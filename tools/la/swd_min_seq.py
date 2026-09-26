@@ -65,12 +65,15 @@ def main() -> int:
     ap.add_argument("--addr", type=lambda s: int(s, 0), default=0x20000000)
     ap.add_argument("--clock", type=int, default=1_000_000)
     ap.add_argument("--loop", type=int, default=0, help=">0：重复 N 轮读+写")
+    ap.add_argument("--vid", type=lambda s: int(s, 0), default=VID,
+                    help="探针 VID（默认 0D28=DAPLink 系；MicroLink 0202 / cherrydap 0204）")
+    ap.add_argument("--pid", type=lambda s: int(s, 0), default=PID, help="探针 PID")
     args = ap.parse_args()
 
     backend = libusb_package.get_libusb1_backend()
-    dev = usb.core.find(idVendor=VID, idProduct=PID, backend=backend)
+    dev = usb.core.find(idVendor=args.vid, idProduct=args.pid, backend=backend)
     if dev is None:
-        return print(f"找不到探针 {VID:04X}:{PID:04X}") or 1
+        return print(f"找不到探针 {args.vid:04X}:{args.pid:04X}") or 1
     cfg = dev.get_active_configuration()
     intf = cfg[(0, 0)]
     ep_out = usb.util.find_descriptor(intf, custom_match=lambda e:
