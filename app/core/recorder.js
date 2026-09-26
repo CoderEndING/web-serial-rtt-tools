@@ -14,7 +14,8 @@
  *
  * 两种写法：
  *   原样（.bin）：字节流原封不动，二进制安全，方便事后解析；
- *   带时间戳（.txt，默认）：每段前面加一行 `[HH:MM:SS.mmm] `，给人看。
+ *   带时间戳（.txt，默认）：仅文件**开头**一行 [HH:MM:SS.mmm] 标记开始时间，
+ *   正文同样是原样字节流（中途打时间戳会把行劈开，已废弃）。
  *
  * ⚠️ 写入是**批量异步**的（默认攒 256 KB 或 300 ms 写一次），push 本身不做 I/O，
  *    不会拖慢接收回路；停止时等最后一批写完再 close。
@@ -53,6 +54,9 @@ export class FileRecorder {
 
   /**
    * 开始记录。**必须在用户手势里调用**（showSaveFilePicker 的硬要求）。
+   * 带时间戳模式：只在**文件开头**写一行 [时:分:秒.毫秒]，正文是原样字节流 ——
+   * 之前逢数据块就打时间戳，会把一行从中间劈开（实测 2MB 文件被劈出 1400+ 处
+   * "hello worl[ts] hello world!"），现已废弃。
    * @param {{name?:string, timestamps?:boolean}} opts
    * @returns {Promise<string>} 文件名
    */
@@ -72,23 +76,22 @@ export class FileRecorder {
     }
     this.bytes = 0; this.frames = 0; this.overflow = false; this.error = null;
     this.t0 = Date.now();
+    if (timestamps){
+      const head = enc.encode(`[${stampOf()}]\n`);
+      this._chunks.push(head);
+      this._pend += head.length;            // 文件头不计入 bytes（那是原始字节数）
+    }
     this.active = true;
     this._timer = setInterval(() => this._flush(), FLUSH_MS);
     this.onChange?.();
     return this.name;
   }
 
-  /** 收流：只入队，不做 I/O（高速通路上不要在这里写盘） */
+  /** 收流：只入队，不做 I/O（高速通路上不要在这里写盘）。正文永远原样字节流 */
   push(bytes, t = new Date()){
     if (!this.active || !bytes?.length) return;
-    if (this.timestamps){
-      const head = enc.encode(`[${stampOf(t)}] `);
-      this._chunks.push(head, bytes);
-      this._pend += head.length + bytes.length;
-    } else {
-      this._chunks.push(bytes);
-      this._pend += bytes.length;
-    }
+    this._chunks.push(bytes);
+    this._pend += bytes.length;
     this.bytes += bytes.length;
     this.frames++;
     if (this._pend >= FLUSH_BYTES) this._flush();
