@@ -8,6 +8,7 @@ import { toast } from '../ui/toast.js';
 import { store } from '../core/store.js';
 import { RxBuffer } from '../core/rxview.js';
 import { Counter } from '../core/stats.js';
+import { FileRecorder } from '../core/recorder.js';
 import { SerialSession } from './session.js';
 import { parseHex, textToBytes, EOL_LABEL } from '../core/hex.js';
 import { bytes as fBytes, rate as fRate, fileStamp, download } from '../core/format.js';
@@ -25,6 +26,7 @@ export class Assistant {
     this.txc = new Counter();
     this.timer = null;
     this.echo = false;
+    this.rec = new FileRecorder();      // 高速采集落文件（见 core/recorder.js）
   }
 
   init(){
@@ -70,6 +72,10 @@ export class Assistant {
     $('s-send').addEventListener('click', () => this.send());
     $('s-clear').addEventListener('click', () => this.rx.clear());
     $('s-save').addEventListener('click', () => this.save());
+    store.bind($('s-record-ts'), 'serial.recordTs', 'checked');
+    $('s-record').addEventListener('click', () => this._toggleRecord());
+    this.rec.onChange = () => this._recordBtn();
+    this._recordBtn();
     $('s-statclear').addEventListener('click', () => { this.rxc.reset(); this.txc.reset(); this._stats(); });
     $('s-pause').addEventListener('click', () => {
       const on = !this.rx.paused;
@@ -97,9 +103,14 @@ export class Assistant {
       $('s-scan').disabled = false; $('s-pick').disabled = false; $('s-port').disabled = false;
       this._armTimer();
       if (unexpected) toast('串口已断开（设备被拔掉或占用）', 'warn');
+      this._stopRecord();
       this._stats();
     });
-    this.s.on('data', (b, t) => { this.rxc.add(b.length); this.rx.push(b, t); });
+    this.s.on('data', (b, t) => {
+      this.rxc.add(b.length);
+      this.rec.push(b, t);             // 落文件在"显示之前"：接收区 2MB 上限丢掉的历史不影响它
+      this.rx.push(b, t);
+    });
     this.s.on('tx', b => { this.txc.add(b.length); if (this.echo) this.rx.push(b, new Date(), '→ '); });
     this.s.on('error', e => setStatus($('s-err'), String(e?.message || e), 'err'));
 
@@ -295,6 +306,47 @@ export class Assistant {
     $('s-txframes').textContent = this.txc.frames;
     $('s-txrate').textContent = fRate(this.txc.rate(now));
     if (this.rx?.paused) $('s-pause').title = `暂停中，已缓存 ${fBytes(this.rx.bytes)}`;
+    if (this.rec.active) this._recordBtn();
+  }
+
+  // ================= 记录到文件 =================
+  /**
+   * 高速采集（高波特率 + 设备猛发）时接收区吃不下：raw 上限 2MB，而且每段还要建 DOM 节点。
+   * 落文件把收到的字节直接写盘 —— 界面卡不卡、有没有被浏览器限速都不影响已写下去的字节。
+   */
+  async _toggleRecord(){
+    if (this.rec.active){
+      const info = await this.rec.stop();
+      this._recordBtn();
+      if (info?.error) toast('记录出错：' + (info.error.message || info.error), 'err', 6000);
+      else if (info) toast(`已保存 ${info.name}：${fBytes(info.bytes)} / ${info.frames} 段 / ${info.seconds.toFixed(1)} s`, 'ok', 6000);
+      return;
+    }
+    try {
+      const name = await this.rec.start({ name: 'serial', timestamps: $('s-record-ts').checked });
+      this._recordBtn();
+      toast(`记录中 → ${name}（停止时写盘）`, 'ok', 5000);
+    } catch (e){
+      if (e?.name !== 'AbortError') toast('开始记录失败：' + (e?.message || e), 'err', 6000);
+    }
+  }
+
+  async _stopRecord(){
+    if (!this.rec.active) return;
+    const info = await this.rec.stop();
+    this._recordBtn();
+    if (info) toast(`记录已停止并保存：${info.name}（${fBytes(info.bytes)}）`, 'ok', 6000);
+  }
+
+  _recordBtn(){
+    const b = $('s-record');
+    if (!b) return;
+    const on = this.rec.active;
+    b.textContent = on ? `■ 停止记录 · ${fBytes(this.rec.bytes)}` : '● 记录到文件';
+    b.classList.toggle('primary', on);
+    b.title = on
+      ? `正在写入 ${this.rec.name}（${fBytes(this.rec.bytes)} / ${this.rec.frames} 段）。界面卡就先「暂停」——只停显示，不停记录。`
+      : '把收到的字节直接写进本地文件（不走接收区的 2MB 上限），高速采集用';
   }
 
   save(){

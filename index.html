@@ -102,6 +102,8 @@
         <span>TX <b id="s-txbytes">0</b> B / <b id="s-txframes">0</b> 段 · <b id="s-txrate">0</b> B/s</span>
         <span class="err" id="s-err"></span>
         <span class="spacer"></span>
+        <button id="s-record" class="mini" title="把收到的字节直接写进本地文件（不走接收区的 2MB 内存上限），高速采集用">● 记录到文件</button>
+        <label class="chk" title="每段数据前加一行 [时:分:秒.毫秒]；关掉则原样写字节（二进制安全）"><input type="checkbox" id="s-record-ts"> 记录带时间戳</label>
         <button id="s-statclear" class="mini">计数清零</button>
       </div>
       <div class="sendbar">
@@ -251,6 +253,8 @@
         <span>控制块 <b id="r-cb">—</b> · up × <b id="r-up">0</b> / down × <b id="r-down">0</b></span>
         <span>读取 <b id="r-rate">0</b> B/s · 轮询 <b id="r-hz">0</b> Hz · 缓冲高位 <b id="r-full">0 次 / 峰值 0%</b> · 溢出丢弃 <b id="r-lost">0</b> B</span>
         <span class="spacer"></span>
+        <button id="r-record" class="mini" title="把读到的 RTT 上行字节直接写进本地文件（不走记录的 2MB 内存上限），高速采集用">● 记录到文件</button>
+        <label class="chk" title="每段数据前加一行 [时:分:秒.毫秒]；关掉则原样写字节（二进制安全）"><input type="checkbox" id="r-record-ts"> 记录带时间戳</label>
         <span class="err" id="r-err"></span>
       </div>
       <div class="sendbar">

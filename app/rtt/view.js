@@ -7,6 +7,7 @@ import { $, seg, setFlag, setStatus } from '../ui/dom.js';
 import { toast } from '../ui/toast.js';
 import { store } from '../core/store.js';
 import { RxBuffer } from '../core/rxview.js';
+import { FileRecorder } from '../core/recorder.js';
 import { Rtt } from './protocol.js';
 import { WebUsbDapProbe } from './dap-webusb.js';
 import { MockProbe } from './mock.js';
@@ -14,7 +15,7 @@ import { BridgeClient } from './bridge.js';
 import { findSymbol } from './elf.js';
 import { parseRanges } from '../core/bin.js';
 import { parseHex, textToBytes } from '../core/hex.js';
-import { rate as fRate, fileStamp, download, stamp as stampOf } from '../core/format.js';
+import { rate as fRate, bytes as fBytes, fileStamp, download, stamp as stampOf } from '../core/format.js';
 
 const EOL = { cr: '\r', crlf: '\r\n', lf: '\n', none: '' };
 const MAX_RAW = 2 * 1024 * 1024;
@@ -37,6 +38,7 @@ export class RttView {
     this.fit = null;
     this.hist = [];
     this.histIdx = -1;
+    this.rec = new FileRecorder();      // 高速采集落文件（见 core/recorder.js）
     this.stats = { bytes: 0, polls: 0, lost: 0, lastBytes: 0, lastPolls: 0, rate: 0, hz: 0 };
   }
 
@@ -83,6 +85,10 @@ export class RttView {
     $('r-pause').addEventListener('click', () => this._togglePause());
     $('r-clear').addEventListener('click', () => this._clear());
     $('r-save').addEventListener('click', () => this.save());
+    store.bind($('r-record-ts'), 'rtt.recordTs', 'checked');
+    $('r-record').addEventListener('click', () => this._toggleRecord());
+    this.rec.onChange = () => this._recordBtn();
+    this._recordBtn();
     $('r-send').addEventListener('click', () => this._sendInput());
 
     this._elfInput = document.createElement('input');
@@ -194,6 +200,11 @@ export class RttView {
   async disconnect(){
     this.running = false;
     clearTimeout(this.timer);
+    if (this.rec.active){
+      const info = await this.rec.stop();
+      this._recordBtn();
+      if (info) toast(`记录已停止并保存：${info.name}（${fBytes(info.bytes)}）`, 'ok', 6000);
+    }
     try { if (this.probe?.disconnect) await this.probe.disconnect(); } catch {}
     try { this.bridge?.close(); } catch {}
     this.probe = null; this.bridge = null; this.rtt = null; this.stream = false;
@@ -320,6 +331,7 @@ export class RttView {
   _ingest(bytes, t){
     if (!bytes?.length) return;
     this.stats.bytes += bytes.length;
+    this.rec.push(bytes, t);            // 落文件在"显示之前"：暂停/丢历史都不影响它
     this.records.push({ t, b: bytes });
     this.recBytes += bytes.length;
     while (this.recBytes > MAX_RAW && this.records.length > 1){
@@ -478,7 +490,41 @@ export class RttView {
       '（主机读速受调试器限制：OpenOCD RPC 实测约 17 KB/s，WebUSB 会快得多）';
     if (peak >= 75) $('r-full').classList.add('err');
     if (this.paused) $('r-pause').title = '暂停中（数据仍在收，继续后补上）';
+    if (this.rec.active) this._recordBtn();
     if (!this.stream && !this.rtt && this.probe) $('r-cb').textContent = '查找中…';
+  }
+
+  // ================= 记录到文件 =================
+  /**
+   * 高速采集时接收区（raw 上限 2MB）存不下 —— 实测 WebUSB 330 KB/s 只要 6 秒就撑爆，
+   * 之后「保存数据」只能保存剩下那段。落文件把字节直接写盘，采集多久都不丢。
+   */
+  async _toggleRecord(){
+    if (this.rec.active){
+      const info = await this.rec.stop();
+      this._recordBtn();
+      if (info?.error) toast('记录出错：' + (info.error.message || info.error), 'err', 6000);
+      else if (info) toast(`已保存 ${info.name}：${fBytes(info.bytes)} / ${info.frames} 段 / ${info.seconds.toFixed(1)} s`, 'ok', 6000);
+      return;
+    }
+    try {
+      const name = await this.rec.start({ name: 'rtt', timestamps: $('r-record-ts').checked });
+      this._recordBtn();
+      toast(`记录中 → ${name}（停止时写盘）`, 'ok', 5000);
+    } catch (e){
+      if (e?.name !== 'AbortError') toast('开始记录失败：' + (e?.message || e), 'err', 6000);
+    }
+  }
+
+  _recordBtn(){
+    const b = $('r-record');
+    if (!b) return;
+    const on = this.rec.active;
+    b.textContent = on ? `■ 停止记录 · ${fBytes(this.rec.bytes)}` : '● 记录到文件';
+    b.classList.toggle('primary', on);
+    b.title = on
+      ? `正在写入 ${this.rec.name}（${fBytes(this.rec.bytes)} / ${this.rec.frames} 段）。界面卡就先「暂停」——只停显示，不停记录。`
+      : '把读到的 RTT 上行字节直接写进本地文件（不走接收区的 2MB 上限），高速采集用';
   }
 
   save(){
