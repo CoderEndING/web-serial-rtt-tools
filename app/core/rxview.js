@@ -27,6 +27,13 @@ export class RxBuffer {
     this.displayOff = false;               // 高速自动关显示：字节照收（计数在外部），只停渲染/存储
     this.suppressedBytes = 0;              // 关显示期间省略渲染的字节数（恢复时提示用）
     this.truncated = false;
+    // ---------- 批量渲染 ----------
+    // 🚨 别在每个数据事件里直接 _append：猛灌时（MicroLink RTT→CDC 一上来就 ~MB/s）
+    // 事件速率上千/秒，每次追加节点 + 自动滚动都强制一次重排，主线程被布局吃满，
+    // 页面直接"无响应"（连高速门控的定时器都排不上队）。攒 60ms / 16KB 合成一个节点。
+    this._pend = [];
+    this._pendBytes = 0;
+    setInterval(() => this.flush(), 60);
     this.raw = [];                         // [{t, b}]
     this.rawBytes = 0;
     this.nodes = [];                       // [{node, lines}]
@@ -44,6 +51,7 @@ export class RxBuffer {
   setAutoscroll(on){ this.autoscroll = on; if (on) this._scroll(); }
   setPaused(on){
     if (this.paused === on) return;
+    if (on) this.flush();                  // 暂停前把攒着的先显示掉
     this.paused = on;
     if (!on) this.repaint();
   }
@@ -69,7 +77,20 @@ export class RxBuffer {
     if (!bytes || !bytes.length) return;
     if (this.displayOff){ this.suppressedBytes += bytes.length; return; }
     this._store(bytes, t);
-    if (!this.paused) this._append(this.format(bytes, t, prefix));
+    if (this.paused) return;
+    this._pend.push({ b: bytes, t, prefix });
+    this._pendBytes += bytes.length;
+    if (this._pendBytes >= 16 * 1024) this.flush();
+  }
+
+  /** 把攒着的段合成一个文本节点（时间戳仍按每段自己的时间打） */
+  flush(){
+    if (!this._pend.length || this.paused || this.displayOff) return;
+    const pend = this._pend;
+    this._pend = []; this._pendBytes = 0;
+    let text = '';
+    for (const { b, t, prefix } of pend) text += this.format(b, t, prefix);
+    if (text) this._append(text);
   }
 
   _store(b, t){
@@ -125,6 +146,7 @@ export class RxBuffer {
 
   /** 整块重建（切模式、开关时间戳、暂停恢复、清空后回填） */
   repaint(){
+    this._pend = []; this._pendBytes = 0;   // 攒着的都在 raw 里，重建会带上，别再追加一遍
     for (const { node } of this.nodes) node.remove();
     this.nodes = []; this.lines = 0;
     this.el.textContent = '';
@@ -137,6 +159,7 @@ export class RxBuffer {
   clear(){
     this.raw = []; this.rawBytes = 0; this.truncated = false;
     this.suppressedBytes = 0;
+    this._pend = []; this._pendBytes = 0;
     for (const { node } of this.nodes) node.remove();
     this.nodes = []; this.lines = 0;
     this.decoder = new TextDecoder('utf-8', { fatal: false });

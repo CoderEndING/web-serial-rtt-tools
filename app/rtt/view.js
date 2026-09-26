@@ -575,11 +575,11 @@ export class RttView {
   /**
    * WebUSB 实测 330KB/s 时渲染必然掉队 —— 先崩的总是显示，字节本身不丢
    * （统计/落文件是全量，MicroLink 固件侧的 g_bytes 对账可以对出来）。
-   * 速率 > 50KB/s 自动停渲染，降到 25KB/s 以下才恢复（回滞）；
+   * 速率 > 100KB/s 自动停渲染，降到 50KB/s 以下才恢复（回滞）；
    * 点状态栏提示可手动恢复（之后不再自动关，直到速率回落后重新武装）。
    */
-  static HS_OFF = 50 * 1024;
-  static HS_ON  = 25 * 1024;
+  static HS_OFF = 100 * 1024;   // 超过 100KB/s 停渲染
+  static HS_ON  = 50 * 1024;    // 降到 50KB/s 以下才自动恢复（回滞）
 
   _highspeedGate(r){
     if (!this.probe && !this.bridge){
