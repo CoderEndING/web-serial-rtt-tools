@@ -7,9 +7,9 @@
 
 | 标签页 | 干什么 | 需要什么 |
 |---|---|---|
-| **串口助手** | SSCOM 那套核心功能：端口/波特率、ASCII/HEX 收发、时间戳、定时发送、5 条快捷发送、保存接收数据 | 桌面版 Chrome / Edge（Web Serial） |
+| **串口助手** | SSCOM 那套核心功能：端口/波特率、ASCII/HEX 收发、**ANSI 彩色接收**（像 MobaXterm）、时间戳、定时发送、5 条快捷发送、保存接收数据、**记录到文件**（高速采集不丢数） | 桌面版 Chrome / Edge（Web Serial） |
 | **终端** | Xshell 式串口终端：xterm.js 渲染 ANSI、本地回显、回车/退格映射、粘贴发送 | 同上（与串口助手共用同一个串口会话） |
-| **RTT Viewer** | SEGGER RTT 多通道查看 + 下行输入 + 复位目标，三种后端 | **零安装**：WebUSB + CMSIS-DAP 探针<br>**可选**：本地桥 + OpenOCD / J-Link |
+| **RTT Viewer** | SEGGER RTT 多通道查看 + 下行输入 + 复位目标，四种后端 | **零安装**：WebUSB + CMSIS-DAP 探针<br>**可选**：本地桥 + OpenOCD / J-Link |
 
 > 为什么 RTT 要分三种后端：J-Link 与 OpenOCD 都是**本机程序**，网页无权启动进程、也无权开 TCP。
 > 所以零安装模式下 RTT 走 **WebUSB 直连 CMSIS-DAP 探针**；想用 J-Link/OpenOCD 就启动仓库里的桥（`bridge/`）。
@@ -45,7 +45,7 @@
 1. 打开页面（Pages 地址或本机的 `http://127.0.0.1:17321/`）。
 2. **串口**：点「选择…」在浏览器弹框里选一次 COM 口（浏览器规定必须手动选一次），然后「连接」。
 3. **RTT（零安装）**：RTT Viewer → 后端选 `WebUSB · CMSIS-DAP` → 「连接探针」→ 它会自动扫描 RAM 找到 `SEGGER RTT` 控制块（也可以先「载入 ELF…」用符号直接定位，更快）。
-4. **RTT（J-Link / OpenOCD）**：双击 `bridge/start-bridge.bat`，页面里后端选「本地桥 · OpenOCD」→ 连接。
+4. **RTT（J-Link / OpenOCD）**：双击 `bridge/start-bridge.bat`，页面里后端选「本地桥 · OpenOCD」→ 选目标芯片（常用 STM32 系列已内置；其它芯片选「自定义 cfg…」填 cfg 文件）→ 连接。
 
 串口和 RTT 可以**同时**用（一个走 USB CDC、一个走探针）。
 

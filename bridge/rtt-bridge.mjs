@@ -235,18 +235,33 @@ class OpenOcdBackend {
     if (!attachOnly){
       const exe = findOpenOcd();
       const scripts = openocdScripts(exe);
-      const t = config.targets[args.target];
-      if (!t) throw new Error(`bridge.config.json 里没有目标 "${args.target}"`);
+      // 目标三级来源：网页这次连接指定的预设名 > 网页给的自定义 cfg 列表 > 启动参数 --target
+      //（网页选预设时只传 target 名；speed 留空 → 用 bridge.config.json 的预设速度）
+      const wc = this.cfg || {};
+      let name = wc.target || args.target || 'stm32f103';
+      const t = config.targets[name];
+      let cfgs, pre;
+      if (wc.cfgs?.length){
+        // 自定义：cfg 路径相对 OpenOCD scripts 目录，也可绝对路径；第一个是 cmsis-dap 时
+        // 自动补 backend usb_bulk（和预设里的 pre 一致，用户不用记这条内部命令）
+        cfgs = wc.cfgs;
+        pre = wc.pre ?? (String(cfgs[0]).includes('cmsis-dap') ? ['cmsis-dap backend usb_bulk'] : []);
+        name = 'custom';
+      } else {
+        if (!t) throw new Error(`bridge.config.json 里没有目标 "${name}"（网页端可以选「自定义 cfg…」直接给 cfg 列表）`);
+        cfgs = t.cfgs || [];
+        pre = t.pre || [];
+      }
       const argv = ['-s', scripts];
+      const cfgPath = c => path.isAbsolute(c) ? c : path.join(scripts, c);
       // 顺序要紧：interface cfg 之后立刻设后端（cmsis-dap backend usb_bulk），
       // 再加载 target cfg —— target cfg 会 transport select，之后就不能再改后端了
-      const cfgs = t.cfgs || [];
-      if (cfgs.length) argv.push('-f', path.join(scripts, cfgs[0]));
-      for (const c of (t.pre || [])) argv.push('-c', c);
-      for (const c of cfgs.slice(1)) argv.push('-f', path.join(scripts, c));
-      // 速度优先级：网页传的 cfg.speed > bridge.config.json 的 speed > 不设
+      if (cfgs.length) argv.push('-f', cfgPath(cfgs[0]));
+      for (const c of pre) argv.push('-c', c);
+      for (const c of cfgs.slice(1)) argv.push('-f', cfgPath(c));
+      // 速度优先级：网页这次连接指定的（自定义档）> bridge.config.json 的 > 不设
       // （RTT 吞吐基本由 SWD 时钟决定：1 MHz 实测 ~68 KB/s，往上还能涨，详见 docs/backends.md）
-      const speed = Number(this.cfg?.speed || t.speed || 0);
+      const speed = Number(wc.speed ?? t?.speed ?? 0);
       if (speed > 0) argv.push('-c', `adapter speed ${speed}`);
       argv.push('-c', 'init');
       onLog?.(`启动 OpenOCD：${exe} ${argv.join(' ')}`);
@@ -263,7 +278,7 @@ class OpenOcdBackend {
     }
     this.sock = await this._connect(args.tclPort);
     const v = await this.rpc('version');
-    return { target: args.target, version: v.trim().split('\n')[0], mode: this.mode };
+    return { target: name, version: v.trim().split('\n')[0], mode: this.mode };
   }
 
   _waitPort(port, ms){

@@ -20,6 +20,32 @@ import { rate as fRate, bytes as fBytes, fileStamp, download, stamp as stampOf }
 const EOL = { cr: '\r', crlf: '\r\n', lf: '\n', none: '' };
 const MAX_RAW = 2 * 1024 * 1024;
 
+/**
+ * 各目标系列的默认 RAM 扫描范围（RTT 控制块一般在 RAM 起始附近，范围取各系列常见最小值，
+ * 宁小勿大：扫到未映射地址轻则读到 0、重则 FAULT）。选目标时自动填入，可手改。
+ */
+const OCD_RAM = {
+  stm32c0: '0x20000000-0x20003000',   // 12K
+  stm32f0:  '0x20000000-0x20002000',  // 8K 起
+  stm32f1:  '0x20000000-0x20005000',  // F103C8 20K
+  stm32f103:'0x20000000-0x20005000',
+  stm32f2:  '0x20000000-0x20020000',  // 128K
+  stm32f3:  '0x20000000-0x2000a000',  // 40K 起
+  stm32f4:  '0x20000000-0x20020000',  // 128K
+  stm32f7:  '0x20000000-0x20020000',
+  stm32g0:  '0x20000000-0x20008000',  // 32K
+  stm32g4:  '0x20000000-0x20008000',
+  stm32h7:  '0x20000000-0x20020000',  // DTCM 128K
+  stm32h5:  '0x20000000-0x20020000',  // H503 128K
+  stm32l0:  '0x20000000-0x20005000',  // 20K
+  stm32l1:  '0x20000000-0x20004000',  // 16K
+  stm32l4:  '0x20000000-0x2000c000',  // 48K
+  stm32l5:  '0x20000000-0x20010000',  // 64K
+  stm32u5:  '0x20000000-0x20020000',
+  stm32wb:  '0x20000000-0x20040000',  // WB55 256K
+  stm32wl:  '0x20000000-0x20010000',  // WLE5 64K
+};
+
 export class RttView {
   constructor(){
     this.probe = null;
@@ -53,6 +79,11 @@ export class RttView {
     store.bind($('r-addr'), 'rtt.addr');
     store.bind($('r-poll'), 'rtt.poll');
     store.bind($('r-eol'), 'rtt.eol');
+    store.bind($('r-ocd-target'), 'rtt.ocdTarget');
+    store.bind($('r-ocd-cfgs'), 'rtt.ocdCfgs');
+    store.bind($('r-ocd-speed'), 'rtt.ocdSpeed');
+    $('r-ocd-target').addEventListener('change', () => this._applyOcdTarget(true));
+    this._applyOcdTarget(false);      // 只同步自定义行的显隐；RAM 范围是用户存过的值，别在加载时覆盖
     this._chk($('r-ts'), 'rtt.ts', v => { this.ts = v; this.tx.setTimestamps(v, false); });
     this._chk($('r-autoscroll'), 'rtt.autoscroll', v => { this.tx.setAutoscroll(v); });
     this._chk($('r-hexsend'), 'rtt.hexsend', () => {});
@@ -146,6 +177,15 @@ export class RttView {
     apply(el.checked);
   }
 
+  /** 桥后端的「目标」下拉变化：显示/隐藏自定义 cfg 输入；选系列时把 RAM 范围填成常见值 */
+  _applyOcdTarget(applyRange){
+    const t = $('r-ocd-target').value;
+    const custom = t === 'custom';
+    $('r-ocd-custom-cfgs-row').hidden = !custom;
+    $('r-ocd-custom-speed-row').hidden = !custom;
+    if (applyRange && OCD_RAM[t]) $('r-range').value = OCD_RAM[t];
+  }
+
   // ================= 连接 =================
   async connectProbe(){
     const b = $('r-backend').value;
@@ -172,12 +212,24 @@ export class RttView {
         const bc = new BridgeClient($('r-bridge-url').value);
         await bc.connect({ version: 1 });
         const backend = b === 'bridge-openocd' ? 'openocd' : 'jlink';
-        const r = await bc.open(backend, {
+        // OpenOCD：目标优先用「预设名」（桥端查 bridge.config.json），自定义则直接给 cfg 列表；
+        // 预设时**不传 speed**（桥用配置里的预设速度——之前总是传 4000 会把配置值覆盖掉）。
+        // J-Link 仍走自己的参数。
+        const cfg = {
           openocd: store.get('rtt.ocdPath', ''),
-          jlink: store.get('rtt.jlinkPath', ''),
-          device: store.get('rtt.jlinkDevice', ''),
-          speed: Number(store.get('rtt.jlinkSpeed', 4000)) || 4000,
-        });
+          target: $('r-ocd-target').value,
+        };
+        if (cfg.target === 'custom'){
+          cfg.cfgs = String($('r-ocd-cfgs').value || '').split(/[,\s;]+/).map(s => s.trim()).filter(Boolean);
+          cfg.speed = Number($('r-ocd-speed').value) || 0;
+          if (!cfg.cfgs.length) throw new Error('自定义目标要填 cfg 文件（逗号分隔，相对 OpenOCD scripts 目录或绝对路径）');
+        }
+        if (backend === 'jlink'){
+          cfg.jlink = store.get('rtt.jlinkPath', '');
+          cfg.device = store.get('rtt.jlinkDevice', '');
+          cfg.speed = Number(store.get('rtt.jlinkSpeed', 4000)) || 4000;
+        }
+        const r = await bc.open(backend, cfg);
         this.bridge = bc;
         if (backend === 'jlink'){
           this.stream = true;
