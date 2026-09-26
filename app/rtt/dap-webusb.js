@@ -299,10 +299,10 @@ export class WebUsbDapProbe {
    * 🚨 这里踩过：组包时漏掉「DAP索引 + 传输条数」这两个字节，固件就会把请求字节
    *    当成条数读 → 响应 count=0 / ACK=0，看起来像"目标没应答"。
    */
-  async _transfer(ops){
+  async _transfer(ops, apIndex = 0){
     const count = ops.length;
     const payload = new Uint8Array(2 + count * 5);
-    payload[0] = 0;                                  // DAP 索引
+    payload[0] = apIndex;                            // DAP 索引 = APSEL（0=AHB-AP，1=APB-AP 调试口）
     payload[1] = count;                              // 传输条数
     let o = 2;
     for (const op of ops){
@@ -326,9 +326,9 @@ export class WebUsbDapProbe {
     return vals;
   }
 
-  async _transferBlock(rnw, count, addr, words){
+  async _transferBlock(rnw, count, addr, words, apIndex = 0){
     const req = new Uint8Array(4 + (rnw ? 0 : count * 4));
-    req[0] = 0; req[1] = count & 0xff; req[2] = (count >> 8) & 0xff;
+    req[0] = apIndex; req[1] = count & 0xff; req[2] = (count >> 8) & 0xff;
     req[3] = reqByte(true, rnw, addr);
     if (!rnw) for (let i = 0; i < count; i++) req.set(u32leBytes(words[i] >>> 0), 4 + i * 4);
     const res = await this._ctrl(CMD.TransferBlock, req);
@@ -361,6 +361,8 @@ export class WebUsbDapProbe {
     await this.setClock(hz);
     await this._ctrl(CMD.SWD_Configure, Uint8Array.of(0));             // turnaround=1 / data_phase=0
     await this.swdActivation();                                       // 88 位激活序列（关键！）
+    // 🚨 激活后第一个包必须是「读 IDCODE」（写会 NO ACK，见 docs/backends.md 坑②），
+    //    所以清 sticky 的 ABORT 要排在 IDCODE 读取之后、第一条 AP 访问之前
     await this._ctrl(CMD.TransferConfigure, Uint8Array.of(0, 0xe8, 0x03, 0, 0));  // idle=0, retry=1000
 
     /**
@@ -376,10 +378,16 @@ export class WebUsbDapProbe {
     if (!this.idcode || this.idcode === 0xffffffff){
       throw new Error(`读 DP IDCODE 失败（0x${this.idcode.toString(16)}）→ SWD 没连上：接线/复位/时钟都要看一眼`);
     }
+    // 注：不要在这里插 ABORT 清 sticky —— 本探针的 DP 状态机对激活后中途 ABORT 敏感
+    // （实测 SELECT 写会 FAULT）。sticky 清理靠失败路径的 reopen()/abort()。
 
     // DP SELECT = 0（选 AP0、bank0）
     await this._transfer([{ ap: false, rnw: false, addr: DP_SELECT, data: 0 }]);
-    // 🚨 AP 访问前必须给 DP 上电，否则后面全是 FAULT（pyOCD 的 DebugPortSetup 就是干这个）
+    // 🚨 AP 访问前必须给 DP 上电（pyOCD 的 DebugPortSetup）。先**掉电再上电**：
+    //    上一个会话（被 kill 的 OpenOCD 等）留下的楔死状态只有电源循环能清，
+    //    只写上电位的话对已上电的 DP 是无操作，楔死就永远楔死。
+    await this._transfer([{ ap: false, rnw: false, addr: DP_CTRL_STAT, data: 0x00000000 }]);
+    await sleep(50);
     await this._transfer([{ ap: false, rnw: false, addr: DP_CTRL_STAT, data: 0x50000000 }]);
     await sleep(20);
     const st = await this._readDP(DP_CTRL_STAT);
@@ -397,19 +405,31 @@ export class WebUsbDapProbe {
     const v = await this._transfer([{ ap: false, rnw: true, addr: DP_RDBUFF }]);
     return v[0] >>> 0;
   }
-  async _readAP(addr){
-    const v = await this._transfer([{ ap: true, rnw: true, addr }]);
+  async _readAP(addr, apIndex = 0){
+    const v = await this._transfer([{ ap: true, rnw: true, addr }], apIndex);
     return v[0] >>> 0;
   }
-  async _writeAP(addr, val){
-    await this._transfer([{ ap: true, rnw: false, addr, data: val }]);
+  async _writeAP(addr, val, apIndex = 0){
+    await this._transfer([{ ap: true, rnw: false, addr, data: val }], apIndex);
   }
-  async _setTAR(addr){
-    await this._transfer([{ ap: true, rnw: false, addr: AP_TAR, data: addr >>> 0 }]);
+  /** 写 DP 寄存器（调试口的选择/控制都在这里，如 DP_SELECT 的 APSEL 字段） */
+  async _writeDP(addr, val){
+    await this._transfer([{ ap: false, rnw: false, addr, data: val >>> 0 }]);
+  }
+
+  /**
+   * 🚨 TAR 写是 **posted（后发）** 的：探针固件高吞吐下，紧跟着的 DRW 访问可能打到
+   * **上一个 TAR 的地址** —— 本机实测抓到过"写 TAR=0xE000ED00 后读到 DHCSR 的值"。
+   * 这是 RTT「错位读」（log 乱码、混进控制块内容）的总根源，也会让调试寄存器访问失效。
+   * 修复：TAR 写之后补一次 AP 读作**屏障**（读会强制 posted 写完成，pyOCD 同款思路）。
+   */
+  async _setTAR(addr, apIndex = 0){
+    await this._transfer([{ ap: true, rnw: false, addr: AP_TAR, data: addr >>> 0 }], apIndex);
+    await this._transfer([{ ap: true, rnw: true, addr: AP_CSW }], apIndex);   // 屏障读（结果丢弃）
   }
 
   // ---------------- 内存访问（RTT 只用到这两个） ----------------
-  async readMem(addr, len){
+  async readMem(addr, len, apIndex = 0){
     if (len <= 0) return new Uint8Array(0);
     if (len > (1 << 20)) throw new Error(`一次要读 ${len} 字节（>1MB），地址参数大概是错了`);
     const start = addr & ~3;
@@ -417,10 +437,10 @@ export class WebUsbDapProbe {
     const bytes = new Uint8Array(end - start);
     const dv = new DataView(bytes.buffer);
     let a = start;
-    await this._setTAR(start);
+    await this._setTAR(start, apIndex);
     while (a < end){
       const words = Math.min(this.maxWords, (end - a) >> 2);
-      const { words: got } = await this._transferBlock(true, words, AP_DRW, null);
+      const { words: got } = await this._transferBlock(true, words, AP_DRW, null, apIndex);
       for (let i = 0; i < words; i++) dv.setUint32(a - start + i * 4, got[i] >>> 0, true);
       a += words * 4;
       if (words === 0) break;
@@ -428,16 +448,16 @@ export class WebUsbDapProbe {
     return bytes.subarray(addr - start, addr - start + len);
   }
 
-  async writeMem(addr, bytes){
+  async writeMem(addr, bytes, apIndex = 0){
     const data = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
     if (!data.length) return;
     if ((addr & 3) === 0 && (data.length & 3) === 0){
       const words = new Uint32Array(data.buffer, data.byteOffset, data.length >> 2);
-      await this._setTAR(addr);
+      await this._setTAR(addr, apIndex);
       let i = 0;
       while (i < words.length){
         const n = Math.min(this.maxWords, words.length - i);
-        await this._transferBlock(false, n, AP_DRW, words.subarray(i, i + n));
+        await this._transferBlock(false, n, AP_DRW, words.subarray(i, i + n), apIndex);
         i += n;
       }
       return;
@@ -445,14 +465,14 @@ export class WebUsbDapProbe {
     // 非对齐 → 读-改-写（RTT 下行缓冲的写指针可能不是 4 的倍数）
     const start = addr & ~3;
     const end = (addr + data.length + 3) & ~3;
-    const cur = await this.readMem(start, end - start);
+    const cur = await this.readMem(start, end - start, apIndex);
     cur.set(data, addr - start);
     const words = new Uint32Array(cur.buffer, cur.byteOffset, cur.length >> 2);
-    await this._setTAR(start);
+    await this._setTAR(start, apIndex);
     let i = 0;
     while (i < words.length){
       const n = Math.min(this.maxWords, words.length - i);
-      await this._transferBlock(false, n, AP_DRW, words.subarray(i, i + n));
+      await this._transferBlock(false, n, AP_DRW, words.subarray(i, i + n), apIndex);
       i += n;
     }
   }
@@ -464,6 +484,8 @@ export class WebUsbDapProbe {
    * 🚨 为什么需要它：DAPLink 的 DAP_ResetTarget 之后目标常常**停在 halt 状态**
    *    （"复位并停住"是调试器的常规语义），于是 RTT 连得上、控制块也读得到，
    *    但固件不跑 ⇒ 一个字节都不来。本页的复位按钮 = 复位并运行，靠的就是这个。
+   * 注：DHCSR 在 AP0（AHB-AP）经 PPB 总线可达，与 RAM 同一条 AP——但必须吃 _setTAR
+   *    里的屏障读，否则 TAR 竞态会让写丢失/读回 0（烧录器的寄存器访问曾栽在这里）。
    */
   async _dhcsr(value){
     await this._setTAR(0xE000EDF0);
@@ -477,6 +499,28 @@ export class WebUsbDapProbe {
       const b = await this.readMem(0xE000EDF0, 4);
       return ((b[0] | (b[1] << 8) | (b[2] << 16) | (b[3] << 24)) >>> 17 & 1) === 1;
     } catch { return false; }
+  }
+
+  /** 内核寄存器读写（AP0 的 DCRSR/DCRDR，flashloader 执行器用；DCRSR 写完要等 S_REGRDY） */
+  async regRead(regsel){
+    await this.writeMem(0xE000EDF4, new Uint8Array([regsel & 0x1f, 0, 0, 0]));
+    for (let i = 0; i < 50; i++){
+      const b = await this.readMem(0xE000EDF0, 4);
+      if (b[2] & 0x01) break;                        // DHCSR.S_REGRDY = bit16（字节 2 的 bit0）
+      await sleep(2);
+    }
+    const b = await this.readMem(0xE000EDF8, 4);
+    return (b[0] | (b[1] << 8) | (b[2] << 16) | (b[3] << 24)) >>> 0;
+  }
+  async regWrite(regsel, value){
+    await this.writeMem(0xE000EDF8, u32leBytes(value >>> 0));
+    await this.writeMem(0xE000EDF4, u32leBytes((regsel & 0x1f) | 0x10000));
+    for (let i = 0; i < 50; i++){
+      const b = await this.readMem(0xE000EDF0, 4);
+      if (b[2] & 0x01) return;
+      await sleep(2);
+    }
+    throw new Error('调试寄存器同步超时（S_REGRDY 没置位）');
   }
 
   /**

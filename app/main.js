@@ -8,6 +8,7 @@ import { SerialSession } from './serial/session.js';
 import { Assistant } from './serial/assistant.js';
 import { TerminalView } from './serial/terminal.js';
 import { RttView } from './rtt/view.js';
+import { FlashView } from './flash/view.js';
 
 // ---------- 错误收集（自检/排障用；平时看不见） ----------
 const errors = [];
@@ -18,10 +19,12 @@ const session = new SerialSession();
 const assistant = new Assistant(session);
 const terminal = new TerminalView(session);
 const rtt = new RttView();
+const flash = new FlashView();
 
 assistant.init();
 terminal.init();
 rtt.init();
+flash.init();
 
 initTabs(name => {
   if (name === 'terminal') requestAnimationFrame(() => terminal.onShow());
@@ -48,7 +51,7 @@ box.id = 'selftest';
 box.hidden = true;
 document.body.appendChild(box);
 
-window.__tools = { session, assistant, terminal, rtt, summary, errors };
+window.__tools = { session, assistant, terminal, rtt, flash, summary, errors };
 
 // ---------- 浏览器端端到端自检：?demo=serial&selftest=1 ----------
 const q = new URLSearchParams(location.search);

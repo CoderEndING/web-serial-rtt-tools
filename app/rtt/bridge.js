@@ -109,6 +109,9 @@ export class BridgeClient {
   async halt(){ await this._call({ t: 'target.halt' }); }
   async go(){ await this._call({ t: 'target.go' }); }
 
+  /** 烧录（烧录器标签页用）：大固件慢慢烧，超时给足 10 分钟 */
+  async flash(cfg){ return (await this._call({ t: 'flash', cfg }, 600000)).info; }
+
   // ---------------- stream 能力（J-Link ch0） ----------------
   async streamWrite(bytes){ await this._call({ t: 'stream.write', data: toB64(bytes) }, 10000); }
 

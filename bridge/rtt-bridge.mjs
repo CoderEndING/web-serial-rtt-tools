@@ -227,31 +227,37 @@ class OpenOcdBackend {
     this.child = null;
     this.mode = '';
     this.expr = [];
+    this.logBuf = [];                  // OpenOCD stdout 环形缓冲（烧录结果里回传给网页看）
+    this.flashTarget = null;           // 当前会话服务的目标名（判断能否复用会话）
   }
   get name(){ return 'OpenOCD'; }
+
+  /** 目标三级来源：网页这次指定的预设名 > 网页给的自定义 cfg 列表 > 启动参数 --target */
+  resolveTarget(wc = {}){
+    let name = wc.target || args.target || 'stm32f103';
+    const t = config.targets[name];
+    let cfgs, pre;
+    if (wc.cfgs?.length){
+      // 自定义：cfg 路径相对 OpenOCD scripts 目录，也可绝对路径；第一个是 cmsis-dap 时
+      // 自动补 backend usb_bulk（和预设里的 pre 一致，用户不用记这条内部命令）
+      cfgs = wc.cfgs;
+      pre = wc.pre ?? (String(cfgs[0]).includes('cmsis-dap') ? ['cmsis-dap backend usb_bulk'] : []);
+      name = 'custom';
+    } else {
+      if (!t) throw new Error(`bridge.config.json 里没有目标 "${name}"（网页端可以选「自定义 cfg…」直接给 cfg 列表）`);
+      cfgs = t.cfgs || [];
+      pre = t.pre || [];
+    }
+    return { name, t, cfgs, pre };
+  }
 
   async start(onLog){
     const attachOnly = args.attach;
     if (!attachOnly){
       const exe = findOpenOcd();
       const scripts = openocdScripts(exe);
-      // 目标三级来源：网页这次连接指定的预设名 > 网页给的自定义 cfg 列表 > 启动参数 --target
-      //（网页选预设时只传 target 名；speed 留空 → 用 bridge.config.json 的预设速度）
-      const wc = this.cfg || {};
-      let name = wc.target || args.target || 'stm32f103';
-      const t = config.targets[name];
-      let cfgs, pre;
-      if (wc.cfgs?.length){
-        // 自定义：cfg 路径相对 OpenOCD scripts 目录，也可绝对路径；第一个是 cmsis-dap 时
-        // 自动补 backend usb_bulk（和预设里的 pre 一致，用户不用记这条内部命令）
-        cfgs = wc.cfgs;
-        pre = wc.pre ?? (String(cfgs[0]).includes('cmsis-dap') ? ['cmsis-dap backend usb_bulk'] : []);
-        name = 'custom';
-      } else {
-        if (!t) throw new Error(`bridge.config.json 里没有目标 "${name}"（网页端可以选「自定义 cfg…」直接给 cfg 列表）`);
-        cfgs = t.cfgs || [];
-        pre = t.pre || [];
-      }
+      const { name, t, cfgs, pre } = this.resolveTarget(this.cfg);
+      this.flashTarget = name;
       const argv = ['-s', scripts];
       const cfgPath = c => path.isAbsolute(c) ? c : path.join(scripts, c);
       // 顺序要紧：interface cfg 之后立刻设后端（cmsis-dap backend usb_bulk），
@@ -261,13 +267,22 @@ class OpenOcdBackend {
       for (const c of cfgs.slice(1)) argv.push('-f', cfgPath(c));
       // 速度优先级：网页这次连接指定的（自定义档）> bridge.config.json 的 > 不设
       // （RTT 吞吐基本由 SWD 时钟决定：1 MHz 实测 ~68 KB/s，往上还能涨，详见 docs/backends.md）
-      const speed = Number(wc.speed ?? t?.speed ?? 0);
+      const speed = Number(this.cfg?.speed ?? t?.speed ?? 0);
       if (speed > 0) argv.push('-c', `adapter speed ${speed}`);
       argv.push('-c', 'init');
       onLog?.(`启动 OpenOCD：${exe} ${argv.join(' ')}`);
       this.child = spawn(exe, argv, { stdio: ['ignore', 'pipe', 'pipe'] });
-      this.child.stdout.on('data', d => onLog?.(String(d).trimEnd()));
-      this.child.stderr.on('data', d => onLog?.(String(d).trimEnd()));
+      const pushLog = d => {
+        for (const line of String(d).split(/\r?\n/)){
+          const s = line.trimEnd();
+          if (!s) continue;
+          this.logBuf.push(s);
+          if (this.logBuf.length > 400) this.logBuf.shift();
+        }
+        onLog?.(String(d).trimEnd());
+      };
+      this.child.stdout.on('data', pushLog);
+      this.child.stderr.on('data', pushLog);
       this.child.on('exit', c => onLog?.(`OpenOCD 退出（code ${c}）`));
       // 等 Tcl RPC 端口起来
       await this._waitPort(args.tclPort, 20000);
@@ -278,7 +293,7 @@ class OpenOcdBackend {
     }
     this.sock = await this._connect(args.tclPort);
     const v = await this.rpc('version');
-    return { target: name, version: v.trim().split('\n')[0], mode: this.mode };
+    return { target: this.flashTarget || args.target, version: v.trim().split('\n')[0], mode: this.mode };
   }
 
   _waitPort(port, ms){
@@ -513,6 +528,74 @@ server.on('upgrade', (req, socket) => {
   console.log('[ws] 网页已连接');
 });
 
+/* ============================ 烧录 ============================ */
+/**
+ * 通过 OpenOCD 烧写固件（elf/hex/bin）。
+ * 文件两种来源：wc.path（桥所在电脑上的路径，直接读）或 wc.dataB64（网页选的文件内容，
+ * 落临时文件）。复用目标一致的已运行会话（烧完接 RTT 看日志的典型场景）；
+ * 目标不一致或没开就（重）拉 OpenOCD —— 同一探针同一时刻只能服务一个目标。
+ */
+async function flashFirmware(wc, log){
+  let file = String(wc.path || '').trim();
+  let tmp = null;
+  try {
+    if (!file){
+      if (!wc.dataB64) throw new Error('要给出固件路径，或把文件内容（dataB64）传上来');
+      const safe = String(wc.name || 'firmware.bin').replace(/[^\w.\-]/g, '_');
+      tmp = path.join(os.tmpdir(), `rtt-tools-flash-${Date.now()}-${safe}`);
+      fs.writeFileSync(tmp, Buffer.from(wc.dataB64, 'base64'));
+      log?.(`固件落盘：${tmp}`);
+      file = tmp;
+    }
+    file = path.resolve(file).replace(/\\/g, '/');       // Tcl 路径用正斜杠（\t \b 会被当转义吃掉）
+    if (!fs.existsSync(file)) throw new Error(`固件文件不存在：${file}`);
+    const size = fs.statSync(file).size;
+
+    // 会话复用判断：解析目标名（三级来源同 open）
+    const probe = new OpenOcdBackend(wc);
+    const { name } = probe.resolveTarget(wc);
+    if (!(backend instanceof OpenOcdBackend && backend.flashTarget === name && backend.sock)){
+      backend?.stop();
+      backend = new OpenOcdBackend({ target: wc.target, cfgs: wc.cfgs, speed: wc.speed });
+      await backend.start(log);
+    }
+    const be = backend;
+    be.logBuf.length = 0;
+
+    const t0 = Date.now();
+    const out = [];
+    const run = async (cmd, timeout = 60000) => {
+      const r = await be.rpc(cmd, timeout);
+      out.push(`> ${cmd}`, ...(r ? String(r).trim().split('\n') : []));
+      return r;
+    };
+    if (/\.bin$/i.test(file)){
+      // .bin 没有地址信息：显式 halt 后按基地址写入再校验
+      const base = Number(wc.base);
+      if (!base) throw new Error('.bin 没有地址信息：请在网页里填基地址（STM32 通用默认 0x08000000）');
+      await run('reset init', 60000);                              // 写 flash 前必须 halt
+      await run(`flash write_image erase {${file}} 0x${base.toString(16)}`, 600000);
+      if (wc.verify !== false) await run(`verify_image {${file}} 0x${base.toString(16)}`, 300000);
+    } else {
+      // elf/hex 自带地址：program 一条龙（reset init → 写 → 校验）
+      await run(`program {${file}} verify`, 600000);
+    }
+    if (wc.reset !== false) await run('reset run', 60000);
+
+    const openocdLog = be.logBuf.splice(0).join('\n').trim();
+    const all = out.join('\n') + '\n' + openocdLog;
+    if (/\bError:|\bfailed\b|timed out/i.test(all)) throw new Error(`OpenOCD 报错：\n${all.slice(-800)}`);
+    return {
+      target: name, file, bytes: size,
+      seconds: (Date.now() - t0) / 1000,
+      verify: wc.verify !== false, reset: wc.reset !== false,
+      output: all.trim(),
+    };
+  } finally {
+    if (tmp){ try { fs.unlinkSync(tmp); } catch {} }
+  }
+}
+
 async function handle(conn, text, log){
   let m;
   try { m = JSON.parse(text); } catch { return; }
@@ -538,6 +621,13 @@ async function handle(conn, text, log){
           reply({ t: 'opened', info });
           console.log('[openocd] ' + JSON.stringify(info));
         }
+        break;
+      }
+
+      case 'flash': {
+        const info = await flashFirmware(m.cfg || {}, log);
+        reply({ t: 'flashed', info });
+        console.log('[flash] ' + JSON.stringify({ target: info.target, bytes: info.bytes, seconds: info.seconds }));
         break;
       }
 

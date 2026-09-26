@@ -17,6 +17,7 @@
     <button class="tab active" data-tab="serial">串口助手</button>
     <button class="tab" data-tab="terminal">终端</button>
     <button class="tab" data-tab="rtt">RTT Viewer</button>
+    <button class="tab" data-tab="flash">烧录器</button>
   </nav>
   <div class="topright">
     <span id="conn-flag" class="flag flag-off">未连接</span>
@@ -316,6 +317,67 @@
         <label class="chk"><input type="checkbox" id="r-hexsend"> HEX</label>
         <input id="r-tx" class="rtt-in" placeholder="给固件发送输入（↑/↓ 翻历史；Enter 发送）">
         <button id="r-send" class="primary">发送</button>
+      </div>
+    </section>
+  </div>
+</section>
+
+<!-- ============================ 烧录器 ============================ -->
+<section class="panel" id="tab-flash">
+  <div class="ws">
+    <aside class="side">
+      <fieldset>
+        <legend>烧录设置</legend>
+        <label class="row"><span>后端</span>
+          <select id="f-backend" title="本地桥：走 OpenOCD，兼容性最好（推荐）。零安装：与 RTT 共用探针直接烧，目前覆盖 F0/F1/F4/F7/H7/L0/L4；部分探针固件存在 PPB 访问兼容问题，失败时请换本地桥">
+            <option value="openocd">本地桥 · OpenOCD（推荐）</option>
+            <option value="webusb">WebUSB · 零安装（实验性）</option>
+          </select>
+        </label>
+        <label class="row"><span>桥地址</span><input id="f-bridge-url" value="ws://127.0.0.1:17321"></label>
+        <label class="row"><span>芯片</span>
+          <select id="f-chip" title="走本地桥时它就是 OpenOCD 的目标 cfg；列表外的芯片选「自定义 cfg…」"></select>
+        </label>
+        <label class="row" id="f-custom-cfgs-row" hidden><span>cfg 文件</span>
+          <input id="f-cfgs" title="逗号/空格分隔，按顺序加载。相对 OpenOCD scripts 目录或绝对路径">
+        </label>
+        <label class="row" id="f-custom-speed-row" hidden><span>SWD kHz</span>
+          <input id="f-speed" class="num" placeholder="留空 = 不设（OpenOCD 默认）" inputmode="numeric">
+        </label>
+        <p class="hint">烧录走仓库里的 <code>bridge/start-bridge.bat</code>（与 RTT 的桥同一个）。</p>
+      </fieldset>
+      <fieldset>
+        <legend>固件</legend>
+        <label class="row"><span>路径</span>
+          <input id="f-path" placeholder="桥所在电脑上的 .elf / .hex / .bin 路径">
+        </label>
+        <div class="row btnrow">
+          <button id="f-pick">选择文件…</button>
+        </div>
+        <p class="hint" id="f-file-info">支持 .elf / .hex / .bin：填桥所在电脑上的路径，或点「选择文件…」/ 拖进右侧日志区</p>
+        <label class="row" id="f-base-row" hidden><span>基地址</span>
+          <input id="f-base" class="num" value="0x08000000" title=".bin 没有地址信息，按这里填的地址写入">
+        </label>
+        <label class="chk"><input type="checkbox" id="f-verify" checked> 校验</label>
+        <label class="chk"><input type="checkbox" id="f-reset" checked> 烧录后复位运行</label>
+        <div class="row btnrow">
+          <button id="f-flash" class="primary">烧录</button>
+        </div>
+        <p class="hint">烧录会暂停目标并在完成后复位；烧录前会断开占用探针的 RTT 会话。</p>
+      </fieldset>
+    </aside>
+    <section class="main">
+      <div class="toolbar">
+        <span id="f-status">空闲</span>
+        <progress id="f-bar" value="0" max="100" hidden></progress>
+        <span class="spacer"></span>
+        <button id="f-logclear">清空日志</button>
+      </div>
+      <pre class="rx" id="f-log" tabindex="0"></pre>
+      <div class="stats">
+        <span id="f-result">—</span>
+        <span class="spacer"></span>
+        <span class="hint">.bin 记得核对基地址（默认 0x08000000）</span>
       </div>
     </section>
   </div>
