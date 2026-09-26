@@ -53,7 +53,7 @@ ESP-IDF 自带那份 OpenOCD（`~\.espressif\tools\openocd-esp32\v0.12.0-esp32-*
 1. **SWD 激活序列必须主机自己发**：`DAP_Connect` 只做引脚初始化。少发 88 位激活序列
    （`9E E7` + 64 个 1 + 8 个 0）时，SWJ-DP 还停在 JTAG 模式，之后所有传输一律 `NO ACK(0x07)`。
    **必须一次发完 88 位**：拆成 16/64/8 三次、或把末尾空闲写成 `0xFF`，都会让这个探针的 SWJ 引擎
-   进入"传输全 NO ACK"的状态（本机实测，最后是靠工作区里验证过的裸客户端 `tools\cmsis_dap_raw.py` 定的写法）。
+   进入"传输全 NO ACK"的状态（本机实测，最后是靠工作区里验证过的裸客户端 `tools\la\cmsis_dap_raw.py` 定的写法）。
    顺序也要照它：`Connect → SWJ_Clock → SWD_Configure → SWJ_Sequence(88) → TransferConfigure`。
 2. **线复位之后的第一个 SWD 包必须是「读 DP IDCODE」**（ARM SWD 协议的激活步骤）。
    少了这一笔，后面任何访问（哪怕是写 DP SELECT）都返回 `NO ACK(0x07)` —— 而包头完全正确、
