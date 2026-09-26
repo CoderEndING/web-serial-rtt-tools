@@ -2,6 +2,9 @@
 
 零安装的调试小工具，纯静态页面，直接托管在 GitHub Pages：
 
+**👉 [在浏览器里直接打开](https://minichao9901.github.io/web-serial-rtt-tools/)**
+（桌面版 Chrome / Edge；无需安装任何东西，串口/探针在页面里授权一次即可）
+
 | 标签页 | 干什么 | 需要什么 |
 |---|---|---|
 | **串口助手** | SSCOM 那套核心功能：端口/波特率、ASCII/HEX 收发、时间戳、定时发送、5 条快捷发送、保存接收数据 | 桌面版 Chrome / Edge（Web Serial） |
