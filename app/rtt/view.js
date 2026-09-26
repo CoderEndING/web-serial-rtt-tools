@@ -85,6 +85,7 @@ export class RttView {
     $('r-pause').addEventListener('click', () => this._togglePause());
     $('r-clear').addEventListener('click', () => this._clear());
     $('r-save').addEventListener('click', () => this.save());
+    store.bind($('r-usb-clock'), 'rtt.clockKhz');
     store.bind($('r-record-ts'), 'rtt.recordTs', 'checked');
     $('r-record').addEventListener('click', () => this._toggleRecord());
     this.rec.onChange = () => this._recordBtn();
@@ -152,11 +153,12 @@ export class RttView {
         // 已经授权过的探针**不用再弹选择框**（用户体验也好得多）；想换设备点「换设备…」
         const auth = this._forcePick ? [] : await WebUsbDapProbe.authorized();
         this._forcePick = false;
+        const clockKhz = Number(store.get('rtt.clockKhz', 0)) || 0;
         if (auth.length){
-          this.probe = await WebUsbDapProbe.open(auth[0]);
+          this.probe = await WebUsbDapProbe.open(auth[0], { clockKhz });
           toast('使用已授权探针：' + this.probe.name, 'ok');
         } else {
-          this.probe = await WebUsbDapProbe.request($('r-usb-all').checked);
+          this.probe = await WebUsbDapProbe.request($('r-usb-all').checked, { clockKhz });
           toast('探针已连接：' + this.probe.name, 'ok');
         }
         this.stream = false;

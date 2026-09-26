@@ -4,8 +4,8 @@
     "stm32f103": {
       "cfgs": ["interface/cmsis-dap.cfg", "target/stm32f1x.cfg"],
       "pre": ["cmsis-dap backend usb_bulk"],
-      "speed": 1000,
-      "note": "CMSIS-DAP 探针 + STM32F103（SWD，1MHz）"
+      "speed": 10000,
+      "note": "CMSIS-DAP 探针 + STM32F103（SWD，10MHz；实测 OpenOCD 下 10MHz 吞吐最高）"
     },
     "stm32f103-jlink": {
       "cfgs": ["interface/jlink.cfg", "target/stm32f1x.cfg"],

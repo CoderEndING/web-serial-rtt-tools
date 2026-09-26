@@ -41,7 +41,20 @@ export class WebUsbDapProbe {
     this.maxWords = 12;
     this._ready = false;
     this.lastError = null;
+    this.clockHz = 1_000_000;          // 当前生效的 SWD 时钟（握手成功后 = 实际请求值）
+    this.clockTried = [];              // 试过哪些档位（排障用）
   }
+
+  /**
+   * SWD 时钟档位（kHz）：逐档试，第一个能读到合法 IDCODE 的就用。
+   *
+   * 🚨 **不是越高越快**：本机 MicroLink CMSIS-DAP + STM32F103 实测（RTT 阻塞发数据、
+   *    目标侧对账一致）：1 MHz 114 KB/s、4 MHz 236、**8 MHz 330（最快）**、
+   *    10 MHz 324、12 MHz 254、20/30 MHz 只有 250 左右 —— 所以 8 MHz 排在第一个。
+   *    时钟太高还会读到错数据（对账对不上）或直接 NO ACK，必须逐档回退。
+   *    想手工指定用界面上的「SWD 时钟」下拉框（存 rtt.clockKhz）。
+   */
+  static CLOCK_CANDIDATES = [8000, 12000, 4000, 2000, 1000, 500, 200];
 
   static supported(){ return typeof navigator !== 'undefined' && 'usb' in navigator; }
 
@@ -51,10 +64,10 @@ export class WebUsbDapProbe {
   }
 
   /** 弹浏览器设备选择框；all=true 时列出所有 USB 设备（非 DAPLink 也能试） */
-  static async request(all = false){
+  static async request(all = false, opts = {}){
     if (!WebUsbDapProbe.supported()) throw new Error('这个浏览器没有 WebUSB（请用桌面版 Chrome / Edge）');
     const device = await navigator.usb.requestDevice({ filters: all ? [] : [{ vendorId: 0x0d28 }] });
-    return await WebUsbDapProbe.open(device);
+    return await WebUsbDapProbe.open(device, opts);
   }
 
   static async open(device, opts = {}){
@@ -65,13 +78,40 @@ export class WebUsbDapProbe {
   }
 
   /**
-   * @param {{skipTargetInit?:boolean, skipInfo?:boolean}} opts
+   * @param {{skipTargetInit?:boolean, skipInfo?:boolean, skipClearHalt?:boolean, clockKhz?:number}} opts
    *   skipTargetInit=true 只认领 USB，不碰目标（自测/排障用）
    *   skipInfo=true 连 DAP_Info 都不问，让命令流与"验证过的裸客户端"完全一致
+   *   clockKhz>0 指定 SWD 时钟；不指定则从高到低自动选（见 CLOCK_CANDIDATES）
    */
-  async _setup({ skipTargetInit = false, skipInfo = false, skipClearHalt = false } = {}){
+  async _setup({ skipTargetInit = false, skipInfo = false, skipClearHalt = false, clockKhz = 0 } = {}){
     this.skipTargetInit = skipTargetInit;
     this.skipClearHalt = skipClearHalt;
+    await this._claim();
+    const prod = this.device.productName || 'CMSIS-DAP';
+
+    // 先按"验证过能跑通"的裸客户端顺序把目标初始化好（tools\cmsis_dap_raw.py），
+    // Info 查询放**后面**做 —— 那份脚本一个 Info 都没发，序列越接近它越稳。
+    if (!skipTargetInit){
+      if (clockKhz > 0){
+        await this._targetInit({ clock: clockKhz * 1000 });
+        this.clockHz = clockKhz * 1000;
+      } else {
+        await this._negotiateClock();
+      }
+    }
+    if (skipInfo) return;
+    try {
+      const ps = await this.info(0xff);
+      if (ps.length >= 2){ const v = ps[0] | (ps[1] << 8); if (v > 0 && v <= 4096) this.pkt = Math.min(v, 512); }
+      const pc = await this.info(0xfe);
+      this.packetCount = pc[0] || 1;
+      this.maxWords = Math.max(1, Math.min(120, Math.floor((this.pkt - 8) / 4)));
+      this.name = `${prod} · ${this.pkt}B/包 · SWD ${Math.round(this.clockHz / 1000)}kHz`;
+    } catch {}
+  }
+
+  /** USB 层：打开设备、找 bulk 端点、认领接口、清端点、同步清队列 */
+  async _claim(){
     const d = this.device;
     if (!d.opened) await d.open();
     if (d.configuration === null) await d.selectConfiguration(1);
@@ -105,24 +145,34 @@ export class WebUsbDapProbe {
       try { await d.clearHalt(dir, ep); } catch (e){ console.warn(`clearHalt(${dir}) 失败：${e.message}`); }
     }
     await this.resync();
-
     this._ready = true;
-    const prod = d.productName || 'CMSIS-DAP';
-    this.name = `${prod} · ${this.pkt}B/包`;
     this.maxWords = Math.max(1, Math.min(120, Math.floor((this.pkt - 8) / 4)));
+    this.name = `${d.productName || 'CMSIS-DAP'} · ${this.pkt}B/包`;
+  }
 
-    // 先按"验证过能跑通"的裸客户端顺序把目标初始化好（tools\cmsis_dap_raw.py），
-    // Info 查询放**后面**做 —— 那份脚本一个 Info 都没发，序列越接近它越稳。
-    if (!skipTargetInit) await this._targetInit();
-    if (skipInfo) return;
-    try {
-      const ps = await this.info(0xff);
-      if (ps.length >= 2){ const v = ps[0] | (ps[1] << 8); if (v > 0 && v <= 4096) this.pkt = Math.min(v, 512); }
-      const pc = await this.info(0xfe);
-      this.packetCount = pc[0] || 1;
-      this.maxWords = Math.max(1, Math.min(120, Math.floor((this.pkt - 8) / 4)));
-      this.name = `${prod} · ${this.pkt}B/包`;
-    } catch {}
+  /**
+   * SWD 时钟自动选档：按 CLOCK_CANDIDATES 的顺序试，第一个能读到合法 IDCODE 的就用。
+   * 时钟过高会 NO ACK 或**读到错数据**（吞吐也不升反降），所以每次都靠
+   * `_targetInit()` 里那笔「读 DP IDCODE + 校验」来判定通不通。
+   */
+  async _negotiateClock(){
+    this.clockTried = [];
+    let last = null;
+    for (const khz of WebUsbDapProbe.CLOCK_CANDIDATES){
+      this.clockTried.push(khz);
+      try {
+        await this._targetInit({ clock: khz * 1000 });
+        this.clockHz = khz * 1000;
+        if (this.clockTried.length > 1) console.info(`[dap] SWD 时钟降到 ${khz} kHz 才通（试过 ${this.clockTried.join('/')}）`);
+        return this.clockHz;
+      } catch (e){
+        last = e;
+        console.warn(`[dap] ${khz} kHz 不通：${e.message}`);
+        // 每档失败后把 USB 会话重开一遍：拉过/折腾过的 SWD 引擎往往要重开会话才肯恢复
+        try { await this.reopen({ negotiate: false }); } catch {}
+      }
+    }
+    throw new Error(`所有 SWD 时钟档位都连不上目标（最后：${last?.message}）——查接线 / 复位 / 供电`);
   }
 
   // ---------------- 原始命令 ----------------
@@ -304,10 +354,11 @@ export class WebUsbDapProbe {
    *   Connect(SWD) → SWJ_Clock → **SWD_Configure** → **SWJ_Sequence(88 位激活)** → TransferConfigure
    * 少一步都不行：早期版本漏了 SWD_Configure、把激活序列拆成三次发，结果所有传输 NO ACK。
    */
-  async _targetInit(){
+  async _targetInit({ clock = null } = {}){
+    const hz = Number(clock || this.clockHz || 1_000_000);
     const port = await this._ctrl(CMD.Connect, Uint8Array.of(1));      // 1 = SWD
     if (port[0] !== 1) throw new Error(`DAP_Connect 失败（返回 ${port[0]}，期望 1=SWD）`);
-    await this.setClock(1_000_000);
+    await this.setClock(hz);
     await this._ctrl(CMD.SWD_Configure, Uint8Array.of(0));             // turnaround=1 / data_phase=0
     await this.swdActivation();                                       // 88 位激活序列（关键！）
     await this._ctrl(CMD.TransferConfigure, Uint8Array.of(0, 0xe8, 0x03, 0, 0));  // idle=0, retry=1000
@@ -477,13 +528,13 @@ export class WebUsbDapProbe {
     }
   }
 
-  /** 释放接口再认领、重跑一遍初始化 —— 比让用户拔插 USB 体面 */
+  /** 释放接口再认领、按**当前时钟**重跑一遍初始化 —— 比让用户拔插 USB 体面 */
   async reopen(){
-    const dev = this.device;
     try { await this.device.releaseInterface(this.iface); } catch {}
     this._ready = false;
     await sleep(120);
-    await this._setup({});
+    await this._claim();
+    await this._targetInit({ clock: this.clockHz });
     return true;
   }
 

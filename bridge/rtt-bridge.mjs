@@ -220,7 +220,8 @@ class WsConn {
 
 /* ============================ OpenOCD 后端 ============================ */
 class OpenOcdBackend {
-  constructor(){
+  constructor(cfg = {}){
+    this.cfg = cfg;                    // 网页传进来的配置（speed = adapter speed，kHz）
     this.sock = null;
     this.buf = Buffer.alloc(0);
     this.child = null;
@@ -243,7 +244,10 @@ class OpenOcdBackend {
       if (cfgs.length) argv.push('-f', path.join(scripts, cfgs[0]));
       for (const c of (t.pre || [])) argv.push('-c', c);
       for (const c of cfgs.slice(1)) argv.push('-f', path.join(scripts, c));
-      if (t.speed) argv.push('-c', `adapter speed ${t.speed}`);
+      // 速度优先级：网页传的 cfg.speed > bridge.config.json 的 speed > 不设
+      // （RTT 吞吐基本由 SWD 时钟决定：1 MHz 实测 ~68 KB/s，往上还能涨，详见 docs/backends.md）
+      const speed = Number(this.cfg?.speed || t.speed || 0);
+      if (speed > 0) argv.push('-c', `adapter speed ${speed}`);
       argv.push('-c', 'init');
       onLog?.(`启动 OpenOCD：${exe} ${argv.join(' ')}`);
       this.child = spawn(exe, argv, { stdio: ['ignore', 'pipe', 'pipe'] });
@@ -514,7 +518,7 @@ async function handle(conn, text, log){
           reply({ t: 'opened', info });
           console.log('[jlink] ' + JSON.stringify(info));
         } else {
-          backend = new OpenOcdBackend();
+          backend = new OpenOcdBackend(m.cfg || {});
           const info = await backend.start(log);
           reply({ t: 'opened', info });
           console.log('[openocd] ' + JSON.stringify(info));

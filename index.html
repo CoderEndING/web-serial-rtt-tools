@@ -201,6 +201,17 @@
             <button id="r-usb-pick" title="换一个探针（会弹浏览器设备选择框）">换设备…</button>
             <button id="r-usb-disconnect" disabled>断开</button>
           </div>
+          <label class="row"><span>SWD 时钟</span>
+            <select id="r-usb-clock" title="不是越高越快：本机 MicroLink + STM32F103 实测 8MHz 最快（12MHz 反而慢 ~25%）">
+              <option value="0">自动</option>
+              <option value="1000">1 MHz</option>
+              <option value="2000">2 MHz</option>
+              <option value="4000">4 MHz</option>
+              <option value="8000">8 MHz</option>
+              <option value="12000">12 MHz</option>
+              <option value="20000">20 MHz</option>
+            </select>
+          </label>
           <label class="chk"><input type="checkbox" id="r-usb-all"> 显示所有 USB 设备（非 DAPLink）</label>
           <p class="hint">支持 CMSIS-DAP v2（bulk）探针：DAPLink、自制 cherrydap 等。<br>J-Link 探针不支持 WebUSB，请改用本地桥。</p>
         </div>
