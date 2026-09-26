@@ -31,6 +31,8 @@ export class Assistant {
     this.term = null;
     this.fit = null;
     this._lastWasCR = false;            // 补 \r 用的跨包状态（同 terminal.js）
+    this.suppressed = false;            // 高速自动关显示（见 _highspeedGate）
+    this.suppManual = false;            // 用户手动恢复过显示：暂不再自动关，速率回落后重新武装
   }
 
   init(){
@@ -78,7 +80,12 @@ export class Assistant {
     $('s-clear').addEventListener('click', () => { this.rx.clear(); this.term?.clear(); this._lastWasCR = false; });
     $('s-save').addEventListener('click', () => this.save());
     store.bind($('s-record-ts'), 'serial.recordTs', 'checked');
+    store.bind($('s-record-auto'), 'serial.recordAuto', 'checked');
     $('s-record').addEventListener('click', () => this._toggleRecord());
+    $('s-err').addEventListener('click', () => {
+      // 高速关显示时状态栏就是恢复入口（文字会提示"点此恢复显示"）
+      if (this.suppressed){ this.suppManual = true; this._setSuppressed(false); }
+    });
     this.rec.onChange = () => this._recordBtn();
     this._recordBtn();
     $('s-statclear').addEventListener('click', () => { this.rxc.reset(); this.txc.reset(); this._stats(); });
@@ -100,6 +107,7 @@ export class Assistant {
       $('s-scan').disabled = true; $('s-pick').disabled = true; $('s-port').disabled = true;
       setStatus($('s-err'), '', null);
       toast(`已打开串口 ${info} @ ${opts.baudRate} 8${opts.parity === 'none' ? 'N' : opts.parity === 'even' ? 'E' : 'O'}${opts.stopBits}`, 'ok');
+      if ($('s-record-auto').checked && !this.rec.active) this._autoStartRecord();
       this._armTimer();
       this._stats();
     });
@@ -109,6 +117,8 @@ export class Assistant {
       $('s-scan').disabled = false; $('s-pick').disabled = false; $('s-port').disabled = false;
       this._armTimer();
       if (unexpected) toast('串口已断开（设备被拔掉或占用）', 'warn');
+      this.suppManual = false;
+      if (this.suppressed) this._setSuppressed(false);
       this._stopRecord();
       this._stats();
     });
@@ -116,7 +126,7 @@ export class Assistant {
       this.rxc.add(b.length);
       this.rec.push(b, t);             // 落文件在"显示之前"：接收区 2MB 上限丢掉的历史不影响它
       this.rx.push(b, t);
-      if (this.ansiOn && this.term && !this.rx.paused) this._ansiFeed(b, t);
+      if (this.ansiOn && this.term && !this.rx.paused && !this.suppressed) this._ansiFeed(b, t);
     });
     this.s.on('tx', b => { this.txc.add(b.length); if (this.echo) this.rx.push(b, new Date(), '→ '); });
     this.s.on('error', e => setStatus($('s-err'), String(e?.message || e), 'err'));
@@ -201,9 +211,18 @@ export class Assistant {
   }
 
   async pickPort(){
+    const before = new Set(this.ports);
     try {
-      await SerialSession.requestPort();
+      const picked = await SerialSession.requestPort();
       await this.refreshPorts();
+      // 授权后自动选中新出现的那个端口 —— 之前停留在旧选择上，看起来像"选了没反应"。
+      // 重新挑同一个设备也要跳过去（对象身份匹配）；集合差别找不到时保持原样。
+      const idx = this.ports.findIndex(p => p === picked || !before.has(p));
+      if (idx >= 0){
+        store.set('serial.lastDesc', SerialSession.describe(this.ports[idx]));
+        await this.refreshPorts();               // 重建一次让 ★ 跟着新设备
+        $('s-port').value = String(idx);
+      }
       toast('端口已授权，可以点「连接」了', 'ok');
     } catch (e){
       if (e?.name !== 'NotFoundError') toast('选择端口失败：' + e.message, 'err');
@@ -312,8 +331,58 @@ export class Assistant {
     $('s-txbytes').textContent = fBytes(this.txc.total);
     $('s-txframes').textContent = this.txc.frames;
     $('s-txrate').textContent = fRate(this.txc.rate(now));
+    this._highspeedGate(this.rxc.rate(now));
     if (this.rx?.paused) $('s-pause').title = `暂停中，已缓存 ${fBytes(this.rx.bytes)}`;
     if (this.rec.active) this._recordBtn();
+  }
+
+  // ================= 高速自动关显示 =================
+  /**
+   * 几百 KB/s（高波特率 / MicroLink 的 RTT→CDC 转发）时界面渲染必然掉队 —— 先崩的总是
+   * 显示，字节本身不丢（统计/落文件是全量）。所以：速率 > 50KB/s 自动停渲染，
+   * 降到 25KB/s 以下才自动恢复（回滞，防临界速率反复开关）；点状态栏提示可手动恢复
+   * （之后不再自动关，直到速率回落后重新武装）。
+   */
+  static HS_OFF = 50 * 1024;
+  static HS_ON  = 25 * 1024;
+
+  _highspeedGate(r){
+    if (!this.s.isOpen){
+      if (this.suppressed) this._setSuppressed(false);
+      this.suppManual = false;
+      return;
+    }
+    if (!this.suppressed && !this.suppManual && r > Assistant.HS_OFF) this._setSuppressed(true, r);
+    else if (this.suppressed && r < Assistant.HS_ON){ this._setSuppressed(false); this.suppManual = false; }
+  }
+
+  _setSuppressed(on, r = 0){
+    if (this.suppressed === on) return;
+    this.suppressed = on;
+    this.rx.setDisplayOff(on);
+    if (on){
+      setStatus($('s-err'), `高速 ${fRate(r)}：渲染已停（收数/记录不受影响）· 点此恢复显示`, 'err');
+      $('s-err').title = '点击恢复显示。若速率仍高于阈值会再次自动关闭';
+    } else {
+      const skipped = this.rx.suppressedBytes;
+      this.rx.setDisplayOff(false);
+      if (this.ansiOn && this.term && skipped > 0){
+        this.term.write(`\x1b[90m（高速期间省略了 ${fBytes(skipped)} 的渲染；完整数据用「记录到文件」拿）\x1b[0m\r\n`);
+      }
+      setStatus($('s-err'), '', null);
+      $('s-err').title = '';
+    }
+  }
+
+  async _autoStartRecord(){
+    try {
+      const name = await this.rec.start({ name: 'serial', timestamps: $('s-record-ts').checked });
+      this._recordBtn();
+      toast(`已自动开始记录 → ${name}`, 'ok', 5000);
+    } catch (e){
+      const why = e?.name === 'NotAllowedError' ? '浏览器要求弹保存框时页面正在响应用户点击' : (e?.message || e);
+      toast(`自动记录没启动（${why}）。手动点「记录到文件」即可`, 'warn', 6000);
+    }
   }
 
   // ================= 记录到文件 =================
