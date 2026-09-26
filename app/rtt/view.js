@@ -358,12 +358,35 @@ export class RttView {
         if (level > this.peak) this.peak = level;
         if (corrupt){
           this.stats.corrupt++;
-          // 别刷屏：10 秒提醒一次；错位读在 SWD 时钟过高时最常见
+          this._corruptRun = (this._corruptRun || 0) + 1;
+          // 别刷屏：10 秒提醒一次。错位读常见原因：SWD 时钟过高、接线/共地不良
+          //（拔插过 LA/杜邦线后特别常见）、或 USB 响应流错位
           if (!this._corruptAt || Date.now() - this._corruptAt > 10000){
             this._corruptAt = Date.now();
             if (!this.suppressed) setStatus($('r-err'),
-              '检测到错位读（读回了控制块内容，已丢弃并重读）—— SWD 时钟太高时最常见，建议降到 4MHz 试试', 'err');
+              '检测到错位读（读回了控制块内容，已丢弃并重读）—— 查 SWD 时钟、接线与共地', 'err');
           }
+          // 🚨 连续错位读说明不是偶发：多半是 USB 响应流错位（所有 Transfer 响应回显都是 0x05，
+          //    错位后回显照样匹配，读回来的全是别的命令的答案）或 SWD 链路半死。
+          //    升级自愈：recover() 重激活 SWD；不行就 reopen() 重开 USB 会话（resync 只在这条路上跑）。
+          if (this._corruptRun === 15 || (this._corruptRun > 15 && this._corruptRun % 60 === 0)){
+            if (!this.suppressed) setStatus($('r-err'), `连续 ${this._corruptRun} 轮错位读，正在自愈（SWD 重激活 → 必要时重开 USB 会话）…`, 'err');
+            try { await this.probe?.recover?.(); } catch {}
+            let ok = false;
+            try {
+              const hdr = await this.probe.readMem(this.rtt.addr, 16);
+              ok = String.fromCharCode(...hdr.subarray(0, 10)) === 'SEGGER RTT';
+            } catch {}
+            if (!ok){
+              try { await this.probe.reopen?.(); } catch {}
+            }
+          }
+          if (this._corruptRun > 150){
+            this._fail(new Error('连续错位读且自愈无效 —— SWD 链路不稳定：查接线/共地，或把 SWD 时钟调低'));
+            return;
+          }
+        } else {
+          this._corruptRun = 0;
         }
       } catch (e){
         const msg = String(e?.message || e);
