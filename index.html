@@ -105,6 +105,7 @@
         <span class="spacer"></span>
         <button id="s-record" class="mini" title="把收到的字节直接写进本地文件（不走接收区的 2MB 内存上限），高速采集用">● 记录到文件</button>
         <label class="chk" title="默认开：每段前加一行 [时:分:秒.毫秒]，存 .txt 给人看；关掉则原样写字节存 .bin（二进制安全，事后解析用）"><input type="checkbox" id="s-record-ts" checked> 记录带时间戳</label>
+        <label class="chk" title="连接成功后自动弹一次保存框开始记录到文件。配合高速自动关显示（>50KB/s 停渲染、收数/记录照常），MicroLink RTT→CDC 这种一上来就猛灌的场景全程无感"><input type="checkbox" id="s-record-auto"> 连接自动记录</label>
         <button id="s-statclear" class="mini">计数清零</button>
       </div>
       <div class="sendbar">
@@ -299,6 +300,7 @@
         <span class="spacer"></span>
         <button id="r-record" class="mini" title="把读到的 RTT 上行字节直接写进本地文件（不走记录的 2MB 内存上限），高速采集用">● 记录到文件</button>
         <label class="chk" title="默认开：每段前加一行 [时:分:秒.毫秒]，存 .txt 给人看；关掉则原样写字节存 .bin（二进制安全，事后解析用）"><input type="checkbox" id="r-record-ts" checked> 记录带时间戳</label>
+        <label class="chk" title="连接成功后自动弹一次保存框开始记录到文件。配合高速自动关显示（>50KB/s 停渲染、收数/记录照常）"><input type="checkbox" id="r-record-auto"> 连接自动记录</label>
         <span class="err" id="r-err"></span>
       </div>
       <div class="sendbar">

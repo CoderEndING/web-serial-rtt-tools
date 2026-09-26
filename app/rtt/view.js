@@ -66,6 +66,9 @@ export class RttView {
     this.histIdx = -1;
     this.rec = new FileRecorder();      // 高速采集落文件（见 core/recorder.js）
     this._lastWasCR = false;            // 终端模式补 \r 用的跨包状态（\r\n 不能补成 \r\r\n）
+    this.suppressed = false;            // 高速自动关显示（见 _highspeedGate）
+    this.suppManual = false;            // 用户手动恢复过显示：暂不再自动关，速率回落后重新武装
+    this.suppBytes = 0;                 // 关显示期间省略渲染的字节数
     this.stats = { bytes: 0, polls: 0, lost: 0, lastBytes: 0, lastPolls: 0, rate: 0, hz: 0 };
   }
 
@@ -119,7 +122,12 @@ export class RttView {
     $('r-save').addEventListener('click', () => this.save());
     store.bind($('r-usb-clock'), 'rtt.clockKhz');
     store.bind($('r-record-ts'), 'rtt.recordTs', 'checked');
+    store.bind($('r-record-auto'), 'rtt.recordAuto', 'checked');
     $('r-record').addEventListener('click', () => this._toggleRecord());
+    $('r-err').addEventListener('click', () => {
+      // 高速关显示时状态栏就是恢复入口（文字会提示"点此恢复显示"）
+      if (this.suppressed){ this.suppManual = true; this._setSuppressed(false); }
+    });
     this.rec.onChange = () => this._recordBtn();
     this._recordBtn();
     $('r-send').addEventListener('click', () => this._sendInput());
@@ -245,6 +253,7 @@ export class RttView {
         if (r?.info?.note) setStatus($('r-err'), r.info.note);
       }
       this._uiConnected(true);
+      if ($('r-record-auto').checked && !this.rec.active) this._autoStartRecord();
       if (this.stream) this._stats(); else await this._startRtt();
     } catch (e){
       this._err(e);
@@ -263,6 +272,8 @@ export class RttView {
     try { if (this.probe?.disconnect) await this.probe.disconnect(); } catch {}
     try { this.bridge?.close(); } catch {}
     this.probe = null; this.bridge = null; this.rtt = null; this.stream = false;
+    this.suppManual = false;
+    if (this.suppressed) this._setSuppressed(false);
     this._uiConnected(false);
     setFlag($('conn-flag'), '未连接');
     setStatus($('r-err'), '已断开');
@@ -387,6 +398,7 @@ export class RttView {
     if (!bytes?.length) return;
     this.stats.bytes += bytes.length;
     this.rec.push(bytes, t);            // 落文件在"显示之前"：暂停/丢历史都不影响它
+    if (this.suppressed){ this.suppBytes += bytes.length; return; }
     this.records.push({ t, b: bytes });
     this.recBytes += bytes.length;
     while (this.recBytes > MAX_RAW && this.records.length > 1){
@@ -547,6 +559,7 @@ export class RttView {
     $('r-rate').textContent = fRate(s.rate);
     $('r-hz').textContent = Math.round(s.hz);
     $('r-lost').textContent = s.lost;
+    this._highspeedGate(s.rate);
     const peak = Math.round((this.peak || 0) * 100);
     $('r-full').textContent = `${this.highPolls || 0} 次 / 峰值 ${peak}%`;
     $('r-full').parentElement.title =
@@ -556,6 +569,55 @@ export class RttView {
     if (this.paused) $('r-pause').title = '暂停中（数据仍在收，继续后补上）';
     if (this.rec.active) this._recordBtn();
     if (!this.stream && !this.rtt && this.probe) $('r-cb').textContent = '查找中…';
+  }
+
+  // ================= 高速自动关显示 =================
+  /**
+   * WebUSB 实测 330KB/s 时渲染必然掉队 —— 先崩的总是显示，字节本身不丢
+   * （统计/落文件是全量，MicroLink 固件侧的 g_bytes 对账可以对出来）。
+   * 速率 > 50KB/s 自动停渲染，降到 25KB/s 以下才恢复（回滞）；
+   * 点状态栏提示可手动恢复（之后不再自动关，直到速率回落后重新武装）。
+   */
+  static HS_OFF = 50 * 1024;
+  static HS_ON  = 25 * 1024;
+
+  _highspeedGate(r){
+    if (!this.probe && !this.bridge){
+      if (this.suppressed) this._setSuppressed(false);
+      this.suppManual = false;
+      return;
+    }
+    if (!this.suppressed && !this.suppManual && r > RttView.HS_OFF) this._setSuppressed(true, r);
+    else if (this.suppressed && r < RttView.HS_ON){ this._setSuppressed(false); this.suppManual = false; }
+  }
+
+  _setSuppressed(on, r = 0){
+    if (this.suppressed === on) return;
+    this.suppressed = on;
+    if (on){
+      setStatus($('r-err'), `高速 ${fRate(r)}：渲染已停（收数/记录不受影响）· 点此恢复显示`, 'err');
+      $('r-err').title = '点击恢复显示。若速率仍高于阈值会再次自动关闭';
+    } else {
+      setStatus($('r-err'), '', null);
+      $('r-err').title = '';
+      if (this.suppBytes > 0){
+        const note = `（高速期间省略了 ${fBytes(this.suppBytes)} 的渲染；完整数据用「记录到文件」拿）`;
+        this.suppBytes = 0;
+        if (this.mode === 'term' && this.term) this._termWrite(new TextEncoder().encode(note + '\r\n'), new Date());
+        else this.tx.push(new TextEncoder().encode('\r\n' + note + '\r\n'), new Date());
+      }
+    }
+  }
+
+  async _autoStartRecord(){
+    try {
+      const name = await this.rec.start({ name: 'rtt', timestamps: $('r-record-ts').checked });
+      this._recordBtn();
+      toast(`已自动开始记录 → ${name}`, 'ok', 5000);
+    } catch (e){
+      const why = e?.name === 'NotAllowedError' ? '浏览器要求弹保存框时页面正在响应用户点击' : (e?.message || e);
+      toast(`自动记录没启动（${why}）。手动点「记录到文件」即可`, 'warn', 6000);
+    }
   }
 
   // ================= 记录到文件 =================

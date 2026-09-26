@@ -10,7 +10,7 @@
  *  ④ 暂停 = 只停止重绘，数据照收；继续时一次性重建，不丢数据。
  */
 import { bytesToHexView, bytesToText } from './hex.js';
-import { stamp as stampOf } from './format.js';
+import { bytes as fBytes, stamp as stampOf } from './format.js';
 
 const countNl = s => { let n = 0; for (let i = 0; i < s.length; i++) if (s.charCodeAt(i) === 10) n++; return n; };
 
@@ -24,6 +24,8 @@ export class RxBuffer {
     this.absolute = false;
     this.autoscroll = true;
     this.paused = false;
+    this.displayOff = false;               // 高速自动关显示：字节照收（计数在外部），只停渲染/存储
+    this.suppressedBytes = 0;              // 关显示期间省略渲染的字节数（恢复时提示用）
     this.truncated = false;
     this.raw = [];                         // [{t, b}]
     this.rawBytes = 0;
@@ -46,10 +48,26 @@ export class RxBuffer {
     if (!on) this.repaint();
   }
 
+  /**
+   * 高速自动关显示：与暂停不同 —— 暂停是"数据留着回头补"，关显示是"这段时间干脆不渲染"
+   * （几百 KB/s 时回头补也是一次几 MB 的重绘，照样卡死）。恢复时补一行省略说明。
+   */
+  setDisplayOff(on){
+    if (this.displayOff === on) return;
+    this.displayOff = on;
+    if (!on){
+      const skipped = this.suppressedBytes;
+      this.suppressedBytes = 0;
+      this.repaint();
+      if (skipped > 0) this._append(`（高速期间省略了 ${fBytes(skipped)} 的渲染；完整数据用「记录到文件」拿）\n`);
+    }
+  }
+
   // ---------------- 数据 ----------------
   /** @param {Uint8Array} bytes */
   push(bytes, t = new Date(), prefix = ''){
     if (!bytes || !bytes.length) return;
+    if (this.displayOff){ this.suppressedBytes += bytes.length; return; }
     this._store(bytes, t);
     if (!this.paused) this._append(this.format(bytes, t, prefix));
   }
@@ -118,6 +136,7 @@ export class RxBuffer {
 
   clear(){
     this.raw = []; this.rawBytes = 0; this.truncated = false;
+    this.suppressedBytes = 0;
     for (const { node } of this.nodes) node.remove();
     this.nodes = []; this.lines = 0;
     this.decoder = new TextDecoder('utf-8', { fatal: false });
