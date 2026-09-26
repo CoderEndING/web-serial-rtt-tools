@@ -11,7 +11,7 @@ import { Counter } from '../core/stats.js';
 import { FileRecorder } from '../core/recorder.js';
 import { SerialSession } from './session.js';
 import { parseHex, textToBytes, EOL_LABEL } from '../core/hex.js';
-import { bytes as fBytes, rate as fRate, fileStamp, download } from '../core/format.js';
+import { bytes as fBytes, rate as fRate, fileStamp, download, stamp as stampOf } from '../core/format.js';
 import { DemoPort, demoEnabled } from './demo.js';
 
 const EOL_BYTES = { none: '', crlf: '\r\n', cr: '\r', lf: '\n' };
@@ -27,6 +27,10 @@ export class Assistant {
     this.timer = null;
     this.echo = false;
     this.rec = new FileRecorder();      // 高速采集落文件（见 core/recorder.js）
+    this.ansiOn = false;                // ANSI 彩色模式（xterm 渲染，见 _setRxMode）
+    this.term = null;
+    this.fit = null;
+    this._lastWasCR = false;            // 补 \r 用的跨包状态（同 terminal.js）
   }
 
   init(){
@@ -40,8 +44,9 @@ export class Assistant {
 
     // ---------- 接收区显示设置 ----------
     const rxm = store.get('serial.rxmode', 'ascii');
-    this.rx.setMode(rxm);
-    seg(document.querySelector('[data-group=rxmode]'), rxm, v => { this.rx.setMode(v); store.set('serial.rxmode', v); });
+    this.rx.setMode(rxm === 'ansi' ? 'ascii' : rxm);   // RxBuffer 只认 ascii/hex；ansi 走 xterm
+    this._rxSeg = seg(document.querySelector('[data-group=rxmode]'), rxm, v => this._setRxMode(v));
+    this._setRxMode(rxm);
 
     this._chk($('s-ts'), 'serial.ts', v => this.rx.setTimestamps(v, $('s-tsabs').checked));
     this._chk($('s-tsabs'), 'serial.tsabs', v => this.rx.setTimestamps($('s-ts').checked, v));
@@ -70,7 +75,7 @@ export class Assistant {
     $('s-open').addEventListener('click', () => this.connect());
     $('s-close').addEventListener('click', () => this.s.close());
     $('s-send').addEventListener('click', () => this.send());
-    $('s-clear').addEventListener('click', () => this.rx.clear());
+    $('s-clear').addEventListener('click', () => { this.rx.clear(); this.term?.clear(); this._lastWasCR = false; });
     $('s-save').addEventListener('click', () => this.save());
     store.bind($('s-record-ts'), 'serial.recordTs', 'checked');
     $('s-record').addEventListener('click', () => this._toggleRecord());
@@ -82,6 +87,7 @@ export class Assistant {
       this.rx.setPaused(on);
       $('s-pause').textContent = on ? '继续' : '暂停';
       $('s-pause').classList.toggle('primary', on);
+      if (!on && this.ansiOn) this._ansiRedraw();
     });
 
     // ---------- 快捷发送 ----------
@@ -110,6 +116,7 @@ export class Assistant {
       this.rxc.add(b.length);
       this.rec.push(b, t);             // 落文件在"显示之前"：接收区 2MB 上限丢掉的历史不影响它
       this.rx.push(b, t);
+      if (this.ansiOn && this.term && !this.rx.paused) this._ansiFeed(b, t);
     });
     this.s.on('tx', b => { this.txc.add(b.length); if (this.echo) this.rx.push(b, new Date(), '→ '); });
     this.s.on('error', e => setStatus($('s-err'), String(e?.message || e), 'err'));
@@ -347,6 +354,69 @@ export class Assistant {
     b.title = on
       ? `正在写入 ${this.rec.name}（${fBytes(this.rec.bytes)} / ${this.rec.frames} 段）。界面卡就先「暂停」——只停显示，不停记录。`
       : '把收到的字节直接写进本地文件（不走接收区的 2MB 上限），高速采集用';
+  }
+
+  // ================= ANSI 彩色模式 =================
+  /**
+   * 「ASCII | ANSI | HEX」里的 ANSI：把收到的字节按 ANSI 转义码渲染（像 MobaXterm），
+   * 复用本地 vendor 的 xterm.js —— 和「终端」「RTT」两个标签页同一套渲染、同一套换行规则。
+   * raw 记录仍进 RxBuffer：切回 ASCII/HEX、保存数据、暂停恢复都从 raw 重建，不丢数据。
+   */
+  _setRxMode(v){
+    store.set('serial.rxmode', v);
+    this.ansiOn = v === 'ansi';
+    $('s-term').hidden = !this.ansiOn;
+    $('s-rx').hidden = this.ansiOn;
+    if (this.ansiOn){
+      if (!this._ensureAnsiTerm()){ this._rxSeg.set('ascii'); store.set('serial.rxmode', 'ascii'); return; }   // xterm 没加载出来就退回 ASCII
+      this._ansiRedraw();
+      try { this.fit?.fit(); } catch {}
+    } else {
+      this.rx.setMode(v);
+    }
+  }
+
+  _ensureAnsiTerm(){
+    if (this.term) return true;
+    if (!window.Terminal){ toast('xterm.js 没加载成功，ANSI 模式不可用', 'err'); return false; }
+    this.term = new Terminal({
+      fontFamily: '"Cascadia Mono","JetBrains Mono",Consolas,"DejaVu Sans Mono",monospace',
+      fontSize: 14, lineHeight: 1.15, cursorBlink: true, scrollback: 5000,
+      convertEol: false, allowTransparency: true,
+      theme: {
+        background: '#010409', foreground: '#e6edf3', cursor: '#58a6ff',
+        selectionBackground: '#264f78', black: '#484f58', red: '#ff7b72',
+        green: '#3fb950', yellow: '#d29922', blue: '#58a6ff', magenta: '#bc8cff',
+        cyan: '#39c5cf', white: '#b1bac4',
+      },
+    });
+    try { this.fit = new FitAddon.FitAddon(); this.term.loadAddon(this.fit); } catch {}
+    this.term.open($('s-term'));
+    this.fit?.fit();
+    const ro = new ResizeObserver(() => { if (this.ansiOn){ try { this.fit?.fit(); } catch {} } });
+    ro.observe($('s-term'));
+    return true;
+  }
+
+  _ansiFeed(bytes, t){
+    if (!this.term) return;
+    if (this.rx.timestamps) this.term.write(`\x1b[90m[${stampOf(t, this.rx.absolute)}]\x1b[0m `);
+    // 很多固件只发 \n 不发 \r，直接塞给 xterm 会变成阶梯状 → 按字节自动补 \r（同 terminal.js）
+    const out = [];
+    for (let i = 0; i < bytes.length; i++){
+      const b = bytes[i];
+      if (b === 0x0a && !this._lastWasCR) out.push(0x0d);
+      out.push(b);
+      this._lastWasCR = (b === 0x0d);
+    }
+    this.term.write(Uint8Array.from(out));
+  }
+
+  _ansiRedraw(){
+    if (!this.term) return;
+    this.term.clear();
+    this._lastWasCR = false;
+    for (const r of this.rx.raw) this._ansiFeed(r.b, r.t);
   }
 
   save(){

@@ -39,6 +39,7 @@ export class RttView {
     this.hist = [];
     this.histIdx = -1;
     this.rec = new FileRecorder();      // 高速采集落文件（见 core/recorder.js）
+    this._lastWasCR = false;            // 终端模式补 \r 用的跨包状态（\r\n 不能补成 \r\r\n）
     this.stats = { bytes: 0, polls: 0, lost: 0, lastBytes: 0, lastPolls: 0, rate: 0, hz: 0 };
   }
 
@@ -348,7 +349,16 @@ export class RttView {
   _termWrite(bytes, t){
     if (!this.term) return;
     if (this.ts) this.term.write(`\x1b[90m[${stampOf(t)}]\x1b[0m `);
-    this.term.write(bytes);
+    // 很多固件只发 \n 不发 \r，直接塞给 xterm 会变成阶梯状 → 按字节自动补 \r
+    //（和终端标签页 terminal.js 同一套规则；不能按字符串处理，多字节 UTF-8 会被拆坏）
+    const out = [];
+    for (let i = 0; i < bytes.length; i++){
+      const b = bytes[i];
+      if (b === 0x0a && !this._lastWasCR) out.push(0x0d);
+      out.push(b);
+      this._lastWasCR = (b === 0x0d);
+    }
+    this.term.write(Uint8Array.from(out));
   }
 
   _ensureTerm(){

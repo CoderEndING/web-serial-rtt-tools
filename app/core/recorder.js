@@ -14,7 +14,7 @@
  *
  * 两种写法：
  *   原样（.bin）：字节流原封不动，二进制安全，方便事后解析；
- *   带时间戳（.log）：每段前面加一行 `[HH:MM:SS.mmm] `，给人看。
+ *   带时间戳（.txt，默认）：每段前面加一行 `[HH:MM:SS.mmm] `，给人看。
  *
  * ⚠️ 写入是**批量异步**的（默认攒 256 KB 或 300 ms 写一次），push 本身不做 I/O，
  *    不会拖慢接收回路；停止时等最后一批写完再 close。
@@ -60,7 +60,7 @@ export class FileRecorder {
     if (this.active) return this.name;
     this.timestamps = timestamps;
     if (FileRecorder.supported()){
-      const ext = timestamps ? 'log' : 'bin';
+      const ext = timestamps ? 'txt' : 'bin';
       const handle = await window.showSaveFilePicker({
         suggestedName: `${name}-${fileStamp()}.${ext}`,
         types: [{ description: timestamps ? '带时间戳的文本日志' : '原始字节流', accept: { 'application/octet-stream': ['.bin', '.log', '.txt'] } }],
@@ -68,7 +68,7 @@ export class FileRecorder {
       this.name = handle.name || `${name}.${ext}`;
       this._w = await handle.createWritable();
     } else {
-      this.name = `${name}-${fileStamp()}.${timestamps ? 'log' : 'bin'}`;
+      this.name = `${name}-${fileStamp()}.${timestamps ? 'txt' : 'bin'}`;
     }
     this.bytes = 0; this.frames = 0; this.overflow = false; this.error = null;
     this.t0 = Date.now();
