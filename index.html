@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>串口 / RTT 工具箱 —— 网页版串口助手 · 终端 · SEGGER RTT Viewer</title>
+<meta name="description" content="零安装的网页工具：Web Serial 串口助手（SSCOM 风格）、ANSI 终端（Xshell 风格）、以及走 WebUSB/CMSIS-DAP 的 SEGGER RTT Viewer。">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%230d1117'/%3E%3Ctext x='16' y='22' font-size='16' text-anchor='middle' fill='%2358a6ff'%3E%3E_%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="app/vendor/xterm/xterm.css">
+<link rel="stylesheet" href="app/app.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand"><span class="logo">&gt;_</span> 串口 / RTT 工具箱</div>
+  <nav class="tabs" id="tabs">
+    <button class="tab active" data-tab="serial">串口助手</button>
+    <button class="tab" data-tab="terminal">终端</button>
+    <button class="tab" data-tab="rtt">RTT Viewer</button>
+  </nav>
+  <div class="topright">
+    <span id="conn-flag" class="flag flag-off">未连接</span>
+    <button class="ghost" id="btn-help">帮助</button>
+    <a class="ghost" id="lnk-github" href="https://github.com/minichao9901/web-serial-rtt-tools" target="_blank" rel="noopener">GitHub</a>
+  </div>
+</header>
+
+<main>
+
+<!-- ============================ 串口助手 ============================ -->
+<section class="panel active" id="tab-serial">
+  <div class="ws">
+    <aside class="side">
+      <fieldset>
+        <legend>串口</legend>
+        <label class="row"><span>端口</span>
+          <select id="s-port"></select>
+        </label>
+        <div class="row btnrow">
+          <button id="s-pick" title="选择串口（浏览器会弹授权框，第一次必须手动选一次）">选择…</button>
+          <button id="s-scan" title="刷新已授权端口列表">刷新</button>
+        </div>
+        <label class="row"><span>波特率</span>
+          <input id="s-baud" list="baud-list" value="115200" inputmode="numeric">
+          <datalist id="baud-list">
+            <option>9600</option><option>19200</option><option>38400</option><option>57600</option>
+            <option>115200</option><option>230400</option><option>460800</option><option>921600</option>
+            <option>1000000</option><option>1500000</option><option>2000000</option>
+          </datalist>
+        </label>
+        <label class="row"><span>数据位</span>
+          <select id="s-databits"><option>8</option><option>7</option><option>6</option><option>5</option></select>
+        </label>
+        <label class="row"><span>停止位</span>
+          <select id="s-stopbits"><option value="1">1</option><option value="2">2</option></select>
+        </label>
+        <label class="row"><span>校验</span>
+          <select id="s-parity">
+            <option value="none">无</option><option value="even">偶</option><option value="odd">奇</option>
+          </select>
+        </label>
+        <label class="row"><span>流控</span>
+          <select id="s-flow">
+            <option value="none">无</option><option value="hardware">硬件 RTS/CTS</option>
+          </select>
+        </label>
+        <div class="row sigrow">
+          <label><input type="checkbox" id="s-dtr"> DTR</label>
+          <label><input type="checkbox" id="s-rts"> RTS</label>
+        </div>
+        <div class="row btnrow">
+          <button id="s-open" class="primary">连接</button>
+          <button id="s-close" disabled>断开</button>
+        </div>
+        <p class="hint" id="s-note">浏览器只支持校验 无/偶/奇（Web Serial 限制）。</p>
+      </fieldset>
+
+      <fieldset>
+        <legend>快捷发送</legend>
+        <div id="s-quick"></div>
+        <p class="hint">按 <b>Alt+1…5</b> 直接发对应的槽位（浏览器占用了 Ctrl+数字，改标签页）。<br>HEX 用空格分隔；内容按「发送」那边选的 ASCII/HEX 与行尾处理。</p>
+      </fieldset>
+    </aside>
+
+    <section class="main">
+      <div class="toolbar">
+        <div class="seg" data-group="rxmode">
+          <button data-v="ascii" class="on">ASCII</button><button data-v="hex">HEX</button>
+        </div>
+        <label class="chk"><input type="checkbox" id="s-ts"> 时间戳</label>
+        <label class="chk"><input type="checkbox" id="s-tsabs"> 绝对时间</label>
+        <label class="chk"><input type="checkbox" id="s-autoscroll" checked> 自动滚动</label>
+        <label class="chk"><input type="checkbox" id="s-echo"> 显示发送</label>
+        <span class="spacer"></span>
+        <button id="s-pause">暂停</button>
+        <button id="s-clear">清空</button>
+        <button id="s-save">保存数据</button>
+      </div>
+      <pre class="rx" id="s-rx" tabindex="0"></pre>
+      <div class="stats">
+        <span>RX <b id="s-rxbytes">0</b> B / <b id="s-rxframes">0</b> 段 · <b id="s-rxrate">0</b> B/s</span>
+        <span>TX <b id="s-txbytes">0</b> B / <b id="s-txframes">0</b> 段 · <b id="s-txrate">0</b> B/s</span>
+        <span class="err" id="s-err"></span>
+        <span class="spacer"></span>
+        <button id="s-statclear" class="mini">计数清零</button>
+      </div>
+      <div class="sendbar">
+        <div class="seg" data-group="txmode">
+          <button data-v="ascii" class="on">ASCII</button><button data-v="hex">HEX</button>
+        </div>
+        <label class="chk">行尾
+          <select id="s-eol">
+            <option value="none">无</option>
+            <option value="crlf" selected>\r\n</option>
+            <option value="cr">\r</option>
+            <option value="lf">\n</option>
+          </select>
+        </label>
+        <label class="chk"><input type="checkbox" id="s-timer"> 定时</label>
+        <input id="s-timer-ms" class="num" value="1000" inputmode="numeric" title="周期，毫秒"> ms
+        <span class="spacer"></span>
+        <button id="s-send" class="primary" title="Ctrl+Enter">发送</button>
+      </div>
+      <textarea id="s-tx" class="tx" rows="3" placeholder="在这里输入要发送的内容（Ctrl+Enter 发送；HEX 模式如：01 03 00 00 00 0A C5 CD）"></textarea>
+    </section>
+  </div>
+</section>
+
+<!-- ============================== 终端 ============================== -->
+<section class="panel" id="tab-terminal">
+  <div class="ws">
+    <aside class="side">
+      <fieldset>
+        <legend>终端</legend>
+        <p class="hint" id="t-session">跟随「串口助手」的串口会话（端口与波特率在那边设置）。</p>
+        <label class="row"><span>回显</span>
+          <select id="t-echo">
+            <option value="off">设备回显（默认）</option>
+            <option value="on">本地回显</option>
+            <option value="both">双向</option>
+          </select>
+        </label>
+        <label class="row"><span>回车发送</span>
+          <select id="t-enter">
+            <option value="cr">\r (0x0D)</option>
+            <option value="crlf">\r\n</option>
+            <option value="lf">\n (0x0A)</option>
+          </select>
+        </label>
+        <label class="row"><span>退格发送</span>
+          <select id="t-bs">
+            <option value="del">0x7F (DEL)</option>
+            <option value="bs">0x08 (BS)</option>
+          </select>
+        </label>
+        <label class="row"><span>换行</span>
+          <select id="t-nl">
+            <option value="auto">自动补回车（\n → \r\n）</option>
+            <option value="raw">原样（\n 只换行）</option>
+          </select>
+        </label>
+        <label class="row"><span>字号</span>
+          <input id="t-font" class="num" value="14" inputmode="numeric"> px
+        </label>
+        <div class="row btnrow">
+          <button id="t-paste" title="从剪贴板粘贴并发送（终端里 Ctrl+V 是发给设备的 0x16）">粘贴并发送</button>
+        </div>
+        <div class="row btnrow">
+          <button id="t-clear">清屏</button>
+          <button id="t-save">保存输出</button>
+        </div>
+        <p class="hint">选中即复制（Ctrl+Shift+C）；Ctrl+Shift+V 粘贴；Ctrl+Shift+L 清屏。</p>
+      </fieldset>
+    </aside>
+    <section class="main">
+      <div class="toolbar"><span id="t-status">未连接</span></div>
+      <div class="termbox" id="t-term"></div>
+    </section>
+  </div>
+</section>
+
+<!-- =========================== RTT Viewer =========================== -->
+<section class="panel" id="tab-rtt">
+  <div class="ws">
+    <aside class="side">
+      <fieldset>
+        <legend>调试后端</legend>
+        <label class="row"><span>类型</span>
+          <select id="r-backend">
+            <option value="webusb">WebUSB · CMSIS-DAP（零安装）</option>
+            <option value="bridge-openocd">本地桥 · OpenOCD</option>
+            <option value="bridge-jlink">本地桥 · J-Link（ch0）</option>
+            <option value="mock">内置模拟目标（演示/自测）</option>
+          </select>
+        </label>
+        <div id="r-webusb-box">
+          <div class="row btnrow">
+            <button id="r-usb-connect" class="primary">连接探针</button>
+            <button id="r-usb-pick" title="换一个探针（会弹浏览器设备选择框）">换设备…</button>
+            <button id="r-usb-disconnect" disabled>断开</button>
+          </div>
+          <label class="chk"><input type="checkbox" id="r-usb-all"> 显示所有 USB 设备（非 DAPLink）</label>
+          <p class="hint">支持 CMSIS-DAP v2（bulk）探针：DAPLink、自制 cherrydap 等。<br>J-Link 探针不支持 WebUSB，请改用本地桥。</p>
+        </div>
+        <div id="r-bridge-box" hidden>
+          <label class="row"><span>桥地址</span><input id="r-bridge-url" value="ws://127.0.0.1:17321"></label>
+          <div class="row btnrow">
+            <button id="r-bridge-connect" class="primary">连接桥</button>
+            <button id="r-bridge-disconnect" disabled>断开</button>
+          </div>
+          <p class="hint">零安装模式不需要桥；要用 J-Link / OpenOCD 时再双击仓库里的 <code>bridge/start-bridge.bat</code>。</p>
+        </div>
+        <div id="r-mock-box" hidden>
+          <p class="hint">模拟目标：内存里放一个假的 RTT 控制块，每 200ms 吐一行日志，用来演示与自测。</p>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>RTT 控制块</legend>
+        <label class="row"><span>RAM 范围</span><input id="r-range" value="0x20000000-0x20020000"></label>
+        <label class="row"><span>地址</span><input id="r-addr" placeholder="留空 = 自动扫描 / 读 ELF"></label>
+        <div class="row btnrow">
+          <button id="r-elf">载入 ELF…</button>
+          <button id="r-find">扫描控制块</button>
+        </div>
+        <label class="row"><span>轮询</span><input id="r-poll" class="num" value="5" inputmode="numeric"> ms</label>
+        <div class="row btnrow">
+          <button id="r-reset">复位目标</button>
+          <button id="r-restart">重连 RTT</button>
+        </div>
+      </fieldset>
+    </aside>
+
+    <section class="main">
+      <div class="toolbar">
+        <div class="seg" data-group="rttmode">
+          <button data-v="term" class="on">终端(ANSI)</button><button data-v="text">文本</button><button data-v="hex">HEX</button>
+        </div>
+        <label class="chk"><input type="checkbox" id="r-ts"> 时间戳</label>
+        <label class="chk"><input type="checkbox" id="r-autoscroll" checked> 自动滚动</label>
+        <span class="spacer"></span>
+        <button id="r-pause">暂停</button>
+        <button id="r-clear">清空</button>
+        <button id="r-save">保存数据</button>
+      </div>
+      <div class="rttbox">
+        <div class="termbox" id="r-term" hidden></div>
+        <pre class="rx" id="r-rx"></pre>
+      </div>
+      <div class="stats">
+        <span>控制块 <b id="r-cb">—</b> · up × <b id="r-up">0</b> / down × <b id="r-down">0</b></span>
+        <span>读取 <b id="r-rate">0</b> B/s · 轮询 <b id="r-hz">0</b> Hz · 缓冲高位 <b id="r-full">0 次 / 峰值 0%</b> · 溢出丢弃 <b id="r-lost">0</b> B</span>
+        <span class="spacer"></span>
+        <span class="err" id="r-err"></span>
+      </div>
+      <div class="sendbar">
+        <span class="lbl" id="r-chlabel">下行 ch0</span>
+        <label class="chk">行尾
+          <select id="r-eol">
+            <option value="cr" selected>\r</option><option value="crlf">\r\n</option>
+            <option value="lf">\n</option><option value="none">无</option>
+          </select>
+        </label>
+        <label class="chk"><input type="checkbox" id="r-hexsend"> HEX</label>
+        <input id="r-tx" class="rtt-in" placeholder="给固件发送输入（↑/↓ 翻历史；Enter 发送）">
+        <button id="r-send" class="primary">发送</button>
+      </div>
+    </section>
+  </div>
+</section>
+
+</main>
+
+<div class="toasts" id="toasts"></div>
+
+<dialog id="help">
+  <h2>帮助 / 已知限制</h2>
+  <h3>浏览器要求</h3>
+  <ul>
+    <li>需要 <b>Chrome / Edge 89+</b>（桌面版）。Firefox / Safari 不支持 Web Serial。</li>
+    <li>页面必须是 <b>HTTPS</b> 或 <b>http://127.0.0.1</b>（安全上下文），GitHub Pages 满足。</li>
+  </ul>
+  <h3>第一次用串口</h3>
+  <ol>
+    <li>点「选择…」→ 在弹出的浏览器授权框里选你的 COM 口（<b>必须手动选一次</b>，网页不允许自动开串口）。</li>
+    <li>选好后端口会记在浏览器里，下次「刷新」就能直接看到并连接。</li>
+    <li>⚠️ <b>独占</b>：SSCOM / 串口监视器 / idf.py monitor 开着同一个口时，这里打不开。</li>
+  </ol>
+  <h3>RTT 为什么分三种后端</h3>
+  <ul>
+    <li><b>WebUSB · CMSIS-DAP</b>：零安装，页面上直接读目标 RAM 拿 RTT。只认 CMSIS-DAP 类探针（DAPLink、cherrydap…），<b>不认 J-Link</b>。</li>
+    <li><b>本地桥 · OpenOCD / J-Link</b>：J-Link 与 OpenOCD 都是本机程序，网页无权启动它们，需要一个本机小程序当桥（仓库 <code>bridge/</code>，双击启动，零 npm 依赖）。</li>
+    <li><b>内置模拟目标</b>：无硬件也能看效果。</li>
+  </ul>
+  <h3>RTT 使用要点</h3>
+  <ul>
+    <li>固件里必须编进了 SEGGER RTT（<code>SEGGER_RTT_Init()</code> 会被自动调用）。</li>
+    <li>控制块地址优先用 <b>ELF 符号</b>（载入 .elf 最稳），否则用「扫描控制块」在 RAM 里找 <code>"SEGGER RTT"</code>。</li>
+    <li>同一个探针不能被两个程序同时占用：OpenOCD / pyOCD / J-Link 开着时，先关掉它们。</li>
+    <li><b>RTT 不重传</b>：目标写太快会覆盖/丢弃还没读走的数据。<b>「缓冲高位」的次数和峰值水位</b>是最实用的
+      过载信号（≥75% 就算高位）；「溢出丢弃」只在主机侧读指针落后时才算得出来 —— 两个数字都当下限看。
+      主机读速受调试器限制（OpenOCD RPC 实测 ~17 KB/s），大流量场景优先用 WebUSB 探针。</li>
+  </ul>
+  <form method="dialog"><button class="primary">知道了</button></form>
+</dialog>
+
+<script src="app/vendor/xterm/xterm.js"></script>
+<script src="app/vendor/xterm/addon-fit.js"></script>
+<script type="module" src="app/main.js"></script>
+</body>
+</html>

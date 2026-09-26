@@ -1,0 +1,489 @@
+/**
+ * RTT Viewer 界面。
+ * 后端四种：WebUSB-CMSIS-DAP（零安装）/ 本地桥+OpenOCD / 本地桥+J-Link(ch0) / 内置模拟目标。
+ * 显示三种：终端(ANSI，xterm) / 文本 / HEX —— 三种共用同一份 raw 记录，切换时重放，不丢历史。
+ */
+import { $, seg, setFlag, setStatus } from '../ui/dom.js';
+import { toast } from '../ui/toast.js';
+import { store } from '../core/store.js';
+import { RxBuffer } from '../core/rxview.js';
+import { Rtt } from './protocol.js';
+import { WebUsbDapProbe } from './dap-webusb.js';
+import { MockProbe } from './mock.js';
+import { BridgeClient } from './bridge.js';
+import { findSymbol } from './elf.js';
+import { parseRanges } from '../core/bin.js';
+import { parseHex, textToBytes } from '../core/hex.js';
+import { rate as fRate, fileStamp, download, stamp as stampOf } from '../core/format.js';
+
+const EOL = { cr: '\r', crlf: '\r\n', lf: '\n', none: '' };
+const MAX_RAW = 2 * 1024 * 1024;
+
+export class RttView {
+  constructor(){
+    this.probe = null;
+    this.bridge = null;
+    this.rtt = null;
+    this.stream = false;
+    this.mode = 'term';
+    this.paused = false;
+    this.running = false;
+    this.timer = null;
+    this.interval = 5;
+    this.records = [];
+    this.recBytes = 0;
+    this.truncated = false;
+    this.term = null;
+    this.fit = null;
+    this.hist = [];
+    this.histIdx = -1;
+    this.stats = { bytes: 0, polls: 0, lost: 0, lastBytes: 0, lastPolls: 0, rate: 0, hz: 0 };
+  }
+
+  init(){
+    this.tx = new RxBuffer($('r-rx'), { mode: 'ascii', maxLines: 4000, maxRaw: MAX_RAW });
+
+    // ---------- 设置 ----------
+    store.bind($('r-backend'), 'rtt.backend');
+    store.bind($('r-bridge-url'), 'rtt.bridgeUrl');
+    store.bind($('r-range'), 'rtt.range');
+    store.bind($('r-addr'), 'rtt.addr');
+    store.bind($('r-poll'), 'rtt.poll');
+    store.bind($('r-eol'), 'rtt.eol');
+    this._chk($('r-ts'), 'rtt.ts', v => { this.ts = v; this.tx.setTimestamps(v, false); });
+    this._chk($('r-autoscroll'), 'rtt.autoscroll', v => { this.tx.setAutoscroll(v); });
+    this._chk($('r-hexsend'), 'rtt.hexsend', () => {});
+
+    const mode = store.get('rtt.mode', 'term');
+    this.mode = mode;
+    this.modeSeg = seg(document.querySelector('[data-group=rttmode]'), mode, v => { store.set('rtt.mode', v); this._setMode(v); });
+    this.interval = Math.max(1, Number($('r-poll').value) || 5);
+    $('r-poll').addEventListener('input', () => { this.interval = Math.max(1, Number($('r-poll').value) || 5); });
+
+    // ---------- 后端选择 ----------
+    const applyBackend = () => {
+      const b = $('r-backend').value;
+      $('r-webusb-box').hidden = b !== 'webusb';
+      $('r-bridge-box').hidden = !(b === 'bridge-openocd' || b === 'bridge-jlink');
+      $('r-mock-box').hidden = b !== 'mock';
+    };
+    applyBackend();
+    $('r-backend').addEventListener('change', () => { applyBackend(); if (this.probe || this.bridge) this.disconnect(); });
+
+    // ---------- 连接按钮 ----------
+    $('r-usb-connect').addEventListener('click', () => this.connectProbe());
+    $('r-usb-pick').addEventListener('click', () => { this._forcePick = true; this.connectProbe(); });
+    $('r-usb-disconnect').addEventListener('click', () => this.disconnect());
+    $('r-bridge-connect').addEventListener('click', () => this.connectProbe());
+    $('r-bridge-disconnect').addEventListener('click', () => this.disconnect());
+    $('r-find').addEventListener('click', () => this._startRtt().catch(e => this._err(e)));
+    $('r-restart').addEventListener('click', () => this._startRtt().catch(e => this._err(e)));
+    $('r-reset').addEventListener('click', () => this.resetTarget());
+    $('r-elf').addEventListener('click', () => this._elfInput.click());
+    $('r-pause').addEventListener('click', () => this._togglePause());
+    $('r-clear').addEventListener('click', () => this._clear());
+    $('r-save').addEventListener('click', () => this.save());
+    $('r-send').addEventListener('click', () => this._sendInput());
+
+    this._elfInput = document.createElement('input');
+    this._elfInput.type = 'file';
+    this._elfInput.accept = '.elf,.axf,.out,.bin';
+    this._elfInput.style.display = 'none';
+    this._elfInput.addEventListener('change', () => this._loadElf());
+    document.body.appendChild(this._elfInput);
+
+    // ---------- 下行输入 ----------
+    $('r-tx').addEventListener('keydown', e => {
+      if (e.key === 'Enter'){ e.preventDefault(); this._sendInput(); return; }
+      if (e.key === 'ArrowUp' || e.key === 'ArrowDown'){
+        if (!this.hist.length) return;
+        e.preventDefault();
+        this.histIdx = e.key === 'ArrowUp'
+          ? (this.histIdx < 0 ? this.hist.length - 1 : Math.max(0, this.histIdx - 1))
+          : (this.histIdx < 0 ? -1 : Math.min(this.hist.length - 1, this.histIdx + 1));
+        $('r-tx').value = this.histIdx < 0 ? '' : this.hist[this.histIdx];
+      }
+    });
+
+    setInterval(() => this._stats(), 500);
+    // 页面切到后台时浏览器会限速定时器（RTT 轮询会明显变慢）—— 如实告诉用户，别让人以为工具卡了
+    document.addEventListener('visibilitychange', () => {
+      if (!this.running) return;
+      if (document.hidden){
+        this._wasRunning = true;
+        setStatus($('r-err'), '页面在后台：浏览器会限速定时器，RTT 轮询会变慢（数据不丢，切回来会补上）', null);
+      } else if (this._wasRunning){
+        this._wasRunning = false;
+        setStatus($('r-err'), '', null);
+      }
+    });
+    if (!WebUsbDapProbe.supported()) setStatus($('r-err'), '这个浏览器没有 WebUSB（Chrome/Edge 桌面版才有）', 'err');
+
+    // URL 参数：?backend=mock&auto=1 直接连上（做演示链接/自测用）
+    const q = new URLSearchParams(location.search);
+    const b = q.get('backend');
+    if (b && [...$('r-backend').options].some(o => o.value === b)){
+      $('r-backend').value = b;
+      $('r-backend').dispatchEvent(new Event('change'));
+    }
+    if (q.get('addr')) $('r-addr').value = q.get('addr');
+    this._setMode(mode);                       // 起手就要应用显示模式（否则默认的终端模式没容器，数据看不见）
+    if (q.get('auto') === '1') setTimeout(() => this.connectProbe().catch(() => {}), 150);
+  }
+
+  _chk(el, key, apply){
+    store.bind(el, key, 'checked');
+    el.addEventListener('change', () => apply(el.checked));
+    apply(el.checked);
+  }
+
+  // ================= 连接 =================
+  async connectProbe(){
+    const b = $('r-backend').value;
+    try {
+      if (b === 'webusb'){
+        // 已经授权过的探针**不用再弹选择框**（用户体验也好得多）；想换设备点「换设备…」
+        const auth = this._forcePick ? [] : await WebUsbDapProbe.authorized();
+        this._forcePick = false;
+        if (auth.length){
+          this.probe = await WebUsbDapProbe.open(auth[0]);
+          toast('使用已授权探针：' + this.probe.name, 'ok');
+        } else {
+          this.probe = await WebUsbDapProbe.request($('r-usb-all').checked);
+          toast('探针已连接：' + this.probe.name, 'ok');
+        }
+        this.stream = false;
+      } else if (b === 'mock'){
+        this.probe = new MockProbe();
+        await this.probe.connect();
+        this.stream = false;
+        toast('模拟目标已启动（内存里有个假 RTT 控制块）', 'ok');
+      } else {
+        const bc = new BridgeClient($('r-bridge-url').value);
+        await bc.connect({ version: 1 });
+        const backend = b === 'bridge-openocd' ? 'openocd' : 'jlink';
+        const r = await bc.open(backend, {
+          openocd: store.get('rtt.ocdPath', ''),
+          jlink: store.get('rtt.jlinkPath', ''),
+          device: store.get('rtt.jlinkDevice', ''),
+          speed: Number(store.get('rtt.jlinkSpeed', 4000)) || 4000,
+        });
+        this.bridge = bc;
+        if (backend === 'jlink'){
+          this.stream = true;
+          this.probe = null;
+          bc.onStream = d => this._ingest(d, new Date());
+          bc.onClose = () => this._fail(new Error('桥断开'));
+          toast('J-Link 流模式已连接（RTT ch0 全双工）', 'ok');
+        } else {
+          this.stream = false;
+          this.probe = bc;
+          toast('桥 + OpenOCD 已连接', 'ok');
+        }
+        if (r?.info?.note) setStatus($('r-err'), r.info.note);
+      }
+      this._uiConnected(true);
+      if (this.stream) this._stats(); else await this._startRtt();
+    } catch (e){
+      this._err(e);
+      await this.disconnect();
+    }
+  }
+
+  async disconnect(){
+    this.running = false;
+    clearTimeout(this.timer);
+    try { if (this.probe?.disconnect) await this.probe.disconnect(); } catch {}
+    try { this.bridge?.close(); } catch {}
+    this.probe = null; this.bridge = null; this.rtt = null; this.stream = false;
+    this._uiConnected(false);
+    setFlag($('conn-flag'), '未连接');
+    setStatus($('r-err'), '已断开');
+  }
+
+  _uiConnected(on){
+    $('r-usb-connect').disabled = on; $('r-usb-pick').disabled = on; $('r-usb-disconnect').disabled = !on;
+    $('r-bridge-connect').disabled = on; $('r-bridge-disconnect').disabled = !on;
+    $('r-backend').disabled = on;
+    if (!on){ $('r-cb').textContent = '—'; $('r-up').textContent = '0'; $('r-down').textContent = '0'; }
+  }
+
+  async _startRtt(){
+    if (!this.probe) return;
+    this.running = false;
+    clearTimeout(this.timer);
+    const addrText = String($('r-addr').value || '').trim();
+    const addr = addrText ? Number(addrText) : 0;
+    const ranges = parseRanges($('r-range').value);
+    setStatus($('r-err'), '正在查找 RTT 控制块…');
+    const found = await Rtt.locate(this.probe, {
+      addr, ranges,
+      onProgress: (p, a) => setStatus($('r-err'), `扫描控制块 ${(p * 100) | 0}%  @0x${a.toString(16)}`),
+    });
+    if (!found) throw new Error('没找到 SEGGER RTT 控制块：固件里编进 RTT 了吗？RAM 范围填对了吗？（也可以载入 .elf 用符号定位）');
+    this.rtt = new Rtt(this.probe, { addr: found });
+    await this.rtt.init(found);
+    const inff = this.rtt.info();
+    $('r-cb').textContent = '0x' + found.toString(16);
+    $('r-up').textContent = inff.maxUp;
+    $('r-down').textContent = inff.maxDown;
+    const nm = await this.rtt.name('up', 0);
+    $('r-chlabel').textContent = `下行 ch0${nm ? ' · ' + nm : ''}`;
+    const sz = inff.up[0]?.size || 0;
+    setStatus($('r-err'), `控制块 0x${found.toString(16)}，上行缓冲 ${sz} B${inff.maxUp > 1 ? `（固件声明 ${inff.maxUp} 个上行通道，本页读 ch0）` : ''}`, 'ok');
+    setFlag($('conn-flag'), `RTT 0x${found.toString(16)}`, 'on');
+    this._startPoll();
+    this._armIdleWatchdog();
+  }
+
+  /**
+   * 看门狗：控制块找到了、却一个字节都不来 —— 十有八九是**目标被停住了**
+   * （上一次调试会话 halt 了它，或探针 connect 时默认 halt）。
+   * 这时主动让它跑起来，并在状态条上说清楚，别让用户以为工具坏了。
+   */
+  _armIdleWatchdog(){
+    clearTimeout(this._idleTimer);
+    this._idleTimer = setTimeout(async () => {
+      if (!this.running || this.stats.bytes > 0) return;
+      if (typeof this.probe?.run !== 'function') return;
+      try {
+        const halted = await this.probe.isHalted?.();
+        await this.probe.run();
+        setStatus($('r-err'), halted
+          ? '目标原本处于 halt 状态（固件不跑就没数据），已自动继续运行'
+          : '两秒内没收到任何数据，已尝试让目标继续运行', halted ? 'ok' : null);
+      } catch (e){ /* 不支持就算了 */ }
+    }, 2000);
+  }
+
+  _startPoll(){
+    this.running = true;
+    this.stats.polls = 0; this.stats.bytes = 0; this.stats.lost = 0;
+    this.fullPolls = 0; this.highPolls = 0; this.peak = 0; this._faults = 0;    const loop = async () => {
+      if (!this.running) return;
+      const t0 = performance.now();
+      try {
+        const { bytes, lost, high, level } = await this.rtt.readUp(0);
+        if (bytes.length) this._ingest(bytes, new Date());
+        if (lost) this.stats.lost += lost;
+        if (high) this.highPolls++;
+        if (level > this.peak) this.peak = level;
+      } catch (e){
+        const msg = String(e?.message || e);
+        // SWD 访问出错 / 控制块内容不可信 → 先自愈（重新初始化调试口），别立刻放弃
+        if (/FAULT|NO ACK|不可信|不合理|没在运行/.test(msg)){
+          this._faults = (this._faults || 0) + 1;
+          if (this._faults === 3 || this._faults % 15 === 0){
+            setStatus($('r-err'), `SWD 访问出错，正在自愈（第 ${this._faults} 次）：${msg}`, 'err');
+            try {
+              await this.probe?.recover?.();
+              const hdr = await this.probe.readMem(this.rtt.addr, 16);
+              const id = String.fromCharCode(...hdr.subarray(0, 10));
+              if (id === 'SEGGER RTT'){ this._faults = 0; setStatus($('r-err'), '', null); }
+              else setStatus($('r-err'), '目标似乎没在运行（RTT 控制块不见了）：点「复位目标」，或确认固件在跑', 'err');
+            } catch { /* 继续重试 */ }
+          }
+          if (this._faults > 80){ this._fail(new Error('连续 SWD 访问失败，已放弃：' + msg)); return; }
+        } else { this._fail(e); return; }
+      }
+      this.stats.polls++;
+      const cost = performance.now() - t0;
+      this.timer = setTimeout(loop, Math.max(0, this.interval - cost));
+    };
+    loop();
+  }
+
+  _fail(e){
+    this.running = false;
+    clearTimeout(this.timer);
+    setStatus($('r-err'), '读取失败：' + (e?.message || e), 'err');
+    setFlag($('conn-flag'), 'RTT 中断', 'warn');
+  }
+
+  _err(e){
+    setStatus($('r-err'), String(e?.message || e), 'err');
+    toast(String(e?.message || e), 'err', 6000);
+  }
+
+  // ================= 数据 =================
+  _ingest(bytes, t){
+    if (!bytes?.length) return;
+    this.stats.bytes += bytes.length;
+    this.records.push({ t, b: bytes });
+    this.recBytes += bytes.length;
+    while (this.recBytes > MAX_RAW && this.records.length > 1){
+      this.recBytes -= this.records.shift().b.length;
+      this.truncated = true;
+    }
+    if (this.paused) return;
+    if (this.mode === 'term') this._termWrite(bytes, t);
+    else this.tx.push(bytes, t);
+  }
+
+  _termWrite(bytes, t){
+    if (!this.term) return;
+    if (this.ts) this.term.write(`\x1b[90m[${stampOf(t)}]\x1b[0m `);
+    this.term.write(bytes);
+  }
+
+  _ensureTerm(){
+    if (this.term || !window.Terminal) return;
+    this.term = new Terminal({
+      fontFamily: '"Cascadia Mono","JetBrains Mono",Consolas,monospace',
+      fontSize: Number(store.get('rtt.font', 13)) || 13,
+      lineHeight: 1.15, cursorBlink: true, scrollback: 3000,
+      theme: { background: '#010409', foreground: '#e6edf3', cursor: '#58a6ff', selectionBackground: '#264f78' },
+    });
+    try { this.fit = new FitAddon.FitAddon(); this.term.loadAddon(this.fit); } catch {}
+    this._termStale = !$('tab-rtt').classList.contains('active');   // 在隐藏状态下创建的话，第一次显示时要重放
+    this.term.open($('r-term'));
+    this.fit?.fit();
+    // 允许直接在终端里敲（等价于下行 ch0），像 JLinkRTTViewer 的 Terminal 模式
+    this.term.onData(d => {
+      const eol = $('r-eol').value;
+      if (d === '\r') this._sendBytes(textToBytes(EOL[eol] ?? '\r'));
+      else this._sendBytes(textToBytes(d));
+    });
+    const ro = new ResizeObserver(() => { if (this.mode === 'term') { try { this.fit?.fit(); } catch {} } });
+    ro.observe($('r-term'));
+  }
+
+  /** 切到本标签时调用（隐藏状态下建的终端在这里补尺寸/重放） */
+  onShow(){
+    if (this.mode !== 'term' || !this.term) return;
+    try { this.fit?.fit(); } catch {}
+    if (this._termStale){ this._redrawAll(); this._termStale = false; }
+  }
+
+  _setMode(m){
+    this.mode = m;
+    $('r-term').hidden = m !== 'term';
+    $('r-rx').hidden = m === 'term';
+    if (m === 'term'){ this._ensureTerm(); this._redrawAll(); try { this.fit?.fit(); } catch {} }
+    else { this.tx.setMode(m === 'hex' ? 'hex' : 'ascii'); this._redrawAll(); }
+  }
+
+  _redrawAll(){
+    if (this.mode === 'term'){
+      if (!this.term) return;
+      this.term.clear();
+      for (const r of this.records) this._termWrite(r.b, r.t);
+    } else {
+      this.tx.clear();
+      for (const r of this.records) this.tx.push(r.b, r.t);
+    }
+  }
+
+  _togglePause(){
+    this.paused = !this.paused;
+    $('r-pause').textContent = this.paused ? '继续' : '暂停';
+    $('r-pause').classList.toggle('primary', this.paused);
+    if (!this.paused) this._redrawAll();
+  }
+
+  _clear(){
+    this.records = []; this.recBytes = 0; this.truncated = false;
+    this.tx.clear();
+    this.term?.clear();
+  }
+
+  // ================= 下行 =================
+  _sendInput(){
+    const raw = $('r-tx').value;
+    if (!raw.trim()) return;
+    const bytes = this._build(raw);
+    if (!bytes) return;
+    if (this.hist[this.hist.length - 1] !== raw) this.hist.push(raw);
+    if (this.hist.length > 100) this.hist.shift();
+    this.histIdx = -1;
+    $('r-tx').value = '';
+    this._sendBytes(bytes);
+  }
+
+  _build(text){
+    let b;
+    if ($('r-hexsend').checked){
+      const r = parseHex(text);
+      if (r.error){ setStatus($('r-err'), r.error, 'err'); return null; }
+      b = r.bytes;
+    } else {
+      b = textToBytes(text);
+    }
+    const tail = EOL[$('r-eol').value] ?? '';
+    if (tail) b = new Uint8Array([...b, ...textToBytes(tail)]);
+    return b;
+  }
+
+  async _sendBytes(bytes){
+    try {
+      if (this.stream){
+        if (!this.bridge) throw new Error('桥未连接');
+        await this.bridge.streamWrite(bytes);
+      } else {
+        if (!this.rtt) throw new Error('RTT 还没就绪（先扫描控制块）');
+        const n = await this.rtt.writeDown(0, bytes);
+        if (n < bytes.length) toast(`下行缓冲只写进 ${n}/${bytes.length} 字节（固件没在取？）`, 'warn');
+      }
+      setStatus($('r-err'), '', null);
+    } catch (e){ this._err(e); }
+  }
+
+  async resetTarget(){
+    if (!this.probe){ toast('先连接一个后端', 'warn'); return; }
+    try {
+      const how = await this.probe.reset();
+      toast(`已复位目标（${how}），2 秒后重新读取控制块…`, 'ok');
+      setTimeout(() => this._startRtt().catch(e => this._err(e)), 2000);
+    } catch (e){ this._err(e); }
+  }
+
+  // ================= ELF =================
+  async _loadElf(){
+    const f = this._elfInput.files?.[0];
+    if (!f) return;
+    try {
+      const buf = await f.arrayBuffer();
+      const sym = findSymbol(buf, '_SEGGER_RTT');
+      if (!sym){ toast(`${f.name} 里没有 _SEGGER_RTT 符号（strip 过了？）→ 改用扫描`, 'warn', 6000); return; }
+      $('r-addr').value = '0x' + sym.addr.toString(16);
+      store.set('rtt.addr', $('r-addr').value);
+      toast(`从 ELF 拿到 _SEGGER_RTT = 0x${sym.addr.toString(16)}（${sym.size} B）`, 'ok', 6000);
+    } catch (e){ this._err(e); }
+  }
+
+  // ================= 统计 / 保存 =================
+  _stats(){
+    const s = this.stats;
+    s.rate = Math.max(0, s.bytes - s.lastBytes) * 2;
+    s.hz = Math.max(0, s.polls - s.lastPolls) * 2;
+    s.lastBytes = s.bytes; s.lastPolls = s.polls;
+    $('r-rate').textContent = fRate(s.rate);
+    $('r-hz').textContent = Math.round(s.hz);
+    $('r-lost').textContent = s.lost;
+    const peak = Math.round((this.peak || 0) * 100);
+    $('r-full').textContent = `${this.highPolls || 0} 次 / 峰值 ${peak}%`;
+    $('r-full').parentElement.title =
+      '缓冲水位：RTT 不重传，水位打到 3/4 以上说明目标写速 ≥ 主机读速，可能已有覆盖/丢弃。\n' +
+      '（主机读速受调试器限制：OpenOCD RPC 实测约 17 KB/s，WebUSB 会快得多）';
+    if (peak >= 75) $('r-full').classList.add('err');
+    if (this.paused) $('r-pause').title = '暂停中（数据仍在收，继续后补上）';
+    if (!this.stream && !this.rtt && this.probe) $('r-cb').textContent = '查找中…';
+  }
+
+  save(){
+    let out = '';
+    if (this.mode === 'term' && this.term){
+      const buf = this.term.buffer.active;
+      for (let i = 0; i < buf.length; i++){
+        const line = buf.getLine(i);
+        out += (line ? line.translateToString(true) : '') + '\n';
+      }
+    } else {
+      out = (this.truncated ? '（较早的数据已因超出上限被丢弃）\n' : '') + this.tx.render(this.records);
+    }
+    if (!out.trim()){ toast('还没有数据', 'warn'); return; }
+    const name = `rtt-${fileStamp()}.txt`;
+    download(name, out);
+    toast(`已保存 ${name}`, 'ok');
+  }
+}

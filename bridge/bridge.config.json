@@ -1,0 +1,35 @@
+{
+  "_说明": "桥的目标配置。cfgs 按顺序加载；pre 里的命令插在第一个 cfg 之后、其余 cfg 之前执行。",
+  "targets": {
+    "stm32f103": {
+      "cfgs": ["interface/cmsis-dap.cfg", "target/stm32f1x.cfg"],
+      "pre": ["cmsis-dap backend usb_bulk"],
+      "speed": 1000,
+      "note": "CMSIS-DAP 探针 + STM32F103（SWD，1MHz）"
+    },
+    "stm32f103-jlink": {
+      "cfgs": ["interface/jlink.cfg", "target/stm32f1x.cfg"],
+      "pre": ["transport select swd"],
+      "speed": 4000,
+      "note": "J-Link 探针 + STM32F103（SWD，4MHz）"
+    },
+    "esp32s31": {
+      "cfgs": ["board/esp32s31-builtin.cfg"],
+      "pre": [],
+      "speed": 0,
+      "note": "ESP32-S31 板载 USB-Serial/JTAG（走 USB-DBG 口）"
+    },
+    "esp32": {
+      "cfgs": ["board/esp32-wrover-kit.cfg"],
+      "pre": [],
+      "speed": 0,
+      "note": "ESP32 通用（按需改板级 cfg）"
+    },
+    "cmsis-dap-generic": {
+      "cfgs": ["interface/cmsis-dap.cfg"],
+      "pre": ["cmsis-dap backend usb_bulk"],
+      "speed": 1000,
+      "note": "只加载探针，目标自己用 -c 指定（例如 -c \"target create ...\"）"
+    }
+  }
+}

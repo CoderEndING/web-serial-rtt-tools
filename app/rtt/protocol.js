@@ -1,0 +1,203 @@
+/**
+ * SEGGER RTT 主机端协议（与探针解耦：只要给出 readMem/writeMem 就能工作）。
+ *
+ * 控制块（32 位目标）：
+ *   char  acID[16]              "SEGGER RTT\0..."
+ *   u32   MaxNumUpBuffers
+ *   u32   MaxNumDownBuffers
+ *   then  aUp[MaxNumUp]   ，每项 24 字节：
+ *         u32 sName; u32 pBuffer; u32 SizeOfBuffer; u32 WrOff; u32 RdOff; u32 Flags;
+ *   then  aDown[MaxNumDown]，结构完全相同
+ *
+ * 上行走 ring buffer：读 [RdOff, WrOff) → 把 RdOff 写成 WrOff（主机是读方）。
+ * 下行走反的：主机写数据 + 推进 WrOff（目标是读方）。
+ *
+ * ⚠️ 与 rtt.py 一致的三个坑：
+ *  ① 缓冲是环形，读之前必须判断是否绕回，否则一次只能读到末尾；
+ *  ② WrOff/RdOff 要尽量一次性读回来（这里整条 24 字节项一起读），避免撕裂；
+ *  ③ 目标写太快会覆盖/丢弃主机没读走的数据（RTT 不重传），但要注意**能观测到什么**：
+ *     · 最实用的是「缓冲水位」：每次读到 n 字节，n/(size-1) 就是当时的占用率。
+ *       实测（STM32F103 + OpenOCD RPC，读速只有 ~17 KB/s）：目标一次灌 8KB 进 4KB 缓冲、
+ *       主机只收到 4KB —— 水位峰值 92%，但**一次都没到 100%**（主机边读边被写）。
+ *       所以判据取「水位 ≥ 3/4 记为高位」，比死等 "n == size-1" 实用得多。
+ *     · 「精确差值」：主机侧 RdOff 落后于上次排空位置（上次推进失败/读取出错）时，
+ *       用「目标写了多少(ΔWr) − 这次读到多少」算得出差值。
+ *     · 不可观测：SKIP 模式下目标自己丢掉的数据、或目标在两轮之间写了超过整个缓冲 —— 
+ *       模运算已经绕圈，谁也看不出来丢了多少（JLinkRTTViewer 同样不知道）。
+ *       界面上的数字都当"下限/压力指示"，不是精确账。
+ */
+import { u32le, u32leBytes, latin1 } from '../core/bin.js';
+
+export const CB_ID = 'SEGGER RTT';
+export const ENTRY = 24;
+
+export class Rtt {
+  constructor(mem, opts = {}){
+    this.mem = mem;                     // { readMem(addr,len), writeMem(addr,bytes) }
+    this.addr = opts.addr || 0;
+    this.maxUp = 0; this.maxDown = 0;
+    this.upBase = 0; this.downBase = 0;
+    this.up = []; this.down = [];
+    this._lastWr = new Map();
+    this._lost = new Map();
+    this._full = new Map();
+    this._high = new Map();
+    this.peak = 0;
+    this._names = new Map();
+  }
+
+  // ---------------- 定位控制块 ----------------
+  /**
+   * @param {{addr?:number, ranges?:{start:number,end:number}[], chunk?:number, onProgress?:Function}} o
+   * @returns {Promise<number>} 控制块地址（找不到返回 0）
+   */
+  static async locate(mem, o = {}){
+    const { addr = 0, ranges = [], chunk = 4096, onProgress } = o;
+    if (addr){
+      const h = await mem.readMem(addr, 16);
+      if (latin1(h.subarray(0, 10)) === CB_ID) return addr;
+      throw new Error(`0x${addr.toString(16)} 处不是 RTT 控制块（读到 "${latin1(h.subarray(0, 16))}"）`);
+    }
+    let done = 0;
+    const total = ranges.reduce((s, r) => s + (r.end - r.start), 0) || 1;
+    for (const r of ranges){
+      for (let a = r.start; a < r.end; a += chunk - (CB_ID.length - 1)){
+        const n = Math.min(chunk, r.end - a);
+        if (n < 16) break;
+        let buf;
+        try { buf = await mem.readMem(a, n); }
+        catch { buf = new Uint8Array(0); }          // 该段不可读（没映射）就跳过
+        const s = latin1(buf);
+        const i = s.indexOf(CB_ID);
+        if (i >= 0) return a + i;
+        done += n;
+        onProgress?.(Math.min(1, done / total), a);
+      }
+    }
+    return 0;
+  }
+
+  async init(addr = this.addr){
+    const hdr = await this.mem.readMem(addr, 24);
+    if (latin1(hdr.subarray(0, 10)) !== CB_ID){
+      throw new Error(`0x${addr.toString(16)} 处不是 RTT 控制块（读到 "${latin1(hdr.subarray(0, 16))}"）`);
+    }
+    this.addr = addr;
+    this.maxUp = u32le(hdr, 16);
+    this.maxDown = u32le(hdr, 20);
+    if (this.maxUp > 16 || this.maxDown > 16) throw new Error(`控制块里的通道数不合理（up=${this.maxUp} down=${this.maxDown}）`);
+    this.upBase = addr + 24;
+    this.downBase = this.upBase + ENTRY * this.maxUp;
+    this.up = []; this.down = [];
+    for (let i = 0; i < this.maxUp; i++) this.up.push(await this._entry(this.upBase, i));
+    for (let i = 0; i < this.maxDown; i++) this.down.push(await this._entry(this.downBase, i));
+    this._lastWr.clear(); this._lost.clear();
+    return this;
+  }
+
+  async _entry(base, i){
+    const b = await this.mem.readMem(base + ENTRY * i, ENTRY);
+    const e = { sName: u32le(b, 0), pbuf: u32le(b, 4), size: u32le(b, 8), wr: u32le(b, 12), rd: u32le(b, 16), flags: u32le(b, 20) };
+    // 合理性检查：目标刚复位/没在跑时，控制块位置可能只剩旧数据或 0，
+    // 不检查的话会拿垃圾指针去读（甚至读到天文数字长度 → RangeError）。
+    if (e.size > (1 << 20)) throw new Error(`RTT 通道 ${i} 的缓冲大小不合理（${e.size}）→ 目标可能刚复位或没在运行`);
+    if (e.size && (e.wr >= e.size || e.rd >= e.size)) throw new Error(`RTT 通道 ${i} 的读写指针越界（wr=${e.wr} rd=${e.rd} size=${e.size}）→ 控制块内容不可信`);
+    if (e.size && !e.pbuf) throw new Error(`RTT 通道 ${i} 的缓冲指针是 0 → 控制块内容不可信`);
+    return e;
+  }
+
+  /** 通道名（存在目标内存里，按需读一次） */
+  async name(dir, ch){
+    const e = (dir === 'up' ? this.up : this.down)[ch];
+    if (!e || !e.sName) return '';
+    const k = `${dir}${ch}`;
+    if (!this._names.has(k)){
+      let nm = '';
+      try { nm = latin1((await this.mem.readMem(e.sName, 16)).subarray(0, 16)).replace(/\0.*$/, ''); } catch {}
+      this._names.set(k, nm);
+    }
+    return this._names.get(k);
+  }
+
+  // ---------------- 上行（目标 → 主机） ----------------
+  /**
+   * @returns {Promise<{bytes:Uint8Array, lost:number, full:boolean, high:boolean,
+   *                    level:number, wr:number, rd:number}>}
+   *   level = 本次读到的字节占缓冲容量（size-1）的比例；high = 水位 ≥ 3/4。
+   */
+  async readUp(ch = 0){
+    const e = await this._entry(this.upBase, ch);            // 每次整项重读：WrOff/RdOff 一致，且能跟上固件重新初始化缓冲
+    this.up[ch] = e;
+    const empty = { bytes: new Uint8Array(0), lost: 0, full: false, high: false, level: 0, wr: e.wr, rd: e.rd };
+    if (!e.size) return empty;
+    let n = e.wr - e.rd;
+    if (n < 0) n += e.size;
+    if (n === 0) return empty;
+
+    let data;
+    if (e.rd + n <= e.size){
+      data = await this.mem.readMem(e.pbuf + e.rd, n);
+    } else {                                                 // 绕回：分两段读
+      const n1 = e.size - e.rd;
+      const a = await this.mem.readMem(e.pbuf + e.rd, n1);
+      const b = await this.mem.readMem(e.pbuf, n - n1);
+      data = new Uint8Array(a.length + b.length);
+      data.set(a); data.set(b, a.length);
+    }
+    await this.mem.writeMem(this.upBase + ENTRY * ch + 16, u32leBytes(e.wr));  // RdOff = WrOff
+
+    // 过载信号：水位（环形缓冲最多装 size-1）
+    const cap = e.size - 1;
+    const level = cap > 0 ? n / cap : 0;
+    const full = n >= cap;
+    const high = level >= 0.75;
+    if (full) this._full.set(ch, (this._full.get(ch) || 0) + 1);
+    if (high) this._high.set(ch, (this._high.get(ch) || 0) + 1);
+    if (level > this.peak) this.peak = level;
+
+    // 精确差值：只有在主机侧 RdOff 落后时才算得出来（见文件头 ③）
+    const prev = this._lastWr.get(ch);
+    let lost = 0;
+    if (prev !== undefined){
+      const advanced = (e.wr - prev + e.size) % e.size;
+      lost = Math.max(0, advanced - data.length);
+      if (lost) this._lost.set(ch, (this._lost.get(ch) || 0) + lost);
+    }
+    this._lastWr.set(ch, e.wr);
+    return { bytes: data, lost, full, high, level, wr: e.wr, rd: e.rd };
+  }
+
+  totalLost(ch){ return this._lost.get(ch) || 0; }
+  fullCount(ch){ return this._full.get(ch) || 0; }
+  highCount(ch){ return this._high.get(ch) || 0; }
+
+  // ---------------- 下行（主机 → 目标） ----------------
+  /** 写多少算多少（目标不来取就只能写满缓冲）；返回实际写入字节数 */
+  async writeDown(ch, bytes){
+    const data = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+    if (!data.length) return 0;
+    const e = await this._entry(this.downBase, ch);
+    this.down[ch] = e;
+    if (!e.size) return 0;
+    const free = (e.size - 1 + e.rd - e.wr + e.size) % e.size;
+    const n = Math.min(data.length, free);
+    if (n <= 0) return 0;
+    const part = Math.min(n, e.size - e.wr);
+    if (part === n){
+      await this.mem.writeMem(e.pbuf + e.wr, data.subarray(0, n));
+    } else {
+      await this.mem.writeMem(e.pbuf + e.wr, data.subarray(0, part));
+      await this.mem.writeMem(e.pbuf, data.subarray(part, n));
+    }
+    await this.mem.writeMem(this.downBase + ENTRY * ch + 12, u32leBytes((e.wr + n) % e.size));
+    return n;
+  }
+
+  info(){
+    return {
+      addr: this.addr, maxUp: this.maxUp, maxDown: this.maxDown,
+      up: this.up.map((e, i) => ({ ch: i, size: e.size, pbuf: e.pbuf, wr: e.wr, rd: e.rd, flags: e.flags })),
+      down: this.down.map((e, i) => ({ ch: i, size: e.size, pbuf: e.pbuf, wr: e.wr, rd: e.rd, flags: e.flags })),
+    };
+  }
+}

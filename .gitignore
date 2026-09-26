@@ -1,0 +1,17 @@
+# 构建产物 / 临时文件
+build/
+tools/target-firmware/**/build/
+node_modules/
+tmp/
+*.log
+*.map
+
+# 抓包/采集的原始数据
+*.csv
+captures/
+
+# 编辑器
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
