@@ -219,31 +219,6 @@
         </div>
         <div id="r-bridge-box" hidden>
           <label class="row"><span>桥地址</span><input id="r-bridge-url" value="ws://127.0.0.1:17321"></label>
-          <label class="row"><span>目标</span>
-            <select id="r-ocd-target" title="常用 STM32 系列已内置（桥自动加载对应 OpenOCD cfg）；不在列表里的芯片选「自定义 cfg…」">
-              <option value="stm32f103">STM32F1（F103 等）</option>
-              <option value="stm32f0">STM32F0</option>
-              <option value="stm32f2">STM32F2</option>
-              <option value="stm32f3">STM32F3</option>
-              <option value="stm32f4">STM32F4</option>
-              <option value="stm32f7">STM32F7</option>
-              <option value="stm32g0">STM32G0</option>
-              <option value="stm32g4">STM32G4</option>
-              <option value="stm32h7">STM32H7</option>
-              <option value="stm32h5">STM32H5</option>
-              <option value="stm32l0">STM32L0</option>
-              <option value="stm32l1">STM32L1</option>
-              <option value="stm32l4">STM32L4 / L4+</option>
-              <option value="stm32l5">STM32L5</option>
-              <option value="stm32u5">STM32U5</option>
-              <option value="stm32c0">STM32C0</option>
-              <option value="stm32wb">STM32WB</option>
-              <option value="stm32wl">STM32WL</option>
-              <option value="esp32s31">ESP32-S31（板载 USB-JTAG）</option>
-              <option value="esp32">ESP32（Wrover Kit）</option>
-              <option value="custom">自定义 cfg…</option>
-            </select>
-          </label>
           <label class="row" id="r-ocd-custom-cfgs-row" hidden><span>cfg 文件</span>
             <input id="r-ocd-cfgs" title="逗号/空格分隔，按顺序加载。相对 OpenOCD scripts 目录或绝对路径。第一个 cfg 是 cmsis-dap 时会自动加 backend usb_bulk">
             <p class="hint">如 <code>interface/cmsis-dap.cfg, target/stm32f4x.cfg</code></p>
@@ -255,7 +230,7 @@
             <button id="r-bridge-connect" class="primary">连接桥</button>
             <button id="r-bridge-disconnect" disabled>断开</button>
           </div>
-          <p class="hint">零安装模式不需要桥；要用 J-Link / OpenOCD 时再双击仓库里的 <code>bridge/start-bridge.bat</code>。<br>选目标后 RAM 范围会自动填成该系列的常见值，控制块定位不准时手工改。</p>
+          <p class="hint">零安装模式不需要桥；要用 J-Link / OpenOCD 时再双击仓库里的 <code>bridge/start-bridge.bat</code>。<br>芯片在上方「RTT 控制块 → 芯片」里选；列表外选「自定义 cfg…」直接填 cfg。</p>
         </div>
         <div id="r-mock-box" hidden>
           <p class="hint">模拟目标：内存里放一个假的 RTT 控制块，每 200ms 吐一行日志，用来演示与自测。</p>
@@ -264,6 +239,31 @@
 
       <fieldset>
         <legend>RTT 控制块</legend>
+        <label class="row"><span>芯片</span>
+          <select id="r-ocd-target" title="换芯片在这里选：RAM 扫描范围自动带出（可手改）。走「本地桥 · OpenOCD」时它同时是 OpenOCD 的目标 cfg；零安装 WebUSB 模式只用到 RAM 范围。列表外的芯片选「自定义 cfg…」">
+            <option value="stm32f103">STM32F1（F103 等）</option>
+            <option value="stm32f0">STM32F0</option>
+            <option value="stm32f2">STM32F2</option>
+            <option value="stm32f3">STM32F3</option>
+            <option value="stm32f4">STM32F4</option>
+            <option value="stm32f7">STM32F7</option>
+            <option value="stm32g0">STM32G0</option>
+            <option value="stm32g4">STM32G4</option>
+            <option value="stm32h7">STM32H7</option>
+            <option value="stm32h5">STM32H5</option>
+            <option value="stm32l0">STM32L0</option>
+            <option value="stm32l1">STM32L1</option>
+            <option value="stm32l4">STM32L4 / L4+</option>
+            <option value="stm32l5">STM32L5</option>
+            <option value="stm32u5">STM32U5</option>
+            <option value="stm32c0">STM32C0</option>
+            <option value="stm32wb">STM32WB</option>
+            <option value="stm32wl">STM32WL</option>
+            <option value="esp32s31">ESP32-S31（板载 USB-JTAG）</option>
+            <option value="esp32">ESP32（Wrover Kit）</option>
+            <option value="custom">自定义 cfg…</option>
+          </select>
+        </label>
         <label class="row"><span>RAM 范围</span><input id="r-range" value="0x20000000-0x20020000"></label>
         <label class="row"><span>地址</span><input id="r-addr" placeholder="留空 = 自动扫描 / 读 ELF"></label>
         <div class="row btnrow">
