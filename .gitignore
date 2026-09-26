@@ -15,3 +15,6 @@ captures/
 .idea/
 Thumbs.db
 desktop.ini
+
+# Actions 工作流需要带 workflow 权限的 PAT 才能推；先用分支发布（Settings → Pages）
+.github/workflows/
