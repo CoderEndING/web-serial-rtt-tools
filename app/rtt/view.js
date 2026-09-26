@@ -69,7 +69,7 @@ export class RttView {
     this.suppressed = false;            // 高速自动关显示（见 _highspeedGate）
     this.suppManual = false;            // 用户手动恢复过显示：暂不再自动关，速率回落后重新武装
     this.suppBytes = 0;                 // 关显示期间省略渲染的字节数
-    this.stats = { bytes: 0, polls: 0, lost: 0, lastBytes: 0, lastPolls: 0, rate: 0, hz: 0 };
+    this.stats = { bytes: 0, polls: 0, lost: 0, corrupt: 0, lastBytes: 0, lastPolls: 0, rate: 0, hz: 0 };
   }
 
   init(){
@@ -351,11 +351,20 @@ export class RttView {
       if (!this.running) return;
       const t0 = performance.now();
       try {
-        const { bytes, lost, high, level } = await this.rtt.readUp(0);
+        const { bytes, lost, high, level, corrupt } = await this.rtt.readUp(0);
         if (bytes.length) this._ingest(bytes, new Date());
         if (lost) this.stats.lost += lost;
         if (high) this.highPolls++;
         if (level > this.peak) this.peak = level;
+        if (corrupt){
+          this.stats.corrupt++;
+          // 别刷屏：10 秒提醒一次；错位读在 SWD 时钟过高时最常见
+          if (!this._corruptAt || Date.now() - this._corruptAt > 10000){
+            this._corruptAt = Date.now();
+            if (!this.suppressed) setStatus($('r-err'),
+              '检测到错位读（读回了控制块内容，已丢弃并重读）—— SWD 时钟太高时最常见，建议降到 4MHz 试试', 'err');
+          }
+        }
       } catch (e){
         const msg = String(e?.message || e);
         // SWD 访问出错 / 控制块内容不可信 → 先自愈（重新初始化调试口），别立刻放弃
@@ -559,6 +568,7 @@ export class RttView {
     $('r-rate').textContent = fRate(s.rate);
     $('r-hz').textContent = Math.round(s.hz);
     $('r-lost').textContent = s.lost;
+    $('r-corrupt').textContent = s.corrupt || 0;
     this._highspeedGate(s.rate);
     const peak = Math.round((this.peak || 0) * 100);
     $('r-full').textContent = `${this.highPolls || 0} 次 / 峰值 ${peak}%`;

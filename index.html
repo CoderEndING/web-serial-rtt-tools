@@ -296,7 +296,7 @@
       </div>
       <div class="stats">
         <span>控制块 <b id="r-cb">—</b> · up × <b id="r-up">0</b> / down × <b id="r-down">0</b></span>
-        <span>读取 <b id="r-rate">0 B/s</b> · 轮询 <b id="r-hz">0</b> Hz · 缓冲高位 <b id="r-full">0 次 / 峰值 0%</b> · 溢出丢弃 <b id="r-lost">0</b> B</span>
+        <span>读取 <b id="r-rate">0 B/s</b> · 轮询 <b id="r-hz">0</b> Hz · 缓冲高位 <b id="r-full">0 次 / 峰值 0%</b> · 溢出丢弃 <b id="r-lost">0</b> B · 错位读 <b id="r-corrupt" title="读回了控制块等错误地址的内容（已整段丢弃重读，不进显示/文件）。持续增长说明 SWD 时钟太高或不稳定">0</b></span>
         <span class="spacer"></span>
         <button id="r-record" class="mini" title="把读到的 RTT 上行字节直接写进本地文件（不走记录的 2MB 内存上限），高速采集用">● 记录到文件</button>
         <label class="chk" title="默认开：每段前加一行 [时:分:秒.毫秒]，存 .txt 给人看；关掉则原样写字节存 .bin（二进制安全，事后解析用）"><input type="checkbox" id="r-record-ts" checked> 记录带时间戳</label>

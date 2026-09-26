@@ -186,6 +186,18 @@ export class Rtt {
       data = new Uint8Array(a.length + b.length);
       data.set(a); data.set(b, a.length);
     }
+
+    // 错位读防护：高速下 SWD 偶发把别的地址内容读回来，最明显的指纹是数据里混进了
+    // 控制块签名 "SEGGER RTT"（真实日志里极少出现这个字符串）。整段丢弃、**不推进 RdOff**
+    // —— 下一轮会原样重读，数据不丢；若时钟太高持续出错，表现为 corrupt 一直涨，提示降时钟。
+    if (Rtt._looksCorrupt(data)){
+      const retry = await this.mem.readMem(e.pbuf + e.rd, n);   // 先立即重读一次
+      if (Rtt._looksCorrupt(retry)){
+        return { ...empty, corrupt: true };
+      }
+      data = retry;
+    }
+
     await this.mem.writeMem(this.upBase + ENTRY * ch + 16, u32leBytes(e.wr));  // RdOff = WrOff
 
     // 过载信号：水位（环形缓冲最多装 size-1）
@@ -207,6 +219,11 @@ export class Rtt {
     }
     this._lastWr.set(ch, e.wr);
     return { bytes: data, lost, full, high, level, wr: e.wr, rd: e.rd };
+  }
+
+  /** 错位读指纹：数据里混进了控制块签名（重读一次能救回来就救，救不回就整轮丢弃重读） */
+  static _looksCorrupt(data){
+    return latin1(data).includes(CB_ID);
   }
 
   totalLost(ch){ return this._lost.get(ch) || 0; }
