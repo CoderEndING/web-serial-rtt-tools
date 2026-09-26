@@ -127,6 +127,13 @@ export class Assistant {
 
     this.refreshPorts();
     setInterval(() => this._stats(), 500);
+
+    // 演示模式可以带 ?demo=serial&autoconnect=1 直接连上（给 Pages 首屏演示/截图用）
+    try {
+      if (this.demo && new URLSearchParams(location.search).get('autoconnect') === '1'){
+        setTimeout(() => this.connect(), 200);
+      }
+    } catch {}
   }
 
   // ================= 内部工具 =================

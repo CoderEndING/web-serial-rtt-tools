@@ -17,7 +17,7 @@ export const CMD = {
 };
 const X_APnDP = 0x01, X_RnW = 0x02, X_ADDR = 0x0c;
 const AP_CSW = 0x00, AP_TAR = 0x04, AP_DRW = 0x0c;
-const DP_CTRL_STAT = 0x04, DP_SELECT = 0x08, DP_RDBUFF = 0x0c;
+const DP_IDCODE = 0x00, DP_CTRL_STAT = 0x04, DP_SELECT = 0x08, DP_RDBUFF = 0x0c;
 const SWJ_nRESET = 1 << 7;
 const ACK = { 1: 'OK', 2: 'WAIT', 4: 'FAULT', 7: 'NO ACK' };
 const reqByte = (ap, rnw, addr) => (ap ? X_APnDP : 0) | (rnw ? X_RnW : 0) | (addr & X_ADDR);
@@ -64,9 +64,14 @@ export class WebUsbDapProbe {
     return p;
   }
 
-  /** @param {{skipTargetInit?:boolean}} opts skipTargetInit=true 时只认领 USB，不碰目标（自测/排障用） */
-  async _setup({ skipTargetInit = false } = {}){
+  /**
+   * @param {{skipTargetInit?:boolean, skipInfo?:boolean}} opts
+   *   skipTargetInit=true 只认领 USB，不碰目标（自测/排障用）
+   *   skipInfo=true 连 DAP_Info 都不问，让命令流与"验证过的裸客户端"完全一致
+   */
+  async _setup({ skipTargetInit = false, skipInfo = false, skipClearHalt = false } = {}){
     this.skipTargetInit = skipTargetInit;
+    this.skipClearHalt = skipClearHalt;
     const d = this.device;
     if (!d.opened) await d.open();
     if (d.configuration === null) await d.selectConfiguration(1);
@@ -87,6 +92,20 @@ export class WebUsbDapProbe {
     this.pkt = Math.min(found.epIn.packetSize || 64, 512);
     try { await d.claimInterface(this.iface); } catch (e){ throw new Error(`占用 USB 接口失败：${e.message}（OpenOCD/pyOCD/J-Link 是不是还开着？）`); }
 
+    /**
+     * 🚨 认领接口后**必须清一次端点**。
+     * 探针的 IN 端点里常常残留着上一次会话（OpenOCD/pyOCD/上一次网页会话）没被取走的响应包，
+     * 而 `DAP_Transfer` 的陈旧失败响应（ACK=NO ACK、count=0）回显同样是 0x05，
+     * 会被我的"按回显匹配"逻辑当成**当前命令的响应** → 现象是"目标明明 ACK 了，页面却报 NO ACK"。
+     * libusb/pyusb 认领接口时会自己 clear_halt 冲掉这些数据，所以同一个探针用 Python 脚本一直是好的，
+     * 只有 WebUSB 这条路上会踩到（本机实测：LA 上能看到目标回了 ACK=OK，页面却报 NO ACK）。
+     */
+    for (const [dir, ep] of [['in', this.epIn], ['out', this.epOut]]){
+      if (this.skipClearHalt) break;
+      try { await d.clearHalt(dir, ep); } catch (e){ console.warn(`clearHalt(${dir}) 失败：${e.message}`); }
+    }
+    await this.resync();
+
     this._ready = true;
     const prod = d.productName || 'CMSIS-DAP';
     this.name = `${prod} · ${this.pkt}B/包`;
@@ -95,6 +114,7 @@ export class WebUsbDapProbe {
     // 先按"验证过能跑通"的裸客户端顺序把目标初始化好（tools\cmsis_dap_raw.py），
     // Info 查询放**后面**做 —— 那份脚本一个 Info 都没发，序列越接近它越稳。
     if (!skipTargetInit) await this._targetInit();
+    if (skipInfo) return;
     try {
       const ps = await this.info(0xff);
       if (ps.length >= 2){ const v = ps[0] | (ps[1] << 8); if (v > 0 && v <= 4096) this.pkt = Math.min(v, 512); }
@@ -144,6 +164,37 @@ export class WebUsbDapProbe {
   async info(id){
     const r = await this._ctrl(CMD.Info, Uint8Array.of(id));
     return r.subarray(1, 1 + (r[0] || 0));                 // r[0] = 长度
+  }
+
+  /**
+   * 把 IN 端点里**上一场会话残留的响应**清干净。
+   *
+   * 为什么需要：探针的响应是"命令回显 + 载荷"，而**回显不唯一** ——
+   * 残留的 `DAP_Transfer` 响应回显同样是 0x05，于是"按回显匹配"根本分不出来，
+   * 会把上一次会话（OpenOCD/上一次网页会话）的失败响应当成自己这条的响应。
+   * 现象诡异：初始化看着正常，一写下行命令就出怪事（地址/指针全不对）。
+   *
+   * 做法：连发 N 条 `DAP_Disconnect`（回显 0x03，很少见），再把 N 条响应全部读掉。
+   * 每一读都有对应的一条响应，所以**不会**出现"传输被弃置"（WebUSB 没有取消接口，
+   * 弃置的 transferIn 会偷走下一条响应 —— 用超时去 flush 就是踩这个坑）。
+   */
+  async resync(n = 8){
+    const pkt = new Uint8Array(this.pkt);
+    pkt[0] = CMD.Disconnect;
+    for (let i = 0; i < n; i++){
+      try { await this.device.transferOut(this.epOut, pkt); } catch { return; }
+    }
+    let saw = 0;
+    for (let i = 0; i < n; i++){
+      let r;
+      try { r = await withTimeout(this.device.transferIn(this.epIn, this.pkt), 1500, 'USB 同步读'); }
+      catch { break; }
+      if (!r.data || !r.data.byteLength) break;
+      const b = new Uint8Array(r.data.buffer, r.data.byteOffset, r.data.byteLength);
+      if (b[0] === CMD.Disconnect) saw++;
+    }
+    if (saw) console.info(`[dap] 同步清队列：吃掉 ${saw} 条陈旧响应`);
+    return saw;
   }
 
   /**
@@ -260,6 +311,21 @@ export class WebUsbDapProbe {
     await this._ctrl(CMD.SWD_Configure, Uint8Array.of(0));             // turnaround=1 / data_phase=0
     await this.swdActivation();                                       // 88 位激活序列（关键！）
     await this._ctrl(CMD.TransferConfigure, Uint8Array.of(0, 0xe8, 0x03, 0, 0));  // idle=0, retry=1000
+
+    /**
+     * 🚨 **线复位之后的第一个 SWD 包必须是「读 DP IDCODE」**（ARM SWD 协议的激活步骤）。
+     *    少了这一笔，后面任何访问（哪怕是写 DP SELECT）都返回 NO ACK(0x07) ——
+     *    现象极具误导性："包头完全正确、探针也回 ACK 字段，但就是 NO ACK"。
+     *    本机是靠在页面上做参数扫描（tools\selftest\debug-sweep.mjs）才定位到的：
+     *      激活序列 + 第一笔读 IDCODE → ack=1；
+     *      激活序列 + 第一笔写 SELECT → ack=7。
+     */
+    const id = await this._transfer([{ ap: false, rnw: true, addr: DP_IDCODE }]);
+    this.idcode = (id[0] >>> 0);
+    if (!this.idcode || this.idcode === 0xffffffff){
+      throw new Error(`读 DP IDCODE 失败（0x${this.idcode.toString(16)}）→ SWD 没连上：接线/复位/时钟都要看一眼`);
+    }
+
     // DP SELECT = 0（选 AP0、bank0）
     await this._transfer([{ ap: false, rnw: false, addr: DP_SELECT, data: 0 }]);
     // 🚨 AP 访问前必须给 DP 上电，否则后面全是 FAULT（pyOCD 的 DebugPortSetup 就是干这个）
@@ -384,18 +450,41 @@ export class WebUsbDapProbe {
       await pins(0x00, 20000);            // nRESET 拉低 20ms
       await pins(SWJ_nRESET, 50000);      // 放开 50ms
       await sleep(150);
-      await this._targetInit();
+      // 复位后重新建立 SWD：先老实来一遍，不行再来一遍（拉过 nRESET 之后第一次常常不认）
+      let lastErr = null;
+      for (let attempt = 1; attempt <= 2; attempt++){
+        try { await this._targetInit(); lastErr = null; break; }
+        catch (e){ lastErr = e; await sleep(120); }
+      }
+      if (lastErr) throw lastErr;
       const halted = await this.isHalted();
       if (halted) await this.run();
       return 'nRESET 脉冲' + (halted ? '（目标被停住，已让它运行）' : '');
     } catch (e){
-      // 探针不支持拉 nRESET → 退回 DAP_ResetTarget，并尽量让它跑起来
-      const r = await this._ctrl(CMD.ResetTarget);
-      await sleep(200);
+      /**
+       * 🚨 nRESET 脉冲之后 SWD 可能整条哑掉（实测：拉过 nRESET 之后再怎么发激活序列都是 NO ACK）。
+       *    这时候唯一的干净恢复是**把 USB 会话整个重开一遍**（释放接口再认领 + 重新初始化），
+       *    也就是把探针从"上一次会话的残留状态"里拉出来。用户手动拔插也能好，但那样太傻。
+       */
+      console.warn('复位后 SWD 不可用，重开 USB 会话：' + e.message);
+      const dev = this.device;
+      try { await this.reopen(); } catch (e2){
+        throw new Error(`复位后 SWD 无法恢复：${e.message} / 重开也失败：${e2.message}`);
+      }
       await this._targetInit();
       await this.run();
-      return `DAP_ResetTarget（nRESET 不可用：${e.message}）`;
+      return 'nRESET 脉冲 + 重开探针会话（原 SWD 已哑：' + e.message + '）';
     }
+  }
+
+  /** 释放接口再认领、重跑一遍初始化 —— 比让用户拔插 USB 体面 */
+  async reopen(){
+    const dev = this.device;
+    try { await this.device.releaseInterface(this.iface); } catch {}
+    this._ready = false;
+    await sleep(120);
+    await this._setup({});
+    return true;
   }
 
   async disconnect(){

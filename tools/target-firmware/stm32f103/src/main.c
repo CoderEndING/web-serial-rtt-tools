@@ -81,28 +81,31 @@ static int vfmt(char *buf, int cap, const char *fmt, va_list ap){
 
 /**
  * 串口输出。
- * 🚨 必须有忙等上限：DAPLink 的 CDC 串口在没有主机读的时候 TX 会堵，
- *    死等 TXE 会把整个主循环（连带 RTT 下行命令处理）卡死 ——
- *    现象是"RTT 连得上、日志也在刷，但发命令没反应"。宁丢串口字符，也不能卡住固件。
+ * 🚨 两条教训：
+ *  ① 必须有忙等上限：DAPLink 的 CDC 串口在没有主机读的时候会堵，死等 TXE 会把整个主循环
+ *     （连带 RTT 下行命令处理）卡死 —— 现象是"RTT 日志还在刷，但发命令没反应"。
+ *  ② 上限也要**小**：200000 次 ≈ 75ms/字符，一行 60 字符就是 4.5 秒，主循环基本被拖死。
  */
 static void uart_write(const char *s, int n){
   for (int i = 0; i < n; i++){
-    uint32_t guard = 200000;                       /* ≈25ms @8MHz 的忙等上限 */
+    uint32_t guard = 20000;                        /* ≈7ms @8MHz 的忙等上限 */
     while (!(USART1_SR & USART_SR_TXE) && --guard) { }
     if (!guard) return;                            /* 串口堵住：这段就不要了 */
     USART1_DR = (uint8_t)s[i];
   }
 }
 
-/** 同时进串口 + RTT ch0 */
+/** 同时进 RTT ch0 + 串口。
+ *  🚨 **顺序要紧：先写 RTT，再写串口**。串口那一侧可能被 DAPLink 的 CDC 堵住，
+ *     反过来（先串口后 RTT）会把 RTT 输出一起饿死 —— 实测现象是"ch1 正常、ch0 一个字节都没有"。 */
 static void out(const char *fmt, ...){
   char buf[512];                      /* ⚠️ 别小于 256：help 那种长文本会被静默截断（踩过） */
   va_list ap;
   va_start(ap, fmt);
   int n = vfmt(buf, sizeof(buf), fmt, ap);
   va_end(ap);
-  uart_write(buf, n);
   SEGGER_RTT_Write(0, buf, n);
+  uart_write(buf, n);
 }
 
 /** 只进串口 */

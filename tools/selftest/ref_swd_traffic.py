@@ -9,6 +9,7 @@
 用法： python ref_swd_traffic.py [持续秒数，默认 4]
 """
 import sys
+import os
 import time
 
 import libusb_package
@@ -87,14 +88,22 @@ def main():
     print(f"      ACK = {ACK.get(r[2] & 0x07, r[2] & 0x07)}   ← 浏览器那边就是这笔报 NO ACK", flush=True)
 
     print(f"\n持续发流量 {secs} 秒（给 LA 抓波形）...", flush=True)
+    act_only = os.environ.get("ACT_ONLY") == "1"
+    if act_only:
+        print("（ACT_ONLY=1：只刷激活序列）", flush=True)
     t0 = time.time()
     n = 0
     while time.time() - t0 < secs:
-        write_select0()
-        read_idcode()
-        n += 2
+        if act_only:
+            xfer([ID_DAP_Connect, 0x01])
+            xfer([ID_DAP_SWD_Configure, 0x00])
+            xfer([ID_DAP_SWJ_Sequence, SWD_ACTIVATION_BITS] + SWD_ACTIVATION)
+        else:
+            write_select0()
+            read_idcode()
+        n += 1
         time.sleep(0.002)
-    print(f"发了 {n} 笔，结束", flush=True)
+    print(f"发了 {n} 轮，结束", flush=True)
 
     r = write_select0()
     print(f"收尾再写 SELECT -> {' '.join(f'{b:02X}' for b in r[:8])}  ACK={ACK.get(r[2] & 0x07, r[2] & 0x07)}")

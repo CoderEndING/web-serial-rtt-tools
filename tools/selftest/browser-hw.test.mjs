@@ -114,7 +114,7 @@ class Cdp {
     await this.sendBrowser('DeviceAccess.selectPrompt', { id: p.id, deviceId: dev.id });
     return dev;
   }
-  async waitFor(expr, timeout = 30000, label = expr){
+  async waitFor(expr, timeout = 10000, label = expr){
     const t0 = Date.now();
     for (;;){
       let v = false;
@@ -141,7 +141,7 @@ const rxText = `document.getElementById('s-rx').textContent`;
  * 等"设备授权"这件事落地：可能弹选择框（自动选第一个匹配的），
  * 也可能因为已授权/策略预授权而**根本没弹框**直接连上（两条路都要认）。
  */
-async function settle(cdp, match, readyExpr, timeout = 20000){
+async function settle(cdp, match, readyExpr, timeout = 10000){
   const t0 = Date.now();
   for (;;){
     if (cdp.prompts.length) return await cdp.pickDevice(match);
@@ -158,10 +158,10 @@ const cdp = new Cdp();
 await cdp.connect();
 console.log(`== 浏览器真机测试：${STAGE} ==`);
 await cdp.navigate(APP);
-await cdp.waitFor('window.__tools', 15000, '页面加载');
+await cdp.waitFor('window.__tools', 8000, '页面加载');
 ok(true, `页面加载完成（${APP}）`);
 // 确认跑的是磁盘上最新的模块（否则后面所有结论都不可信）
-const modInfo = await cdp.evalJson(`fetch('/app/rtt/dap-webusb.js',{cache:'reload'}).then(r=>r.text()).then(t=>JSON.stringify({len:t.length, hasActivation:t.includes('SWD 激活序列'), hasPad:t.includes('补齐到整包再发')}))`);
+const modInfo = await cdp.evalJson(`fetch('/app/rtt/dap-webusb.js',{cache:'reload'}).then(r=>r.text()).then(t=>({len:t.length, hasActivation:t.includes('SWD 激活序列'), hasPad:t.includes('补齐到整包再发')}))`);
 console.log(`        dap-webusb.js ${modInfo.len} 字节 · 含激活序列修复: ${modInfo.hasActivation} · 含整包发送: ${modInfo.hasPad}`);
 ok(modInfo.hasActivation && modInfo.hasPad, '页面加载到的是最新模块（不是缓存里的旧版）');
 
@@ -173,11 +173,11 @@ if (STAGE === 'webusb'){
   await cdp.eval(click('r-usb-connect'), true);
   const dev = await settle(cdp, /MicroLink|DAP|CMSIS/i, `window.__tools.rtt.probe`);
   ok(true, dev ? `选择框里选中探针：${dev.name}` : '用已授权设备直连（没弹选择框）');
-  await cdp.waitFor('window.__tools.rtt.probe', 15000, '探针对象');
+  await cdp.waitFor('window.__tools.rtt.probe', 8000, '探针对象');
   const probeName = await cdp.evalJson(`window.__tools.rtt.probe.name`);
   console.log(`        探针：${probeName}`);
 
-  await cdp.waitFor('window.__tools.rtt.rtt', 40000, 'RTT 控制块定位+初始化');
+  await cdp.waitFor('window.__tools.rtt.rtt', 12000, 'RTT 控制块定位+初始化');
   const st = await cdp.evalJson(`({cb:document.getElementById('r-cb').textContent,
       up:document.getElementById('r-up').textContent, down:document.getElementById('r-down').textContent,
       probe:window.__tools.rtt.probe && window.__tools.rtt.probe.name})`);
@@ -185,14 +185,14 @@ if (STAGE === 'webusb'){
   ok(st.up === '2' && st.down === '1', `通道数 up=${st.up} down=${st.down}`);
 
   // 等固件的周期性日志经 WebUSB 流进来
-  await cdp.waitFor(`${rttRecords}.length > 40`, 20000, 'ch0 数据');
+  await cdp.waitFor(`${rttRecords}.length > 40`, 8000, 'ch0 数据');
   const txt = await cdp.eval(rttRecords);
   ok(txt.includes('RTT ch0') || txt.includes('tick='), `ch0 收到固件日志 ${txt.length} 字符`);
   ok(txt.includes('\x1b['), 'CH0 带 ANSI 转义（终端模式能用）');
 
   // 下行命令 → 固件回包
   await cdp.eval(`window.__tools.rtt._sendBytes(new TextEncoder().encode('help\\r'))`);
-  await cdp.waitFor(`${rttRecords}.includes('测试固件命令')`, 15000, 'help 回包');
+  await cdp.waitFor(`${rttRecords}.includes('测试固件命令')`, 8000, 'help 回包');
   const txt2 = await cdp.eval(rttRecords);
   ok(txt2.includes('测试固件命令') && txt2.includes('reboot'), '下行 help 收到完整命令列表');
 
@@ -204,10 +204,10 @@ if (STAGE === 'webusb'){
   // 测试复位按钮（会重新扫描控制块，而且**目标必须重新跑起来**——否则固件不打印）
   const beforeReset = await cdp.evalJson(`window.__tools.rtt.records.length`);
   await cdp.eval(`window.__tools.rtt.resetTarget()`, true);
-  await sleep(3500);
+  await sleep(900);
   const st2 = await cdp.evalJson(`({cb:document.getElementById('r-cb').textContent, err:document.getElementById('r-err').textContent})`);
   ok(/0x2000/.test(st2.cb), `复位后重新定位控制块 ${st2.cb}`, st2.err);
-  await cdp.waitFor(`window.__tools.rtt.records.length > ${beforeReset}`, 15000, '复位后又收到数据');
+  await cdp.waitFor(`window.__tools.rtt.records.length > ${beforeReset}`, 8000, '复位后又收到数据');
   const after = await cdp.eval(rttRecords);
   ok(after.includes('STM32F103') || after.includes('tick='), '复位后目标重新运行并打印（没被停在 halt）');
 }
@@ -216,13 +216,13 @@ if (STAGE === 'bridge'){
   await cdp.eval(setBackend('bridge-openocd'));
   await cdp.eval(`document.getElementById('r-range').value='0x20000000-0x20005000'`);
   await cdp.eval(click('r-bridge-connect'), true);
-  await cdp.waitFor('window.__tools.rtt.rtt', 45000, '桥 + OpenOCD 的 RTT 初始化');
+  await cdp.waitFor('window.__tools.rtt.rtt', 12000, '桥 + OpenOCD 的 RTT 初始化');
   const st = await cdp.evalJson(`({cb:document.getElementById('r-cb').textContent,
       up:document.getElementById('r-up').textContent})`);
   ok(/0x2000/.test(st.cb), `（桥）控制块定位 ${st.cb}，up=${st.up}`);
-  await cdp.waitFor(`${rttRecords}.length > 40`, 20000, 'ch0 数据');
+  await cdp.waitFor(`${rttRecords}.length > 40`, 8000, 'ch0 数据');
   await cdp.eval(`window.__tools.rtt._sendBytes(new TextEncoder().encode('info\\r'))`);
-  await cdp.waitFor(`${rttRecords}.includes('USART1')`, 20000, 'info 回包');
+  await cdp.waitFor(`${rttRecords}.includes('USART1')`, 8000, 'info 回包');
   const txt = await cdp.eval(rttRecords);
   ok(txt.includes('USART1') && txt.includes('RTT'), '（桥）下行 info 收到固件信息');
   const errs = await cdp.evalJson(`window.__tools.errors`);
@@ -239,7 +239,7 @@ if (STAGE === 'serial'){
   ok(true, '串口已打开（Web Serial）');
 
   // 固件每秒往串口打一条带 ANSI 的行、每 3 秒一条 UART 专有行
-  await cdp.waitFor(`${rxText}.includes('[UART]') || ${rxText}.includes('[RTT ch0]')`, 15000, '设备输出');
+  await cdp.waitFor(`${rxText}.includes('[UART]') || ${rxText}.includes('[RTT ch0]')`, 8000, '设备输出');
   const t1 = await cdp.eval(rxText);
   ok(t1.includes('[RTT ch0]') || t1.includes('[UART]'), `接收区收到设备输出 ${t1.length} 字符`);
 

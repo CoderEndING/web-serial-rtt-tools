@@ -128,7 +128,8 @@ export class RttView {
     }
     if (q.get('addr')) $('r-addr').value = q.get('addr');
     this._setMode(mode);                       // 起手就要应用显示模式（否则默认的终端模式没容器，数据看不见）
-    if (q.get('auto') === '1') setTimeout(() => this.connectProbe().catch(() => {}), 150);
+    // 只有当 URL **明确指定了后端**时才自动连接（否则会拿 localStorage 里上次的后端乱连）
+    if (b && q.get('auto') === '1') setTimeout(() => this.connectProbe().catch(() => {}), 150);
   }
 
   _chk(el, key, apply){
@@ -247,11 +248,13 @@ export class RttView {
       if (!this.running || this.stats.bytes > 0) return;
       if (typeof this.probe?.run !== 'function') return;
       try {
+        // ⚠️ 只在**确实停住**时才写 DHCSR 让它跑。
+        //    早期版本无条件写 run()，结果把一个正在运行的固件"弄停"了：
+        //    现象是"连上后读到几 KB 就不再来数据"（时间点正好在看门狗触发处）。
         const halted = await this.probe.isHalted?.();
-        await this.probe.run();
-        setStatus($('r-err'), halted
-          ? '目标原本处于 halt 状态（固件不跑就没数据），已自动继续运行'
-          : '两秒内没收到任何数据，已尝试让目标继续运行', halted ? 'ok' : null);
+        if (halted) await this.probe.run();
+        else { setStatus($('r-err'), '两秒内没收到数据，但目标在运行中（检查固件有没有在写 RTT）', null); return; }
+        setStatus($('r-err'), '目标原本处于 halt 状态（固件不跑就没数据），已自动继续运行', 'ok');
       } catch (e){ /* 不支持就算了 */ }
     }, 2000);
   }
@@ -259,7 +262,15 @@ export class RttView {
   _startPoll(){
     this.running = true;
     this.stats.polls = 0; this.stats.bytes = 0; this.stats.lost = 0;
-    this.fullPolls = 0; this.highPolls = 0; this.peak = 0; this._faults = 0;    const loop = async () => {
+    this.fullPolls = 0; this.highPolls = 0; this.peak = 0; this._faults = 0;
+    /**
+     * 轮询间隔下限：走桥（OpenOCD Tcl RPC）时不能按 WebUSB 那种节奏猛刷 ——
+     * 一轮 readUp 是 3 条 RPC，190 Hz 就是 ~570 条/秒，OpenOCD 的 Tcl 口扛不住，
+     * 会冒出"read_memory 只回来 0 个字"这种瞬时失败（本机实测）。
+     * 反正 OpenOCD 的读数只有 ~17 KB/s，快轮询没有意义。
+     */
+    const minGap = this.bridge ? 30 : 0;
+    const loop = async () => {
       if (!this.running) return;
       const t0 = performance.now();
       try {
@@ -288,7 +299,7 @@ export class RttView {
       }
       this.stats.polls++;
       const cost = performance.now() - t0;
-      this.timer = setTimeout(loop, Math.max(0, this.interval - cost));
+      this.timer = setTimeout(loop, Math.max(minGap, this.interval - cost, 0));
     };
     loop();
   }

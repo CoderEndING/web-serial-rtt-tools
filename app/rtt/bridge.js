@@ -12,7 +12,14 @@ import { toB64, fromB64 } from '../core/b64.js';
 
 export class BridgeClient {
   constructor(url){
-    this.url = url;
+    // 允许用户只填 "ws://127.0.0.1:17321"：桥的 WebSocket 端点在 /ws，这里自动补上
+    let u = String(url || 'ws://127.0.0.1:17321').trim();
+    try {
+      const p = new URL(u);
+      if (!p.pathname || p.pathname === '/') p.pathname = '/ws';
+      u = p.toString();
+    } catch { /* 保持原样，让 connect() 报错更直观 */ }
+    this.url = u;
     this.ws = null;
     this.seq = 0;
     this.pending = new Map();
@@ -81,10 +88,17 @@ export class BridgeClient {
   // ---------------- mem 能力（OpenOCD） ----------------
   async readMem(addr, len){
     if (len <= 0) return new Uint8Array(0);
-    const r = await this._call({ t: 'mem.read', addr, len }, 20000);
-    const b = fromB64(r.data || '');
-    if (b.length < len){ const o = new Uint8Array(len); o.set(b); return o; }
-    return b;
+    // OpenOCD 偶尔会短读（尤其在被高频轮询时）：短读重试一次再报错
+    for (let attempt = 1; ; attempt++){
+      const r = await this._call({ t: 'mem.read', addr, len }, 20000);
+      const b = fromB64(r.data || '');
+      if (b.length >= len) return b.subarray(0, len);
+      if (attempt >= 2){
+        if (!b.length) throw new Error(`读内存失败：0x${addr.toString(16)} 要 ${len} 字节，只回来 ${b.length} 字节（OpenOCD 忙不过来？把轮询间隔调大一点）`);
+        const o = new Uint8Array(len); o.set(b); return o;
+      }
+      await new Promise(r2 => setTimeout(r2, 30));
+    }
   }
 
   async writeMem(addr, bytes){

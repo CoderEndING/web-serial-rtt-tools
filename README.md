@@ -11,6 +11,32 @@
 > 为什么 RTT 要分三种后端：J-Link 与 OpenOCD 都是**本机程序**，网页无权启动进程、也无权开 TCP。
 > 所以零安装模式下 RTT 走 **WebUSB 直连 CMSIS-DAP 探针**；想用 J-Link/OpenOCD 就启动仓库里的桥（`bridge/`）。
 
+## 界面
+
+| 串口助手 | 终端 |
+|---|---|
+| ![串口助手](docs/shots/1-serial.png) | ![终端](docs/shots/2-terminal.png) |
+
+| RTT Viewer（内置模拟目标） |
+|---|
+| ![RTT](docs/shots/3-rtt-mock.png) |
+
+（截图里第一个标签用的是**内置演示串口**，所以显示的是假设备；`?demo=serial` 就能自己试。）
+
+## 实测状态（2026-09-26，真硬件：MicroLink CMSIS-DAP + STM32F103）
+
+| 用例集 | 结果 |
+|---|---|
+| Node 协议层（控制块定位/环形绕回/丢包信号/下行写入/ELF 符号/HEX） | **34/34** |
+| 桥端到端（真板，上行 ch0+ch1、下行命令、flood、复位） | **19/19** |
+| 浏览器无硬件（演示串口的整条 UI 链路） | **15/15** |
+| 浏览器 + 真探针（WebUSB 零安装 RTT：定位/上行/下行/复位） | **11/11** |
+| 浏览器 + 桥（OpenOCD 后端：定位/上行/下行） | **5/5** |
+| 串口助手真板（DAPLink CDC 桥到 PA9/PA10，`help/info/ansi/hex` 回包） | ✅ |
+
+速度实测（同一探针同一条 SWD）：**WebUSB 单命令往返 0.34 ms、连续读 127 KB/s**；
+**OpenOCD Tcl RPC 只有 ~17 KB/s** —— 大流量 RTT 优先用 WebUSB。详见 [`docs/backends.md`](docs/backends.md)。
+
 ## 快速开始
 
 1. 打开页面（Pages 地址或本机的 `http://127.0.0.1:17321/`）。

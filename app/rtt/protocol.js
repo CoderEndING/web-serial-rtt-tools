@@ -48,18 +48,21 @@ export class Rtt {
 
   // ---------------- 定位控制块 ----------------
   /**
-   * @param {{addr?:number, ranges?:{start:number,end:number}[], chunk?:number, onProgress?:Function}} o
-   * @returns {Promise<number>} 控制块地址（找不到返回 0）
+   * 找一个**可信的**控制块：RAM 里出现 "SEGGER RTT" 的地方可能不止一处
+   * —— 上一次固件编译留下的旧控制块会残留在 .bss 之外（RAM 不是每次上电都清零），
+   * 锁错了就会出现"通道数/缓冲指针全是垃圾"的怪现象（本机实测踩到）。
+   * 所以候选地址要逐个校验结构是否合理，第一个通过的就是它。
    */
   static async locate(mem, o = {}){
     const { addr = 0, ranges = [], chunk = 4096, onProgress } = o;
     if (addr){
-      const h = await mem.readMem(addr, 16);
-      if (latin1(h.subarray(0, 10)) === CB_ID) return addr;
-      throw new Error(`0x${addr.toString(16)} 处不是 RTT 控制块（读到 "${latin1(h.subarray(0, 16))}"）`);
+      const v = await Rtt.validate(mem, addr);
+      if (!v.ok) throw new Error(`0x${addr.toString(16)} 处不是可用的 RTT 控制块：${v.reason}`);
+      return addr;
     }
     let done = 0;
     const total = ranges.reduce((s, r) => s + (r.end - r.start), 0) || 1;
+    const tried = [];
     for (const r of ranges){
       for (let a = r.start; a < r.end; a += chunk - (CB_ID.length - 1)){
         const n = Math.min(chunk, r.end - a);
@@ -68,13 +71,52 @@ export class Rtt {
         try { buf = await mem.readMem(a, n); }
         catch { buf = new Uint8Array(0); }          // 该段不可读（没映射）就跳过
         const s = latin1(buf);
-        const i = s.indexOf(CB_ID);
-        if (i >= 0) return a + i;
+        let i = s.indexOf(CB_ID);
+        while (i >= 0){
+          const cand = a + i;
+          const v = await Rtt.validate(mem, cand);
+          if (v.ok) return cand;
+          tried.push({ addr: cand, reason: v.reason });
+          i = s.indexOf(CB_ID, i + 1);
+        }
         done += n;
         onProgress?.(Math.min(1, done / total), a);
       }
     }
+    if (tried.length){
+      const t = tried[0];
+      throw new Error(`找到 ${tried.length} 处 "SEGGER RTT"，但结构都不可信（第一个 0x${t.addr.toString(16)}：${t.reason}）`);
+    }
     return 0;
+  }
+
+  /** 校验某个地址是不是合理的控制块（结构自洽才认） */
+  static async validate(mem, addr){
+    try {
+      const hdr = await mem.readMem(addr, 24);
+      if (latin1(hdr.subarray(0, 10)) !== CB_ID) return { ok: false, reason: `没有 "SEGGER RTT" 标识` };
+      const maxUp = u32le(hdr, 16), maxDown = u32le(hdr, 20);
+      if (maxUp < 1 || maxUp > 16 || maxDown > 16) return { ok: false, reason: `通道数不合理（up=${maxUp} down=${maxDown}）` };
+      const upBase = addr + 24, downBase = upBase + ENTRY * maxUp;
+      let used = 0, bytes = 0;
+      for (let i = 0; i < maxUp + maxDown; i++){
+        const base = i < maxUp ? upBase : downBase;
+        const idx = i < maxUp ? i : i - maxUp;
+        const b = await mem.readMem(base + ENTRY * idx, ENTRY);
+        const size = u32le(b, 8), wr = u32le(b, 12), rd = u32le(b, 16), pbuf = u32le(b, 4);
+        if (!size) continue;                                   // 没用到的通道
+        used++;
+        if (size > (1 << 20)) return { ok: false, reason: `通道 ${i} 缓冲大小 ${size} 不合理` };
+        if (wr >= size || rd >= size) return { ok: false, reason: `通道 ${i} 读写指针越界（wr=${wr} rd=${rd} size=${size}）` };
+        if (!pbuf || (pbuf & 3)) return { ok: false, reason: `通道 ${i} 缓冲指针无效（0x${pbuf.toString(16)}）` };
+        bytes += size;
+      }
+      if (!used) return { ok: false, reason: '所有通道都没配置缓冲' };
+      if (!bytes) return { ok: false, reason: '缓冲总大小为 0' };
+      return { ok: true, reason: '', maxUp, maxDown, used, bytes };
+    } catch (e){
+      return { ok: false, reason: '读取失败：' + (e?.message || e) };
+    }
   }
 
   async init(addr = this.addr){
