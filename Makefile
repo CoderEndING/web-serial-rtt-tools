@@ -26,8 +26,8 @@ LA       = tools/la/kingst_la.py
 
 .DEFAULT_GOAL := help
 .PHONY: help serve serve-stop browser open test test-ui test-hw test-bridge test-all \
-        bridge bridge-stop fw-build fw-flash fw-restore la-info la-capture \
-        git-status git-log check clean
+        bridge bridge-stop fw-build fw-flash fw-restore fw-h7-build fw-h7-slow fw-h7-flash \
+        la-info la-capture git-status git-log check clean
 
 help:
 	pwsh -NoProfile -ExecutionPolicy Bypass -File tools/dev/help.ps1
@@ -80,6 +80,18 @@ fw-flash:
 
 fw-restore: fw-build fw-flash
 	pwsh -NoProfile -Command "Write-Host '测试固件已烧回，板子随时可用'"
+
+# STM32H7B0（RTT 吞吐测试固件；板子换成 H7B0 时用这组）
+H7_DIR = tools/target-firmware/stm32h7b0_rtt_speed
+
+fw-h7-build:
+	pwsh -NoProfile -File $(H7_DIR)/build.ps1
+
+fw-h7-slow:
+	pwsh -NoProfile -File $(H7_DIR)/build.ps1 -SlowClock
+
+fw-h7-flash:
+	pwsh -NoProfile -File $(H7_DIR)/flash.ps1
 
 # ---------------------------------------------------------------- 逻辑分析仪
 la-info:

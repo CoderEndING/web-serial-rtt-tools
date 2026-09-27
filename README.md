@@ -78,7 +78,11 @@ bridge/
 tools/
   selftest/             自测：Node 协议测试 / 桥端到端 / 浏览器真机(CDP) / LA 参考流量
   la/                   逻辑分析仪：kingst_la.py（KingstVIS Socket API 单文件工具）+ SWD 流量发生器
-  target-firmware/      STM32F103 测试固件（UART + RTT，含 SEGGER RTT 源码）
+  dev/                  extract-algo.py（从 pyOCD 抽 flash 算法，别手抄 base64）、help.ps1
+  target-firmware/
+    stm32f103/          STM32F103 测试固件（UART + RTT，含 SEGGER RTT 源码）
+    stm32f103_rtt_speed/      F103 RTT 吞吐测试（死循环灌 hello world）
+    stm32h7b0_rtt_speed/      **H7B0 RTT 吞吐测试**（HSI→PLL1 280MHz，DTCM 布局，见其 README）
 docs/                   后端配置与排障；逻辑分析仪攻略.md（含 LA 工具完整源码与踩坑）
 ```
 

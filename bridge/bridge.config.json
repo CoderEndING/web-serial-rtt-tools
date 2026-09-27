@@ -16,6 +16,7 @@
     "stm32g4":  { "cfgs": ["interface/cmsis-dap.cfg", "target/stm32g4x.cfg"], "pre": ["cmsis-dap backend usb_bulk"], "speed": 4000, "note": "CMSIS-DAP + STM32G4（SWD 4MHz）" },
     "stm32h7":  { "cfgs": ["interface/cmsis-dap.cfg", "target/stm32h7x.cfg"], "pre": ["cmsis-dap backend usb_bulk"], "speed": 4000, "note": "CMSIS-DAP + STM32H7（SWD 4MHz）" },
     "stm32h5":  { "cfgs": ["interface/cmsis-dap.cfg", "target/stm32h5x.cfg"], "pre": ["cmsis-dap backend usb_bulk"], "speed": 4000, "note": "CMSIS-DAP + STM32H5（SWD 4MHz）" },
+    "stm32h7b0": { "cfgs": ["interface/cmsis-dap.cfg", "target/stm32h7x.cfg"], "pre": ["cmsis-dap backend usb_bulk"], "speed": 4000, "note": "CMSIS-DAP + STM32H7B0/H7A3/H7B3（value line；OpenOCD 用 stm32h7x.cfg 覆盖，SWD 4MHz）" },
     "stm32l0":  { "cfgs": ["interface/cmsis-dap.cfg", "target/stm32l0.cfg"],  "pre": ["cmsis-dap backend usb_bulk"], "speed": 4000, "note": "CMSIS-DAP + STM32L0（SWD 4MHz）" },
     "stm32l1":  { "cfgs": ["interface/cmsis-dap.cfg", "target/stm32l1.cfg"],  "pre": ["cmsis-dap backend usb_bulk"], "speed": 4000, "note": "CMSIS-DAP + STM32L1（SWD 4MHz）" },
     "stm32l4":  { "cfgs": ["interface/cmsis-dap.cfg", "target/stm32l4x.cfg"], "pre": ["cmsis-dap backend usb_bulk"], "speed": 4000, "note": "CMSIS-DAP + STM32L4/L4+（SWD 4MHz）" },

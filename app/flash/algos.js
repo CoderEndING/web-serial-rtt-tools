@@ -5,10 +5,18 @@
  * 本仓库同为 Apache-2.0，随源分发并在此注明出处。数据块是编译好的 ARM Thumb 代码，
  * 末尾带 BKPT：执行完会自己 halt，主机轮询 DHCSR.S_HALT 等结果（见 flash/runner.js）。
  *
- * 覆盖系列：F0 / F1 / F4 / F7 / H7 / L0 / L4。
+ * 覆盖系列：F0 / F1 / F4 / F7 / H7 / H7B0 / L0 / L4。
  * 其余系列（F2/F3/G0/G4/L1/L5/U5/C0/WB/WL）暂未内置算法，烧录器走「本地桥 · OpenOCD」。
  * 注意：STM32F1 用的是高密度算法（页参数 2KB），F103 中密度（1KB 页）芯片会被按 2KB 擦，
  * 功能不受影响（实测）；想省擦写寿命可以后续换成中密度算法。
+ *
+ * H7B0（2026-09-27 新增，用 tools/dev/extract-algo.py 从本机 pyOCD 抽的，别手抄）：
+ *   · `page_size` 在**本工程里是"擦除粒度"**（runner 按它步进 erase_sector），H7B 的扇区是 **8KB**；
+ *     它的*编程*页是 32KB（算法一次最多吃 32KB），我们按 8KB 分块喂，合法。
+ *   · `write_granularity: 32` —— H7 的 flash **按 32 字节（256 位 flash word）编程**，
+ *     尾块必须补 0xFF 到 32 字节的倍数，否则写不进去（F1/F4 那些 4 字节就够，别混）。
+ *   · `flash_length` 取 128KB（H7B0 value line）。若你手上是 H7B3/H7A3（更大 flash），
+ *     把这里改成 0x200000，并把 ld/ 里的 FLASH LENGTH 一起放大。
  */
 export const ALGOS = {
   "stm32f103": {
@@ -127,5 +135,22 @@ export const ALGOS = {
     "flash_start": 134217728,
     "flash_length": 262144,
     "page_size": 2048
-  }
+  },
+  "stm32h7b0": {
+      "code": "AL7950C6cEfAunBHT+owAHBHAAC/80+PcEcQtQNG6kjqTGBhAL/pSABpAPABAAAo+dHnSOVMYGDmSGBg4kjmTCBgAL/kSAAfAGgA8AEAACj40d9I4EwQPCBg3kjbTMT4BAEgRsBpACAQvQFG10jAaEDwAQDVStBg10gIOABoQPABAML4DAEAIHBHAL/PSABpAPABAAAo+dHLSMxJSGEIRsBoIPABAMhgCEbAaEDwCADIYAhGwGhA8CAAyGAAv8NIAGkA8AEAACj50cBIwGgg8AgAvknIYAC/v0gAHwBoAPABAAAo+NG4SLtJCGC3SND4DAEg8AEAtUnB+AwBCEbQ+AwBQPAIAMH4DAEIRtD4DAFA8CAAsEkIOQhgAL+uSAAfAGgA8AEAACj40atICDgAaCDwCAClScH4DAEAIHBHELUBRsHzRzKx8QBvNtOx8QFvM9KeSEBpoUsYQ5xLWGEAv5pIAGkA8AQAACj50ZdIwGgg9P5QlUvYYBhGwGgEI0PqghMYQ5FL2GAYRsBoQPAgANhgAL+NSABpAPAEAAAo+dGKSMBoIPAEAIhL2GAYRgBpAPABAPCzASAQvYdIAGiHSxhDgkvD+BQBAL+DSAAfAGgA8AQAACj40X9ICDgAaCD0/lB6S8P4DAF7SAg4AGii8YADBCRE6oMTGEN0S8P4DAEYRtD4DAFA8CAAw/gMAQC/cUgAHwBoAPAEAAAo+NFuSAg4AGgg8AQAaEvD+AwBakgAHwDgBeAAaADwAQAIsQEguuf/9+f+ACC25/C1A0YWRhpGNUYAJAC/XEgAaQDwAQAAKPnRWEhZT3hhAL9aSAAfAGgA8AEAACj40VNIVk84YJzgUkjAaCDwAQBQT/hgOEbAaEDwAgD4YE9ICDgAaCDwAQDH+AwBOEbQ+AwBQPACAMf4DAEQKQzTACQG4C9oaGgXYFBgCDUIMmQcAiz22xA5KOAAJATgFfgBCwL4AQtkHIxC+NMAJAPg/yAC+AELZBzB8RAAoEL32LPxAG8J07PxAW8G0jFIwGhA8EAAL0/4YAfgMUgIOABoQPBAACtPx/gMAQAh//d2/rPxAG8K07PxAW8H0gC/JUgAaQDwAQAAKPnRB+AAvyRIAB8AaADwAQAAKPjRHUgAaQAgH08/Hz9oAEOwsbPxAG8J07PxAW8G0hZIwGgg8AIAFE/4YAfgFkgIOABoIPACABBPx/gMAQEg8L2z8QBvCdOz8QFvBtILSMBoIPACAAlP+GAH4ApICDgAaCDwAgAFT8f4DAEAKX/0YK8AIOTnAAAAAK8PACAAUiMBZ0Wrie/NFCEAUgAA7w8AAAAA",
+      "load_address": 536870912,
+      "pc_init": 536870939,
+      "pc_eraseAll": 536871051,
+      "pc_erase_sector": 536871231,
+      "pc_program_page": 536871499,
+      "static_base": 536871904,
+      "begin_stack": 536941552,
+      "page_buffers": [
+          536871920
+      ],
+      "flash_start": 134217728,
+      "flash_length": 131072,
+      "page_size": 8192,
+      "write_granularity": 32
+  },
 };

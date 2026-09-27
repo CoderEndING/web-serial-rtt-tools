@@ -13,6 +13,13 @@ export const CHIPS = [
   { v: 'stm32g0',   label: 'STM32G0',             ram: '0x20000000-0x20008000' },
   { v: 'stm32g4',   label: 'STM32G4',             ram: '0x20000000-0x20008000' },
   { v: 'stm32h7',   label: 'STM32H7',             ram: '0x20000000-0x20020000' },
+  /**
+   * H7B0 / H7A3 / H7B3（value line 那几颗）：内存是**散的**，扫描范围给两段 ——
+   *   DTCM 0x20000000（128KB，内核直连；本仓库的 H7B0 测速固件就把 RTT 放这儿）
+   *   AXI SRAM 0x24000000（1MB，H7B0 实际 1.4MB 的一部分）
+   * 中间那些空洞（0x20020000~0x23FFFFFF 未映射）扫描时会读失败，locate 会自动跳过该段。
+   */
+  { v: 'stm32h7b0', label: 'STM32H7B0/H7A3/H7B3', ram: '0x20000000-0x20020000, 0x24000000-0x24100000' },
   { v: 'stm32h5',   label: 'STM32H5',             ram: '0x20000000-0x20020000' },
   { v: 'stm32l0',   label: 'STM32L0',             ram: '0x20000000-0x20005000' },
   { v: 'stm32l1',   label: 'STM32L1',             ram: '0x20000000-0x20004000' },

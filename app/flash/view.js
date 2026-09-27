@@ -247,8 +247,15 @@ export class FlashView {
     for (const seg of regions){
       for (let off = 0; off < seg.data.length; off += chunk){
         let page = seg.data.subarray(off, Math.min(off + chunk, seg.data.length));
-        if (page.length % 4){                          // 算法按字写，尾部补 0xFF
-          const pad = new Uint8Array((page.length + 3) & ~3);
+        /**
+         * 尾部补 0xFF 到**编程粒度**的整数倍。
+         * 🚨 粒度不是处处都等于 4：F1/F4 这类按字（4B）写就行，但 **H7 是按 32 字节
+         *    （256 位 flash word）编程**的 —— 尾块不补齐到 32 字节，算法那一页就写不进去，
+         *    现象是"校验失败、某个地址读到 0xFF/旧值"。粒度由 algos.js 的 write_granularity 给。
+         */
+        const gran = algo.write_granularity || 4;
+        if (page.length % gran){
+          const pad = new Uint8Array(((page.length + gran - 1) / gran | 0) * gran);
           pad.set(page);
           pad.fill(0xff, page.length);
           page = pad;
