@@ -368,16 +368,24 @@ export class FlashView {
     }
   }
 
-  // ---------- 备用：本地桥 · OpenOCD ----------
+  // ---------- 备用：本地桥（OpenOCD 或 J-Link） ----------
   async _flashBridge(name, pathText){
-    this._bar(50);   // OpenOCD 的 rpc 拿不到流式进度，只能示意
-    this._status('桥烧录中…（OpenOCD 完成后一次性返回结果）');
+    const useJlink = $('f-backend').value === 'jlink';
+    this._bar(50);   // 桥烧录拿不到流式进度，只能示意
+    this._status(useJlink ? '桥烧录中…（J-Link Commander 完成后一次性返回结果）'
+                          : '桥烧录中…（OpenOCD 完成后一次性返回结果）');
     this.bc = new BridgeClient($('f-bridge-url').value);
     await this.bc.connect({ version: 1 });
     const cfg = {
       target: $('f-chip').value,
       verify: $('f-verify').checked,
       reset: $('f-reset').checked,
+      /**
+       * J-Link 这条路由桥自己起 JLink.exe 烧（见 bridge/rtt-bridge.mjs 的 jlinkFlash）：
+       * 桥会**先停掉 RTT 会话**再烧 —— J-Link 同一时刻只允许一个持有者，两个进程一起抢
+       * 会直接连不上探针（跟 WebUSB 那边"谁占着调试器"是同一类问题）。
+       */
+      ...(useJlink ? { backend: 'jlink' } : {}),
     };
     if (cfg.target === 'custom'){
       cfg.cfgs = String($('f-cfgs').value || '').split(/[,\s;]+/).map(s => s.trim()).filter(Boolean);
