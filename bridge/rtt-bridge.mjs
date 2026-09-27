@@ -163,6 +163,7 @@ class WsConn {
     this.onMessage = onMessage;
     this.onClose = onClose;
     this.alive = true;
+    this.frag = null;                    // 分片消息的累积缓冲（见 _parse 的注释）
     socket.on('data', d => {
       this.buf = Buffer.concat([this.buf, d]);
       this._parse();
@@ -201,7 +202,22 @@ class WsConn {
       if (opcode === 0x8){ this.close(); return; }
       if (opcode === 0x9){ this._frame(0xA, payload); continue; }
       if (opcode === 0xA) continue;
-      if (opcode === 0x1 || opcode === 0x0) this.onMessage?.(payload.toString('utf8'));
+      /**
+       * 🚨 **必须拼接分片**。浏览器发大消息（实测：页面上传 150KB 的 ELF → base64 后 ~205KB）
+       *    时会把一个消息拆成多个帧（首帧 opcode=0x1、后续 opcode=0x0 续帧）。
+       *    老代码把**每一片都当成完整消息**丢给上层 → `JSON.parse` 失败 →
+       *    handle() 里 `catch { return; }` **静默丢弃** → 页面点烧录后永远等不到回包
+       *    （现象：#f-result 一直是"—"、桥日志只看到"网页已连接"、没有任何 [flash] 行）。
+       *    坑在于**用 Node 客户端测是好的**（Node 的 ws 不分片），只有真页面才复现 ✗。
+       */
+      if (opcode === 0x2){ this.frag = null; continue; }        // 二进制帧：协议里都走 base64，不用
+      if (opcode === 0x1) this.frag = payload;
+      else if (opcode === 0x0 && this.frag) this.frag = Buffer.concat([this.frag, payload]);
+      else continue;
+      if (!fin) continue;                                       // 还没拼完，等下一片
+      const whole = this.frag;
+      this.frag = null;
+      this.onMessage?.(whole.toString('utf8'));
       // 二进制帧暂不用（协议里二进制都走 base64）
     }
   }
