@@ -27,7 +27,7 @@ LA       = tools/la/kingst_la.py
 .DEFAULT_GOAL := help
 .PHONY: help serve serve-stop browser open test test-ui test-hw test-bridge test-all \
         bridge bridge-stop fw-build fw-flash fw-restore fw-h7-build fw-h7-slow fw-h7-flash \
-        la-info la-capture git-status git-log check clean
+        algo-check flash-plan la-info la-capture git-status git-log check clean
 
 help:
 	pwsh -NoProfile -ExecutionPolicy Bypass -File tools/dev/help.ps1
@@ -92,6 +92,13 @@ fw-h7-slow:
 
 fw-h7-flash:
 	pwsh -NoProfile -File $(H7_DIR)/flash.ps1
+
+# 不依赖硬件的两项体检：flash 算法条目自洽性、烧录计划（擦除/分块/补齐/范围）
+algo-check:
+	$(PY) tools/dev/verify-algo.py
+
+flash-plan:
+	$(NODE) tools/dev/check-flash-plan.mjs $(FW_DIR)/build/fw.elf $(H7_DIR)/build/fw.elf
 
 # ---------------------------------------------------------------- 逻辑分析仪
 la-info:
