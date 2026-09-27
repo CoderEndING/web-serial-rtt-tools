@@ -36,6 +36,11 @@ export class BridgeClient {
     if (this.connected) return;
     this._closedByUs = false;
     const ws = new WebSocket(this.url);
+    /**
+     * 🚨 必须显式设成 arraybuffer：默认是 'blob'，二进制帧会变成 Blob 而不是 ArrayBuffer，
+     *    下面 `_msg` 里就得多走一次异步的 blob.arrayBuffer()（多一次拷贝 + 打乱时序）。
+     */
+    ws.binaryType = 'arraybuffer';
     this.ws = ws;
     await new Promise((res, rej) => {
       const t = setTimeout(() => rej(new Error(`连不上桥（${this.url}）：请先双击 bridge/start-bridge.bat 启动它`)), 5000);
@@ -60,7 +65,15 @@ export class BridgeClient {
   }
 
   _msg(data){
+    /**
+     * 二进制帧 = RTT 字节流（当前桥就是这么发的，见 bridge/rtt-bridge.mjs 的 sendBinary）。
+     * 直接用 Uint8Array 视图交给上层，**不拷贝、不 base64**：老的 JSON+base64 分支还会用，
+     * 但那条路每条消息都多 +33% 体积与一次解码。
+     * （⚠️ 实测：端到端吞吐的天花板在桥那一侧的**数据源**，不在解码这里；见 docs/backends.md 三。）
+     */
+    if (data instanceof ArrayBuffer){ this.onStream?.(new Uint8Array(data)); return; }
     let m;
+    // JSON 分支保留：兼容还在发 {t:'stream.data', data:base64} 的旧版桥（也用于非流消息）
     try { m = JSON.parse(data); } catch { return; }
     if (m.t === 'stream.data'){ this.onStream?.(fromB64(m.data || '')); return; }
     if (m.t === 'error' && m.id === undefined){ this.onClose?.(new Error(m.message)); return; }
