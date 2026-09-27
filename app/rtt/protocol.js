@@ -137,7 +137,24 @@ export class Rtt {
     return this;
   }
 
+  /**
+   * 读一个通道表项（24 字节）。
+   *
+   * 🚨 读**一次不通过结构校验就重读一次**：探针的 AP 读是挂起读，紧跟写/换地址之后
+   *    偶尔会拿到上一笔事务的残渣（实测读到过 size=560229490、pbuf=0xd 这种）。
+   *    这类垃圾几乎都过不了下面的合理性校验，所以"按需重读"比"无脑读两遍"划算得多
+   *    （后者把 RTT 吞吐砍掉一半，实测 330 → 154 KB/s）。
+   */
   async _entry(base, i){
+    let lastErr = null;
+    for (let attempt = 0; attempt < 2; attempt++){
+      try { return await this._entryOnce(base, i); }
+      catch (e){ lastErr = e; }
+    }
+    throw lastErr;
+  }
+
+  async _entryOnce(base, i){
     const b = await this.mem.readMem(base + ENTRY * i, ENTRY);
     const e = { sName: u32le(b, 0), pbuf: u32le(b, 4), size: u32le(b, 8), wr: u32le(b, 12), rd: u32le(b, 16), flags: u32le(b, 20) };
     // 合理性检查：目标刚复位/没在跑时，控制块位置可能只剩旧数据或 0，

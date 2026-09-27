@@ -614,29 +614,24 @@ export class WebUsbDapProbe {
     return await this._withLock(() => this._readMemLocked(addr, len, apIndex));
   }
 
+  /**
+   * 读目标内存。
+   *
+   * 抗「挂起读」的策略**按数据量分级**（2026-09-27 调过两轮：
+   * 早先不分大小一律读两遍，大流量读取成本直接翻倍 —— 8MHz 下 330 KB/s 掉到 154 KB/s）：
+   *   · 大块（RTT 缓冲、flash 校验……）：读一遍，但写完 TAR 后**先读两个字丢掉**（prime），
+   *     把流水线里上一笔事务的残渣顶出去。只多一次往返。
+   *   · 小块（≤ 64 字节）：也读一遍；**结构校验不通过时由上层重读**
+   *     （Rtt._entry 会校验 size/pbuf/wr/rd 是否合理，不合理就重读一次——
+   *     实测残留数据几乎都过不了这层校验，所以"按需重读"够用，省掉无脑双读）。
+   * 另外地址必须先 `>>> 0` 归一化：JS 位运算（`& ~3`）是 32 位有符号的，
+   * 地址 ≥ 0x80000000（PPB 区，如 DHCSR=0xE000EDF0）会变负数 → subarray 越界 → 返回空数组。
+   */
   async _readMemLocked(addr, len, apIndex = 0){
-    /**
-     * 🚨 读两遍、以第二遍为准。
-     *
-     * 这颗探针（CherryUSB DAPLink）+ STM32F1 实测：AP 读是**挂起读**——读 DRW 拿到的
-     * 是**上一笔读事务**的数据，紧跟写事务之后的第一遍块读常常整段拿到旧值/残留。
-     * 现场：flash 烧完做校验，`readMem(0x08001000, …)` 第一遍读到 0x0（擦过的 flash 只会是 0xFF），
-     * 第二遍才是真数据 —— 于是"校验失败"其实是**读**不可靠，写是对的。
-     * 第二遍读会把第一遍取回的值顶出来，拿到的即"这一笔"的真实数据。
-     * 代价：每次两遍（实测 RTT 轮询仍有数十 Hz，够用）；两遍一致时不再读第三遍。
-     */
-    const first = await this._readMemOnce(addr, len, apIndex);
-    const second = await this._readMemOnce(addr, len, apIndex);
-    if (first.length === second.length){
-      let same = true;
-      for (let i = 0; i < first.length; i++){ if (first[i] !== second[i]){ same = false; break; } }
-      if (same) return second;
-    }
-    // 两遍不一致：可能是残留，也可能是目标在动（RTT 缓冲）→ 再读一遍，取最新
-    return await this._readMemOnce(addr, len, apIndex);
+    return await this._readMemOnce(addr, len, apIndex, len > 64);
   }
 
-  async _readMemOnce(addr, len, apIndex = 0){
+  async _readMemOnce(addr, len, apIndex = 0, prime = false){
     addr = addr >>> 0;
     if (len <= 0) return new Uint8Array(0);
     if (len > (1 << 20)) throw new Error(`一次要读 ${len} 字节（>1MB），地址参数大概是错了`);
@@ -646,6 +641,11 @@ export class WebUsbDapProbe {
     const dv = new DataView(bytes.buffer);
     let a = start;
     await this._setTAR(start, apIndex);
+    if (prime){
+      // 顶掉流水线里的残渣（结果丢弃）。挂起读的第一笔数据来自上一次读事务，
+      // 大块读时这一笔就会变成"开头几个字是别的地址的内容"。
+      try { await this._transferBlock(true, 2, AP_DRW, null, apIndex); } catch {}
+    }
     while (a < end){
       const words = Math.min(this.maxWords, (end - a) >> 2, this._wordsToBoundary(a));
       if (this._needsTarReset(a, start)) await this._setTAR(a, apIndex);      // 4KB 边界：自增会绕回
@@ -702,6 +702,14 @@ export class WebUsbDapProbe {
     if (!data.length) return;
     await this._writeMemOnce(addr, data, apIndex);
     if (this.verifyWrites === false) return;      // 排障开关（默认开）
+    /**
+     * 回读确认的**节流**：同一地址短时间内反复写（RTT 轮询每轮推进一次 RdOff 就是这种）
+     * 时跳过回读 —— 上一次已经证明这条路径可靠，而每轮多两次往返会把吞吐砍掉两成
+     * （实测 330 KB/s 的历史值就是这么丢的）。换地址的写（真正的"配置/参数"写）照旧校验。
+     */
+    const now = Date.now();
+    if (this._lastWriteAddr === addr && now - (this._lastWriteAt || 0) < 200) return;
+    this._lastWriteAddr = addr; this._lastWriteAt = now;
     try {
       const back = await this.readMem(addr, data.length, apIndex);
       let same = back.length === data.length;
