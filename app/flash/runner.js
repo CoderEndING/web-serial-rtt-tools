@@ -87,12 +87,20 @@ export class FlashRunner {
     await this.runCode(this.algo.pc_program_page, { 0: addr, 1: data.length, 2: buf }, 30000);
   }
 
-  /** 单次编程块大小：页参数与缓冲容量取小（缓冲容量 = 两缓冲间距或到栈底的余量） */
+  /**
+   * 单次编程块大小：取「页参数」与「页缓冲容量」的较小值。
+   *
+   * 🚨 单缓冲的芯片**不要**拿 `begin_stack - page_buffers[0]` 当容量：
+   *    有些算法（L0/F0/F4 实测）把页缓冲放在**栈顶之上**，这个差值是负数，
+   *    旧写法 `Math.max(256, min(page_size, 负值))` 会回落成 **256B** ——
+   *    而 L0 的页只有 128B，等于按 256B 写，超出算法缓冲/页边界（`tools/dev/verify-algo.py` 抓到的）。
+   *    pyOCD 的算法保证"页缓冲 ≥ 一页"，所以单缓冲时直接按页大小来最稳。
+   *    多缓冲时用两个缓冲的间距（那是真实的缓冲容量）。
+   */
   chunkSize(){
     const a = this.algo;
-    const room = a.page_buffers.length > 1
-      ? a.page_buffers[1] - a.page_buffers[0]
-      : Math.max(256, Math.min(a.page_size, a.begin_stack - a.page_buffers[0]));
-    return Math.min(a.page_size, room);
+    const gap = a.page_buffers.length > 1 ? (a.page_buffers[1] - a.page_buffers[0]) : 0;
+    const cap = gap > 0 ? gap : a.page_size;
+    return Math.max(4, Math.min(a.page_size, cap));
   }
 }
