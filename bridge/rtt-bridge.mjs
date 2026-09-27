@@ -94,6 +94,12 @@ function loadConfig(){
         speed: 1000,
         note: 'CMSIS-DAP + STM32F103（SWD）',
       },
+      stm32h7b0: {
+        cfgs: ['interface/cmsis-dap.cfg', 'target/stm32h7x.cfg'],
+        pre: ['cmsis-dap backend usb_bulk'],
+        speed: 4000,
+        note: 'CMSIS-DAP + STM32H7B0（SWD，H7A3/7B3/7B0 用同一个 target cfg）',
+      },
       esp32s31: {
         cfgs: ['board/esp32s31-builtin.cfg'],
         pre: [],
@@ -125,6 +131,9 @@ function findOpenOcd(){
   const roots = [
     path.join(home, '.espressif', 'tools', 'openocd-esp32'),
     'C:\\Program Files\\OpenOCD', 'C:\\Program Files (x86)\\OpenOCD',
+    // 本机的 xpack OpenOCD（E:\Share\env-windows\xpack-openocd-*\bin\openocd.exe）：
+    // 下面按 <root>\<dir>\bin\openocd.exe 的模式扫，正好命中，不用手写 --openocd
+    'E:\\Share\\env-windows',
     '/usr/local/share/openocd', '/usr/share/openocd',
   ];
   for (const r of roots){

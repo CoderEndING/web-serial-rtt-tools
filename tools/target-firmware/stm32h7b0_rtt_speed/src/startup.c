@@ -12,6 +12,9 @@ extern uint32_t _sidata, _sdata, _edata, _sbss, _ebss;
 
 int main(void);
 void SysTick_Handler(void);
+/* ST 的 CMSIS 系统初始化（system_stm32h7xx.c）：设向量表偏移、SystemCoreClock 等。
+ * 官方 startup 一上电就调它，HAL 版本的固件必须也要调 —— 否则 HAL 拿到的时钟变量是错的。 */
+void SystemInit(void);
 
 void Reset_Handler(void);
 void Default_Handler(void);
@@ -58,6 +61,8 @@ void Reset_Handler(void){
   SCB_CPACR |= (0xFu << 20);                     /* CP10/CP11 全访问 */
   __asm__ volatile("dsb"); __asm__ volatile("isb");
   FPU_FPCCR |= (1u << 31) | (1u << 30);          /* ASPEN | LSPEN */
+
+  SystemInit();                                  /* 官方 startup 也这么做（HAL 需要） */
 
   main();
   for (;;) { }

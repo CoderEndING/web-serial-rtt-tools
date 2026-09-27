@@ -725,7 +725,17 @@ export class WebUsbDapProbe {
      */
     while (a < end){
       const words = Math.min(this.maxWords, (end - a) >> 2, this._wordsToBoundary(a));
-      if (this._needsTarReset(a, start)) await this._setTAR(a, apIndex);      // 4KB 边界：自增会绕回
+      /**
+       * 🚨 **1KB 边界也必须重设 TAR** —— 实测 akaLinkPro(0D28:0204) 的 AHB-AP 自增是
+       *    **在 1KB 边界回绕**（RAM 地址 0x…400 处继续自增会回到本 1KB 页首页），
+       *    而不是早期在 MicroLink 上观察到的 4KB。只按 4KB 判定的后果极其隐蔽：
+       *      第 1 块（1KB 页内）完全正确 → 之后每块都读到**本页页首**的数据；
+       *      读到 RTT 缓冲时正好把控制块签名 "SEGGER RTT" 混进来 → 上层判为错位读
+       *      → readUp() 一直返回 0 字节（"探针连上了、控制块也找得到，就是一个字节都读不到"）。
+       *    诊断记录：读 1024 字节 @0x200001e8 时，前 536 字节对、其后全是 0x20000000 起的数据。
+       *    代价只有"每 1KB 多一笔 USB 往返"，换来的是数据正确 —— 值得。
+       */
+      if ((a & 0x3FF) === 0 || this._needsTarReset(a, start)) await this._setTAR(a, apIndex);
       const { count: got, words: vals } = await this._transferBlock(true, words, AP_DRW, null, apIndex);
       /**
        * 🚨 探针**会把块读响应截短**（本机 120 字的请求常常只回一部分），
@@ -821,8 +831,10 @@ export class WebUsbDapProbe {
     await this._setTAR(start, apIndex);
     let i = 0;
     while (i < words.length){
-      const n = Math.min(this.maxWords, words.length - i, this._wordsToBoundary(start + i * 4));
-      if (n <= 0 || this._needsTarReset(start + i * 4, start)) await this._setTAR(start + i * 4, apIndex);
+      const cur = (start + i * 4) >>> 0;
+      const n = Math.min(this.maxWords, words.length - i, this._wordsToBoundary(cur));
+      // 与读路径同理：**1KB 边界必须重设 TAR**（本探针 1KB 回绕）。写错地址比读错更危险。
+      if (n <= 0 || (cur & 0x3FF) === 0 || this._needsTarReset(cur, start)) await this._setTAR(cur, apIndex);
       await this._transferBlock(false, n, AP_DRW, words.subarray(i, i + n), apIndex);
       i += n;
     }

@@ -24,7 +24,8 @@ const SECS = Number(process.argv[3] || 5);
 const CDP = process.env.CDP || 'http://127.0.0.1:9333';
 const APP = process.env.APP || 'http://127.0.0.1:8899/index.html';
 const RANGE = process.env.RAM || '0x20000000-0x20005000';
-const ELF = join(root, 'tools', 'target-firmware', 'stm32f103_rtt_speed', 'build', 'fw.elf');
+// 换板子/换固件时用 ELF=<路径> 覆盖（例：STM32H7B0 那份固件），符号只用于目标侧对账，缺了也能跑
+const ELF = process.env.ELF || join(root, 'tools', 'target-firmware', 'stm32f103_rtt_speed', 'build', 'fw.elf');
 
 // 从 ELF 里取几个全局量的地址，用来交叉验证
 const syms = {};
@@ -115,9 +116,16 @@ if (BACKEND === 'bridge'){
   };
   await send('Page.enable'); await send('Runtime.enable');
   try { await send('Network.enable'); await send('Network.setCacheDisabled', { cacheDisabled: true }); } catch {}
-  await send('Page.navigate', { url: APP + '?backend=webusb&auto=1#rtt' });
+  // 🚨 必须把 ELF 里的 RTT 控制块地址传给页面：页面会优先用 URL 里的 addr，
+  //    否则它会拿 localStorage 里上一次的地址（换板子/换固件后就是错的，
+  //    实测报"0x20000448 处不是可用的 RTT 控制块：没有 SEGGER RTT 标识"）。
+  const addrParam = syms._SEGGER_RTT ? ('&addr=0x' + syms._SEGGER_RTT.toString(16)) : '';
+  await send('Page.navigate', { url: APP + '?backend=webusb&auto=1' + addrParam + '#rtt' });
   for (let i = 0; i < 60; i++){
-    if (await evalJs('!!(window.__tools && window.__tools.rtt && window.__tools.rtt.rtt)')) break;
+    // 必须等**探针真的连上**（probe 非空）再往下：只等 rtt 实例会撞进"自动连接还在半路"的窗口，
+    // 于是读到 probe=null 报 TypeError（实测踩过好几次）。
+    if (await evalJs('!!(window.__tools && window.__tools.rtt && window.__tools.rtt.probe && window.__tools.rtt.rtt)')) break;
+    if (i === 20) await evalJs('window.__tools.rtt.connectProbe().catch(()=>{})');   // 自动连接没起来就手动补一刀
     await sleep(250);
   }
   console.log(`后端 WebUSB · ` + await evalJs('window.__tools.rtt.probe.name') + '\n');
