@@ -117,9 +117,14 @@ if (BACKEND === 'bridge'){
   await send('Page.enable'); await send('Runtime.enable');
   try { await send('Network.enable'); await send('Network.setCacheDisabled', { cacheDisabled: true }); } catch {}
   // 🚨 必须把 ELF 里的 RTT 控制块地址传给页面：页面会优先用 URL 里的 addr，
-  //    否则它会拿 localStorage 里上一次的地址（换板子/换固件后就是错的，
-  //    实测报"0x20000448 处不是可用的 RTT 控制块：没有 SEGGER RTT 标识"）。
-  const addrParam = syms._SEGGER_RTT ? ('&addr=0x' + syms._SEGGER_RTT.toString(16)) : '';
+  //    否则它会拿 localStorage 里上一次的地址（换板子/换固件后就是错的）。
+  // ⚠️ 但**前提是板子上跑的正是这个 ELF**！实测踩过：板子上还是旧固件（RTT 块在 0x20000448），
+  //    而新 ELF 的符号是 0x2000000c —— 脚本一传就把页面里存的好地址覆盖成错的，
+  //    之后用户手动连也连不上（"0x2000000c 处没有 SEGGER RTT 标识"）。
+  //    所以要覆盖时显式给：ADDR=0x20000448 node tools/selftest/rtt-speed.mjs webusb 5
+  const addrEnv = process.env.ADDR;
+  const addrParam = addrEnv ? ('&addr=' + addrEnv)
+    : (syms._SEGGER_RTT ? ('&addr=0x' + syms._SEGGER_RTT.toString(16)) : '');
   await send('Page.navigate', { url: APP + '?backend=webusb&auto=1' + addrParam + '#rtt' });
   for (let i = 0; i < 60; i++){
     // 必须等**探针真的连上**（probe 非空）再往下：只等 rtt 实例会撞进"自动连接还在半路"的窗口，
