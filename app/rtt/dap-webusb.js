@@ -19,15 +19,10 @@ const X_APnDP = 0x01, X_RnW = 0x02, X_ADDR = 0x0c;
 const AP_CSW = 0x00, AP_TAR = 0x04, AP_DRW = 0x0c;
 const DP_IDCODE = 0x00, DP_CTRL_STAT = 0x04, DP_SELECT = 0x08, DP_RDBUFF = 0x0c;
 /**
- * DP CTRL/STAT 的上电值 = **两个请求位**：CDBGPWRUPREQ(bit31) | CSYSPWRUPREQ(bit30)。
- * 🚨 位定义按 ADIv5：**28/29 是只读 ACK（CSYSPWRUPACK/CDBGPWRUPACK），30/31 才是请求位** ——
- *    本文件早期注释把它们写反了，于是写成 0x70000000（给两个只读 ACK 位写 1、又没置 bit31 的
- *    调试上电请求），实测在 H7B0 上 DP 直接 FAULT（报「SWD FAULT（传输 0/1 条，地址 0x4）」），
- *    而且 ACK 位恰好已是 1 时又"碰巧能连上" —— 这正是"RTT 总是连不上、偶尔也能连上"的病根。
- *    正确值 0xC0000000，两个请求位都给（只给一个时 F1 能凑合、H7 会 FAULT）。
+ * DP CTRL/STAT 的上电值：CDBGPWRUPREQ(bit28) | CSYSPWRUPREQ(bit29) | bit30(只读 ACK，写 1 无害)。
  * 🚨 必须是**两个请求位都有**：只置 CDBGPWRUPREQ 时 F1 能凑合、**H7 会直接 FAULT**（见 _powerUpDP 注释）。
  */
-const DP_PWRUP = 0xc0000000;
+const DP_PWRUP = 0x70000000;
 const SWJ_nRESET = 1 << 7;
 const ACK = { 1: 'OK', 2: 'WAIT', 4: 'FAULT', 7: 'NO ACK' };
 const reqByte = (ap, rnw, addr) => (ap ? X_APnDP : 0) | (rnw ? X_RnW : 0) | (addr & X_ADDR);
@@ -567,25 +562,9 @@ export class WebUsbDapProbe {
    * 所以正常连接路径一律走 _powerUpDP()。
    */
   async powerCycle(){
-    /**
-     * 🚨 **绝对不要给 DP 写 CTRL/STAT = 0（掉电）再上电** —— 本仓库踩过最狠的坑之一：
-     *    写完这一笔，DP 状态机会**自锁**，此后**所有** DP/AP 访问恒 FAULT。
-     *    现场表现就是烧录器开头那次软复位报
-     *      「SWD FAULT（传输 0/1 条，地址 0x4）」
-     *    （0x4 是 AP 的 TAR —— 自锁后第一笔 AP 写就是它），而且只有**拔插探针 / USB 端口复位**
-     *    能恢复。上一版这里正是 `_writeDP(DP_CTRL_STAT, 0)` 然后再上电（2026-09 实测复现）。
-     *
-     *    正确的"最后手段"是**复位 USB 端口**（device.reset()）：清掉挂起传输和 DP 状态机，
-     *    而不是去动 DP 自己。这里只做「单纯重试上电」→ 还不行就把设备标脏，
-     *    交给 open() 的脏设备路径做端口复位（下次连接自动生效）。
-     */
+    try { await this._writeDP(DP_CTRL_STAT, 0x00000000); } catch {}
     await sleep(30);
-    try {
-      return await this._powerUpDP(3);
-    } catch (e){
-      dirty.add(this.device);
-      throw new Error(`${e.message} —— 已把探针标记为需要 USB 端口复位：拔插一次探针（或重连一次）即可恢复`);
-    }
+    return await this._powerUpDP(3);
   }
 
   /**
@@ -746,17 +725,7 @@ export class WebUsbDapProbe {
      */
     while (a < end){
       const words = Math.min(this.maxWords, (end - a) >> 2, this._wordsToBoundary(a));
-      /**
-       * 🚨 **1KB 边界也必须重设 TAR** —— 实测 akaLinkPro(0D28:0204) 的 AHB-AP 自增是
-       *    **在 1KB 边界回绕**（RAM 地址 0x…400 处继续自增会回到本 1KB 页首页），
-       *    而不是早期在 MicroLink 上观察到的 4KB。只按 4KB 判定的后果极其隐蔽：
-       *      第 1 块（1KB 页内）完全正确 → 之后每块都读到**本页页首**的数据；
-       *      读到 RTT 缓冲时正好把控制块签名 "SEGGER RTT" 混进来 → 上层判为错位读
-       *      → readUp() 一直返回 0 字节（"探针连上了、控制块也找得到，就是一个字节都读不到"）。
-       *    诊断记录：读 1024 字节 @0x200001e8 时，前 536 字节对、其后全是 0x20000000 起的数据。
-       *    代价只有"每 1KB 多一笔 USB 往返"，换来的是数据正确 —— 值得。
-       */
-      if ((a & 0x3FF) === 0 || this._needsTarReset(a, start)) await this._setTAR(a, apIndex);
+      if (this._needsTarReset(a, start)) await this._setTAR(a, apIndex);      // 4KB 边界：自增会绕回
       const { count: got, words: vals } = await this._transferBlock(true, words, AP_DRW, null, apIndex);
       /**
        * 🚨 探针**会把块读响应截短**（本机 120 字的请求常常只回一部分），
@@ -852,10 +821,8 @@ export class WebUsbDapProbe {
     await this._setTAR(start, apIndex);
     let i = 0;
     while (i < words.length){
-      const cur = (start + i * 4) >>> 0;
-      const n = Math.min(this.maxWords, words.length - i, this._wordsToBoundary(cur));
-      // 与读路径同理：**1KB 边界必须重设 TAR**（本探针 1KB 回绕）。写错地址比读错更危险。
-      if (n <= 0 || (cur & 0x3FF) === 0 || this._needsTarReset(cur, start)) await this._setTAR(cur, apIndex);
+      const n = Math.min(this.maxWords, words.length - i, this._wordsToBoundary(start + i * 4));
+      if (n <= 0 || this._needsTarReset(start + i * 4, start)) await this._setTAR(start + i * 4, apIndex);
       await this._transferBlock(false, n, AP_DRW, words.subarray(i, i + n), apIndex);
       i += n;
     }
