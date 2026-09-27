@@ -24,10 +24,37 @@ const reqByte = (ap, rnw, addr) => (ap ? X_APnDP : 0) | (rnw ? X_RnW : 0) | (add
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-async function withTimeout(p, ms, what){
+/**
+ * 被「挂起传输」搞脏的设备。
+ *
+ * 🚨 WebUSB **没有取消接口**：`withTimeout` 超时只是"我们不等了"，底层那次 bulk 传输
+ *    还挂在 USB 栈里 —— 它会偷走下一条响应，攒多了还会把整个 USB 服务搞到
+ *    `navigator.usb.getDevices()` / `device.open()` 都不返回（实测：连不上几次之后，
+ *    连烧录器都卡在第一步 getDevices() 上，90 秒不动）。
+ *    唯一的解药是 **USB 端口复位**（`device.reset()`，会清掉挂起传输），其次是重开设备。
+ *    所以这里把"出现过超时"的设备记下来，下次认领前先复位。
+ */
+const dirty = new WeakSet();
+
+/** 给任意 promise 套超时（超时只是放弃等待；USB 层要靠 dirty+reset 收拾） */
+export async function withTimeout(p, ms, what){
   let t;
   const timeout = new Promise((_, rej) => { t = setTimeout(() => rej(new Error(`${what} 超时（${ms}ms）：探针没响应`)), ms); });
   try { return await Promise.race([p, timeout]); } finally { clearTimeout(t); }
+}
+
+/** USB 端口复位（清挂起传输）；成功返回 true */
+async function resetDevice(device){
+  if (!device || !device.opened) return false;
+  try {
+    await withTimeout(device.reset(), 3000, 'USB 端口复位');
+    dirty.delete(device);
+    console.info('[dap] 已做 USB 端口复位（清掉上一次会话的挂起传输）');
+    return true;
+  } catch (e){
+    console.warn(`[dap] USB 端口复位失败：${e.message}（可能要拔插一次探针）`);
+    return false;
+  }
 }
 
 export class WebUsbDapProbe {
@@ -41,6 +68,7 @@ export class WebUsbDapProbe {
     this.maxWords = 12;
     this._ready = false;
     this.lastError = null;
+    this._posted = false;              // 是否有未冲干净的 posted（后发）写
     this.clockHz = 1_000_000;          // 当前生效的 SWD 时钟（握手成功后 = 实际请求值）
     this.clockTried = [];              // 试过哪些档位（排障用）
   }
@@ -113,8 +141,15 @@ export class WebUsbDapProbe {
   /** USB 层：打开设备、找 bulk 端点、认领接口、清端点、同步清队列 */
   async _claim(){
     const d = this.device;
-    if (!d.opened) await d.open();
-    if (d.configuration === null) await d.selectConfiguration(1);
+    // 🚨 上一次会话如果有过超时，USB 栈里可能还挂着传输 —— 会偷响应、甚至让
+    //    getDevices()/open() 整条卡死。先做端口复位清掉（在 open 之前做最安全）。
+    if (dirty.has(d)){
+      console.warn('[dap] 这个探针上次有超时（挂起传输），先复位 USB 端口再认领');
+      try { if (!d.opened) await withTimeout(d.open(), 5000, 'USB 打开'); } catch {}
+      await resetDevice(d);
+    }
+    if (!d.opened) await withTimeout(d.open(), 5000, 'USB 打开（卡住通常是探针被别的程序占着）');
+    if (d.configuration === null) await withTimeout(d.selectConfiguration(1), 5000, 'USB 选择配置');
     let found = null;
     for (const iface of d.configuration.interfaces){
       for (const alt of iface.alternates){
@@ -130,7 +165,11 @@ export class WebUsbDapProbe {
     this.epIn = found.epIn.endpointNumber;
     this.epOut = found.epOut.endpointNumber;
     this.pkt = Math.min(found.epIn.packetSize || 64, 512);
-    try { await d.claimInterface(this.iface); } catch (e){ throw new Error(`占用 USB 接口失败：${e.message}（OpenOCD/pyOCD/J-Link 是不是还开着？）`); }
+    try {
+      await withTimeout(d.claimInterface(this.iface), 5000, 'USB 认领接口');
+    } catch (e){
+      throw new Error(`占用 USB 接口失败：${e.message}（OpenOCD/pyOCD/J-Link 是不是还开着？）`);
+    }
 
     /**
      * 🚨 认领接口后**必须清一次端点**。
@@ -142,7 +181,8 @@ export class WebUsbDapProbe {
      */
     for (const [dir, ep] of [['in', this.epIn], ['out', this.epOut]]){
       if (this.skipClearHalt) break;
-      try { await d.clearHalt(dir, ep); } catch (e){ console.warn(`clearHalt(${dir}) 失败：${e.message}`); }
+      try { await withTimeout(d.clearHalt(dir, ep), 2000, `clearHalt(${dir})`); }
+      catch (e){ console.warn(`clearHalt(${dir}) 失败：${e.message}`); }
     }
     await this.resync();
     this._ready = true;
@@ -196,9 +236,20 @@ export class WebUsbDapProbe {
     const req = new Uint8Array(this.pkt);
     req[0] = cmd;
     if (payload) req.set(payload, 1);
-    await withTimeout(this.device.transferOut(this.epOut, req), 3000, 'USB 写');
+    try {
+      await withTimeout(this.device.transferOut(this.epOut, req), 3000, 'USB 写');
+    } catch (e){
+      dirty.add(this.device);                 // 写超时：底层传输可能还挂着 → 标脏
+      throw e;
+    }
     for (let attempt = 0; attempt < 4; attempt++){
-      const r = await withTimeout(this.device.transferIn(this.epIn, this.pkt), 3000, 'USB 读');
+      let r;
+      try {
+        r = await withTimeout(this.device.transferIn(this.epIn, this.pkt), 3000, 'USB 读');
+      } catch (e){
+        dirty.add(this.device);               // 读超时：挂起传输会偷走后续响应 → 标脏
+        throw e;
+      }
       if (!r.data || !r.data.byteLength) continue;                     // 空包：跳过
       const res = new Uint8Array(r.data.buffer, r.data.byteOffset, r.data.byteLength);
       if (res[0] !== cmd){
@@ -232,7 +283,8 @@ export class WebUsbDapProbe {
     const pkt = new Uint8Array(this.pkt);
     pkt[0] = CMD.Disconnect;
     for (let i = 0; i < n; i++){
-      try { await this.device.transferOut(this.epOut, pkt); } catch { return; }
+      try { await withTimeout(this.device.transferOut(this.epOut, pkt), 1500, 'USB 同步写'); }
+      catch { dirty.add(this.device); return 0; }
     }
     let saw = 0;
     for (let i = 0; i < n; i++){
@@ -318,6 +370,8 @@ export class WebUsbDapProbe {
     const vals = [];
     for (let i = 0; i < n && 2 + i * 4 + 4 <= res.length; i++) vals.push(u32le(res, 2 + i * 4));
     if (ack !== 1){
+      // 出过错之后 TAR 已自增到不可知的位置、posted 写也不可信 → 标记作废（下次访问会重写 TAR）
+      this._posted = false;
       if (ack === 4) await this.abort();                    // FAULT → 清 sticky，否则后面全废
       const err = new Error(`SWD ${ACK[ack] || ('ACK=' + ack)}（传输 ${n}/${count} 条，地址 0x${(ops[0]?.addr || 0).toString(16)}）`);
       err.ack = ack;
@@ -335,16 +389,28 @@ export class WebUsbDapProbe {
     const got = res[0] | (res[1] << 8);
     const ack = res[2] & 0x07;
     if (ack !== 1){
+      this._posted = false;
       if (ack === 4) await this.abort();                    // 同上：FAULT 必须清 sticky
       const err = new Error(`SWD 块传输 ${ACK[ack] || ('ACK=' + ack)}（${rnw ? '读' : '写'} ${count} 字 @0x${addr.toString(16)}）`);
       err.ack = ack;
       throw err;
     }
     if (rnw){
-      const out = new Uint32Array(count);
-      for (let i = 0; i < count && 3 + i * 4 + 4 <= res.length; i++) out[i] = u32le(res, 3 + i * 4);
-      return { count: got, words: out };
+      /**
+       * 🚨 只返回**响应里真正带着的那些字**。
+       *    这颗探针会把块读响应截短（120 字的请求常常只回一部分）；
+       *    早期写法先 `new Uint32Array(count)` 再把没填满的槽留成 0 —— 于是"读回来一堆 0"，
+       *    上层拿去算地址/指针就会算出垃圾（写错地址、踩坏控制块、RTT 突然连不上）。
+       *    这里按响应实际长度算能给出几个字，并把 count 也按实际值报回去，
+       *    让调用方（_readMemOnce）能正确地"接着读完剩下的"。
+       */
+      const avail = Math.max(0, Math.floor((res.length - 3) / 4));
+      const n2 = Math.min(count, avail);
+      const out = new Uint32Array(n2);
+      for (let i = 0; i < n2; i++) out[i] = u32le(res, 3 + i * 4);
+      return { count: Math.min(got, n2), words: out };
     }
+    this._posted = true;                                   // DRW 写是 posted：改 TAR 前必须冲
     return { count: got, words: null };
   }
 
@@ -356,6 +422,7 @@ export class WebUsbDapProbe {
    */
   async _targetInit({ clock = null } = {}){
     const hz = Number(clock || this.clockHz || 1_000_000);
+    this._posted = false;                             // 新会话：未完成的 posted 写作废
     const port = await this._ctrl(CMD.Connect, Uint8Array.of(1));      // 1 = SWD
     if (port[0] !== 1) throw new Error(`DAP_Connect 失败（返回 ${port[0]}，期望 1=SWD）`);
     await this.setClock(hz);
@@ -383,12 +450,14 @@ export class WebUsbDapProbe {
 
     // DP SELECT = 0（选 AP0、bank0）
     await this._transfer([{ ap: false, rnw: false, addr: DP_SELECT, data: 0 }]);
-    // 🚨 AP 访问前必须给 DP 上电（pyOCD 的 DebugPortSetup）。先**掉电再上电**：
-    //    上一个会话（被 kill 的 OpenOCD 等）留下的楔死状态只有电源循环能清，
-    //    只写上电位的话对已上电的 DP 是无操作，楔死就永远楔死。
-    await this._transfer([{ ap: false, rnw: false, addr: DP_CTRL_STAT, data: 0x00000000 }]);
-    await sleep(50);
-    await this._transfer([{ ap: false, rnw: false, addr: DP_CTRL_STAT, data: 0x50000000 }]);
+    // AP 访问前必须给 DP 上电（pyOCD 的 DebugPortSetup 就是干这个）。
+    // 先走正常路径（纯上电 + 清 sticky 重试）；只有它连着失败，才动用「掉电-上电」最后手段。
+    try {
+      await this._powerUpDP();
+    } catch (e){
+      console.warn(`[dap] DP 上电失败（${e.message}），改用掉电-上电最后手段`);
+      await this.powerCycle();
+    }
     await sleep(20);
     const st = await this._readDP(DP_CTRL_STAT);
     if (!(st & (1 << 31))) console.warn('DP 电源应答位没起来（0x' + st.toString(16) + '），继续试');
@@ -411,6 +480,7 @@ export class WebUsbDapProbe {
   }
   async _writeAP(addr, val, apIndex = 0){
     await this._transfer([{ ap: true, rnw: false, addr, data: val }], apIndex);
+    this._posted = true;                              // AP 写按 posted 处理，改 TAR 前冲一次最稳
   }
   /** 写 DP 寄存器（调试口的选择/控制都在这里，如 DP_SELECT 的 APSEL 字段） */
   async _writeDP(addr, val){
@@ -418,60 +488,255 @@ export class WebUsbDapProbe {
   }
 
   /**
-   * 🚨 TAR 写是 **posted（后发）** 的：探针固件高吞吐下，紧跟着的 DRW 访问可能打到
-   * **上一个 TAR 的地址** —— 本机实测抓到过"写 TAR=0xE000ED00 后读到 DHCSR 的值"。
-   * 这是 RTT「错位读」（log 乱码、混进控制块内容）的总根源，也会让调试寄存器访问失效。
-   * 修复：TAR 写之后补一次 AP 读作**屏障**（读会强制 posted 写完成，pyOCD 同款思路）。
+   * 给调试口上电：写 DP CTRL/STAT 的 CSYSPWRUPREQ|CDBGPWRUPREQ。
+   *
+   * 🚨 **千万别先写 0「掉电」再上电**（6bba430 加过这一步，直接把 RTT 连接搞挂）：
+   *    本机 MicroLink(CherryUSB) + STM32F103 实测，掉电写之后那个上电写会稳定返回
+   *    **FAULT(4)**（浏览器线级抓包与裸客户端两边都复现），而 _transfer 见 FAULT 就抛
+   *    → 现象正是「RTT 总是连不上，偶尔又能连上」。更糟的是炸过一次之后 DP 停在
+   *    「掉电已请求 + sticky」，下一次连接照样炸 —— 自锁（3209a87 之前没有这步，一直很稳）。
+   *    网页里 sleep(50) 还会被后台节流成 ~200ms，掉电更彻底、命中率更高。
+   * 这里保留一次「清 sticky 再重试」的兜底：万一真撞上 FAULT 也能自己爬起来。
+   */
+  async _powerUpDP(attempts = 2){
+    let lastErr = null;
+    for (let i = 1; i <= attempts; i++){
+      try {
+        await this._writeDP(DP_CTRL_STAT, 0x50000000);
+        return true;
+      } catch (e){
+        lastErr = e;
+        if (e.ack !== 4) throw e;                    // 不是 FAULT（NO ACK / WAIT）→ 重试也没意义
+        await this.abort();                          // FAULT → 清 sticky
+        await sleep(20);
+      }
+    }
+    throw lastErr;
+  }
+
+  /**
+   * 掉电 → 上电：**只在 recover() 里当最后手段**，用来清「上一个会话（被 kill 的 OpenOCD 等）
+   * 把 DP 楔死」这种顽固状态。⚠️ 它在部分目标上会让上电写 FAULT（见 _powerUpDP），
+   * 所以正常连接路径一律走 _powerUpDP()。
+   */
+  async powerCycle(){
+    try { await this._writeDP(DP_CTRL_STAT, 0x00000000); } catch {}
+    await sleep(30);
+    return await this._powerUpDP(3);
+  }
+
+  /**
+   * 把 pending 的 **posted 写**冲干净。
+   *
+   * 做法：读一次 **DP 的 RDBUFF**。ARM 规定读它会让此前所有 posted 的 AP 事务完成，
+   * 而且它是 DP 读，**不会**把数据塞进 AP 的挂起读流水线。
+   *
+   * 🚨 千万别用「读 AP DRW」来冲（前一版就是这么写的，栽了）：AP 的读是**挂起读**
+   *    （读回的是上一次读事务的结果），读一次 DRW 会把刚写进去的数据挂到流水线上，
+   *    紧接着的下一次块读就会把**头几个字读成这些旧数据**。
+   *    实测现场：下行写完 "help\r" 后再读 RTT 控制块，读回来的前 8 字节正是 "help\r\0\0\0"
+   *    → 控制块被判"缓冲指针无效(0xd)" → 连接直接失败（看着像"RTT 又连不上了"）。
+   */
+  async _flushPosted(){
+    if (!this._posted) return;
+    this._posted = false;
+    await this._transfer([{ ap: false, rnw: true, addr: DP_RDBUFF }]);
+  }
+
+  /**
+   * 设置 AP 的 TAR（目标地址）—— **每次块访问前都必须写**，不做「地址没变就跳过」的缓存。
+   *
+   * 🚨 为什么不能省（本机 MicroLink(CherryUSB) + STM32F103 实测，裸客户端与网页两边都复现）：
+   *    这条链路的 CSW 开着地址自增（AddrInc=1），**每次 DRW 访问都会让 TAR 往前走**，
+   *    而且访问完不会自己回来。所以"地址没变就不用重写 TAR"是错的 ——
+   *    同址连读第 2 次起读回来的就是**后面几个字**的内容，表现为 RTT 日志"错位/跳相位"：
+   *    这正是 60ccc42 / 93838d7 / 6bba430 一路在追的「错位读」。
+   *    对照实测（tmp/dap_tar_repeat.py）：
+   *      · 每次重写 TAR → 同址连读 5 次全部是 "SEGGER RTT"（正确）
+   *      · 不重写 TAR   → 第 1 次对，第 2 次起读到 CB+16 / CB+32 的内容（错）
+   *    注：跨块的多字块读靠的就是这个自增，所以**同一个 TAR 内**连续 TransferBlock 是对的；
+   *    要换地址时重写一次即可。
+   *
+   * 另外：改 TAR 之前先把上一笔 posted（后发）的 DRW 写冲干净，否则那笔写会落到新地址上
+   * （烧录器「固件能写、某个寄存器写不进去」就是这么来的）。
    */
   async _setTAR(addr, apIndex = 0){
+    await this._flushPosted();
     await this._transfer([{ ap: true, rnw: false, addr: AP_TAR, data: addr >>> 0 }], apIndex);
-    await this._transfer([{ ap: true, rnw: true, addr: AP_CSW }], apIndex);   // 屏障读（结果丢弃）
+    /**
+     * ⚠️ 这里**不要**再插任何"屏障读"，两种都试过、都更糟：
+     *   · 读 AP CSW / AP DRW（6bba430 与后来我都试过）：AP 读是**挂起读**，
+     *     会把旧值顶进读流水线 → DHCSR 轮询报「S_REGRDY 没置位」、RTT 直接连不上；
+     *   · 读 DP RDBUFF：不污染 AP 流水线，但实测会让 `_targetInit` 里的
+     *     「写 DP SELECT」直接 FAULT（SWD FAULT，地址 0x8）。
+     * 现状策略（实测可用）：TAR 每次都重写 + posted 写用 DP RDBUFF 冲（只在写之后、改 TAR 之前），
+     * 写操作靠 writeMem 的回读确认兜底。
+     */
   }
 
   // ---------------- 内存访问（RTT 只用到这两个） ----------------
+  /**
+   * 读目标内存。
+   *
+   * 🚨 **地址必须先 `>>> 0` 归一化**：JS 的位运算（`& ~3`）是 **32 位有符号**的，
+   *    地址一旦 ≥ 0x80000000（PPB 区就是，例如 DHCSR=0xE000EDF0）就会变成负数，
+   *    而 `addr` 本身还是正数 → `addr - start` 差出 2^32 → `subarray` 越界 →
+   *    **返回空数组**（不是报错！）。后果极隐蔽：
+   *      · `isHalted()` 永远读不到 S_HALT → 看门狗以为目标在跑，不去唤醒被 halt 的目标；
+   *      · flashloader 的 `regRead/regWrite` 永远读不到 S_REGRDY → 报
+   *        「调试寄存器同步超时（S_REGRDY 没置位）」——就是烧录器"某个寄存器写不进去"的真身
+   *        （其实写进去了，是**读回**全空）。
+   *    → 本函数与 writeMem 一律先把 addr 归一化成无符号，start/end 也 `>>> 0`。
+   */
+  /**
+   * 把一段内存访问**串行化**。
+   *
+   * 🚨 为什么必须有：页面里同时有两条路径在碰同一个探针 —— RTT 轮询循环（读上行缓冲 + 推进 RdOff）
+   *    和用户的下行发送（读下行表项 + 写数据 + 写 WrOff）。两者都在 await 处让出，**交错执行**；
+   *    而 TAR、AP 挂起读流水线、posted 写都是**探针/AP 上的共享状态**：
+   *      A 写了 TAR=X → B 写 TAR=Y → A 的读落到 Y 上 → A 拿到垃圾（读出的 WrOff/size 是假的）
+   *      → 命令写丢（实测：页面"发送成功"、固件一个字节都没收到）。
+   *    早期之所以"偶尔好偶尔坏"，就是因为交错窗口时大时小。
+   *    这里用一条 promise 链互斥，保证一次内存访问序列跑完再让下一个进来（可重入，内部调用不卡死）。
+   */
+  async _withLock(fn){
+    if (this._locked){ return await fn(); }          // 可重入：writeMem 内部会调 readMem
+    let release;
+    const prev = this._lockChain || Promise.resolve();
+    this._lockChain = new Promise(r => { release = r; });
+    await prev;
+    this._locked = true;
+    try { return await fn(); }
+    finally { this._locked = false; release(); }
+  }
+
   async readMem(addr, len, apIndex = 0){
+    return await this._withLock(() => this._readMemLocked(addr, len, apIndex));
+  }
+
+  async _readMemLocked(addr, len, apIndex = 0){
+    /**
+     * 🚨 读两遍、以第二遍为准。
+     *
+     * 这颗探针（CherryUSB DAPLink）+ STM32F1 实测：AP 读是**挂起读**——读 DRW 拿到的
+     * 是**上一笔读事务**的数据，紧跟写事务之后的第一遍块读常常整段拿到旧值/残留。
+     * 现场：flash 烧完做校验，`readMem(0x08001000, …)` 第一遍读到 0x0（擦过的 flash 只会是 0xFF），
+     * 第二遍才是真数据 —— 于是"校验失败"其实是**读**不可靠，写是对的。
+     * 第二遍读会把第一遍取回的值顶出来，拿到的即"这一笔"的真实数据。
+     * 代价：每次两遍（实测 RTT 轮询仍有数十 Hz，够用）；两遍一致时不再读第三遍。
+     */
+    const first = await this._readMemOnce(addr, len, apIndex);
+    const second = await this._readMemOnce(addr, len, apIndex);
+    if (first.length === second.length){
+      let same = true;
+      for (let i = 0; i < first.length; i++){ if (first[i] !== second[i]){ same = false; break; } }
+      if (same) return second;
+    }
+    // 两遍不一致：可能是残留，也可能是目标在动（RTT 缓冲）→ 再读一遍，取最新
+    return await this._readMemOnce(addr, len, apIndex);
+  }
+
+  async _readMemOnce(addr, len, apIndex = 0){
+    addr = addr >>> 0;
     if (len <= 0) return new Uint8Array(0);
     if (len > (1 << 20)) throw new Error(`一次要读 ${len} 字节（>1MB），地址参数大概是错了`);
-    const start = addr & ~3;
-    const end = (addr + len + 3) & ~3;
+    const start = (addr & ~3) >>> 0;
+    const end = ((addr + len + 3) & ~3) >>> 0;
     const bytes = new Uint8Array(end - start);
     const dv = new DataView(bytes.buffer);
     let a = start;
     await this._setTAR(start, apIndex);
     while (a < end){
-      const words = Math.min(this.maxWords, (end - a) >> 2);
-      const { words: got } = await this._transferBlock(true, words, AP_DRW, null, apIndex);
-      for (let i = 0; i < words; i++) dv.setUint32(a - start + i * 4, got[i] >>> 0, true);
-      a += words * 4;
-      if (words === 0) break;
+      const words = Math.min(this.maxWords, (end - a) >> 2, this._wordsToBoundary(a));
+      if (this._needsTarReset(a, start)) await this._setTAR(a, apIndex);      // 4KB 边界：自增会绕回
+      const { count: got, words: vals } = await this._transferBlock(true, words, AP_DRW, null, apIndex);
+      /**
+       * 🚨 探针**会把块读响应截短**（本机 120 字的请求常常只回一部分），
+       *    早先的写法把没填到的字**静默留成 0** —— 于是"校验读到 0x0，其实 flash 是对的"。
+       *    这里按响应里真实返回的条数推进，接着把剩下的读完（TAR 已自增）。
+       */
+      const n = Math.min(got, words, vals.length);
+      for (let i = 0; i < n; i++) dv.setUint32(a - start + i * 4, vals[i] >>> 0, true);
+      if (n === 0) break;
+      a += n * 4;
     }
     return bytes.subarray(addr - start, addr - start + len);
   }
 
+  /**
+   * 一次块访问最多能走几个字（不许跨 **1KB 边界**，且到 4KB 边界必须重设 TAR）。
+   *
+   * 🚨 ADIv5 的 TAR 自增是**有界**的：连续多块的 DAP_TransferBlock 不会一路加下去。
+   *    本机实测（读 0x08000000 起 0x1244 字节）：地址走到 0x08001000 时**绕回了 0x08000000**
+   *    —— 也就是 **4KB 边界回绕**（TAR[11:0] 清零、高位不变）。后果：
+   *      · 读：偏移 0x1000 之后读到的是本 4KB 页开头的数据（校验因此误报"读到 0x0"）；
+   *      · 写：**写进错误地址**（本该写的没写对）——"固件能写入、某个寄存器写不进去"就有它一份。
+   *    所以：块大小按 1KB 收窄（保守），并且**每当新块正好落在 4KB 边界上就重写一次 TAR**。
+   *    （很多人以为只有 1KB 回绕，实测这颗探针/这条 AHB-AP 是 4KB。）
+   */
+  _wordsToBoundary(a){
+    const next = (a + 1024) & ~1023;          // 下一个 1KB 边界
+    return Math.max(0, (next - a) >> 2);
+  }
+
+  /** 块起始落在 4KB 边界上时必须重设 TAR（自增在那儿会绕回页首） */
+  _needsTarReset(a, start){
+    return a !== start && (a & 0xfff) === 0;
+  }
+
+  /**
+   * 写目标内存。写完**回读确认**，不一致就重写一次（最多一次）。
+   *
+   * 🚨 为什么值得多花这一趟：这颗探针的写偶发不落地（posted 写 + 地址自增的锅），
+   *    而"写了没生效"在下游的表现千奇百怪 —— RTT 下行命令石沉大海、
+   *    flashloader 参数寄存器写丢导致算法跑飞。回读一遍就能发现并补救。
+   *    只影响 RAM/调试寄存器的写（都是幂等的），不会对 flash 重复编程。
+   */
   async writeMem(addr, bytes, apIndex = 0){
+    return await this._withLock(() => this._writeMemLocked(addr, bytes, apIndex));
+  }
+
+  async _writeMemLocked(addr, bytes, apIndex = 0){
+    addr = addr >>> 0;
     const data = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
     if (!data.length) return;
+    await this._writeMemOnce(addr, data, apIndex);
+    if (this.verifyWrites === false) return;      // 排障开关（默认开）
+    try {
+      const back = await this.readMem(addr, data.length, apIndex);
+      let same = back.length === data.length;
+      if (same) for (let i = 0; i < data.length; i++){ if (back[i] !== data[i]){ same = false; break; } }
+      if (!same){
+        console.warn(`[dap] 写 0x${addr.toString(16)}（${data.length}B）回读不一致，重写一次`);
+        await this._writeMemOnce(addr, data, apIndex);
+      }
+    } catch (e){ /* 回读失败不阻断写（可能只是读抖动） */ }
+  }
+
+  async _writeMemOnce(addr, data, apIndex = 0){
     if ((addr & 3) === 0 && (data.length & 3) === 0){
       const words = new Uint32Array(data.buffer, data.byteOffset, data.length >> 2);
       await this._setTAR(addr, apIndex);
       let i = 0;
       while (i < words.length){
-        const n = Math.min(this.maxWords, words.length - i);
+        const n = Math.min(this.maxWords, words.length - i, this._wordsToBoundary(addr + i * 4));
+        if (n <= 0 || this._needsTarReset(addr + i * 4, addr)) await this._setTAR(addr + i * 4, apIndex);
         await this._transferBlock(false, n, AP_DRW, words.subarray(i, i + n), apIndex);
         i += n;
       }
       return;
     }
     // 非对齐 → 读-改-写（RTT 下行缓冲的写指针可能不是 4 的倍数）
-    const start = addr & ~3;
-    const end = (addr + data.length + 3) & ~3;
+    const start = (addr & ~3) >>> 0;
+    const end = ((addr + data.length + 3) & ~3) >>> 0;
     const cur = await this.readMem(start, end - start, apIndex);
     cur.set(data, addr - start);
     const words = new Uint32Array(cur.buffer, cur.byteOffset, cur.length >> 2);
     await this._setTAR(start, apIndex);
     let i = 0;
     while (i < words.length){
-      const n = Math.min(this.maxWords, words.length - i);
+      const n = Math.min(this.maxWords, words.length - i, this._wordsToBoundary(start + i * 4));
+      if (n <= 0 || this._needsTarReset(start + i * 4, start)) await this._setTAR(start + i * 4, apIndex);
       await this._transferBlock(false, n, AP_DRW, words.subarray(i, i + n), apIndex);
       i += n;
     }
@@ -491,18 +756,46 @@ export class WebUsbDapProbe {
     await this._setTAR(0xE000EDF0);
     await this._transferBlock(false, 1, AP_DRW, Uint32Array.of(value >>> 0));
   }
-  async run(){ await this._dhcsr(0xA05F0001); }
-  async halt(){ await this._dhcsr(0xA05F0003); }
+
+  /** 读一个 32 位字（内部用；地址已归一化） */
+  async _readWord(addr){
+    const b = await this.readMem(addr, 4);
+    return ((b[0] | (b[1] << 8) | (b[2] << 16) | (b[3] << 24)) >>> 0);
+  }
+
+  /**
+   * 运行/停止目标。
+   * 写完**回读确认**（这颗探针的 AP 写偶发不落地），但确认失败**只警告不抛错**：
+   * 读回来的 DHCSR 本身也可能是滞后的旧值（实测内核明明在跑、回读却说 C_HALT=1），
+   * 为此中断整个烧录流程不划算 —— 真正的判据交给调用方（如 flashloader 的 isHalted 轮询）。
+   */
+  async run(){
+    for (let i = 0; i < 3; i++){
+      await this._dhcsr(0xA05F0001);                       // C_DEBUGEN=1, C_HALT=0
+      const v = await this._readWord(0xE000EDF0);
+      if (((v >>> 1) & 1) === 0) return;                   // C_HALT=0：确实在跑
+      await sleep(10);
+    }
+    console.warn('[dap] 让目标运行的回读一直显示 C_HALT=1（可能是读滞后）——继续，不中断流程');
+  }
+  async halt(){
+    for (let i = 0; i < 3; i++){
+      await this._dhcsr(0xA05F0003);                       // C_DEBUGEN=1, C_HALT=1
+      const v = await this._readWord(0xE000EDF0);
+      if (((v >>> 1) & 1) === 1) return;                   // C_HALT=1：确实停住了
+      await sleep(10);
+    }
+    console.warn('[dap] 停住目标的回读一直显示 C_HALT=0（可能是读滞后）——继续，不中断流程');
+  }
   /** @returns {Promise<boolean>} 目标当前是否处于 halt（DHCSR.S_HALT = bit17） */
   async isHalted(){
     try {
-      const b = await this.readMem(0xE000EDF0, 4);
-      return ((b[0] | (b[1] << 8) | (b[2] << 16) | (b[3] << 24)) >>> 17 & 1) === 1;
+      const v = await this._readWord(0xE000EDF0);
+      return ((v >>> 17) & 1) === 1;
     } catch { return false; }
   }
 
-  /** 内核寄存器读写（AP0 的 DCRSR/DCRDR，flashloader 执行器用；DCRSR 写完要等 S_REGRDY） */
-  async regRead(regsel){
+  /** 内核寄存器读写（AP0 的 DCRSR/DCRDR，flashloader 执行器用；DCRSR 写完要等 S_REGRDY） */  async regRead(regsel){
     await this.writeMem(0xE000EDF4, new Uint8Array([regsel & 0x1f, 0, 0, 0]));
     for (let i = 0; i < 50; i++){
       const b = await this.readMem(0xE000EDF0, 4);
@@ -521,6 +814,37 @@ export class WebUsbDapProbe {
       await sleep(2);
     }
     throw new Error('调试寄存器同步超时（S_REGRDY 没置位）');
+  }
+
+  /**
+   * 跑 flash 算法之前把中断摁住（SysTick + 全部 NVIC IRQ）。
+   *
+   * 🚨 为什么必须：擦除**第一个扇区就是向量表**，向量表一旦为空，任何一个中断
+   *    （固件的 SysTick 每 1ms 一次）都会让内核取到 0xFFFFFFFF → HardFault → 而 HardFault
+   *    向量也空了 → **LOCKUP**。进 LOCKUP 之后 DHCSR.C_HALT 清不掉，只能复位，
+   *    现象就是烧录中途报「无法让目标继续运行（DHCSR.C_HALT 清不掉）」。
+   *    （pyOCD/J-Link 跑算法时同样会先把中断关掉。）
+   * 只是临时摁住：烧完（或失败）都会复位目标，固件重新初始化，不受影响。
+   */
+  async maskInterrupts(){
+    await this.writeMem(0xE000E010, u32leBytes(0));                                  // SysTick：ENABLE/TICKINT 全关
+    for (let i = 0; i < 8; i++) await this.writeMem(0xE000E180 + i * 4, u32leBytes(0xFFFFFFFF));  // NVIC ICER0..7
+  }
+
+  /**
+   * 软复位目标：写 AIRCR.SYSRESETREQ（0xE000ED0C = 0x05FA0004）。
+   *
+   * 🚨 为什么需要它：`reset()` 拉的是探针的 **nRESET 引脚**，很多接线（本机这块 F103 就是）
+   *    根本没把 NRST 连到探针 —— 于是"复位"看着成功，其实目标一直在跑；
+   *    更糟的是内核一旦进了 **LOCKUP**（擦除先擦掉向量表 + 中断进来就会），
+   *    拉 NRST（没接线）救不回来，DHCSR.C_HALT 也清不掉，只能靠 SYSRESETREQ 或断电。
+   *    写 AIRCR 走的是内核寄存器，一定能到。
+   */
+  async sysReset(){
+    await this.writeMem(0xE000ED0C, u32leBytes(0x05FA0004));
+    await sleep(60);
+    await this._targetInit();
+    return '软件复位（AIRCR.SYSRESETREQ）';
   }
 
   /**
@@ -585,6 +909,9 @@ export class WebUsbDapProbe {
   async disconnect(){
     try { await this._ctrl(CMD.Disconnect); } catch {}
     try { await this.device.releaseInterface(this.iface); } catch {}
+    // 🚨 有过超时的会话必须先做端口复位：挂起的 bulk 传输不会随 close() 消失，
+    //    留着它下一次会话（甚至烧录器的 getDevices()）就会被卡住。
+    if (dirty.has(this.device)) await resetDevice(this.device);
     try { await this.device.close(); } catch {}
     this._ready = false;
   }
@@ -594,6 +921,7 @@ export class WebUsbDapProbe {
    * 幂等 —— 重连 SWD、重新给 DP 上电、重设 CSW；目标被停住就让它跑。
    * ⚠️ 中途**不要**用 DAP_Disconnect/Connect 去"重连"（实测会把链路搞成一路 NO ACK），
    *    要恢复就重新走 _targetInit()，实在不行只能重新打开 USB 设备。
+   *    （_targetInit 内部已经带「纯上电失败 → 掉电-上电」的最后手段，这里不必再补。）
    */
   async recover(){
     await this._targetInit();

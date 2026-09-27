@@ -10,6 +10,7 @@
 | **串口助手** | SSCOM 那套核心功能：端口/波特率、ASCII/HEX 收发、**ANSI 彩色接收**（像 MobaXterm）、时间戳、定时发送、5 条快捷发送、保存接收数据、**记录到文件**（高速采集不丢数）、**高速自动关显示**（>50KB/s 停渲染、数据照收） | 桌面版 Chrome / Edge（Web Serial） |
 | **终端** | Xshell 式串口终端：xterm.js 渲染 ANSI、本地回显、回车/退格映射、粘贴发送 | 同上（与串口助手共用同一个串口会话） |
 | **RTT Viewer** | SEGGER RTT 多通道查看 + 下行输入 + 复位目标，四种后端；同样支持记录到文件与高速自动关显示 | **零安装**：WebUSB + CMSIS-DAP 探针<br>**可选**：本地桥 + OpenOCD / J-Link |
+| **烧录器** | .elf/.hex/.bin 写进目标：**零安装 WebUSB**（页面跑 flashloader，擦/写/校验/复位一条龙）或**本地桥 OpenOCD** | 零安装：同上探针；桥：OpenOCD |
 
 > 为什么 RTT 要分三种后端：J-Link 与 OpenOCD 都是**本机程序**，网页无权启动进程、也无权开 TCP。
 > 所以零安装模式下 RTT 走 **WebUSB 直连 CMSIS-DAP 探针**；想用 J-Link/OpenOCD 就启动仓库里的桥（`bridge/`）。
@@ -83,6 +84,10 @@ docs/                   后端配置与排障；逻辑分析仪攻略.md（含 L
 
 ## 自测（不需要硬件也能跑一部分）
 
+> 常用操作都收进 **`Makefile`** 了：`make` 看帮助，`make open` 一键盘起页面+浏览器，
+> `make test` 纯逻辑自测，`make test-hw` 真机验收，`make fw-restore` 把测试固件烧回板子。
+> 下面这些是等价的原始命令。
+
 ```powershell
 # 1) 纯逻辑（RTT 协议 / ELF 符号 / HEX 解析）—— 不需要浏览器、不需要硬件
 node tools\selftest\rtt.test.mjs
@@ -103,6 +108,24 @@ node tools\selftest\browser-hw.test.mjs webusb     # 零安装 RTT
 node tools\selftest\browser-hw.test.mjs bridge     # 桥 + OpenOCD
 node tools\selftest\browser-hw.test.mjs serial     # 串口助手
 ```
+
+## 零安装烧录（WebUSB，2026-09-27 真机打通）
+
+`烧录器` 标签页 → 后端 `WebUSB · 零安装`：页面把 flashloader 算法加载进目标 RAM 跑起来，
+自己完成擦/写/校验/复位（与 RTT 共用同一根探针）。实测：
+`✅ stm32f103 · 4.6 KB · 校验通过 · 已复位运行`（约 3 秒）。
+
+它踩过的坑比较硬核，都写在 `app/flash/*.js` 注释里，也是本次修 bug 的主要战场：
+
+| 现象 | 真因 |
+|---|---|
+| 连探针就报 `SWD FAULT` | `_targetInit` 里"先掉电再上电"，掉电写之后那个上电写**必 FAULT**（本探针 + F103） |
+| `调试寄存器同步超时（S_REGRDY 没置位）` | `readMem` 里 `addr & ~3` 是 **32 位有符号**运算，PPB 地址（≥0x80000000，如 DHCSR）变负数 → `subarray` 越界 → **读回空数组**，其实寄存器写得进去 |
+| `flashloader 执行超时（停在 pc=入口）` | ① LR 必须指向算法 blob 开头的 `BKPT`（`load_address｜1`），写 0xFFFFFFFE 会跑飞；② PC 必须**最后**写；③ 跑算法前要**摁住中断**（SysTick/NVIC），否则擦掉向量表后中断进来直接 LOCKUP |
+| `校验失败：读到 0x0` | 块访问**跨 4KB 边界时 TAR 自增会绕回页首**（ADIv5 的有界自增）：长读的第 9 块读到的是页首数据；写则会**写错地址** |
+| 块读数据"跳相位/错位" | 同址连读时**不能省 TAR 写**（自增会把地址往前带）；读还是**挂起读**，所以每次访问都重写 TAR + 读两遍取新值 |
+| 偶发 `SWD NO ACK` / 界面卡死 | WebUSB **没有取消接口**：`withTimeout` 超时后底层传输仍挂着，会偷响应、甚至把 `getDevices()` 卡死 → 现在超时即把设备标脏并在下次认领前做 **USB 端口复位** |
+
 
 ## 踩过的坑（都写在代码注释里）
 

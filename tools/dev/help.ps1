@@ -1,0 +1,36 @@
+# 显示 Makefile 的帮助。单独放成脚本是为了把控制台编码切到 UTF-8 ——
+# 本机控制台默认 GBK，直接 echo 中文会乱码。
+
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
+
+$lines = @(
+  '串口 / RTT 工具箱 —— 一键操作'
+  ''
+  '  make open          起静态服务 + 打开自测浏览器（一键盘真机调试）'
+  '  make serve         只起静态服务（前台，端口 8899；Ctrl+C 停）'
+  '  make serve-stop    停掉占用 8899 的进程'
+  '  make browser       只打开带 CDP 的自测浏览器（端口 9333）'
+  ''
+  '  make test          纯逻辑自测（RTT 协议 / ELF / HEX，不需要硬件）'
+  '  make test-ui       页面端到端（演示串口，不需要硬件）'
+  '  make test-hw       真机 WebUSB RTT 验收（探针 + 目标板）'
+  '  make test-bridge   桥端到端（OpenOCD + 探针 + 目标板）'
+  '  make test-all      上面全跑一遍'
+  ''
+  '  make bridge        起本地桥（OpenOCD 后端，默认目标 stm32f103）'
+  '  make bridge-stop   停掉本地桥与 OpenOCD'
+  ''
+  '  make fw-build      编译 STM32F103 测试固件'
+  '  make fw-flash      用 OpenOCD 烧测试固件'
+  '  make fw-restore    = fw-build + fw-flash（板子被烧花了就用它救）'
+  ''
+  '  make la-info       逻辑分析仪状态（需要 KingstVIS 正在运行）'
+  '  make la-capture    抓一段 SWD 波形到 tmp/la-now.csv'
+  ''
+  '  make git-status    git 状态 + 最近 5 条提交'
+  '  make git-log       最近 15 条提交'
+  '  make check         语法体检（node --check 各模块）'
+  '  make clean         清掉临时采集/构建杂物'
+)
+$lines | ForEach-Object { Write-Host $_ }

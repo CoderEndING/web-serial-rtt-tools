@@ -19,7 +19,7 @@ import { toast } from '../ui/toast.js';
 import { store } from '../core/store.js';
 import { CHIPS, fillChipSelect } from '../core/chips.js';
 import { BridgeClient } from '../rtt/bridge.js';
-import { WebUsbDapProbe } from '../rtt/dap-webusb.js';
+import { WebUsbDapProbe, withTimeout } from '../rtt/dap-webusb.js';
 import { ALGOS } from './algos.js';
 import { FlashRunner } from './runner.js';
 import { parseFirmware } from './image.js';
@@ -167,16 +167,34 @@ export class FlashView {
     // 探针：复用已授权的（不弹框），没有才弹浏览器选择框。
     // 烧录强制 1MHz：flashloader 执行依赖 PPB（调试寄存器）访问，实测本探针固件
     // 在高时钟下 PPB 访问不可靠（读回 0），RTT 那种纯 RAM 访问则 8MHz 没问题。
-    const auth = await WebUsbDapProbe.authorized();
+    //
+    // 🚨 每一步都必须带超时：WebUSB 的挂起传输会把浏览器的 USB 服务搞脏，
+    //    那时 `navigator.usb.getDevices()` 会**永远不返回**（实测卡 90 秒以上、界面看着像死了，
+    //    连 RTT 那边也一起连不上）。宁可 5 秒报错让用户刷新/拔插，也不要无声卡死。
+    let auth;
+    try {
+      auth = await withTimeout(WebUsbDapProbe.authorized(), 5000, '枚举已授权探针');
+    } catch (e){
+      throw new Error(`${e.message} —— 浏览器 USB 服务可能被上一次中断的会话卡住了：刷新页面（或拔插一次探针）再试`);
+    }
     this.probe = auth.length
-      ? await WebUsbDapProbe.open(auth[0], { clockKhz: 1000 })
-      : await WebUsbDapProbe.request(false, { clockKhz: 1000 });
+      ? await withTimeout(WebUsbDapProbe.open(auth[0], { clockKhz: 1000 }), 15000, '连接探针（WebUSB）')
+      : await withTimeout(WebUsbDapProbe.request(false, { clockKhz: 1000 }), 60000, '等你在浏览器里选探针');
 
     const verify = $('f-verify').checked;
     const doReset = $('f-reset').checked;
     const runner = new FlashRunner(this.probe);
     this._log(`── 零安装烧录：${this.file.name}（${fBytes(total)}）→ ${chip} ──`);
     this._bar(1);
+    /**
+     * 🚨 开烧之前**先复位一次目标**。
+     *    烧录会先把向量表所在的扇区擦掉，此时若中断进来内核就进 **LOCKUP**；
+     *    而 LOCKUP 一旦进入就出不来（DHCSR.C_HALT 清不掉，只能复位）。
+     *    上一次被中断的烧录留下的 LOCKUP 会让这一次连"让目标跑起来"都做不到
+     *    （报「无法让目标继续运行」）。复位是最便宜、最干净的入场券。
+     */
+    this._status('复位目标（清掉上一次可能留下的 LOCKUP）…');
+    try { await this.probe.sysReset(); } catch (e){ this._log('软复位失败（继续试）：' + (e?.message || e)); }
     this._status('加载 flashloader 到目标 RAM…');
     await runner.load(algo);
 
@@ -225,7 +243,13 @@ export class FlashView {
       this._status('校验（读回比对）…');
       this._bar(90);
       for (const seg of regions){
-        const rb = await this.probe.readMem(seg.addr, seg.data.length);
+        /**
+         * 🚨 用「连读一致才认」的稳定读，而不是单次 readMem：
+         *    这颗探针的 AP 读是**挂起读**（读回上一笔事务的数据），紧跟算法写 flash 之后
+         *    的第一遍读常常整段是旧值 —— 实测就出现过"读到 0x0、期望 0xe7"，而 flash 里
+         *    其实写对了（用裸客户端读同一个地址是正确的）。读两次一致才认，读不可靠时不会误报。
+         */
+        const rb = await this._readStable(seg.addr, seg.data.length);
         for (let i = 0; i < seg.data.length; i++){
           if (rb[i] !== seg.data[i]){
             throw new Error(`校验失败：0x${(seg.addr + i).toString(16)} 处读到 0x${rb[i].toString(16)}，期望 0x${seg.data[i].toString(16)}`);
@@ -246,8 +270,28 @@ export class FlashView {
     toast('烧录成功', 'ok', 5000);
   }
 
-  _checkRange(seg, algo){
-    if (seg.addr < algo.flash_start || seg.addr + seg.data.length > algo.flash_start + algo.flash_length){
+  /**
+   * 稳定读：连续两次读到的内容完全一致才认（最多 5 轮）。
+   * 专治这颗探针的「挂起读」——紧跟写操作之后的第一遍读拿到的是上一笔事务的数据。
+   * ⚠️ 只用于**静态**数据（flash 校验）：RTT 之类的动态内存本来就会变，别用它。
+   */
+  async _readStable(addr, len){
+    let prev = await this.probe.readMem(addr, len);
+    for (let i = 0; i < 4; i++){
+      const cur = await this.probe.readMem(addr, len);
+      if (cur.length === prev.length){
+        let same = true;
+        for (let j = 0; j < cur.length; j++){ if (cur[j] !== prev[j]){ same = false; break; } }
+        if (same) return cur;
+      }
+      prev = cur;
+      await new Promise(r => setTimeout(r, 20));
+    }
+    this._log('（提示：校验读连续 5 轮都不一致，可能是读不可靠或目标在动）');
+    return prev;
+  }
+
+  _checkRange(seg, algo){    if (seg.addr < algo.flash_start || seg.addr + seg.data.length > algo.flash_start + algo.flash_length){
       throw new Error(`固件地址 0x${seg.addr.toString(16)}… 超出 ${$('f-chip').value} 的 flash 范围（0x${algo.flash_start.toString(16)} 起 ${fBytes(algo.flash_length)}）—— 芯片选对了吗？`);
     }
   }

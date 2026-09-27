@@ -9,7 +9,7 @@ import { store } from '../core/store.js';
 import { RxBuffer } from '../core/rxview.js';
 import { FileRecorder } from '../core/recorder.js';
 import { Rtt } from './protocol.js';
-import { WebUsbDapProbe } from './dap-webusb.js';
+import { WebUsbDapProbe, withTimeout } from './dap-webusb.js';
 import { MockProbe } from './mock.js';
 import { BridgeClient } from './bridge.js';
 import { findSymbol } from './elf.js';
@@ -200,14 +200,21 @@ export class RttView {
     try {
       if (b === 'webusb'){
         // 已经授权过的探针**不用再弹选择框**（用户体验也好得多）；想换设备点「换设备…」
-        const auth = this._forcePick ? [] : await WebUsbDapProbe.authorized();
+        // 🚨 全部加超时：USB 服务被挂起传输搞脏时，getDevices()/open() 会永远不返回，
+        //    界面看着像"点了一下就没反应"（实测卡过 90 秒）。宁可 5 秒报错并给出自救提示。
+        let auth;
+        try {
+          auth = this._forcePick ? [] : await withTimeout(WebUsbDapProbe.authorized(), 5000, '枚举已授权探针');
+        } catch (e){
+          throw new Error(`${e.message} —— 浏览器 USB 服务可能被上一次中断的会话卡住了：刷新页面（或拔插一次探针）再试`);
+        }
         this._forcePick = false;
         const clockKhz = Number(store.get('rtt.clockKhz', 0)) || 0;
         if (auth.length){
-          this.probe = await WebUsbDapProbe.open(auth[0], { clockKhz });
+          this.probe = await withTimeout(WebUsbDapProbe.open(auth[0], { clockKhz }), 20000, '连接探针');
           toast('使用已授权探针：' + this.probe.name, 'ok');
         } else {
-          this.probe = await WebUsbDapProbe.request($('r-usb-all').checked, { clockKhz });
+          this.probe = await withTimeout(WebUsbDapProbe.request($('r-usb-all').checked, { clockKhz }), 60000, '等你在浏览器里选探针');
           toast('探针已连接：' + this.probe.name, 'ok');
         }
         this.stream = false;
