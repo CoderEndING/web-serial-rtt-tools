@@ -89,6 +89,20 @@ export class RttView {
     store.bind($('r-ocd-target'), 'rtt.ocdTarget');
     store.bind($('r-ocd-cfgs'), 'rtt.ocdCfgs');
     store.bind($('r-ocd-speed'), 'rtt.ocdSpeed');
+    /**
+     * J-Link 这条路的两个参数（以前只有 localStorage、页面上没有入口，用户没法改）：
+     *   · rtt.jlinkDevice —— 传给 J-Link 的器件名
+     *   · rtt.jlinkSpeed  —— SWD 时钟 kHz（50000 = 50MHz）
+     * 注意**页面传的值会覆盖桥的 bridge.config.json**（桥那边是 jlink.device / jlink.speed），
+     * 所以两边的默认值必须一致 —— 都是 STM32F103C8 / 50000，改一处记得改另一处。
+     */
+    store.bind($('r-jlink-device'), 'rtt.jlinkDevice');
+    store.bind($('r-jlink-speed'), 'rtt.jlinkSpeed');
+    /**
+     * 「高速只读」：数据源从桥自启的 GDBServer telnet（全双工，实测上限 ~565 KB/s）
+     * 换成 JLinkRTTLogger 落文件 + 桥 tail（~1463 KB/s）。默认**关**——勾上就没有下行了。
+     */
+    store.bind($('r-jlink-fast'), 'rtt.jlinkFast', 'checked');
     $('r-ocd-target').addEventListener('change', () => this._applyOcdTarget(true));
     this._applyOcdTarget(false);      // 只同步自定义行的显隐；RAM 范围是用户存过的值，别在加载时覆盖
     // 「选择…」：列出桥所在机器的 OpenOCD cfg 让你挑（浏览器拿不到本地文件路径，列表只能由桥给）
@@ -115,6 +129,8 @@ export class RttView {
       const b = $('r-backend').value;
       $('r-webusb-box').hidden = b !== 'webusb';
       $('r-bridge-box').hidden = !(b === 'bridge-openocd' || b === 'bridge-jlink');
+      // J-Link 的 device/speed 只在「本地桥 · J-Link」下才有意义，别的后端别摆出来晃眼
+      $('r-jlink-box').hidden = b !== 'bridge-jlink';
       $('r-mock-box').hidden = b !== 'mock';
     };
     applyBackend();
@@ -255,8 +271,12 @@ export class RttView {
         }
         if (backend === 'jlink'){
           cfg.jlink = store.get('rtt.jlinkPath', '');
-          cfg.device = store.get('rtt.jlinkDevice', '');
-          cfg.speed = Number(store.get('rtt.jlinkSpeed', 4000)) || 4000;
+          // device/speed 现在页面上有输入框了（#r-jlink-device / #r-jlink-speed）：
+          // 留空就退回默认（与 bridge/bridge.config.json 的 jlink 段保持一致）
+          cfg.device = String(store.get('rtt.jlinkDevice', 'STM32F103C8') || 'STM32F103C8').trim();
+          cfg.speed = Number(store.get('rtt.jlinkSpeed', 50000)) || 50000;
+          // 勾了「高速只读」就让桥用 JLinkRTTLogger 当数据源（桥端见 JLinkBackend.start 的 loggerExe）
+          if ($('r-jlink-fast').checked) cfg.mode = 'logger';
         }
         const r = await bc.open(backend, cfg);
         this.bridge = bc;
@@ -672,6 +692,15 @@ export class RttView {
     if (on){
       setStatus($('r-err'), `高速 ${fRate(r)}：渲染已停（收数/记录不受影响）· 点此恢复显示`, 'err');
       $('r-err').title = '点击恢复显示。若速率仍高于阈值会再次自动关闭';
+      /**
+       * 🚨 **必须在这块区域里也留一行**，不能只改状态栏。
+       *    实测踩到：J-Link 高速只读（~1.4MB/s）一接上，用户盯着的终端就"凭空冻住"了 ——
+       *    状态栏那句小字没人注意，于是得出"页面一个字节都没收到"的结论（其实 10 秒收了 15MB）。
+       *    这里跟下面"恢复显示"时的提示对称：开始停渲染时说明一次，之后一个字都不再写。
+       */
+      const note = `\r\n[高速 ${fRate(r)}：已停止渲染以省 CPU —— 数据仍在收（统计、计数、记录到文件都照常）· 点状态栏可恢复显示]\r\n`;
+      if (this.mode === 'term' && this.term) this._termWrite(new TextEncoder().encode(note), new Date());
+      else this.tx.push(new TextEncoder().encode(note), new Date());
     } else {
       setStatus($('r-err'), '', null);
       $('r-err').title = '';

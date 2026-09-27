@@ -34,17 +34,82 @@ ESP-IDF 自带那份 OpenOCD（`~\.espressif\tools\openocd-esp32\v0.12.0-esp32-*
 目标配置写在 `bridge/bridge.config.json`：`cfgs` 顺序加载，`pre` 里的命令插在第一个 cfg 之后、
 其余 cfg 之前（`cmsis-dap backend usb_bulk` 必须赶在 `target/*.cfg` 里的 `transport select` 之前）。
 
-## 三、J-Link 后端（未实测）
+## 三、J-Link 后端（真机实测：SEGGER J-Link PRO + STM32F103RB，SWD 50MHz）
 
-本机没有 J-Link 探针，所以这条路**没有在真硬件上验证过**，只按 SEGGER 文档实现：
+目标跑用户固件（死循环狂发 `b`，RTT 控制块在 `0x20000000` 一带）。
 
-- **attach 模式**：连本机 `127.0.0.1:19021`（J-Link 的 RTT telnet 服务），ch0 全双工。
-  前提是已经有一个带 RTT 的 J-Link 会话在跑（例如 JLinkRTTViewer）。
-- **logger 模式**：桥自己拉 `JLinkRTTLogger.exe -Device X -If SWD -Speed N -RTTChannel n <文件>`，
-  tail 文件内容 → 只读，但能拿任意通道。可用参数（本机 V8.82 实测的 `-?` 输出）：
-  `-Device -If -Speed -USB -IP -RTTAddress -RTTSearchRanges -RTTChannel -JLinkScriptFile <OutFilename>`。
-- J-Link **没有 WebUSB 通路**（协议不开放；`JLinkUSBWebServer.exe` 只是开 SEGGER 自家的网页界面，
-  不对外提供 RTT API），所以想用 J-Link 就必须起桥。
+### 3.1 各条取数路径的实测吞吐（同一块板、同一速率，本轮复测）
+
+| 取数路径 | 吞吐 | 说明 |
+|---|---|---|
+| `JLinkRTTLogger.exe` 直写文件（官方 CLI 基线） | **1463.4 KB/s** | 与用户 `make do_log` 的 1465.7 KB/s 一致 |
+| **经桥到网页（logger 源，页面勾「高速只读」）** | **1463.0 KB/s** | 转发后与官方 CLI 持平，代价是**只读** |
+| `JLinkGDBServerCL` 的 RTT telnet（裸读，不过桥） | **565.4 KB/s** | 8192 B/帧、约 71 帧/秒 ≈ 每 14ms 才轮询一次 RTT |
+| 同上 + 每 20ms 塞一个 GDB 请求 | 578.9 KB/s | 想"催"它多轮询基本无效 |
+| **经桥到网页（GDBServer 源，默认全双工）** | **567.1 KB/s** | = 裸 telnet 的 100.3%，转发层已不构成瓶颈 |
+| 不连 GDB 客户端直接读 telnet | 1.0 KB/s | 目标被 server 按在 halt 上，只吐 8 KB 缓冲存量 |
+
+**结论：网页这条 J-Link 通路的天花板在数据源，不在转发层。**
+`JLinkGDBServerCL` 的 RTT telnet 自带 ~14ms 的轮询节奏（它的二进制里也没有轮询间隔开关），
+想上 MB/s 只能换源 → 用 `JLinkRTTLogger`。
+
+### 3.2 桥里的两种 J-Link 模式
+
+- **全双工（默认）**：桥自启 `JLinkGDBServerCL -RTTTelnetPort 19021` 再连它的 telnet，ch0 收发都行，
+  上限 ~565 KB/s。server 起来后目标默认 **halt**，桥会连 GDB 端口补一句 `c` 让它跑
+  （不补就只出 4KB 缓冲存量，现象像"RTT 坏了"）。
+- **高速只读（页面里勾选）**：桥拉
+  `JLinkRTTLogger.exe -Device X -If SWD -Speed N [-RTTAddress 0x…] -RTTChannel n <临时文件>`，
+  每 25ms tail 一次转发，实测 ~1463 KB/s。**不能向下发**（`stream.write` 会报错）；
+  日志落在 `%TEMP%`，桥停会话时删除（1.4MB/s 下一小时约 5GB，别指望它长期存档）。
+
+### 3.3 转发层（这次改的就是它）
+
+- RTT 流走 **WebSocket 二进制帧**（opcode 0x2），不再 base64 + JSON：老写法体积 +33%，
+  且每包一次 `JSON.stringify` + base64 编码 + 一次 write 系统调用。
+- 桥端**攒批**：`≥32KB` 或每 `20ms`（先到先发）才发一帧；实测帧均值从 ~4KB 涨到 ~19.7KB。
+- 页面 `app/rtt/bridge.js` 设 `binaryType='arraybuffer'`，二进制优先，
+  同时保留老的 `{t:'stream.data', data:base64}` 分支兼容旧桥。
+
+### 3.4 其它实测坑（细节都写在 `bridge/rtt-bridge.mjs` 注释里）
+
+- **绝对不要给 server 加 `-singlerun`**：GDB 端口连上再断开会被当成"会话结束"，server 当场退出。
+- RTT telnet 口会先吐 server 自己的横幅（`SEGGER J-Link V8.82 …`），必须逐行滤掉。
+- J-Link 同一时刻只允许一个持有者 —— 烧录前桥会先停掉 RTT 会话。
+- 官方 CLI 可用参数（`JLinkRTTLogger.exe -?`）：`-Device -If -Speed -USB -IP -RTTAddress -RTTSearchRanges -RTTChannel -JLinkScriptFile <OutFilename>`。
+- J-Link **没有 WebUSB 通路**（协议不开放），想用 J-Link 就必须起桥。
+
+### 3.5 烧录（JLink.exe Commander）
+
+`flash(backend=jlink)` 用官方 `JLink.exe`：`erase → loadfile → verify → r`，烧完不自动重启 RTT。
+验收口径：经桥烧 `tools/target-firmware/stm32f103/build/fw.elf`（153624 B 的 ELF）→
+`tmp/jlink-accept.mjs check` 读回与 `objcopy` 出的镜像**逐字节比对**（本次 4676 B 全等 ✅）。
+
+### 3.6 真页面实测（CDP 驱动，`tmp/page-rtt-jlink-probe.mjs` / `tmp/page-rtt-diag.mjs`）
+
+前提：`python -m http.server 8899` 供页面 + `bridge/rtt-bridge.mjs --port 17321` + 带 CDP(9333) 的浏览器。
+
+| 页面里选的模式 | 10 秒收到 | 速率 | 样本 |
+|---|---|---|---|
+| 勾「高速只读」（JLinkRTTLogger 源） | 13.5 MB（另一次 15.2 MB） | **1318~1485 KB/s** | `bbbb…` ✅ |
+| 不勾（GDB server 全双工流） | 4.60 MB | **448 KB/s** | `bbbb…` ✅ |
+
+**量页面有没有收到数据，只有 `window.__tools.rtt.stats.bytes` 算数**（配 `term.buffer.active.length` 看显示）。
+三个看着像、其实不成立的指标（第一版验收脚本就栽在这上面，误判成"页面一个字节都没收到"）：
+
+- ✗ `#r-term` 的 `textContent.length`：**空 xterm 就有 5 万多字符**（一堆 `&nbsp;` 单元格），
+  而且 DOM 渲染器复用固定的行节点、内容原地覆盖 → 长度几乎不涨。
+- ✗ `__tools.rtt.rxBytes` / `totalBytes`：**这两个属性不存在** → 恒为 0。
+- ✗ `__tools.rtt.running`：它只表示"**内存轮询循环**在跑"（WebUSB/OpenOCD 那条路）。
+  J-Link 流模式是桥**推**数据，本来就没有轮询循环 → `running:false` 是正常的，跟收没收到数据无关。
+
+另外两点页面行为，容易再次误判：
+
+- **速率 >100 KB/s 时页面会自动停渲染**（`_highspeedGate`，`app/rtt/view.js`，WebUSB 时代就有的省 CPU 设计）：
+  于是终端"冻住"，但字节照收、统计照涨、记录到文件照写。现在停渲染的那一刻会在终端里写一行说明
+  （否则盯终端的人只会看到画面凭空不动）。
+- 页面默认流模式（GDB server 源）稳定在 ~450 KB/s，比同模式下 Node 客户端测到的 ~565 KB/s 低 ~20%
+  （浏览器侧接收/调度开销，未深挖）；换 logger 源后页面反而能跑到 1.3~1.5 MB/s。
 
 ## 四、WebUSB 后端的坑（都是真机踩出来的）
 

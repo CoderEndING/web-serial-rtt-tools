@@ -222,6 +222,18 @@
         </div>
         <div id="r-bridge-box" hidden>
           <label class="row"><span>桥地址</span><input id="r-bridge-url" value="ws://127.0.0.1:17321"></label>
+          <!-- J-Link（本地桥 · J-Link ch0）专用两格：原来这两个值只躺在 localStorage 里，页面上没入口。
+               device 是给 J-Link 的器件名；speed 是 SWD 时钟 kHz（50000 = 50MHz，J-Link PRO + F103 实测可用）。 -->
+          <div id="r-jlink-box" hidden>
+            <label class="row"><span>器件</span>
+              <input id="r-jlink-device" value="STM32F103C8" title="给 J-Link 的器件名（如 STM32F103C8 / STM32F103RB / STM32H7B0VB）">
+            </label>
+            <label class="row"><span>SWD kHz</span>
+              <input id="r-jlink-speed" class="num" inputmode="numeric" value="50000" title="SWD 时钟（kHz）：50000 = 50MHz（J-Link PRO + STM32F103RB 实测可用）。调低只会更慢，不会更稳">
+            </label>
+            <label class="chk"><input type="checkbox" id="r-jlink-fast"> 高速只读（JLinkRTTLogger）</label>
+            <p class="hint">勾上走 JLinkRTTLogger 直写日志（实测 ~1463 KB/s）；不勾走桥自启的 GDB server telnet（全双工，但它的 RTT 轮询节奏把上限压在 ~565 KB/s）。<br>代价：高速模式<b>只读</b>，下方发送框不能向下发数据。</p>
+          </div>
           <div class="row cfgrow" id="r-ocd-custom-cfgs-row" hidden><span>cfg 文件</span>
             <input id="r-ocd-cfgs" title="逗号/空格分隔，按顺序加载。相对 OpenOCD scripts 目录或绝对路径。第一个 cfg 是 cmsis-dap 时会自动加 backend usb_bulk">
             <button id="r-ocd-cfgs-pick" type="button" title="列出桥所在机器的 OpenOCD cfg 让你挑（浏览器拿不到本地文件路径，所以列表由桥提供）">选择…</button>

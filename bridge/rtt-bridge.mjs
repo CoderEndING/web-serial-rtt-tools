@@ -233,6 +233,17 @@ class WsConn {
     try { this.socket.write(Buffer.concat([head, payload])); } catch { this.alive = false; }
   }
   send(obj){ this._frame(0x1, Buffer.from(JSON.stringify(obj))); }
+  /**
+   * 发**二进制帧**（opcode 0x2）—— RTT 字节流走这条。
+   *
+   * 为什么不用 JSON + base64：base64 让体积 +33%，且每个包都要 `JSON.stringify` + base64 编码。
+   * ⚠️ 但**别把这条当成提速的银弹**：实测（J-Link PRO + F103，50MHz）改之前之后端到端都是
+   *    ~557 → 567 KB/s，因为天花板根本不在转发层，而在数据源（JLinkGDBServerCL 的 RTT telnet
+   *    只有 ~565 KB/s，见 JLinkBackend.start 的注释）。二进制帧的价值是：转发层不再额外
+   *    放大/编码数据（裸 telnet 565 → 经桥 567 KB/s，已经是 100%），CPU 与内存拷贝也省下来。
+   * `_frame` 本来就支持 126/127 两种长度头，32KB 的包自动落到 127（8 字节长度）分支。
+   */
+  sendBinary(buf){ this._frame(0x2, Buffer.isBuffer(buf) ? buf : Buffer.from(buf)); }
   close(code = 1000){
     if (!this.alive) return;
     const p = Buffer.alloc(2);
@@ -445,11 +456,18 @@ class OpenOcdBackend {
 /** 读 config 里的 jlink 段（没有就空对象，调用方各自兜底） */
 function cfgJlink(){ return (config && config.jlink) || {}; }
 
-/** 找 JLinkGDBServerCL.exe / JLink.exe：配置 → PATH → 默认安装目录里版本号最大的那份 */
+/**
+ * 找 JLinkGDBServerCL.exe / JLink.exe / JLinkRTTLogger.exe：
+ * 配置 → PATH → 默认安装目录里版本号最大的那份
+ */
 function findJLinkExe(which = 'server'){
-  const name = which === 'server' ? 'JLinkGDBServerCL.exe' : 'JLink.exe';
+  const name = which === 'server' ? 'JLinkGDBServerCL.exe'
+             : which === 'rttlogger' ? 'JLinkRTTLogger.exe'
+             : 'JLink.exe';
   const conf = cfgJlink();
-  const explicit = which === 'server' ? (conf.gdbserver || args.jlinkServer) : (conf.exe || args.jlinkExe);
+  const explicit = which === 'server' ? (conf.gdbserver || args.jlinkServer)
+                 : which === 'rttlogger' ? (conf.rttLogger || args.jlinkLogger)
+                 : (conf.exe || args.jlinkExe);
   if (explicit && fs.existsSync(explicit)) return explicit;
   const candidates = [];
   for (const dir of String(process.env.PATH || '').split(path.delimiter)){
@@ -518,6 +536,17 @@ function rspContinue(port, onLog){
  *      必须滤掉，否则页面终端里凭空多一行。
  *   另外实测：server 起来后**目标不会被按住**（流里数据一直在走），所以不需要额外 continue。
  */
+/**
+ * 转发批量化的两个阈值 —— **谁先到算谁**：
+ *   · 攒够 32KB 立刻发（数据量一大基本都由它触发，等于"有多大发多大"）
+ *   · 否则最多等 20ms 就发（低速时保证实时性：1KB/s 也照样每 20ms 见字）
+ * 攒批不是"提速银弹"，它是**摊薄每字节开销**：telnet 的 data 事件很碎（实测每包 ~1.4KB），
+ * 不攒的话每 1.4KB 就要付一次 JSON/base64/write 的固定成本。实测帧均值 4KB → 19.7KB。
+ * 端到端吞吐的天花板在数据源那边（见 JLinkBackend 的两种模式）。
+ */
+const STREAM_FLUSH_BYTES = 32 * 1024;
+const STREAM_FLUSH_MS = 20;
+
 class JLinkBackend {
   constructor(cfg = {}){
     this.cfg = cfg || {};
@@ -529,27 +558,70 @@ class JLinkBackend {
     this.banner = Buffer.alloc(0);
     this.bannerDone = false;
     this.gdb = null;              // 常连的 GDB RSP 连接（发过 c，让目标一直跑）
+    this.mode = '';               // 'logger' | 'spawn' | 'attach'（决定 name 与收尾动作）
+    this.outBuf = [];             // 待转发的数据块（攒批用，见 _queue）
+    this.outBytes = 0;
+    this.flushTimer = null;
+    this.onData = null;           // 上层给的"一段字节"消费者（桥里就是发二进制帧那个回调）
   }
-  get name(){ return this.child ? 'J-Link (RTT ch0 流 · 自启)' : 'J-Link (RTT ch0 流)'; }
+  get name(){
+    if (this.mode === 'logger') return 'J-Link (RTT logger 高速只读)';
+    return this.child ? 'J-Link (RTT ch0 流 · 自启)' : 'J-Link (RTT ch0 流)';
+  }
   get port(){ return Number(this.cfg.rttPort || cfgJlink().rttPort || args.jlinkPort || 19021); }
   get device(){ return String(this.cfg.device || this.cfg.jlinkDevice || cfgJlink().device || args.jlinkDevice || 'STM32F103C8'); }
   get speed(){ return Number(this.cfg.speed || cfgJlink().speed || 4000); }
   get gdbPort(){ return Number(this.cfg.gdbPort || cfgJlink().gdbPort || 2331); }
 
   async start(onLog, onData){
-    const emit = d => this._emit(d, onData);
-    if (args.jlinkLogger){
-      const exe = args.jlinkLogger;
+    /**
+     * 🚨 转发路径上**唯一**的出入口：telnet 收到的字节先过 `_emit`（滤横幅），
+     *    再进 `sink` → `_queue`（攒批），最后才由上层一次性发出去（二进制帧）。
+     *    原来这里是 `d => this._emit(d, onData)`：telnet 每来一小包就发一条 base64+JSON 的
+     *    WS 消息 —— 小包 + 编码开销，属于"转发层自己给自己加的成本"，现在没有了。
+     */
+    const sink = d => this._queue(d);
+    this.onData = onData;
+    const emit = d => this._emit(d, sink);
+    /**
+     * 高速只读模式：数据源换成 **JLinkRTTLogger**（落文件，桥 tail 转发）。
+     *
+     * 🚨 为什么需要它（实测，J-Link PRO + STM32F103RB，都是 50MHz SWD）：
+     *    · JLinkRTTLogger 直写文件      = **1463 KB/s**（和用户 make do_log 的 1465.7 一致）
+     *    · JLinkGDBServerCL 的 RTT telnet = **565 KB/s**（裸读，不经过桥；8192B/帧、约 71 帧/秒
+     *      ≈ 每 14ms 才轮询一次 RTT —— 这是 server 自己的节奏，加 GDB 流量也压不上去，
+     *      实测每 20ms 塞一个 GDB 请求只从 565 涨到 578 KB/s）
+     *    也就是说**桥这条通路的天花板在数据源，不在转发层**：转发层已经做到裸 telnet 的 98%。
+     *    想上 1MB/s 只能换源 —— 代价是 logger 只读（不能向下发 stream.write）。
+     *    所以这是个**显式选择**：网页上勾「高速只读」走这条，不勾仍走全双工 GDB server。
+     */
+    const loggerExe = args.jlinkLogger ||
+      ((this.cfg.mode === 'logger' || this.cfg.logger === true) ? findJLinkExe('rttlogger') : '');
+    if (loggerExe){
+      const exe = loggerExe;
+      this.mode = 'logger';
       this.file = path.join(os.tmpdir(), `rtt-jlink-${Date.now()}.log`);
       const argv = [];
       if (this.device) argv.push('-Device', this.device);
-      argv.push('-If', 'SWD', '-Speed', String(this.speed), '-RTTChannel', String(args.jlinkChannel));
-      argv.push(this.file);
+      argv.push('-If', 'SWD', '-Speed', String(this.speed));
+      /**
+       * 钉死 RTT 控制块地址（页面从 ELF 里拿到 _SEGGER_RTT 时会给）。
+       * 用 `-RTTAddress` 而不是搜索范围：logger 的用法说明里这是直给地址的那个开关，最不含糊。
+       * 不传就让它自己搜（自动搜索可能撞上上一份固件留在 RAM 里的旧控制块，见 _spawnServer 的注释）。
+       */
+      if (this.cfg.rttAddr && Number(this.cfg.rttAddr) > 0){
+        argv.push('-RTTAddress', '0x' + Number(this.cfg.rttAddr).toString(16));
+      }
+      argv.push('-RTTChannel', String(args.jlinkChannel));
+      argv.push(this.file);                    // ← 输出文件名必须放最后（logger 的用法要求）
+      // 先建空文件再起进程：反过来（先起进程再截断）会把 logger 刚写进去的内容截掉
+      fs.writeFileSync(this.file, '');
+      this.pos = 0;
       onLog?.(`启动 ${exe} ${argv.join(' ')}`);
       this.child = spawn(exe, argv, { stdio: ['ignore', 'pipe', 'pipe'] });
       this.child.stdout.on('data', d => onLog?.(String(d).trimEnd()));
       this.child.stderr.on('data', d => onLog?.(String(d).trimEnd()));
-      fs.writeFileSync(this.file, '');
+      // 25ms 一轮：1.4MB/s 时一次读 ~35KB，本地文件读不是瓶颈，只为压低"看到字"的延迟
       this.timer = setInterval(() => {
         try {
           const st = fs.statSync(this.file);
@@ -559,11 +631,12 @@ class JLinkBackend {
             fs.readSync(fd, buf, 0, buf.length, this.pos);
             fs.closeSync(fd);
             this.pos = st.size;
-            onData?.(buf);
+            sink(buf);                      // 同样走攒批（一轮可能读到几十 KB）
           }
         } catch {}
-      }, 100);
-      return { mode: 'logger', file: this.file, note: 'JLinkRTTLogger 落文件后 tail：只读，可拿任意通道' };
+      }, 25);
+      return { mode: 'logger', readOnly: true, file: this.file, device: this.device, speed: this.speed,
+               note: `JLinkRTTLogger 高速只读（device=${this.device}，SWD ${this.speed}kHz）：实测 ~1463 KB/s，不能向下发送` };
     }
 
     let spawned = false;
@@ -581,9 +654,10 @@ class JLinkBackend {
                  : '请先用 JLinkRTTViewer 把它开起来，或去掉 --jlink-attach 让桥自启，或用 --jlink-logger。'))));
     });
     this.sock.on('data', emit);
+    this.mode = spawned ? 'spawn' : 'attach';
     return {
-      mode: spawned ? 'spawn' : 'attach', port: this.port, device: this.device, speed: this.speed,
-      note: spawned ? `J-Link 自启 RTT telnet（device=${this.device}，SWD ${this.speed}kHz）`
+      mode: this.mode, port: this.port, device: this.device, speed: this.speed,
+      note: spawned ? `J-Link 自启 RTT telnet（device=${this.device}，SWD ${this.speed}kHz）：全双工，实测上限 ~565 KB/s（受 server 的 RTT 轮询节奏限制）`
                     : 'J-Link RTT ch0 全双工（telnet）',
     };
   }
@@ -659,13 +733,47 @@ class JLinkBackend {
     if (this.banner.length > 2048){ this.bannerDone = true; onData?.(this.banner); this.banner = Buffer.alloc(0); }
   }
 
+  /**
+   * 攒批：把 telnet 来的碎包堆进 outBuf，等 `_flush` 一次性交出去。
+   * 🚨 为什么攒：telnet 的 `data` 事件很碎（实测每包 ~1.4KB），不攒的话每 1.4KB 就要付一次
+   *    base64 编码 + `JSON.stringify` + `socket.write` 的固定开销。攒成 32KB 后这些成本被摊薄，
+   *    帧均值从 ~4KB 涨到 ~19.7KB。注意：**这不是端到端提速的来源** —— 天花板在数据源
+   *    （GDB server 的 telnet 只有 ~565 KB/s），攒批只是保证转发层不成为新的瓶颈。
+   */
+  _queue(d){
+    if (!d || !d.length) return;
+    this.outBuf.push(d);
+    this.outBytes += d.length;
+    if (this.outBytes >= STREAM_FLUSH_BYTES) this._flush();                 // 大数据量：攒够就走
+    else if (!this.flushTimer) this.flushTimer = setTimeout(() => this._flush(), STREAM_FLUSH_MS);
+  }
+
+  /** 把攒着的字节一次性交上层（没东西可发就什么都不做） */
+  _flush(){
+    clearTimeout(this.flushTimer);
+    this.flushTimer = null;
+    if (!this.outBytes) return;
+    // 只有一块时直接原样发（零拷贝）；多块才拼
+    const chunk = this.outBuf.length === 1 ? this.outBuf[0] : Buffer.concat(this.outBuf, this.outBytes);
+    this.outBuf = [];
+    this.outBytes = 0;
+    try { this.onData?.(chunk); } catch {}
+  }
+
   async write(bytes){
     if (this.sock) this.sock.write(bytes);
-    else throw new Error('JLinkRTTLogger 模式下只能读，不能写');
+    else throw new Error('「高速只读」（JLinkRTTLogger）模式下只能读，不能向下发送：'
+      + '需要下发就在 J-Link 那组里取消勾选「高速只读」，改走 GDB server 的全双工 telnet');
   }
 
   stop(){
     clearInterval(this.timer);
+    this._flush();                            // 收摊前把攒着的尾巴先发出去，别丢最后一段数据
+    clearTimeout(this.flushTimer);
+    this.flushTimer = null;
+    this.outBuf = [];
+    this.outBytes = 0;
+    this.onData = null;
     try { this.sock?.destroy(); } catch {}
     try { this.gdb?.destroy(); } catch {}     // 常连的 RSP（它在给目标"继续"状态，必须一起收掉）
     this.gdb = null;
@@ -674,7 +782,14 @@ class JLinkBackend {
       try { spawn('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore' }); } catch {}
       try { this.child.kill(); } catch {}
     }
-    this.sock = null; this.child = null;
+    /**
+     * logger 模式会把 RTT 流全量写进 %TEMP%：1.4MB/s 下一小时就是 ~5GB，
+     * 桥不负责长期保存，收摊时删掉（要存档请自己在页面上另存 RTT 记录）。
+     */
+    if (this.mode === 'logger' && this.file){
+      try { fs.rmSync(this.file, { force: true }); } catch {}
+    }
+    this.sock = null; this.child = null; this.mode = '';
   }
 }
 
@@ -917,7 +1032,12 @@ async function handle(conn, text, log){
         backend?.stop();
         if (m.backend === 'jlink'){
           backend = new JLinkBackend(m.cfg || {});
-          const info = await backend.start(log, buf => conn.send({ t: 'stream.data', data: buf.toString('base64') }));
+          /**
+           * RTT 流用**二进制帧**发给网页（原来这里是 `{t:'stream.data', data: base64}`）。
+           * 上层（JLinkBackend）已经攒成 ≥32KB / 20ms 一批，这儿直接原样发，零编码开销。
+           * 页面侧 app/rtt/bridge.js 两种都认（二进制优先，JSON+base64 的老分支保留，兼容旧桥）。
+           */
+          const info = await backend.start(log, buf => conn.sendBinary(buf));
           reply({ t: 'opened', info });
           console.log('[jlink] ' + JSON.stringify(info));
         } else {
