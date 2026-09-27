@@ -451,6 +451,44 @@ function findJLinkExe(which = 'server'){
 }
 
 /**
+ * 极简 GDB RSP 客户端 —— 存在的唯一理由是**让目标跑起来**。
+ *
+ * 🚨 为什么必须发这一句 `c`：`JLinkGDBServerCL` 连上目标后会把 CPU 按在 **halt** 上，
+ *    于是 RTT 只会吐出**缓冲里的存量** —— 实测（STM32F103 + 狂发固件）：12 秒恰好收到
+ *    4095 字节 = 一个 4KB 缓冲，之后纹丝不动，看着特别像"RTT 坏了"，其实是目标没在跑。
+ *    这里连上 GDB 端口、按 ack 模式（收到包回 `+`）应两声，然后发 `c`（continue）就不管了。
+ *    ⚠️ `c` **不会立刻回包**（要等目标停下来才有 stop reply），所以绝不能等它的响应。
+ */
+function rspContinue(port, onLog){
+  return new Promise(resolve => {
+    const s = net.connect(port, '127.0.0.1');
+    let buf = '';
+    let settled = false;
+    const ck = p => { let n = 0; for (const ch of p) n = (n + ch.charCodeAt(0)) & 0xff; return n.toString(16).padStart(2, '0'); };
+    const send = p => { try { s.write('$' + p + '#' + ck(p)); } catch {} };
+    const done = ok => { if (settled) return; settled = true; ok ? resolve(s) : (s.destroy(), resolve(null)); };
+    s.on('data', d => {
+      buf += d.toString('latin1');
+      let m;
+      while ((m = /\$([^$]*)#([0-9a-fA-F]{2})/.exec(buf))){
+        buf = buf.slice(m.index + m[0].length);
+        try { s.write('+'); } catch {}         // ack 模式：收到每个包都要回 '+'
+      }
+    });
+    s.once('error', e => { if (settled) onLog?.('[jlink] RSP 连接断开：' + e.message); else done(false); });
+    s.once('connect', () => {
+      send('qSupported:swbreak+');
+      setTimeout(() => {
+        send('c');                              // ← 本函数存在的全部理由
+        onLog?.('[jlink] 已向 GDB 端口发 c（continue）：目标开始运行');
+        done(true);
+      }, 350);
+    });
+    setTimeout(() => done(false), 6000);
+  });
+}
+
+/**
  * J-Link 的 RTT 走 **telnet 字节流**（ch0 全双工）。三种起法：
  *   · spawn（默认）—— 桥**自己拉起** JLinkGDBServerCL 的 RTT telnet，用户不用先开 JLinkRTTViewer；
  *   · attach —— 连一个已经跑着的 RTT telnet（老行为，`--jlink-attach`）；
@@ -474,11 +512,13 @@ class JLinkBackend {
     this.timer = null;
     this.banner = Buffer.alloc(0);
     this.bannerDone = false;
+    this.gdb = null;              // 常连的 GDB RSP 连接（发过 c，让目标一直跑）
   }
   get name(){ return this.child ? 'J-Link (RTT ch0 流 · 自启)' : 'J-Link (RTT ch0 流)'; }
   get port(){ return Number(this.cfg.rttPort || cfgJlink().rttPort || args.jlinkPort || 19021); }
   get device(){ return String(this.cfg.device || this.cfg.jlinkDevice || cfgJlink().device || args.jlinkDevice || 'STM32F103C8'); }
   get speed(){ return Number(this.cfg.speed || cfgJlink().speed || 4000); }
+  get gdbPort(){ return Number(this.cfg.gdbPort || cfgJlink().gdbPort || 2331); }
 
   async start(onLog, onData){
     const emit = d => this._emit(d, onData);
@@ -536,7 +576,7 @@ class JLinkBackend {
   async _spawnServer(onLog){
     const exe = findJLinkExe('server');
     const argv = ['-device', this.device, '-if', 'SWD', '-speed', String(this.speed),
-      '-RTTTelnetPort', String(this.port), '-silent', '-nogui'];
+      '-port', String(this.gdbPort), '-RTTTelnetPort', String(this.port), '-silent', '-nogui'];
     /**
      * 🚨 指定 RTT 控制块地址（可选但强烈建议）。
      *    实测踩到：换了固件之后，**上一份固件的 RTT 控制块还留在 RAM 里**（复位不清 RAM），
@@ -563,7 +603,12 @@ class JLinkBackend {
         s.once('connect', () => { clearTimeout(t); s.destroy(); res(true); });   // 连完立刻断，telnet 口可反复连
         s.once('error', () => { clearTimeout(t); res(false); });
       });
-      if (ok) return true;
+      if (ok){
+        // 🚨 端口就绪后**立刻让目标跑起来**，否则 RTT 只出缓冲存量（见 rspContinue 注释）
+        this.gdb = await rspContinue(this.gdbPort, onLog);
+        if (!this.gdb) onLog?.(`[jlink] ⚠️ 没能连上 GDB 端口(${this.gdbPort})，目标可能仍被 halt：RTT 可能只出存量`);
+        return true;
+      }
       await new Promise(r => setTimeout(r, 300));
     }
     throw new Error(`等 J-Link RTT telnet(${this.port}) 就绪超时 20s —— server 日志见上`);
@@ -606,6 +651,8 @@ class JLinkBackend {
   stop(){
     clearInterval(this.timer);
     try { this.sock?.destroy(); } catch {}
+    try { this.gdb?.destroy(); } catch {}     // 常连的 RSP（它在给目标"继续"状态，必须一起收掉）
+    this.gdb = null;
     if (this.child){
       const pid = this.child.pid;
       try { spawn('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore' }); } catch {}
