@@ -15,6 +15,7 @@ import { BridgeClient } from './bridge.js';
 import { findSymbol } from './elf.js';
 import { parseRanges } from '../core/bin.js';
 import { parseHex, textToBytes } from '../core/hex.js';
+import { pickCfgs } from '../ui/cfgpicker.js';
 import { rate as fRate, bytes as fBytes, fileStamp, download, stamp as stampOf } from '../core/format.js';
 
 const EOL = { cr: '\r', crlf: '\r\n', lf: '\n', none: '' };
@@ -87,6 +88,15 @@ export class RttView {
     store.bind($('r-ocd-speed'), 'rtt.ocdSpeed');
     $('r-ocd-target').addEventListener('change', () => this._applyOcdTarget(true));
     this._applyOcdTarget(false);      // 只同步自定义行的显隐；RAM 范围是用户存过的值，别在加载时覆盖
+    // 「选择…」：列出桥所在机器的 OpenOCD cfg 让你挑（浏览器拿不到本地文件路径，列表只能由桥给）
+    $('r-ocd-cfgs-pick').addEventListener('click', async () => {
+      const v = await pickCfgs({
+        bridgeUrl: $('r-bridge-url').value,
+        current: $('r-ocd-cfgs').value,
+        title: '选择 OpenOCD cfg（RTT 后端用）',
+      });
+      if (v !== null){ $('r-ocd-cfgs').value = v; store.set('rtt.ocdCfgs', v); }
+    });
     this._chk($('r-ts'), 'rtt.ts', v => { this.ts = v; this.tx.setTimestamps(v, false); });
     this._chk($('r-autoscroll'), 'rtt.autoscroll', v => { this.tx.setAutoscroll(v); });
     this._chk($('r-hexsend'), 'rtt.hexsend', () => {});
@@ -190,6 +200,7 @@ export class RttView {
     const t = $('r-ocd-target').value;
     const custom = t === 'custom';
     $('r-ocd-custom-cfgs-row').hidden = !custom;
+    $('r-ocd-cfgs-hint').hidden = !custom;
     $('r-ocd-custom-speed-row').hidden = !custom;
     if (applyRange && OCD_RAM[t]) $('r-range').value = OCD_RAM[t];
   }

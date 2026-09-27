@@ -57,6 +57,10 @@ legend{font-size:11.5px;color:var(--fg2);padding:0 5px;letter-spacing:.4px}
 .row{display:flex;align-items:center;gap:6px;margin:5px 0}
 .row>span:first-child{flex:none;width:60px;color:var(--fg2);font-size:12px}
 .row input,.row select{flex:1}
+/* cfg 行：输入框要占满剩余宽度（之前被挤成几十像素，占位文字都溢出框外），右边挂「选择…」 */
+.cfgrow{align-items:center}
+.cfgrow>input{flex:1 1 auto;min-width:0;width:100%}
+.cfgrow>button{flex:none;white-space:nowrap;padding:4px 9px;font-size:12px}
 .btnrow{justify-content:flex-start}
 .btnrow>button{flex:1}
 .sigrow{gap:16px}

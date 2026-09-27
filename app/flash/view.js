@@ -24,6 +24,7 @@ import { ALGOS } from './algos.js';
 import { FlashRunner } from './runner.js';
 import { parseFirmware } from './image.js';
 import { bytes as fBytes } from '../core/format.js';
+import { pickCfgs } from '../ui/cfgpicker.js';
 
 export class FlashView {
   constructor(){
@@ -44,6 +45,15 @@ export class FlashView {
     store.bind($('f-reset'), 'flash.reset', 'checked');
     $('f-chip').addEventListener('change', () => this._applyChip());
     this._applyChip();
+    // 「选择…」：列出桥所在机器的 OpenOCD cfg 让你挑（浏览器拿不到本地文件路径，列表只能由桥给）
+    $('f-cfgs-pick').addEventListener('click', async () => {
+      const v = await pickCfgs({
+        bridgeUrl: $('f-bridge-url').value,
+        current: $('f-cfgs').value,
+        title: '选择 OpenOCD cfg（烧录器用）',
+      });
+      if (v !== null){ $('f-cfgs').value = v; store.set('flash.cfgs', v); }
+    });
 
     // ---------- 固件文件 ----------
     this._fileInput = document.createElement('input');
@@ -106,7 +116,6 @@ export class FlashView {
     $('f-custom-cfgs-row').hidden = !custom;
     $('f-custom-speed-row').hidden = !custom;
   }
-
   // ================= 烧录 =================
   async flash(){
     if (this.busy) return;

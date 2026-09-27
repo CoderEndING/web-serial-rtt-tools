@@ -112,6 +112,12 @@ export class BridgeClient {
   /** 烧录（烧录器标签页用）：大固件慢慢烧，超时给足 10 分钟 */
   async flash(cfg){ return (await this._call({ t: 'flash', cfg }, 600000)).info; }
 
+  /**
+   * 列出桥所在机器上 OpenOCD 的 cfg 文件（页面里的「选择…」按钮用）。
+   * 浏览器拿不到本地文件的完整路径，所以列表只能由桥端提供。
+   */
+  async cfgs(){ return (await this._call({ t: 'target.cfgs' }, 15000)).info; }
+
   // ---------------- stream 能力（J-Link ch0） ----------------
   async streamWrite(bytes){ await this._call({ t: 'stream.write', data: toB64(bytes) }, 10000); }
 

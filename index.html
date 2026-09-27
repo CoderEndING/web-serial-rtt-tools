@@ -222,10 +222,11 @@
         </div>
         <div id="r-bridge-box" hidden>
           <label class="row"><span>桥地址</span><input id="r-bridge-url" value="ws://127.0.0.1:17321"></label>
-          <label class="row" id="r-ocd-custom-cfgs-row" hidden><span>cfg 文件</span>
+          <div class="row cfgrow" id="r-ocd-custom-cfgs-row" hidden><span>cfg 文件</span>
             <input id="r-ocd-cfgs" title="逗号/空格分隔，按顺序加载。相对 OpenOCD scripts 目录或绝对路径。第一个 cfg 是 cmsis-dap 时会自动加 backend usb_bulk">
-            <p class="hint">如 <code>interface/cmsis-dap.cfg, target/stm32f4x.cfg</code></p>
-          </label>
+            <button id="r-ocd-cfgs-pick" type="button" title="列出桥所在机器的 OpenOCD cfg 让你挑（浏览器拿不到本地文件路径，所以列表由桥提供）">选择…</button>
+          </div>
+          <p class="hint" id="r-ocd-cfgs-hint" hidden>如 <code>interface/cmsis-dap.cfg, target/stm32f4x.cfg</code>（点「选择…」从列表挑，或直接手填）</p>
           <label class="row" id="r-ocd-custom-speed-row" hidden><span>SWD kHz</span>
             <input id="r-ocd-speed" class="num" placeholder="留空 = 不设（OpenOCD 默认）" inputmode="numeric">
           </label>
@@ -338,9 +339,10 @@
         <label class="row"><span>芯片</span>
           <select id="f-chip" title="走本地桥时它就是 OpenOCD 的目标 cfg；列表外的芯片选「自定义 cfg…」"></select>
         </label>
-        <label class="row" id="f-custom-cfgs-row" hidden><span>cfg 文件</span>
+        <div class="row cfgrow" id="f-custom-cfgs-row" hidden><span>cfg 文件</span>
           <input id="f-cfgs" title="逗号/空格分隔，按顺序加载。相对 OpenOCD scripts 目录或绝对路径">
-        </label>
+          <button id="f-cfgs-pick" type="button" title="列出桥所在机器的 OpenOCD cfg 让你挑">选择…</button>
+        </div>
         <label class="row" id="f-custom-speed-row" hidden><span>SWD kHz</span>
           <input id="f-speed" class="num" placeholder="留空 = 不设（OpenOCD 默认）" inputmode="numeric">
         </label>

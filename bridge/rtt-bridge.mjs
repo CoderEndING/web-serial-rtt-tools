@@ -608,6 +608,47 @@ async function handle(conn, text, log){
                 targets: Object.keys(config.targets), defaultTarget: args.target || 'stm32f103' });
         break;
 
+      case 'target.cfgs': {
+        /**
+         * 列出 OpenOCD scripts 目录里**真实存在**的 cfg（页面上的「选择…」按钮用）。
+         * 为什么由桥来列：浏览器出于安全**拿不到本地文件的完整路径**（`<input type=file>`
+         * 只给文件名），而 OpenOCD 要的是 `target/stm32f4x.cfg` 这种**相对 scripts 目录**的路径。
+         * 桥就跑在本机，能直接看到那份目录，列出来让用户点选，填进去的一定是对的路径。
+         */
+        let exe = '', scripts = '';
+        try { exe = args.openocd || config.openocd || findOpenOcd(); } catch {}
+        try { scripts = openocdScripts(exe); } catch {}
+        const cfgs = [];
+        if (scripts && fs.existsSync(scripts)){
+          /**
+           * 🚨 遍历顺序要**按用处排**，而且**不能在遍历途中截断**：
+           *    第一版写了"收集到 500 条就停"，结果按字母序先扫完 `board/`（500+ 个），
+           *    `interface/`、`target/` 一个都没进来 —— 而用户要的恰恰是这两个目录
+           *    （`interface/cmsis-dap.cfg`、`target/stm32f1x.cfg`）。
+           *    现在：先 interface → target → board → 其余，只在**输出**时设上限。
+           */
+          const rank = n => n === 'interface' ? 0 : n === 'target' ? 1 : n === 'board' ? 2 : 3;
+          const walk = (dir, rel = '', depth = 0) => {
+            if (depth > 3) return;
+            let ents = [];
+            try { ents = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+            const dirs = ents.filter(e => e.isDirectory()).sort((a, b) => rank(a.name) - rank(b.name) || a.name.localeCompare(b.name));
+            for (const e of ents){
+              if (!e.isDirectory() && /\.cfg$/i.test(e.name)) cfgs.push(rel ? `${rel}/${e.name}` : e.name);
+            }
+            for (const d of dirs) walk(path.join(dir, d.name), rel ? `${rel}/${d.name}` : d.name, depth + 1);
+          };
+          walk(scripts);
+        }
+        const total = cfgs.length;
+        cfgs.sort((a, b) => {
+          const rank = s => s.startsWith('interface/') ? 0 : s.startsWith('target/') ? 1 : s.startsWith('board/') ? 2 : 3;
+          return rank(a) - rank(b) || a.localeCompare(b);
+        });
+        reply({ t: 'cfgs', info: { openocd: exe, scripts, count: cfgs.length, total, cfgs: cfgs.slice(0, 2000) } });
+        break;
+      }
+
       case 'open': {
         backend?.stop();
         if (m.backend === 'jlink'){
