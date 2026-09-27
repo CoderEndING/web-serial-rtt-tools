@@ -1,53 +1,10 @@
 {
-  "_说明": "桥的目标配置。cfgs 按顺序加载；pre 里的命令插在第一个 cfg 之后、其余 cfg 之前执行。",
   "targets": {
-    "stm32f103": {
-      "cfgs": ["interface/cmsis-dap.cfg", "target/stm32f1x.cfg"],
+    "stm32h7b0": {
+      "cfgs": ["interface/cmsis-dap.cfg", "target/stm32h7x.cfg"],
       "pre": ["cmsis-dap backend usb_bulk"],
-      "speed": 10000,
-      "note": "CMSIS-DAP 探针 + STM32F103（SWD，10MHz；实测 OpenOCD 下 10MHz 吞吐最高）"
-    },
-    "stm32f0":  { "cfgs": ["interface/cmsis-dap.cfg", "target/stm32f0x.cfg"], "pre": ["cmsis-dap backend usb_bulk"], "speed": 4000, "note": "CMSIS-DAP + STM32F0（SWD 4MHz）" },
-    "stm32f2":  { "cfgs": ["interface/cmsis-dap.cfg", "target/stm32f2x.cfg"], "pre": ["cmsis-dap backend usb_bulk"], "speed": 4000, "note": "CMSIS-DAP + STM32F2（SWD 4MHz）" },
-    "stm32f3":  { "cfgs": ["interface/cmsis-dap.cfg", "target/stm32f3x.cfg"], "pre": ["cmsis-dap backend usb_bulk"], "speed": 4000, "note": "CMSIS-DAP + STM32F3（SWD 4MHz）" },
-    "stm32f4":  { "cfgs": ["interface/cmsis-dap.cfg", "target/stm32f4x.cfg"], "pre": ["cmsis-dap backend usb_bulk"], "speed": 4000, "note": "CMSIS-DAP + STM32F4（SWD 4MHz）" },
-    "stm32f7":  { "cfgs": ["interface/cmsis-dap.cfg", "target/stm32f7x.cfg"], "pre": ["cmsis-dap backend usb_bulk"], "speed": 4000, "note": "CMSIS-DAP + STM32F7（SWD 4MHz）" },
-    "stm32g0":  { "cfgs": ["interface/cmsis-dap.cfg", "target/stm32g0x.cfg"], "pre": ["cmsis-dap backend usb_bulk"], "speed": 4000, "note": "CMSIS-DAP + STM32G0（SWD 4MHz）" },
-    "stm32g4":  { "cfgs": ["interface/cmsis-dap.cfg", "target/stm32g4x.cfg"], "pre": ["cmsis-dap backend usb_bulk"], "speed": 4000, "note": "CMSIS-DAP + STM32G4（SWD 4MHz）" },
-    "stm32h7":  { "cfgs": ["interface/cmsis-dap.cfg", "target/stm32h7x.cfg"], "pre": ["cmsis-dap backend usb_bulk"], "speed": 4000, "note": "CMSIS-DAP + STM32H7（SWD 4MHz）" },
-    "stm32h5":  { "cfgs": ["interface/cmsis-dap.cfg", "target/stm32h5x.cfg"], "pre": ["cmsis-dap backend usb_bulk"], "speed": 4000, "note": "CMSIS-DAP + STM32H5（SWD 4MHz）" },
-    "stm32h7b0": { "cfgs": ["interface/cmsis-dap.cfg", "target/stm32h7x.cfg"], "pre": ["cmsis-dap backend usb_bulk"], "speed": 4000, "note": "CMSIS-DAP + STM32H7B0/H7A3/H7B3（value line；OpenOCD 用 stm32h7x.cfg 覆盖，SWD 4MHz）" },
-    "stm32l0":  { "cfgs": ["interface/cmsis-dap.cfg", "target/stm32l0.cfg"],  "pre": ["cmsis-dap backend usb_bulk"], "speed": 4000, "note": "CMSIS-DAP + STM32L0（SWD 4MHz）" },
-    "stm32l1":  { "cfgs": ["interface/cmsis-dap.cfg", "target/stm32l1.cfg"],  "pre": ["cmsis-dap backend usb_bulk"], "speed": 4000, "note": "CMSIS-DAP + STM32L1（SWD 4MHz）" },
-    "stm32l4":  { "cfgs": ["interface/cmsis-dap.cfg", "target/stm32l4x.cfg"], "pre": ["cmsis-dap backend usb_bulk"], "speed": 4000, "note": "CMSIS-DAP + STM32L4/L4+（SWD 4MHz）" },
-    "stm32l5":  { "cfgs": ["interface/cmsis-dap.cfg", "target/stm32l5x.cfg"], "pre": ["cmsis-dap backend usb_bulk"], "speed": 4000, "note": "CMSIS-DAP + STM32L5（SWD 4MHz）" },
-    "stm32u5":  { "cfgs": ["interface/cmsis-dap.cfg", "target/stm32u5x.cfg"], "pre": ["cmsis-dap backend usb_bulk"], "speed": 4000, "note": "CMSIS-DAP + STM32U5（SWD 4MHz）" },
-    "stm32c0":  { "cfgs": ["interface/cmsis-dap.cfg", "target/stm32c0x.cfg"], "pre": ["cmsis-dap backend usb_bulk"], "speed": 4000, "note": "CMSIS-DAP + STM32C0（SWD 4MHz）" },
-    "stm32wb":  { "cfgs": ["interface/cmsis-dap.cfg", "target/stm32wbx.cfg"], "pre": ["cmsis-dap backend usb_bulk"], "speed": 4000, "note": "CMSIS-DAP + STM32WB（SWD 4MHz）" },
-    "stm32wl":  { "cfgs": ["interface/cmsis-dap.cfg", "target/stm32wlx.cfg"], "pre": ["cmsis-dap backend usb_bulk"], "speed": 4000, "note": "CMSIS-DAP + STM32WL（SWD 4MHz）" },
-    "stm32f103-jlink": {
-      "cfgs": ["interface/jlink.cfg", "target/stm32f1x.cfg"],
-      "pre": ["transport select swd"],
       "speed": 4000,
-      "note": "J-Link 探针 + STM32F103（SWD，4MHz）"
-    },
-    "esp32s31": {
-      "cfgs": ["board/esp32s31-builtin.cfg"],
-      "pre": [],
-      "speed": 0,
-      "note": "ESP32-S31 板载 USB-Serial/JTAG（走 USB-DBG 口）"
-    },
-    "esp32": {
-      "cfgs": ["board/esp32-wrover-kit.cfg"],
-      "pre": [],
-      "speed": 0,
-      "note": "ESP32 通用（按需改板级 cfg）"
-    },
-    "cmsis-dap-generic": {
-      "cfgs": ["interface/cmsis-dap.cfg"],
-      "pre": ["cmsis-dap backend usb_bulk"],
-      "speed": 1000,
-      "note": "只加载探针，目标自己用 -c 指定（例如 -c \"target create ...\"）"
+      "note": "CMSIS-DAP + STM32H7B0（SWD，H7A3/7B3/7B0 用同一个 target cfg）"
     }
   }
 }
