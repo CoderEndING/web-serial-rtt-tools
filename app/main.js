@@ -9,6 +9,7 @@ import { Assistant } from './serial/assistant.js';
 import { TerminalView } from './serial/terminal.js';
 import { RttView } from './rtt/view.js';
 import { FlashView } from './flash/view.js';
+import { GenView } from './gen/view.js';
 
 // ---------- 错误收集（自检/排障用；平时看不见） ----------
 const errors = [];
@@ -20,15 +21,18 @@ const assistant = new Assistant(session);
 const terminal = new TerminalView(session);
 const rtt = new RttView();
 const flash = new FlashView();
+const gen = new GenView();
 
 assistant.init();
 terminal.init();
 rtt.init();
 flash.init();
+gen.init();
 
 initTabs(name => {
   if (name === 'terminal') requestAnimationFrame(() => terminal.onShow());
   if (name === 'rtt') requestAnimationFrame(() => rtt.onShow());
+  if (name === 'gen') requestAnimationFrame(() => gen.onShow());
 });
 
 document.getElementById('btn-help').addEventListener('click', () => document.getElementById('help').showModal());
@@ -43,6 +47,7 @@ function summary(){
     xtermLoaded: !!window.Terminal,
     tabs: [...document.querySelectorAll('#tabs .tab')].map(t => t.dataset.tab),
     quickSlots: document.querySelectorAll('#s-quick .qrow').length,
+    genFiles: (gen?.files || []).map(f => f.name),
     vendor: 'serial-rtt-tools',
   };
 }
@@ -51,7 +56,7 @@ box.id = 'selftest';
 box.hidden = true;
 document.body.appendChild(box);
 
-window.__tools = { session, assistant, terminal, rtt, flash, summary, errors };
+window.__tools = { session, assistant, terminal, rtt, flash, gen, summary, errors };
 
 // ---------- 浏览器端端到端自检：?demo=serial&selftest=1 ----------
 const q = new URLSearchParams(location.search);

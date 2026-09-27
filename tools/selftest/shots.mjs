@@ -31,9 +31,12 @@ await send('Page.enable'); await send('Runtime.enable');
 try { await send('Network.enable'); await send('Network.setCacheDisabled', { cacheDisabled: true }); } catch {}
 await send('Emulation.setDeviceMetricsOverride', { width: 1500, height: 950, deviceScaleFactor: 1, mobile: false });
 
-async function shot(url, waitMs, name){
+const evaluate = async expression => (await send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true })).result?.value;
+
+async function shot(url, waitMs, name, prep){
   await send('Page.navigate', { url });
   await sleep(waitMs);
+  if (prep) await prep();
   const r = await send('Page.captureScreenshot', { format: 'png' });
   const f = join(outDir, name);
   writeFileSync(f, Buffer.from(r.data, 'base64'));
@@ -44,4 +47,9 @@ console.log('截图到 ' + outDir);
 await shot(BASE + '?demo=serial&autoconnect=1#serial', 3000, '1-serial.png');
 await shot(BASE + '?demo=serial&autoconnect=1#terminal', 3000, '2-terminal.png');
 await shot(BASE + '?backend=mock&auto=1#rtt', 4000, '3-rtt-mock.png');
+await shot(BASE + '?t=' + Date.now() + '#gen', 2500, '4-gen.png', async () => {
+  // 让截图里是个像样的工程名（默认是 project 占位符）
+  await evaluate(`(()=>{const e=document.getElementById('g-project');e.value='STM32F103_Develop';e.dispatchEvent(new Event('input',{bubbles:true}));return true})()`);
+  await sleep(500);
+});
 ws.close();

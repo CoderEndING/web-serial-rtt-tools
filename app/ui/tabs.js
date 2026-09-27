@@ -1,8 +1,8 @@
-/** 顶部三个标签页的切换。支持 #serial / #terminal / #rtt 直达（也方便做演示链接）。 */
+/** 顶部标签页的切换。支持 #serial / #terminal / #rtt / #flash / #gen 直达（也方便做演示链接）。 */
 export function initTabs(onSwitch){
   const tabs = [...document.querySelectorAll('#tabs .tab')];
   const panels = [...document.querySelectorAll('.panel')];
-  const names = ['serial', 'terminal', 'rtt'];
+  const names = tabs.map(t => t.dataset.tab);   // 从 DOM 取，别再手写一份（加页时容易漏）
   function show(name, push = true){
     for (const t of tabs) t.classList.toggle('active', t.dataset.tab === name);
     for (const p of panels) p.classList.toggle('active', p.id === 'tab-' + name);
