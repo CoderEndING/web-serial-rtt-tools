@@ -190,6 +190,9 @@ export class FlashView {
     this.probe = auth.length
       ? await withTimeout(WebUsbDapProbe.open(auth[0], { clockKhz: 1000 }), 15000, '连接探针（WebUSB）')
       : await withTimeout(WebUsbDapProbe.request(false, { clockKhz: 1000 }), 60000, '等你在浏览器里选探针');
+    // 烧录走**严格档**：flashloader 靠状态位判断算法是否跑完，读错=校验失败；
+    // 每页写同一个 RAM 缓冲，写后必须回读把 posted 写逼落地（对照 rtt/view.js 的快速档）
+    this.probe.fast = false;
 
     const verify = $('f-verify').checked;
     const doReset = $('f-reset').checked;

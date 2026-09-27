@@ -69,6 +69,18 @@ export class WebUsbDapProbe {
     this._ready = false;
     this.lastError = null;
     this._posted = false;              // 是否有未冲干净的 posted（后发）写
+    /**
+     * **访问档位**（两条路径诉求不同，分开优化）：
+     *   fast=false 严格档（默认）：小块读一律双读、每次写都回读校验。
+     *     用于烧录（flashloader 靠状态位判断算法是否跑完，误判=校验失败）
+     *     以及用户手动动作（下行命令、复位、定位控制块）。
+     *   fast=true 快速档：RAM 小块读单读（上层结构校验不过再重读）、
+     *     同一地址的重复写不每次回读（RTT 轮询每轮推进 RdOff 就是这种）。
+     *     用于 RTT 后台轮询这类高频流式读。
+     * ⚠️ 无论哪档，PPB 区（≥0xE0000000，DHCSR 之类状态位）小块读都双读，不许省。
+     * 由 rtt/view.js 在连接后置位、手动动作前后临时切回严格档。
+     */
+    this.fast = false;
     this.clockHz = 1_000_000;          // 当前生效的 SWD 时钟（握手成功后 = 实际请求值）
     this.clockTried = [];              // 试过哪些档位（排障用）
   }
@@ -638,25 +650,29 @@ export class WebUsbDapProbe {
    */
   async _readMemLocked(addr, len, apIndex = 0){
     addr = addr >>> 0;
+    const small = len > 0 && len <= 64;
+    const ppb = addr >= 0xE0000000;          // DHCSR / DCRSR / DCRDR…（承载状态位）
     /**
-     * 🚨 **PPB 区（≥0xE0000000：DHCSR / DCRSR / DCRDR…）的小块读一律读两遍。**
-     *    这些寄存器承载**状态位**（S_HALT / S_REGRDY），单读一次拿到残渣就会误判：
-     *      · isHalted() 假 false → flashloader 一直等到超时；
-     *      · isHalted() 假 true  → 算法还没跑完就往下走 → 擦/写踩在一起 → **校验失败**
-     *        （实测用户报的「读到 0xad，期望 0x0」就是这一类）。
-     *    它们每次只占一两次往返，稳比快重要。
-     *    RAM 的小块读（RTT 表项等）走单读 + 上层结构校验重读，省下的往返留给吞吐。
+     * 🚨 PPB 区小块读**任何档位都双读**：这些寄存器读的是**状态位**
+     *    （S_HALT / S_REGRDY），单读一次拿到残渣就会误判：
+     *      · isHalted() 假 false → flashloader 白等到超时；
+     *      · isHalted() 假 true  → 算法还没跑完就往下走 → 擦/写叠在一起 → **校验失败**
+     *        （用户实测「读到 0xad，期望 0x0」就是这一类）。
+     * RAM 的小块读（RTT 表项）在快速档下单读 —— 上层 Rtt._entry 会做结构校验，
+     * 不合理才重读；这一档省下的往返直接变成 RTT 吞吐。
      */
-    const strict = len > 0 && len <= 64 && addr >= 0xE0000000;
-    if (!strict) return await this._readMemOnce(addr, len, apIndex, len > 64);
-    const first = await this._readMemOnce(addr, len, apIndex, false);
-    const second = await this._readMemOnce(addr, len, apIndex, false);
-    if (first.length === second.length){
-      let same = true;
-      for (let i = 0; i < first.length; i++){ if (first[i] !== second[i]){ same = false; break; } }
-      if (same) return second;
+    if (small && (ppb || !this.fast)){
+      const first = await this._readMemOnce(addr, len, apIndex, false);
+      const second = await this._readMemOnce(addr, len, apIndex, false);
+      if (first.length === second.length){
+        let same = true;
+        for (let i = 0; i < first.length; i++){ if (first[i] !== second[i]){ same = false; break; } }
+        if (same) return second;
+      }
+      return await this._readMemOnce(addr, len, apIndex, false);   // 不一致：再读一遍取最新
     }
-    return await this._readMemOnce(addr, len, apIndex, false);   // 不一致：再读一遍取最新
+    // 大块读：单读 + prime（写完 TAR 先读两个字丢掉，顶掉流水线残渣）
+    return await this._readMemOnce(addr, len, apIndex, len > 64);
   }
 
   async _readMemOnce(addr, len, apIndex = 0, prime = false){
@@ -731,11 +747,14 @@ export class WebUsbDapProbe {
     await this._writeMemOnce(addr, data, apIndex);
     if (this.verifyWrites === false) return;      // 排障开关（默认开）
     /**
-     * 回读确认**不节流**（曾经为了吞吐按"同地址 200ms 内跳过"做了节流，结果把烧录搞坏：
-     * flashloader 每页都往同一个 RAM 缓冲写，跳过校验后那笔 posted 写没人逼它落地，
-     * 算法紧接着就去读缓冲 → 读到上一页的内容 → **校验失败**。
-     * 吞吐的账改从别处省：PPB 读双读、RAM 读单读（见 _readMemLocked）。）
+     * 回读确认：**严格档每次都做；快速档只对"换了地址的写"做**。
+     *   · 严格档（烧录 / 用户手动动作）：flashloader 每页都写同一个 RAM 缓冲，
+     *     那笔 posted 写必须被这次回读逼着落地，否则算法读到上一页 → 校验失败；
+     *   · 快速档（RTT 轮询每轮推进 RdOff，地址固定）：省掉这次回读换吞吐 ——
+     *     写没生效的后果只是"缓冲水位上升/溢出丢弃"，界面本来就有这两个指标。
      */
+    if (this.fast && addr === this._lastWriteAddr) { this._lastWriteAt = Date.now(); return; }
+    this._lastWriteAddr = addr; this._lastWriteAt = Date.now();
     try {
       const back = await this.readMem(addr, data.length, apIndex);
       let same = back.length === data.length;

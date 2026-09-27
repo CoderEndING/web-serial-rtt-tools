@@ -301,10 +301,11 @@ export class RttView {
     const addr = addrText ? Number(addrText) : 0;
     const ranges = parseRanges($('r-range').value);
     setStatus($('r-err'), '正在查找 RTT 控制块…');
-    const found = await Rtt.locate(this.probe, {
+    // 定位是"一次性的关键动作" → 严格档（扫描要跨很多地址，读到残渣就会锁错控制块）
+    const found = await this._strict(() => Rtt.locate(this.probe, {
       addr, ranges,
       onProgress: (p, a) => setStatus($('r-err'), `扫描控制块 ${(p * 100) | 0}%  @0x${a.toString(16)}`),
-    });
+    }));
     if (!found) throw new Error('没找到 SEGGER RTT 控制块：固件里编进 RTT 了吗？RAM 范围填对了吗？（也可以载入 .elf 用符号定位）');
     this.rtt = new Rtt(this.probe, { addr: found });
     await this.rtt.init(found);
@@ -345,6 +346,12 @@ export class RttView {
 
   _startPoll(){
     this.running = true;
+    /**
+     * 后台轮询切**快速档**（RAM 单读 + 热点写不回读）——吞吐优先；
+     * 用户手动动作（下行/复位/定位）在 _strict() 里临时切回严格档。
+     * 桥后端没有这个开关（它是 RPC，不涉及 AP 读写细节）。
+     */
+    if (this.probe && typeof this.probe.fast === 'boolean') this.probe.fast = true;
     this.stats.polls = 0; this.stats.bytes = 0; this.stats.lost = 0;
     this.fullPolls = 0; this.highPolls = 0; this.peak = 0; this._faults = 0;
     /**
@@ -552,6 +559,19 @@ export class RttView {
     return b;
   }
 
+  /**
+   * 临时切到**严格档**跑一段（探针 fast=false）：小块读双读、写必回读。
+   * 用于用户手动动作（下行发送、复位、定位控制块）——这些一秒钟也就几次，
+   * 稳妥优先；后台轮询则用快速档换吞吐（见 _startPoll 里对 probe.fast 的设置）。
+   */
+  async _strict(fn){
+    const p = this.probe;
+    if (!p || typeof p.fast !== 'boolean') return await fn();
+    const prev = p.fast;
+    p.fast = false;
+    try { return await fn(); } finally { p.fast = prev; }
+  }
+
   async _sendBytes(bytes){
     try {
       if (this.stream){
@@ -559,7 +579,8 @@ export class RttView {
         await this.bridge.streamWrite(bytes);
       } else {
         if (!this.rtt) throw new Error('RTT 还没就绪（先扫描控制块）');
-        const n = await this.rtt.writeDown(0, bytes);
+        // 下行命令是"用户按下就要成功"的动作 → 严格档（写指针必须落地）
+        const n = await this._strict(() => this.rtt.writeDown(0, bytes));
         if (n < bytes.length) toast(`下行缓冲只写进 ${n}/${bytes.length} 字节（固件没在取？）`, 'warn');
       }
       setStatus($('r-err'), '', null);
@@ -569,7 +590,7 @@ export class RttView {
   async resetTarget(){
     if (!this.probe){ toast('先连接一个后端', 'warn'); return; }
     try {
-      const how = await this.probe.reset();
+      const how = await this._strict(() => this.probe.reset());   // 复位是关键动作 → 严格档
       toast(`已复位目标（${how}），2 秒后重新读取控制块…`, 'ok');
       setTimeout(() => this._startRtt().catch(e => this._err(e)), 2000);
     } catch (e){ this._err(e); }
