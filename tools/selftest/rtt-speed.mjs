@@ -66,8 +66,21 @@ if (BACKEND === 'bridge'){
     },
     async writeMem(addr, b){ await call({ t: 'mem.write', addr, data: Buffer.from(b).toString('base64') }); },
   };
-  await call({ t: 'open', backend: 'openocd' }, 60000);
-  const found = await Rtt.locate(mem, { ranges: parseRanges(RANGE), chunk: 1024 });
+  // 后端可切换：默认 openocd；BRIDGE_BACKEND=jlink 时走 J-Link 的 GDB RSP mem 模式
+  const beBackend = process.env.BRIDGE_BACKEND || 'openocd';
+  await call({ t: 'open', backend: beBackend, cfg: beBackend === 'jlink'
+    ? { mem: true, device: process.env.JDEV || 'STM32F103C8', speed: Number(process.env.JSPEED || 4000) }
+    : {} }, 60000);
+  /**
+   * 控制块地址：默认靠 magic "SEGGER RTT" 扫描。
+   * 🚨 `CB_ADDR=0x…` 可跳过扫描直接指定 —— J-Link 的 mem 模式需要它：
+   *    那时我们会**故意清掉控制块的 magic**，好让 JLinkGDBServerCL 自带的 RTT
+   *    找不到控制块、不去偷读目标环缓冲（否则它会把环搬空，mem 只能读到个零头）。
+   *    固件自己不依赖 magic（它直接用结构体写），所以清掉 magic 对目标毫无影响。
+   */
+  const found = process.env.CB_ADDR
+    ? Number(process.env.CB_ADDR)
+    : await Rtt.locate(mem, { ranges: parseRanges(RANGE), chunk: 1024 });
   const rtt = new Rtt(mem, { addr: found });
   await rtt.init();
   console.log(`后端 OpenOCD · 控制块 0x${found.toString(16)} · up0 缓冲 ${rtt.up[0].size} B\n`);
