@@ -425,24 +425,69 @@ class OpenOcdBackend {
   }
 }
 
-/* ============================ J-Link 后端（流） ============================ */
+/* ============================ J-Link ============================ */
+/** 读 config 里的 jlink 段（没有就空对象，调用方各自兜底） */
+function cfgJlink(){ return (config && config.jlink) || {}; }
+
+/** 找 JLinkGDBServerCL.exe / JLink.exe：配置 → PATH → 默认安装目录里版本号最大的那份 */
+function findJLinkExe(which = 'server'){
+  const name = which === 'server' ? 'JLinkGDBServerCL.exe' : 'JLink.exe';
+  const conf = cfgJlink();
+  const explicit = which === 'server' ? (conf.gdbserver || args.jlinkServer) : (conf.exe || args.jlinkExe);
+  if (explicit && fs.existsSync(explicit)) return explicit;
+  const candidates = [];
+  for (const dir of String(process.env.PATH || '').split(path.delimiter)){
+    if (dir) candidates.push(path.join(dir, name));
+  }
+  for (const base of ['C:/Program Files/SEGGER', 'C:/Program Files (x86)/SEGGER']){
+    try {
+      for (const d of fs.readdirSync(base)){
+        if (/^JLink_/i.test(d)) candidates.push(path.join(base, d, name));
+      }
+    } catch {}
+  }
+  for (const c of candidates) { try { if (fs.existsSync(c)) return c; } catch {} }
+  return name;                        // 交给 PATH 兜底，让报错更直观
+}
+
+/**
+ * J-Link 的 RTT 走 **telnet 字节流**（ch0 全双工）。三种起法：
+ *   · spawn（默认）—— 桥**自己拉起** JLinkGDBServerCL 的 RTT telnet，用户不用先开 JLinkRTTViewer；
+ *   · attach —— 连一个已经跑着的 RTT telnet（老行为，`--jlink-attach`）；
+ *   · logger —— JLinkRTTLogger 落文件后 tail（只读，可拿任意通道）。
+ *
+ * 🚨 两个实测坑（本机 J-Link V8.82 + STM32F103 亲测）：
+ *   ① **绝对不要加 `-singlerun`**：任何一次 TCP 连上 GDB 端口再断开，都会被它当成
+ *      "一个 GDB 会话结束"，服务器当场退出 —— 我就这么把自己坑过一次（现象是
+ *      `connect ECONNREFUSED`，看着像端口没起，其实是被自己连死的）。
+ *   ② server 会先吐一行横幅 `SEGGER J-Link V8.82 - Real time terminal output`，
+ *      必须滤掉，否则页面终端里凭空多一行。
+ *   另外实测：server 起来后**目标不会被按住**（流里数据一直在走），所以不需要额外 continue。
+ */
 class JLinkBackend {
-  constructor(){
+  constructor(cfg = {}){
+    this.cfg = cfg || {};
     this.sock = null;
     this.child = null;
     this.file = '';
     this.pos = 0;
     this.timer = null;
+    this.banner = Buffer.alloc(0);
+    this.bannerDone = false;
   }
-  get name(){ return 'J-Link (RTT ch0 流)'; }
+  get name(){ return this.child ? 'J-Link (RTT ch0 流 · 自启)' : 'J-Link (RTT ch0 流)'; }
+  get port(){ return Number(this.cfg.rttPort || cfgJlink().rttPort || args.jlinkPort || 19021); }
+  get device(){ return String(this.cfg.device || this.cfg.jlinkDevice || cfgJlink().device || args.jlinkDevice || 'STM32F103C8'); }
+  get speed(){ return Number(this.cfg.speed || cfgJlink().speed || 4000); }
 
   async start(onLog, onData){
+    const emit = d => this._emit(d, onData);
     if (args.jlinkLogger){
       const exe = args.jlinkLogger;
       this.file = path.join(os.tmpdir(), `rtt-jlink-${Date.now()}.log`);
       const argv = [];
-      if (args.jlinkDevice) argv.push('-Device', args.jlinkDevice);
-      argv.push('-If', 'SWD', '-Speed', '4000', '-RTTChannel', String(args.jlinkChannel));
+      if (this.device) argv.push('-Device', this.device);
+      argv.push('-If', 'SWD', '-Speed', String(this.speed), '-RTTChannel', String(args.jlinkChannel));
       argv.push(this.file);
       onLog?.(`启动 ${exe} ${argv.join(' ')}`);
       this.child = spawn(exe, argv, { stdio: ['ignore', 'pipe', 'pipe'] });
@@ -464,16 +509,93 @@ class JLinkBackend {
       }, 100);
       return { mode: 'logger', file: this.file, note: 'JLinkRTTLogger 落文件后 tail：只读，可拿任意通道' };
     }
-    // attach：连 J-Link 已经开着的 RTT telnet
-    onLog?.(`连接 J-Link RTT telnet 127.0.0.1:${args.jlinkPort}`);
+
+    let spawned = false;
+    if (!args.jlinkAttach && this.cfg.spawn !== false){
+      await this._spawnServer(onLog);
+      spawned = true;
+    }
+    // attach：连 J-Link 的 RTT telnet（自启的场景下，这个口就是上面那个 server 开的）
+    onLog?.(`连接 J-Link RTT telnet 127.0.0.1:${this.port}`);
     this.sock = await new Promise((res, rej) => {
-      const s = net.connect(args.jlinkPort, '127.0.0.1');
+      const s = net.connect(this.port, '127.0.0.1');
       s.once('connect', () => res(s));
-      s.once('error', e => rej(new Error(`连不上 J-Link RTT telnet(${args.jlinkPort})：${e.message}。` +
-        `请先用 JLinkRTTViewer（或带 RTT 的 JLink 会话）把它开起来，或用 --jlink-logger 模式。`)));
+      s.once('error', e => rej(new Error(`连不上 J-Link RTT telnet(${this.port})：${e.message}。` +
+        (spawned ? '（server 已启动但端口连不上，看上面的 server 日志）'
+                 : '请先用 JLinkRTTViewer 把它开起来，或去掉 --jlink-attach 让桥自启，或用 --jlink-logger。'))));
     });
-    this.sock.on('data', d => onData?.(Buffer.from(d)));
-    return { mode: 'attach', port: args.jlinkPort, note: 'J-Link RTT ch0 全双工（telnet）' };
+    this.sock.on('data', emit);
+    return {
+      mode: spawned ? 'spawn' : 'attach', port: this.port, device: this.device, speed: this.speed,
+      note: spawned ? `J-Link 自启 RTT telnet（device=${this.device}，SWD ${this.speed}kHz）`
+                    : 'J-Link RTT ch0 全双工（telnet）',
+    };
+  }
+
+  /** 拉起 JLinkGDBServerCL 并等它的 RTT telnet 端口就绪（不带 -singlerun，见类注释） */
+  async _spawnServer(onLog){
+    const exe = findJLinkExe('server');
+    const argv = ['-device', this.device, '-if', 'SWD', '-speed', String(this.speed),
+      '-RTTTelnetPort', String(this.port), '-silent', '-nogui'];
+    /**
+     * 🚨 指定 RTT 控制块地址（可选但强烈建议）。
+     *    实测踩到：换了固件之后，**上一份固件的 RTT 控制块还留在 RAM 里**（复位不清 RAM），
+     *    J-Link 的 RTT 自动搜索先撞上那个旧的，于是页面上显示的是**旧固件的输出** ——
+     *    而 flash 里明明是新的（逐字节校验通过）。现象极具误导性。
+     *    网页那边从 ELF 里能拿到 `_SEGGER_RTT` 地址，传进来就把搜索范围钉死在那附近。
+     */
+    if (this.cfg.rttAddr){
+      const a = Number(this.cfg.rttAddr);
+      if (a > 0) argv.push('-RTTSearchRanges', `0x${a.toString(16)},0x1000`);
+    }
+    onLog?.(`启动 ${exe} ${argv.join(' ')}`);
+    this.child = spawn(exe, argv, { stdio: ['ignore', 'pipe', 'pipe'] });
+    let exited = null;
+    this.child.once('exit', (code) => { exited = code; });
+    this.child.stdout.on('data', d => onLog?.(('[jlink] ' + String(d)).trimEnd()));
+    this.child.stderr.on('data', d => onLog?.(('[jlink] ' + String(d)).trimEnd()));
+    const t0 = Date.now();
+    while (Date.now() - t0 < 20000){
+      if (exited !== null) throw new Error(`JLinkGDBServerCL 起来就退出了（code=${exited}）：devcie/接线看一下`);
+      const ok = await new Promise(res => {
+        const s = net.connect(this.port, '127.0.0.1');
+        const t = setTimeout(() => { s.destroy(); res(false); }, 600);
+        s.once('connect', () => { clearTimeout(t); s.destroy(); res(true); });   // 连完立刻断，telnet 口可反复连
+        s.once('error', () => { clearTimeout(t); res(false); });
+      });
+      if (ok) return true;
+      await new Promise(r => setTimeout(r, 300));
+    }
+    throw new Error(`等 J-Link RTT telnet(${this.port}) 就绪超时 20s —— server 日志见上`);
+  }
+
+  /**
+   * 滤掉 server 的启动横幅。实测 RTT telnet 口会把 server 自己的启动信息也吐出来，形如：
+   *   SEGGER J-Link Ultra V4.0, SN=59789780
+   *   Process: JLinkGDBServerCL.exe
+   *   ...（可能还有几行）
+   * 这些都是**在 RTT 数据之前**的整行文本：逐行判断，丢掉像横幅的行；
+   * 一旦遇到不像横幅的行，就把从该行起的内容原样放出去，之后不再过滤。
+   * 只按单行匹配是不够的 —— 第一版就是这么写的，结果页面上多出一行 "SEGGER J-Link Ultra…"。
+   */
+  _emit(d, onData){
+    if (this.bannerDone){ onData?.(d); return; }
+    this.banner = Buffer.concat([this.banner, d]);
+    const isBanner = s => /SEGGER J-Link|^Process:|^Firmware:|^DLL version|^Copyright|Real time terminal output|^Connecting to target|^J-Link>|^Info:|^Warning:/i.test(s.trim());
+    let start = 0;
+    for (;;){
+      const nl = this.banner.indexOf(0x0a, start);
+      if (nl < 0) break;
+      const line = this.banner.subarray(start, nl + 1);
+      if (isBanner(line.toString('latin1'))){ start = nl + 1; continue; }
+      this.bannerDone = true;
+      const rest = this.banner.subarray(start);
+      this.banner = Buffer.alloc(0);
+      onData?.(rest);
+      return;
+    }
+    this.banner = this.banner.subarray(start);
+    if (this.banner.length > 2048){ this.bannerDone = true; onData?.(this.banner); this.banner = Buffer.alloc(0); }
   }
 
   async write(bytes){
@@ -484,9 +606,53 @@ class JLinkBackend {
   stop(){
     clearInterval(this.timer);
     try { this.sock?.destroy(); } catch {}
-    try { if (this.child) this.child.kill(); } catch {}
+    if (this.child){
+      const pid = this.child.pid;
+      try { spawn('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore' }); } catch {}
+      try { this.child.kill(); } catch {}
+    }
     this.sock = null; this.child = null;
   }
+}
+
+/**
+ * 用官方 JLink.exe 烧录（一次性进程）。**调用方必须先停掉 RTT 那条会话**——
+ * J-Link 同一时刻只允许一个持有者，否则 JLink.exe 连不上探针。
+ */
+function jlinkFlash({ file, base, device, speed, verify = true, reset = true }, log, timeoutMs = 600000){
+  return new Promise((resolve, reject) => {
+    const exe = findJLinkExe('exe');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'jlink-'));
+    const script = path.join(dir, 'flash.jlink');
+    const lines = ['si SWD', `speed ${speed}`];
+    if (device) lines.unshift(`device ${device}`);
+    lines.push('connect', 'erase');
+    if (/\.bin$/i.test(file)) lines.push(`loadbin ${file}, 0x${Number(base).toString(16)}`);
+    else lines.push(`loadfile ${file}`);
+    if (verify) lines.push(/\.bin$/i.test(file) ? `verifybin ${file}, 0x${Number(base).toString(16)}` : 'verify');
+    if (reset) lines.push('r');
+    lines.push('qc');
+    fs.writeFileSync(script, lines.join('\n') + '\n');
+    log?.(`J-Link 烧录：${exe} -device ${device} -CommanderScript ${script}`);
+    log?.('  ' + lines.join(' | '));
+    const ch = spawn(exe, ['-device', device, '-if', 'SWD', '-speed', String(speed),
+      '-autoconnect', '1', '-CommanderScript', script], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = '';
+    const timer = setTimeout(() => {
+      try { spawn('taskkill', ['/PID', String(ch.pid), '/T', '/F'], { stdio: 'ignore' }); } catch {}
+      reject(new Error(`JLink.exe 超时（${timeoutMs / 1000}s）：\n${out.slice(-800)}`));
+    }, timeoutMs);
+    ch.stdout.on('data', d => { out += d; log?.(String(d).trimEnd()); });
+    ch.stderr.on('data', d => { out += d; log?.(String(d).trimEnd()); });
+    ch.once('error', e => { clearTimeout(timer); reject(new Error('启动 JLink.exe 失败：' + e.message)); });
+    ch.once('exit', code => {
+      clearTimeout(timer);
+      try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
+      const bad = /\bERROR\b|Error while|Failed to|cannot|not connected/i.test(out) || code !== 0;
+      if (bad) reject(new Error(`J-Link 烧录失败（exit=${code}）：\n${out.slice(-800)}`));
+      else resolve(out.trim());
+    });
+  });
 }
 
 /* ============================ HTTP + WS 服务 ============================ */
@@ -560,6 +726,32 @@ async function flashFirmware(wc, log){
     if (!fs.existsSync(file)) throw new Error(`固件文件不存在：${file}`);
     const size = fs.statSync(file).size;
 
+    /**
+     * J-Link 分支：交给官方 JLink.exe 一次性烧录（erase → loadfile → verify → r）。
+     *
+     * 🚨 **先停掉正在跑的 J-Link 会话**（RTT 的 GDB server / telnet 流）：
+     *    J-Link 同一时刻只允许一个持有者 —— 两个进程一起抢，后到的那个直接连不上探针。
+     *    这和 WebUSB 那边"谁占着调试器"是同一类问题，只是这次是同一家的两个工具在抢。
+     *    烧完**不自动重启** RTT 会话：让页面显式再 open 一次，状态最清楚（避免隐式抢回探针）。
+     */
+    if (wc.backend === 'jlink' || backend instanceof JLinkBackend){
+      backend?.stop();
+      backend = null;
+      const targetName = String(wc.target || wc.chip || '').trim();
+      const dev = String(wc.device || wc.jlinkDevice || cfgJlink().device ||
+        (config?.targets?.[targetName]?.jlinkDevice) || 'STM32F103C8');
+      const speed = Number(wc.speed || cfgJlink().speed || 4000);
+      const t0 = Date.now();
+      const out = await jlinkFlash({ file, base: wc.base, device: dev, speed,
+        verify: wc.verify !== false, reset: wc.reset !== false }, log);
+      return {
+        target: targetName || dev, file, bytes: size,
+        seconds: (Date.now() - t0) / 1000,
+        verify: wc.verify !== false, reset: wc.reset !== false,
+        backend: 'jlink', device: dev, speed, output: out,
+      };
+    }
+
     // 会话复用判断：解析目标名（三级来源同 open）
     const probe = new OpenOcdBackend(wc);
     const { name } = probe.resolveTarget(wc);
@@ -613,7 +805,7 @@ async function handle(conn, text, log){
     switch (m.t){
       case 'hello':
         // 必须带 id 回（客户端是按 id 匹配请求/响应的）—— 第一版漏了，客户端等 hello 直接超时
-        reply({ t: 'ready.ack', caps: ['mem', 'stream', 'target'], version: VERSION,
+        reply({ t: 'ready.ack', caps: ['mem', 'stream', 'target', 'jlink'], version: VERSION,
                 targets: Object.keys(config.targets), defaultTarget: args.target || 'stm32f103' });
         break;
 
@@ -661,7 +853,7 @@ async function handle(conn, text, log){
       case 'open': {
         backend?.stop();
         if (m.backend === 'jlink'){
-          backend = new JLinkBackend();
+          backend = new JLinkBackend(m.cfg || {});
           const info = await backend.start(log, buf => conn.send({ t: 'stream.data', data: buf.toString('base64') }));
           reply({ t: 'opened', info });
           console.log('[jlink] ' + JSON.stringify(info));
