@@ -276,6 +276,10 @@ export class WebUsbDapProbe {
       }
       if (!r.data || !r.data.byteLength) continue;                     // 空包：跳过
       const res = new Uint8Array(r.data.buffer, r.data.byteOffset, r.data.byteLength);
+      // TEMP-DEBUG（H7B0 DP SELECT FAULT 排查用，查完删除）
+      console.debug('[dap-tx] ' + cmd.toString(16).padStart(2, '0')
+        + ' req=[' + Array.from(req.slice(0, 5), b => b.toString(16).padStart(2, '0')).join(' ') + ']'
+        + ' rsp(' + res.length + ')=[' + Array.from(res.slice(0, 8), b => b.toString(16).padStart(2, '0')).join(' ') + ']');
       if (res[0] !== cmd){
         this.stale = (this.stale || 0) + 1;
         console.warn(`[dap] 丢弃陈旧响应包（回显 0x${res[0].toString(16)} ≠ 命令 0x${cmd.toString(16)}，第 ${this.stale} 个）`);
@@ -483,7 +487,40 @@ export class WebUsbDapProbe {
       console.warn(`[dap] DP 上电失败（${e.message}），改用掉电-上电最后手段`);
       await this.powerCycle();
     }
-    await this._transfer([{ ap: false, rnw: false, addr: DP_SELECT, data: 0 }]);
+    /**
+     * 🚨 **APSEL 不能硬编码 0**。同一份代码要在不同芯片上跑：
+     *    · STM32F103 —— CM3 内存挂在 **AP0**；
+     *    · STM32H7B0 —— CM7 内存挂在 **AP2**（OpenOCD 自己的日志就是
+     *      `Info : [stm32h7x.ap2] Examination succeed`）。
+     *    硬写 0 的后果：H7B0 上写 CSW 直接 FAULT（不存在的 AP），而 F103 一路正常，
+     *    于是表现成"页面在 F103 好、在 H7 坏"。这里照 OpenOCD 的做法扫一遍 APSEL：
+     *    写 SELECT → 写 CSW(0x23000052) → 写 TAR=0xE000ED00 → 读 DRW，
+     *    **谁能返回合理的 CPUID 就用谁**（只看 ACK 不够：H7B0 上不存在的 AP0 也会"回 ACK"，
+     *    但读出来是 0x9576B58B 这种垃圾）。顺序 [0,2,1,3]：F103 第一下就中。
+     */
+    this.apIndex = 0;
+    for (const ap of [0, 2, 1, 3]){
+      /**
+       * CSW 也一起扫候选值 —— 出处 docs/openocd-flow.md（:1825/:1832/:1871）：
+       *   OpenOCD 的 `CSW_AHB_DEFAULT` = 0xA2000000（bit31/29/25），块读写再 |0x12 → **0xA2000012**；
+       *   而 **STM32H7 上它实际下发的是 0xAA000012（bit27 也置 1）**。
+       *   本文件旧值 0x23000052 是另一套 Prot 位（bit24 而非 bit31、没有 bit27）——
+       *   在 F103 上凑巧能用，在 H7 上写下去直接 FAULT。这里按"常用 → H7 → 旧值"依次试。
+       */
+      for (const csw of [0xa2000012, 0xaa000012, 0x23000052]){
+        try {
+          await this._transfer([{ ap: false, rnw: false, addr: DP_SELECT, data: (ap << 24) >>> 0 }]);
+          await this._transfer([{ ap: true, rnw: false, addr: AP_CSW, data: csw >>> 0 }]);
+          await this._transfer([{ ap: true, rnw: false, addr: AP_TAR, data: 0xE000ED00 }]);
+          const v = ((await this._transfer([{ ap: true, rnw: true, addr: AP_DRW }]))[0]) >>> 0;
+          if (v && v !== 0xffffffff){ this.apIndex = ap; this.cswUsed = csw; break; }
+        } catch (e){ /* 这组不行，试下一个 */ }
+        try { await this._transfer([{ ap: false, rnw: false, addr: 0x00, data: 0x0000001e }]); } catch {}
+      }
+      if (this.cswUsed) break;
+      try { await this._transfer([{ ap: false, rnw: false, addr: 0x00, data: 0x0000001e }]); } catch {}
+    }
+    await this._transfer([{ ap: false, rnw: false, addr: DP_SELECT, data: (this.apIndex << 24) >>> 0 }]);
     await sleep(20);
     const st = await this._readDP(DP_CTRL_STAT);
     // 两个 ACK 位都要看：CSYSPWRUPACK(31) 与 CDBGPWRUPACK(30)。缺任何一个，后面 AP 访问都可能 FAULT。
@@ -538,29 +575,39 @@ export class WebUsbDapProbe {
    *    网页里 sleep(50) 还会被后台节流成 ~200ms，掉电更彻底、命中率更高。
    * 这里保留一次「清 sticky 再重试」的兜底：万一真撞上 FAULT 也能自己爬起来。
    */
-  async _powerUpDP(attempts = 2){
-    let lastErr = null;
-    for (let i = 1; i <= attempts; i++){
+  async _powerUpDP(attempts = 3){
+    /**
+     * **照 OpenOCD 的 dap_dp_init 抄**（出处见 docs/openocd-flow.md，含 文件:行号）：
+     *   ① 无条件写 `DP_CTRL_STAT = CDBGPWRUPREQ|CSYSPWRUPREQ|SSTICKYERR|SSTICKYORUN`
+     *      = **0x50000022** —— 关键就是最后两位 sticky 清除位：
+     *      **带着 sticky 的 DP 会拒绝写**，所以"先 ABORT 清、再写 0x50000000"那条路是死路
+     *      （页面实测：写 CTRL/STAT 恒 FAULT）；OpenOCD 是**一笔写里同时请求上电 + 清 sticky**。
+     *   ② 轮询 CTRL/STAT 等 PWRUPACK（本机 H7B0 上这两位可能一直是 0，所以**只当参考**，
+     *      不通过也继续 —— OpenOCD 能跑通就证明 AP 可用性与这两位不必绑定）。
+     *   ③ 再写一次 `0x50000000`（撤掉 sticky 清除位，保留电源请求）——与 OpenOCD 一致。
+     */
+    for (let i = 0; i < attempts; i++){
       try {
-        await this._writeDP(DP_CTRL_STAT, DP_PWRUP);
-        return true;
+        await this._writeDP(DP_CTRL_STAT, 0x50000022);
       } catch (e){
-        lastErr = e;
-        if (e.ack !== 4) throw e;                    // 不是 FAULT（NO ACK / WAIT）→ 重试也没意义
-        /**
-         * FAULT → 清 sticky **并重新走一遍 SWD 激活序列**再重试。
-         * 只写 ABORT 清 sticky 是不够的：上一个会话（或被 kill 的工具）常把 SWJ-DP 留在
-         * "能读 IDCODE、但一写 DP 寄存器就 FAULT"的半死状态，必须重新线复位 + 重激活才能救回来。
-         */
-        await this.abort();
-        try {
-          await this.swdActivation();
-          await this._transfer([{ ap: false, rnw: true, addr: DP_IDCODE }]);
-        } catch {}
-        await sleep(20);
+        if (e.ack !== 4) throw e;
       }
+      let st = 0;
+      for (let k = 0; k < 20; k++){
+        try { st = ((await this._transfer([{ ap: false, rnw: true, addr: DP_CTRL_STAT }]))[0]) >>> 0; } catch { st = 0; }
+        if ((st & 0x30000000) === 0x30000000) break;
+        await sleep(10);
+      }
+      try { await this._writeDP(DP_CTRL_STAT, 0x50000000); } catch {}
+      this.lastDpStat = st;
+      if ((st & 0x30000000) === 0x30000000) return true;
+      try {
+        await this.swdActivation();
+        await this._transfer([{ ap: false, rnw: true, addr: DP_IDCODE }]);
+      } catch {}
+      await sleep(20);
     }
-    throw lastErr;
+    return true;   // 不判死：让第一笔 AP 访问去证伪（OpenOCD 也不因 ACK 缺失就放弃）
   }
 
   /**
