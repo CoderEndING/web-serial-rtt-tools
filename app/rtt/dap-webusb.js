@@ -562,9 +562,25 @@ export class WebUsbDapProbe {
    * 所以正常连接路径一律走 _powerUpDP()。
    */
   async powerCycle(){
-    try { await this._writeDP(DP_CTRL_STAT, 0x00000000); } catch {}
+    /**
+     * 🚨 **绝对不要给 DP 写 CTRL/STAT = 0（掉电）再上电** —— 本仓库踩过最狠的坑之一：
+     *    写完这一笔，DP 状态机会**自锁**，此后**所有** DP/AP 访问恒 FAULT。
+     *    现场表现就是烧录器开头那次软复位报
+     *      「SWD FAULT（传输 0/1 条，地址 0x4）」
+     *    （0x4 是 AP 的 TAR —— 自锁后第一笔 AP 写就是它），而且只有**拔插探针 / USB 端口复位**
+     *    能恢复。上一版这里正是 `_writeDP(DP_CTRL_STAT, 0)` 然后再上电（2026-09 实测复现）。
+     *
+     *    正确的"最后手段"是**复位 USB 端口**（device.reset()）：清掉挂起传输和 DP 状态机，
+     *    而不是去动 DP 自己。这里只做「单纯重试上电」→ 还不行就把设备标脏，
+     *    交给 open() 的脏设备路径做端口复位（下次连接自动生效）。
+     */
     await sleep(30);
-    return await this._powerUpDP(3);
+    try {
+      return await this._powerUpDP(3);
+    } catch (e){
+      dirty.add(this.device);
+      throw new Error(`${e.message} —— 已把探针标记为需要 USB 端口复位：拔插一次探针（或重连一次）即可恢复`);
+    }
   }
 
   /**
