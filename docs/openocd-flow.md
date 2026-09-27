@@ -2183,7 +2183,7 @@ int mem_ap_write_buf_noincr(struct adiv5_ap *ap,
 | `struct algorithm` / `target_algorithm` / `algo->stack_*` | **不存在**；`algorithm.h` 全文只有 `mem_param` / `reg_param` | `src/target/algorithm.h`（42 行全文） |
 | `stm32h7x_write` / `_stm32h7x_...` / `stm32h7x_flash_write_code` | 全是 **`stm32x_`** 前缀：`stm32x_write` / `stm32x_write_block` / `stm32x_erase` / `stm32x_probe` / `stm32x_flash_write_code` | `src/flash/nor/stm32h7x.c:661` / `:554` / `:463` / `:749` / `:572` |
 | `stm32h7x_wait_flash_op_status` | **`stm32x_wait_flash_op_queue`** | `src/flash/nor/stm32h7x.c:263` |
-| `cortex_m_reset()` | **不存在**；只有 `cortex_m_assert_reset` / `cortex_m_deassert_reset` / `cortex_m_soft_reset_halt` | `cortex_m.c:1684` / `:1900+` / `:1237` |
+| `cortex_m_reset()` | **不存在**；只有 `cortex_m_assert_reset` / `cortex_m_deassert_reset` / `cortex_m_soft_reset_halt` | `cortex_m.c:1684` / `:1844` / `:1237` |
 | `SWJ_Clock`（tcl 命令） | **不存在**；tcl 侧是 `adapter speed`，探针命令是 `CMD_DAP_SWJ_CLOCK`(0x11) | tcl: `stm32h7x.cfg:129`；命令码 `src/jtag/drivers/cmsis_dap.c:119` |
 | `dap_ap_select()` | **不存在**；真身 `swd_queue_ap_bankselect()` | `src/target/adi_v5_swd.c:519` |
 
@@ -2908,11 +2908,14 @@ static uint32_t stm32h7a_h7bxx_compute_flash_cr(uint32_t cmd, int snb)
 | 5 | AP 读 BD0 | `03` | `MEM_AP_REG_BD0 \| (addr & 0xC)`，这里低 4 位为 0 | `arm_adi_v5.c:251` |
 | 6 | DP 读 RDBUFF | `0E` | 冲刷挂起读，**CPUID 的值在这里落到 `&cpuid`** | `adi_v5_swd.c:70` |
 
-**CPUID 期望值**：Cortex-M7 的 partno 是 `0xC27`（`src/target/cortex_m.h:53`
+**CPUID 期望值**：Cortex-M7 的 partno 字面值是 `0xC27`（`src/target/cortex_m.h:53`：
 `CORTEX_M7_PARTNO = ARM_MAKE_CPUID(ARM_IMPLEMENTER_ARM, 0xC27)`）。
-**实读典型值 `0x411FC271`** → 小端字节 `71 C2 1F 41`
-（⚠️ 高/低修订位（`0x411F_C2_71` 里的 `1`/`1`）随芯片批次不同，**这两个半字节不是源码常量**；
-本文只保证 **partno 掩码 `0xC27` 与 implementer `0x41` 来自源码**，完整 32 位值请以实读为准）。
+**实读典型值 `0x411FC271`** → 小端字节 `71 C2 1F 41`。
+⚠️ 三点声明，避免过度断言：
+① 示例里的高字节 `0x41` 对应宏 `ARM_IMPLEMENTER_ARM`，但**该宏的数值定义在本文未下载的头文件里
+（`cortex_m.h` 只引用、未定义）→ 「未确认」**，本文**不宣称** `0x41` 来自源码；
+② 高/低修订位（示例里的 `1`/`1`）随芯片批次不同，**也不是源码常量**；
+③ 本文只保证 **partno 掩码字面值 `0xC27` 来自源码**，完整 32 位 CPUID 请以实读为准。
 
 ### 5.6 阶段 E —— 写一个 4 字节内存（`0x12345678` → `0x20000000`）
 
@@ -2939,6 +2942,83 @@ static uint32_t stm32h7a_h7bxx_compute_flash_cr(uint32_t cmd, int snb)
 > 高一层（`target_write_u32` / `target_write_memory`）可能还有 target 层的额外步骤（如缓存处理、
 > 快速路径选择）。**本文只保证 `mem_ap_write_u32` + `dap_run` 这一层的报文**，
 > 更上层的具体路径**未逐行核对 → 未确认**。
+
+### 5.7 端到端汇总（把 A–E 串成一条线，**一个 USB 往返一行**）
+
+> 这是"从 `DAP_Connect` 到读到 CPUID、再到写一个 4 字节内存"的**完整连续序列**，
+> 每一行 = 一次 bulk OUT + 一次 bulk IN。
+> 多事务包（`count > 1`）的响应按 OpenOCD 解析器的布局书写（见 §1.6.5 的**未确认**提示）。
+> 数值前提：CMSIS-DAP v2、SWD、AP0、`adapter speed 1800`、`DPIDR = 0x6BA02477`、H7B0（`apcsw` 已生效）。
+
+```text
+# ---------- 阶段 A：传输层初始化（cmsis_dap_init） ----------
+发: 00 f0                                      # DAP_Info(CAPS)
+收: 00 01 03
+发: 00 04                                      # DAP_Info(FW_VER)
+收: 00 0a xx xx xx xx xx xx xx xx xx xx
+发: 00 03                                      # DAP_Info(SERNUM)
+收: 00 0c xx xx xx xx xx xx xx xx xx xx xx xx
+发: 02 01                                      # DAP_Connect(SWD=1)   <-- DAP_Connect
+收: 02 01
+发: 00 ff                                      # DAP_Info(PKT_SZ)
+收: 00 02 40 00
+发: 00 fe                                      # DAP_Info(PKT_CNT)
+收: 00 01 01
+发: 10 00 00 00 00 00 00                        # DAP_SWJ_Pins 仅读状态
+收: 10 xx
+发: 11 40 77 1b 00                             # DAP_SWJ_Clock = 1 800 000 Hz
+收: 11 00
+发: 04 00 40 00 00 00                          # DAP_TransferConfigure(0, 64, 0)
+收: 04 00
+发: 13 00                                      # DAP_SWD_Configure(0)
+收: 13 00
+发: 01 00 01                                      # DAP_LED(CONNECT, ON)
+收: 01 00
+发: 01 01 01                                      # DAP_LED(RUN, ON)
+收: 01 00
+
+# ---------- 阶段 B：SWD 链路激活（swd_connect_single） ----------
+发: 12 88 ff ff ff ff ff ff ff 9e e7 ff ff ff ff ff ff ff 00   # SWJ_Sequence 136 位
+收: 12 00
+发: 05 00 01 02                                # 读 DP DPIDR（激活后第一笔，必须）
+收: 05 01 01 77 24 a0 6b                       #   -> 0x6BA02477
+发: 05 00 01 00 1e 00 00 00                     # 写 DP ABORT = 0x1E 清 sticky
+收: 05 01 01
+
+# ---------- 阶段 C：dap_dp_init（排队后一次性发出） ----------
+发: 05 00 05 08 00 00 00 00  04 22 00 00 50  06  04 00 00 00 50  06
+收: 05 05 01 xx xx xx xx  xx xx xx xx
+发: 05 00 01 06                                # 等 CSYSPWRUPACK 的读
+收: 05 01 01 xx xx xx xx
+发: 05 00 03 06  04 00 00 00 50  06             # 读 / 写 CTRL/STAT / 读
+收: 05 03 01 xx xx xx xx  xx xx xx xx
+
+# ---------- 阶段 D：mem_ap_init 读 AP CFG ----------
+发: 05 00 03 08 f0 00 00 00  07  0e
+收: 05 03 01 xx xx xx xx  xx xx xx xx
+
+# ---------- 阶段 D：读 CPUID @ 0xE000ED00 ----------
+发: 05 00 06 08 00 00 00 00  01 02 00 00 aa  05 00 ed 00 e0  08 10 00 00 00  03  0e
+收: 05 06 01 71 c2 1f 41  xx xx xx xx            # CPUID = 0x411FC271（典型值，见 §5.5）
+                                                #   CSW=0xAA000002  TAR=0xE000ED00  SELECT=0x10
+
+# ---------- 阶段 E：写 4 字节 0x12345678 -> 0x20000000 ----------
+发: 05 00 02 05 00 00 00 20  01 78 56 34 12     # TAR=0x20000000  BD0=0x12345678
+收: 05 02 01
+```
+
+**这条序列里"发"的字节全部可从源码逐字节复现**（对照表见 §5 各阶段表格与 §8 ④ 的来源表）。
+**"收"里的 `xx` 是硬件相关结果**（固件版本串、CFG、CTRL/STAT 实际值），本文不臆造。
+
+**三个最值得你盯住的"少了就不对"的点**（都在上表里）：
+
+1. **B 阶段第 1 行必须是完整 136 位激活序列**（`12 88 …`），且**紧接着第 2 行必须是 `05 00 01 02`（读 DPIDR）**
+   —— 中间不能插任何其它 DAP 事务。
+2. **D 阶段读 CPUID 的那一包里，最后必须是 `03 0e`（AP 读 BD0 + DP 读 RDBUFF）**
+   —— 少了 `0e` 这笔，`cpuid` 拿到的就不是本次的值。
+3. **E 阶段只有 2 笔**（TAR + BD0），**没有 CSW、没有 SELECT、没有 RDBUFF**
+   —— 这是缓存生效的正常表现。如果你的实现每次都重发 CSW/SELECT，功能上通常也对，
+   但一旦某处缓存逻辑写错（比如把 `tar_valid` 处理错），就会在 **M7 的 1KB 边界**上翻车（见 §3.3）。
 
 ---
 
@@ -3038,7 +3118,7 @@ static uint32_t stm32h7a_h7bxx_compute_flash_cr(uint32_t cmd, int snb)
 | 65 | **寄存器写入顺序 = 索引降序**（xPSR → PC → LR → SP → R12…R0） | `armv7m.c:207-215` | |
 | 66 | 写寄存器的硬件顺序：先 `DCRDR`，再 `DCRSR = REGSEL\|WNR`，再轮询 `S_REGRDY` | `cortex_m.c:415-436` | |
 | 67 | `S_REGRDY` 等待上限 **500 ms** | `cortex_m.c:48,431-434` | |
-| 68 | 算法 blob 以 **`BKPT`（`00 BE`）** 结尾自停 | `stm32h7x.inc` 偏移 100 |
+| 68 | 算法 blob 以 **`BKPT`（`00 BE`）** 结尾自停 | `stm32h7x.inc` 偏移 100 | |
 | 69 | H7 异步算法 **exit_point = 0 → 不检查 PC** | `stm32h7x.c:630` | |
 | 70 | 异步结束等待 **10000 ms**；FIFO 空转看门狗 **2500 × 2 ms** | `target.c:1063,1012-1019` | |
 | 71 | 目标端放弃的标志是 **`rp == 0`** | `target.c:985-989,1071-1078` | |
@@ -3474,10 +3554,11 @@ static int swd_queue_ap_abort(struct adiv5_dap *dap, uint8_t *ack)
 | 3 | §3.2 | `0x23000052` 的出处 | **「未确认」**，明确说明本源码推不出该值（bit24 无 define、bit6 零引用） |
 | 4 | §4.3 | H7 算法 blob 内部是否使用栈 | **「未确认」**（未逐条反汇编） |
 | 5 | §4.9 / §6.5 | `reset_config srst_nogate` 的位语义、`reset-init` 触发时机 | **「未确认（引自 v0.12.0 树）」**；主树无 `src/jtag/adapter.c`、无 `startup.tcl` |
-| 6 | §5.5 | Cortex-M7 CPUID 的完整 32 位值 | 说明只有 **partno `0xC27` 与 implementer `0x41` 来自源码**；修订位**不是源码常量** |
+| 6 | §5.5 | Cortex-M7 CPUID 的完整 32 位值 | 只保证 **partno 字面值 `0xC27` 来自源码**；**implementer 宏的数值与修订位均标「未确认」** |
 | 7 | §5.6 | 更上层（`target_write_u32`）的具体报文路径 | **「未确认」**，只保证 `mem_ap_write_u32` + `dap_run` 这一层 |
 | 8 | §0.2 | 本机二进制与源码的逐行一致性 | 只能确认版本串一致；**行号以 `eb6f2745b` 源码为准**，已在 §0.2 明确 |
 | 9 | §5.1 | 响应字节布局 | 与 #1 同一处，**「未确认」**，提示以 F103 抓包核对 |
+| 10 | §5.5 | 宏 `ARM_IMPLEMENTER_ARM` 的数值（`0x41` 这个说法） | **「未确认」**：`cortex_m.h` 只引用该宏、未定义，定义所在头文件本文未下载 → 不宣称其数值来自源码 |
 
 **另外主动纠正了任务书中的 4 处事实性错误（均给出源码依据，不是猜测）：**
 

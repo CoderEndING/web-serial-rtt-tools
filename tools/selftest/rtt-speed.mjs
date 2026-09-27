@@ -163,3 +163,8 @@ if (BACKEND === 'bridge'){
   try { await evalJs('window.__tools.rtt.disconnect()'); } catch {}
   ws.close();
 }
+/**
+ * 🚨 必须显式退出：CDP 的 WebSocket / 页面侧的挂起 promise 会让 node 一直吊着，
+ *    表现是"测完了却不结束"（实测踩到：跑完 8 秒基准后进程还活着，只能手动杀）。
+ */
+process.exit(0);

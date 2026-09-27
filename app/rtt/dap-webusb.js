@@ -276,10 +276,6 @@ export class WebUsbDapProbe {
       }
       if (!r.data || !r.data.byteLength) continue;                     // 空包：跳过
       const res = new Uint8Array(r.data.buffer, r.data.byteOffset, r.data.byteLength);
-      // TEMP-DEBUG（H7B0 DP SELECT FAULT 排查用，查完删除）
-      console.debug('[dap-tx] ' + cmd.toString(16).padStart(2, '0')
-        + ' req=[' + Array.from(req.slice(0, 5), b => b.toString(16).padStart(2, '0')).join(' ') + ']'
-        + ' rsp(' + res.length + ')=[' + Array.from(res.slice(0, 8), b => b.toString(16).padStart(2, '0')).join(' ') + ']');
       if (res[0] !== cmd){
         this.stale = (this.stale || 0) + 1;
         console.warn(`[dap] 丢弃陈旧响应包（回显 0x${res[0].toString(16)} ≠ 命令 0x${cmd.toString(16)}，第 ${this.stale} 个）`);
@@ -365,12 +361,26 @@ export class WebUsbDapProbe {
    *    都会让这个探针的 SWJ 引擎进入"传输全 NO ACK"的状态 —— 必须按下面这一种写法。
    *    出处：SEGGER/pyOCD 的标准做法，也是本工作区 tools\cmsis_dap_raw.py 验证过的那份。
    */
+  /**
+   * SWD 激活序列 —— **照 OpenOCD 的规范形式：136 位**
+   *   `FF×7 9E E7 FF×7 00`（17 字节）
+   * 出处：`src/jtag/swd.h:115-125`（`swd_seq_jtag_to_swd`），v0.11.0 / v0.12.0 / 本机 dev 三版一致；
+   *     详见本仓库 docs/openocd-flow.md §1。
+   *
+   * 早期这里是 88 位（`9E E7 FF×8 00`，11 字节），在 STM32F103 上够用（所以一直没暴露），
+   * 但在 H7B0 上 SWJ-DP 的状态机不吃这一套 —— 表现为后面 DP 写一路 FAULT
+   * （页面上就是那句 'SWD FAULT（…地址 0x4/0x8）'）。线复位要"足够多的连续 1"才稳：
+   * OpenOCD 给的是切换前 7 字节 + 切换后 7 字节的 0xFF。
+   *
+   * 保留旧写法在本文件历史里（git log 可查），万一哪颗老目标只认 88 位再回退即可。
+   */
   async swdActivation(){
-    const data = new Uint8Array(11);
-    data[0] = 0x9e; data[1] = 0xe7;              // JTAG-to-SWD 切换
-    data.fill(0xff, 2, 10);                      // 8 字节 0xFF = 64 位线复位
-    data[10] = 0x00;                             // 8 位空闲（SWDIO 低）
-    await this.swjSequence(88, data);
+    const data = new Uint8Array(17);
+    data.fill(0xff, 0, 7);                       // 切换前：56 个 1
+    data[7] = 0x9e; data[8] = 0xe7;              // JTAG-to-SWD 切换（0xE79E 低位在前）
+    data.fill(0xff, 9, 16);                      // 切换后：56 个 1（线复位）
+    data[16] = 0x00;                             // 8 位空闲（SWDIO 低）
+    await this.swjSequence(136, data);
   }
 
   /**
@@ -768,7 +778,6 @@ export class WebUsbDapProbe {
     const bytes = new Uint8Array(end - start);
     const dv = new DataView(bytes.buffer);
     let a = start;
-    await this._setTAR(start, apIndex);
     /**
      * 🚨 这里**不要**加"prime 读"（写完 TAR 先读几个字丢掉）。
      *    我试过：prime 读 2 个字 → TAR 自增 8 字节 → 紧接着的正式读就从 **start+8** 开始，
@@ -779,7 +788,9 @@ export class WebUsbDapProbe {
      */
     while (a < end){
       const words = Math.min(this.maxWords, (end - a) >> 2, this._wordsToBoundary(a));
-      if (this._needsTarReset(a, start)) await this._setTAR(a, apIndex);      // 4KB 边界：自增会绕回
+      if (words <= 0) break;
+      // 🚨 **每块都重设 TAR**：自增只在"写 TAR 时那个 1KB 块"内有效（见 _wordsToBoundary 的实测记录）
+      await this._setTAR(a, apIndex);
       const { count: got, words: vals } = await this._transferBlock(true, words, AP_DRW, null, apIndex);
       /**
        * 🚨 探针**会把块读响应截短**（本机 120 字的请求常常只回一部分），
@@ -795,24 +806,30 @@ export class WebUsbDapProbe {
   }
 
   /**
-   * 一次块访问最多能走几个字（不许跨 **1KB 边界**，且到 4KB 边界必须重设 TAR）。
+   * 一次块访问最多能走几个字：**不许跨 1KB 边界**。
    *
-   * 🚨 ADIv5 的 TAR 自增是**有界**的：连续多块的 DAP_TransferBlock 不会一路加下去。
-   *    本机实测（读 0x08000000 起 0x1244 字节）：地址走到 0x08001000 时**绕回了 0x08000000**
-   *    —— 也就是 **4KB 边界回绕**（TAR[11:0] 清零、高位不变）。后果：
-   *      · 读：偏移 0x1000 之后读到的是本 4KB 页开头的数据（校验因此误报"读到 0x0"）；
-   *      · 写：**写进错误地址**（本该写的没写对）——"固件能写入、某个寄存器写不进去"就有它一份。
-   *    所以：块大小按 1KB 收窄（保守），并且**每当新块正好落在 4KB 边界上就重写一次 TAR**。
-   *    （很多人以为只有 1KB 回绕，实测这颗探针/这条 AHB-AP 是 4KB。）
+   * 🚨 ADIv5 的 TAR 自增是**有界**的，而且这个"界"比很多人以为的小得多。2026-09 用
+   *    "自描述字"（每个字写成 `0xAD000000 | 它本应去的地址`，读回来就知道跑到哪了）在这块
+   *    H7B0 + akaLinkPro 上实测，一次 DAP_TransferBlock 内：
+   *      · 起点 0x20000200 走 64 字（不跨界）→ **逐字正确**；
+   *      · 起点 0x200003F0 走 8 字（跨 0x400）→ 前 4 字对，**后 4 字跑到 0x20000000**（块首！）；
+   *      · 起点 0x20000FF0 走 8 字（跨 0x1000）→ 前 4 字对，**后 4 字跑到 0x20000C00**（块首！）。
+   *    → 规则唯一解：**自增只在"最后一次写 TAR 时所在的那个 1KB 块"内有效**
+   *      （TAR[31:10] 钉死、TAR[9:0] 回绕到块首），这正是 ADIv5 规范的说法。
+   *
+   *    踩过的坑（本条是本项目最贵的一个）：以前按"4KB 回绕"处理，只在 4KB 边界重设 TAR。
+   *    H7B0 的页缓冲在 0x200003F0、一页 8KB —— 数据越过 0x400 就回绕回 0x20000000，
+   *    **把算法自己的代码整个覆盖掉**，于是内核跑到 pc_program_page 取到垃圾指令 →
+   *    IACCVIOL → HardFault → 界面报「flashloader 执行超时」。F103 的页缓冲在 0x1000
+   *    正好是 4KB 对齐、2KB 一页也在块内，所以只有 H7 中招（"只有某块板子坏"的典型来源）。
+   *    更阴的是：读路径有同一个 bug，写坏之后**读回来也"一致"**，自校验反而通过 ✗。
+   *
+   *    现在的纪律：**每块都重写 TAR**（块已按 1KB 收窄，块内自增绝对安全）。
+   *    代价是每 ≤120 字多一次 DP 写，实测对 RTT 吞吐无感。
    */
   _wordsToBoundary(a){
     const next = (a + 1024) & ~1023;          // 下一个 1KB 边界
     return Math.max(0, (next - a) >> 2);
-  }
-
-  /** 块起始落在 4KB 边界上时必须重设 TAR（自增在那儿会绕回页首） */
-  _needsTarReset(a, start){
-    return a !== start && (a & 0xfff) === 0;
   }
 
   /**
@@ -856,11 +873,12 @@ export class WebUsbDapProbe {
   async _writeMemOnce(addr, data, apIndex = 0){
     if ((addr & 3) === 0 && (data.length & 3) === 0){
       const words = new Uint32Array(data.buffer, data.byteOffset, data.length >> 2);
-      await this._setTAR(addr, apIndex);
       let i = 0;
       while (i < words.length){
-        const n = Math.min(this.maxWords, words.length - i, this._wordsToBoundary(addr + i * 4));
-        if (n <= 0 || this._needsTarReset(addr + i * 4, addr)) await this._setTAR(addr + i * 4, apIndex);
+        const at = (addr + i * 4) >>> 0;
+        const n = Math.min(this.maxWords, words.length - i, this._wordsToBoundary(at));
+        if (n <= 0) break;
+        await this._setTAR(at, apIndex);       // 🚨 每块重设：自增只在"写 TAR 时那个 1KB 块"内有效
         await this._transferBlock(false, n, AP_DRW, words.subarray(i, i + n), apIndex);
         i += n;
       }
@@ -872,11 +890,12 @@ export class WebUsbDapProbe {
     const cur = await this.readMem(start, end - start, apIndex);
     cur.set(data, addr - start);
     const words = new Uint32Array(cur.buffer, cur.byteOffset, cur.length >> 2);
-    await this._setTAR(start, apIndex);
     let i = 0;
     while (i < words.length){
-      const n = Math.min(this.maxWords, words.length - i, this._wordsToBoundary(start + i * 4));
-      if (n <= 0 || this._needsTarReset(start + i * 4, start)) await this._setTAR(start + i * 4, apIndex);
+      const at = (start + i * 4) >>> 0;
+      const n = Math.min(this.maxWords, words.length - i, this._wordsToBoundary(at));
+      if (n <= 0) break;
+      await this._setTAR(at, apIndex);         // 同上：每块重设
       await this._transferBlock(false, n, AP_DRW, words.subarray(i, i + n), apIndex);
       i += n;
     }
