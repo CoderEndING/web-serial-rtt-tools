@@ -80,6 +80,10 @@ export class FlashRunner {
   async programPage(addr, data){
     const buf = this.algo.page_buffers[0];
     await this.probe.writeMem(buf, data);
+    // 🚨 写完之后**必须把这笔 posted 写逼落地**再让算法去读它：
+    //    AP 的写是后发的，算法在目标侧直接读 RAM，抢在前面就会读到上一页的内容 →
+    //    烧进去的是旧数据（实测现象：校验失败，某个字节对不上）。
+    if (this.probe.flushWrites) await this.probe.flushWrites();
     await this.runCode(this.algo.pc_program_page, { 0: addr, 1: data.length, 2: buf }, 30000);
   }
 

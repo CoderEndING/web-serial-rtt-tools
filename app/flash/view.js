@@ -142,13 +142,23 @@ export class FlashView {
       this._status('空闲');
       setStatus($('f-result'), `❌ ${e?.message || e}`, 'err');
       // 失败也要复位目标：flashloader 可能已写进 RAM（踩掉 RTT 控制块等数据），
-      // 不复位的话固件带着被踩的 RAM 继续跑，RTT/串口看上去就"坏了"
-      try { if (this.probe) await this.probe.reset(); } catch {}
+      // 不复位的话固件带着被踩的 RAM 继续跑，RTT/串口看上去就"坏了"。
+      // 先试 nRESET 脉冲；不行再试 AIRCR 软复位（很多接线根本没把 NRST 连到探针）。
+      try { if (this.probe) await this.probe.reset(); }
+      catch { try { if (this.probe) await this.probe.sysReset(); } catch {} }
       throw e;
     } finally {
       clearInterval(timer);
       this.busy = false;
       $('f-flash').disabled = false;
+      /**
+       * 🚨 **烧完必须把探针还回去**（成功失败都要）。
+       *    烧录器是另开一个 WebUsbDapProbe 会话的；不释放的话接口一直被占着 ——
+       *    现象：烧录失败后 RTT 连不上、再点一次烧录报「占用 USB 接口失败」，
+       *    用户只能刷新页面才好（实测就是这么个坑）。
+       */
+      try { if (this.probe) await this.probe.disconnect(); } catch {}
+      this.probe = null;
     }
   }
 

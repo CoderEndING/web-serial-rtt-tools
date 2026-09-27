@@ -544,6 +544,15 @@ export class WebUsbDapProbe {
   }
 
   /**
+   * 把还没落地的 posted 写**逼着落地**（公开给 flashloader 用）。
+   * 场景：算法要读的那块 RAM 缓冲刚由主机写进去，如果那笔写还挂在 AP 的写缓冲里，
+   * 算法（目标侧直接读 RAM）就会读到**上一页的内容** → 烧进去的是旧数据 → 校验失败。
+   */
+  async flushWrites(){
+    await this._flushPosted();
+  }
+
+  /**
    * 设置 AP 的 TAR（目标地址）—— **每次块访问前都必须写**，不做「地址没变就跳过」的缓存。
    *
    * 🚨 为什么不能省（本机 MicroLink(CherryUSB) + STM32F103 实测，裸客户端与网页两边都复现）：
@@ -628,7 +637,26 @@ export class WebUsbDapProbe {
    * 地址 ≥ 0x80000000（PPB 区，如 DHCSR=0xE000EDF0）会变负数 → subarray 越界 → 返回空数组。
    */
   async _readMemLocked(addr, len, apIndex = 0){
-    return await this._readMemOnce(addr, len, apIndex, len > 64);
+    addr = addr >>> 0;
+    /**
+     * 🚨 **PPB 区（≥0xE0000000：DHCSR / DCRSR / DCRDR…）的小块读一律读两遍。**
+     *    这些寄存器承载**状态位**（S_HALT / S_REGRDY），单读一次拿到残渣就会误判：
+     *      · isHalted() 假 false → flashloader 一直等到超时；
+     *      · isHalted() 假 true  → 算法还没跑完就往下走 → 擦/写踩在一起 → **校验失败**
+     *        （实测用户报的「读到 0xad，期望 0x0」就是这一类）。
+     *    它们每次只占一两次往返，稳比快重要。
+     *    RAM 的小块读（RTT 表项等）走单读 + 上层结构校验重读，省下的往返留给吞吐。
+     */
+    const strict = len > 0 && len <= 64 && addr >= 0xE0000000;
+    if (!strict) return await this._readMemOnce(addr, len, apIndex, len > 64);
+    const first = await this._readMemOnce(addr, len, apIndex, false);
+    const second = await this._readMemOnce(addr, len, apIndex, false);
+    if (first.length === second.length){
+      let same = true;
+      for (let i = 0; i < first.length; i++){ if (first[i] !== second[i]){ same = false; break; } }
+      if (same) return second;
+    }
+    return await this._readMemOnce(addr, len, apIndex, false);   // 不一致：再读一遍取最新
   }
 
   async _readMemOnce(addr, len, apIndex = 0, prime = false){
@@ -703,13 +731,11 @@ export class WebUsbDapProbe {
     await this._writeMemOnce(addr, data, apIndex);
     if (this.verifyWrites === false) return;      // 排障开关（默认开）
     /**
-     * 回读确认的**节流**：同一地址短时间内反复写（RTT 轮询每轮推进一次 RdOff 就是这种）
-     * 时跳过回读 —— 上一次已经证明这条路径可靠，而每轮多两次往返会把吞吐砍掉两成
-     * （实测 330 KB/s 的历史值就是这么丢的）。换地址的写（真正的"配置/参数"写）照旧校验。
+     * 回读确认**不节流**（曾经为了吞吐按"同地址 200ms 内跳过"做了节流，结果把烧录搞坏：
+     * flashloader 每页都往同一个 RAM 缓冲写，跳过校验后那笔 posted 写没人逼它落地，
+     * 算法紧接着就去读缓冲 → 读到上一页的内容 → **校验失败**。
+     * 吞吐的账改从别处省：PPB 读双读、RAM 读单读（见 _readMemLocked）。）
      */
-    const now = Date.now();
-    if (this._lastWriteAddr === addr && now - (this._lastWriteAt || 0) < 200) return;
-    this._lastWriteAddr = addr; this._lastWriteAt = now;
     try {
       const back = await this.readMem(addr, data.length, apIndex);
       let same = back.length === data.length;
