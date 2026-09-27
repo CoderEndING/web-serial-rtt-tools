@@ -460,8 +460,9 @@ export class WebUsbDapProbe {
     // 注：不要在这里插 ABORT 清 sticky —— 本探针的 DP 状态机对激活后中途 ABORT 敏感
     // （实测 SELECT 写会 FAULT）。sticky 清理靠失败路径的 reopen()/abort()。
 
-    // DP SELECT = 0（选 AP0、bank0）
-    await this._transfer([{ ap: false, rnw: false, addr: DP_SELECT, data: 0 }]);
+    // DP SELECT = 0 放到上电**之后**写（pyOCD 也是这个顺序）：
+    // 上电前写 SELECT 在目标/探针状态不干净时会直接 FAULT（实测「SWD FAULT（…地址 0x8）」
+    // 就是这么来的，一 FAULT 整条链路就废）。
     // AP 访问前必须给 DP 上电（pyOCD 的 DebugPortSetup 就是干这个）。
     // 先走正常路径（纯上电 + 清 sticky 重试）；只有它连着失败，才动用「掉电-上电」最后手段。
     try {
@@ -470,6 +471,7 @@ export class WebUsbDapProbe {
       console.warn(`[dap] DP 上电失败（${e.message}），改用掉电-上电最后手段`);
       await this.powerCycle();
     }
+    await this._transfer([{ ap: false, rnw: false, addr: DP_SELECT, data: 0 }]);
     await sleep(20);
     const st = await this._readDP(DP_CTRL_STAT);
     if (!(st & (1 << 31))) console.warn('DP 电源应答位没起来（0x' + st.toString(16) + '），继续试');
@@ -519,7 +521,16 @@ export class WebUsbDapProbe {
       } catch (e){
         lastErr = e;
         if (e.ack !== 4) throw e;                    // 不是 FAULT（NO ACK / WAIT）→ 重试也没意义
-        await this.abort();                          // FAULT → 清 sticky
+        /**
+         * FAULT → 清 sticky **并重新走一遍 SWD 激活序列**再重试。
+         * 只写 ABORT 清 sticky 是不够的：上一个会话（或被 kill 的工具）常把 SWJ-DP 留在
+         * "能读 IDCODE、但一写 DP 寄存器就 FAULT"的半死状态，必须重新线复位 + 重激活才能救回来。
+         */
+        await this.abort();
+        try {
+          await this.swdActivation();
+          await this._transfer([{ ap: false, rnw: true, addr: DP_IDCODE }]);
+        } catch {}
         await sleep(20);
       }
     }
@@ -685,11 +696,14 @@ export class WebUsbDapProbe {
     const dv = new DataView(bytes.buffer);
     let a = start;
     await this._setTAR(start, apIndex);
-    if (prime){
-      // 顶掉流水线里的残渣（结果丢弃）。挂起读的第一笔数据来自上一次读事务，
-      // 大块读时这一笔就会变成"开头几个字是别的地址的内容"。
-      try { await this._transferBlock(true, 2, AP_DRW, null, apIndex); } catch {}
-    }
+    /**
+     * 🚨 这里**不要**加"prime 读"（写完 TAR 先读几个字丢掉）。
+     *    我试过：prime 读 2 个字 → TAR 自增 8 字节 → 紧接着的正式读就从 **start+8** 开始，
+     *    整段数据错位 8 字节。实测现象极有辨识度：烧录校验报
+     *    「0x8000000 处读到 0xb9，期望 0x0」—— 而 0xb9 正是偏移 8 处的字节。
+     *    教训：这颗探针的读**没有**"挂起读"滞后（读了就是读到的地址），
+     *    之前遇到的脏数据都来自 TAR 没落地/自增绕回/读写并发，那些已分别修掉了。
+     */
     while (a < end){
       const words = Math.min(this.maxWords, (end - a) >> 2, this._wordsToBoundary(a));
       if (this._needsTarReset(a, start)) await this._setTAR(a, apIndex);      // 4KB 边界：自增会绕回

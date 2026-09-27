@@ -273,8 +273,17 @@ export class FlashView {
     }
 
     if (doReset){
+      /**
+       * 🚨 这里必须用**系统复位**（AIRCR.SYSRESETREQ），不能只拉 nRESET 引脚：
+       *   · 很多接线（本机这块 F103 就是）根本没把 NRST 连到探针，拉引脚等于没复位；
+       *   · 更要命的是跑 flashloader 前我们调过 maskInterrupts()，把目标的 SysTick/NVIC
+       *     关掉了。不复位的话固件"能跑但不打印"—— 现象是 RTT 连得上、控制块也对，
+       *     却一个字节都不来（自测里的「等待超时：ch0 数据」就是这么来的）。
+       *   系统复位会把外设/SysTick 全部初始化回正常状态。
+       */
       this._status('复位运行…');
-      await this.probe.reset();
+      try { await this.probe.sysReset(); }
+      catch (e){ this._log('软复位失败，退回 nRESET 脉冲：' + (e?.message || e)); await this.probe.reset(); }
     }
     this._bar(100);
     this._log('── 完成 ──');
