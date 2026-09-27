@@ -206,17 +206,8 @@
             <button id="r-usb-disconnect" disabled>断开</button>
           </div>
           <label class="row"><span>SWD 时钟</span>
-            <select id="r-usb-clock" title="不是越高越快：本机 MicroLink + STM32F103 实测 8MHz 最快（12MHz 反而慢 ~25%）">
-              <option value="0">自动</option>
-              <option value="1000">1 MHz</option>
-              <option value="500">500 kHz</option>
-              <option value="200">200 kHz</option>
-              <option value="2000">2 MHz</option>
-              <option value="4000">4 MHz</option>
-              <option value="8000">8 MHz</option>
-              <option value="12000">12 MHz</option>
-              <option value="20000">20 MHz</option>
-            </select>
+            <input id="r-usb-clock" class="num" list="usb-clock-list" inputmode="numeric" placeholder="自动"
+                   title="SWD 时钟 kHz。留空或 0 = 自动（从高到低试到通为止）。不是越高越快：本机 MicroLink + STM32F103 实测 8MHz 最快（12MHz 反而慢 ~25%）">
           </label>
           <label class="chk"><input type="checkbox" id="r-usb-all"> 显示所有 USB 设备（非 DAPLink）</label>
           <p class="hint">支持 CMSIS-DAP v2（bulk）探针：DAPLink、自制 cherrydap 等。<br>J-Link 探针不支持 WebUSB，请改用本地桥。</p>
@@ -230,7 +221,7 @@
               <input id="r-jlink-device" value="STM32F103C8" title="给 J-Link 的器件名（如 STM32F103C8 / STM32F103RB / STM32H7B0VB）">
             </label>
             <label class="row"><span>SWD kHz</span>
-              <input id="r-jlink-speed" class="num" inputmode="numeric" value="50000" title="SWD 时钟（kHz）：50000 = 50MHz（J-Link PRO + STM32F103RB 实测可用）。调低只会更慢，不会更稳">
+              <input id="r-jlink-speed" class="num" list="speed-list" inputmode="numeric" value="50000" title="SWD 时钟（kHz）：50000 = 50MHz（J-Link PRO + STM32F103RB 实测可用）。调低只会更慢，不会更稳。点开有 1M~60M 候选，也可手输">
             </label>
             <label class="chk"><input type="checkbox" id="r-jlink-fast"> 高速只读（JLinkRTTLogger）</label>
             <p class="hint">勾上走 JLinkRTTLogger 直写日志（实测 ~1463 KB/s）；不勾走桥自启的 GDB server telnet（全双工，但它的 RTT 轮询节奏把上限压在 ~565 KB/s）。<br>代价：高速模式<b>只读</b>，下方发送框不能向下发数据。</p>
@@ -241,7 +232,7 @@
           </div>
           <p class="hint" id="r-ocd-cfgs-hint" hidden>如 <code>interface/cmsis-dap.cfg, target/stm32f4x.cfg</code>（点「选择…」从列表挑，或直接手填）</p>
           <label class="row" id="r-ocd-custom-speed-row" hidden><span>SWD kHz</span>
-            <input id="r-ocd-speed" class="num" placeholder="留空 = 不设（OpenOCD 默认）" inputmode="numeric">
+            <input id="r-ocd-speed" class="num" list="speed-list" placeholder="留空 = 不设（OpenOCD 默认）" inputmode="numeric">
           </label>
           <div class="row btnrow">
             <button id="r-bridge-connect" class="primary">连接桥</button>
@@ -361,7 +352,7 @@
           <button id="f-cfgs-pick" type="button" title="列出桥所在机器的 OpenOCD cfg 让你挑">选择…</button>
         </div>
         <label class="row" id="f-custom-speed-row" hidden><span>SWD kHz</span>
-          <input id="f-speed" class="num" placeholder="留空 = 不设（OpenOCD 默认）" inputmode="numeric">
+          <input id="f-speed" class="num" list="speed-list" placeholder="留空 = 不设（OpenOCD 默认）" inputmode="numeric">
         </label>
         <p class="hint">烧录走仓库里的 <code>bridge/start-bridge.bat</code>（与 RTT 的桥同一个）。</p>
       </fieldset>
@@ -504,6 +495,41 @@
     </section>
   </div>
 </section>
+
+<!-- ===================== 速度候选（datalist：可点选，也可手输） =====================
+     9 档 = 1M / 5M / 10M / 20M / 30M / 40M / 45M / 50M / 60M（值单位 kHz，与各输入框一致）。
+     60MHz 超过 SEGGER 的 J-Link 上限（J-Link PRO 最高 50MHz，更高的值会被钳住/报错），
+     条目上直接标注，留着只是方便你自己试极限。 -->
+<datalist id="speed-list">
+  <option value="1000" label="1 MHz"></option>
+  <option value="5000" label="5 MHz"></option>
+  <option value="10000" label="10 MHz"></option>
+  <option value="20000" label="20 MHz"></option>
+  <option value="30000" label="30 MHz"></option>
+  <option value="40000" label="40 MHz"></option>
+  <option value="45000" label="45 MHz"></option>
+  <option value="50000" label="50 MHz（J-Link 上限）"></option>
+  <option value="60000" label="60 MHz ⚠ 超过 J-Link 上限（最高 50MHz，会被钳住）"></option>
+</datalist>
+
+<!-- WebUSB（CMSIS-DAP）那一路单独一份：同样 9 档，外加「自动」与三个实测有用的档 ——
+     8MHz 是本机 MicroLink + F103 实测最快（12MHz 反而慢 ~25%），200/500kHz 是链路不稳时的救命档。 -->
+<datalist id="usb-clock-list">
+  <option value="0" label="自动（0 = 从高到低试到通为止）"></option>
+  <option value="1000" label="1 MHz"></option>
+  <option value="5000" label="5 MHz"></option>
+  <option value="10000" label="10 MHz"></option>
+  <option value="20000" label="20 MHz"></option>
+  <option value="30000" label="30 MHz"></option>
+  <option value="40000" label="40 MHz"></option>
+  <option value="45000" label="45 MHz"></option>
+  <option value="50000" label="50 MHz（J-Link 上限）"></option>
+  <option value="60000" label="60 MHz ⚠ 超过 J-Link 上限（最高 50MHz，会被钳住）"></option>
+  <option value="8000" label="8 MHz（本机 MicroLink 实测最快）"></option>
+  <option value="12000" label="12 MHz（实测比 8MHz 慢 ~25%）"></option>
+  <option value="500" label="500 kHz（救命档）"></option>
+  <option value="200" label="200 kHz（救命档）"></option>
+</datalist>
 
 </main>
 

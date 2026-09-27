@@ -104,7 +104,7 @@ export class WebUsbDapProbe {
    *    目标侧对账一致）：1 MHz 114 KB/s、4 MHz 236、**8 MHz 330（最快）**、
    *    10 MHz 324、12 MHz 254、20/30 MHz 只有 250 左右 —— 所以 8 MHz 排在第一个。
    *    时钟太高还会读到错数据（对账对不上）或直接 NO ACK，必须逐档回退。
-   *    想手工指定用界面上的「SWD 时钟」下拉框（存 rtt.clockKhz）。
+   *    想手工指定用界面上的「SWD 时钟」输入框（存 rtt.clockKhz；留空或 0 = 自动，即走这份候选表）。
    */
   static CLOCK_CANDIDATES = [8000, 12000, 4000, 2000, 1000, 500, 200];
 
