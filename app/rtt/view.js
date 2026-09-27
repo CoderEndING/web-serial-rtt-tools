@@ -692,6 +692,15 @@ export class RttView {
     if (on){
       setStatus($('r-err'), `高速 ${fRate(r)}：渲染已停（收数/记录不受影响）· 点此恢复显示`, 'err');
       $('r-err').title = '点击恢复显示。若速率仍高于阈值会再次自动关闭';
+      /**
+       * 🚨 **必须在这块区域里也留一行**，不能只改状态栏。
+       *    实测踩到：J-Link 高速只读（~1.4MB/s）一接上，用户盯着的终端就"凭空冻住"了 ——
+       *    状态栏那句小字没人注意，于是得出"页面一个字节都没收到"的结论（其实 10 秒收了 15MB）。
+       *    这里跟下面"恢复显示"时的提示对称：开始停渲染时说明一次，之后一个字都不再写。
+       */
+      const note = `\r\n[高速 ${fRate(r)}：已停止渲染以省 CPU —— 数据仍在收（统计、计数、记录到文件都照常）· 点状态栏可恢复显示]\r\n`;
+      if (this.mode === 'term' && this.term) this._termWrite(new TextEncoder().encode(note), new Date());
+      else this.tx.push(new TextEncoder().encode(note), new Date());
     } else {
       setStatus($('r-err'), '', null);
       $('r-err').title = '';

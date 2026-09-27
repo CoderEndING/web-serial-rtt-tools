@@ -85,6 +85,32 @@ ESP-IDF 自带那份 OpenOCD（`~\.espressif\tools\openocd-esp32\v0.12.0-esp32-*
 验收口径：经桥烧 `tools/target-firmware/stm32f103/build/fw.elf`（153624 B 的 ELF）→
 `tmp/jlink-accept.mjs check` 读回与 `objcopy` 出的镜像**逐字节比对**（本次 4676 B 全等 ✅）。
 
+### 3.6 真页面实测（CDP 驱动，`tmp/page-rtt-jlink-probe.mjs` / `tmp/page-rtt-diag.mjs`）
+
+前提：`python -m http.server 8899` 供页面 + `bridge/rtt-bridge.mjs --port 17321` + 带 CDP(9333) 的浏览器。
+
+| 页面里选的模式 | 10 秒收到 | 速率 | 样本 |
+|---|---|---|---|
+| 勾「高速只读」（JLinkRTTLogger 源） | 13.5 MB（另一次 15.2 MB） | **1318~1485 KB/s** | `bbbb…` ✅ |
+| 不勾（GDB server 全双工流） | 4.60 MB | **448 KB/s** | `bbbb…` ✅ |
+
+**量页面有没有收到数据，只有 `window.__tools.rtt.stats.bytes` 算数**（配 `term.buffer.active.length` 看显示）。
+三个看着像、其实不成立的指标（第一版验收脚本就栽在这上面，误判成"页面一个字节都没收到"）：
+
+- ✗ `#r-term` 的 `textContent.length`：**空 xterm 就有 5 万多字符**（一堆 `&nbsp;` 单元格），
+  而且 DOM 渲染器复用固定的行节点、内容原地覆盖 → 长度几乎不涨。
+- ✗ `__tools.rtt.rxBytes` / `totalBytes`：**这两个属性不存在** → 恒为 0。
+- ✗ `__tools.rtt.running`：它只表示"**内存轮询循环**在跑"（WebUSB/OpenOCD 那条路）。
+  J-Link 流模式是桥**推**数据，本来就没有轮询循环 → `running:false` 是正常的，跟收没收到数据无关。
+
+另外两点页面行为，容易再次误判：
+
+- **速率 >100 KB/s 时页面会自动停渲染**（`_highspeedGate`，`app/rtt/view.js`，WebUSB 时代就有的省 CPU 设计）：
+  于是终端"冻住"，但字节照收、统计照涨、记录到文件照写。现在停渲染的那一刻会在终端里写一行说明
+  （否则盯终端的人只会看到画面凭空不动）。
+- 页面默认流模式（GDB server 源）稳定在 ~450 KB/s，比同模式下 Node 客户端测到的 ~565 KB/s 低 ~20%
+  （浏览器侧接收/调度开销，未深挖）；换 logger 源后页面反而能跑到 1.3~1.5 MB/s。
+
 ## 四、WebUSB 后端的坑（都是真机踩出来的）
 
 按重要性排序，全部写在 `app/rtt/dap-webusb.js` 的注释里：
