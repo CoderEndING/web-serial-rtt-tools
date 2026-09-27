@@ -532,12 +532,19 @@ export class WebUsbDapProbe {
     }
     await this._transfer([{ ap: false, rnw: false, addr: DP_SELECT, data: (this.apIndex << 24) >>> 0 }]);
     await sleep(20);
-    const st = await this._readDP(DP_CTRL_STAT);
-    // 两个 ACK 位都要看：CSYSPWRUPACK(31) 与 CDBGPWRUPACK(30)。缺任何一个，后面 AP 访问都可能 FAULT。
-    if ((st & 0xC0000000) !== 0xC0000000){
-      console.warn(`DP 电源应答位没起来（CTRL/STAT=0x${st.toString(16)}，` +
-        `CSYSPWRUPACK=${(st >>> 31) & 1} CDBGPWRUPACK=${(st >>> 30) & 1}），继续试`);
-    }
+    /**
+     * ⚠️ **不要在这里用 DP CTRL/STAT 的读值去判断"上电成功没有"**（这一段曾经这么做，
+     *    结果整晚排查方向跑偏，记录在此）：
+     *      · 本探针在刚做完一串 AP 读之后，`_readDP(CTRL/STAT)` 会**稳定地**回一个残留值
+     *        （实测拿到 AP 读出来的 CPUID `0x411FC271`，连读两遍都一样），
+     *        于是日志里刷"DP 电源应答位没起来"，而实际上 AP 访问一切正常；
+     *      · 而且 ACK 位本来就该看 **bit31 = CSYSPWRUPACK、bit29 = CDBGPWRUPACK**
+     *        （bit30/28 是 REQ 位），别按名字猜。
+     *    现在的策略与 OpenOCD 一致（见 docs/openocd-flow.md 的 dap_dp_init）：
+     *    **写了电源请求就不判死**，让第一笔 AP 访问去证伪 —— 上面 APSEL 扫描能读到合理 CPUID
+     *    就已经证明上电成功了。
+     */
+    await this._readDP(DP_CTRL_STAT);        // 保留一次读当"落地屏障"，不看结果
     // CSW：32 位 + 单次自增（保留其它位）
     const csw = await this._readAP(AP_CSW);
     const want = (csw & ~0x3f) | 0x02 | 0x10;
