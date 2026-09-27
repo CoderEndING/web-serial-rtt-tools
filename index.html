@@ -436,7 +436,7 @@
         </label>
         <label class="row"><span>时钟 kHz</span><input id="g-speed" class="num" value="25000" inputmode="numeric" title="J-Link 的 -Speed。J-Link PRO 上 50000 也能稳跑"></label>
         <label class="row"><span>RTT 地址</span><input id="g-rtt-addr" value="0x20002000" title="_SEGGER_RTT 控制块地址，要与链接脚本里钉的位置一致"></label>
-        <label class="row"><span>RTT 范围</span><input id="g-rtt-size" value="0x5000" title="-RTTSearchRanges 的搜索长度"></label>
+        <label class="row"><span>RTT 范围</span><input id="g-rtt-size" value="0x2000" title="-RTTSearchRanges 的搜索长度。Python 模板原值是 0x5000，在 20KB RAM 的 F103 上会越过 RAM 顶，所以这里默认按修正后的 0x2000"></label>
         <label class="row"><span>GDB 端口</span><input id="g-gdb-port" class="num" value="3333" inputmode="numeric"></label>
         <label class="row"><span>build 目录</span><input id="g-build-dir" value="build"></label>
         <label class="row"><span>CMake 生成器</span>
@@ -453,6 +453,19 @@
         <datalist id="g-openocd-targets"></datalist>
         <label class="row"><span>OpenOCD kHz</span><input id="g-openocd-freq" class="num" value="10000" inputmode="numeric"></label>
         <label class="row"><span>RTT 端口</span><input id="g-rtt-port" class="num" value="9090" inputmode="numeric" title="openocd-rtt 目标里 rtt server start 的端口"></label>
+      </fieldset>
+
+      <fieldset>
+        <legend>已套用的修正（固定 4 项）</legend>
+        <p class="hint" style="margin-top:2px">
+          生成时<b>固定</b>在 <code>uvprojx2cmake.py</code> 的产物上套这 4 处修补，不需要你勾：
+        </p>
+        <ol class="hint fixlist">
+          <li><b>RTT 范围</b> <code>0x5000 → 0x2000</code>（原来在 20KB RAM 的 F103 上会越过 RAM 顶）</li>
+          <li><b>clean-jlink 不再删 <code>*.log</code></b>（原来会连 <code>JLinkLog.txt</code> 一起删掉）</li>
+          <li><b>openocd-rtt 改用双引号</b>（<code>-c "…"</code>；原来单引号在 cmd.exe 里会报错）</li>
+          <li><b>去掉 jlink-swo 目标</b>（硬编码 72MHz、固件也没开 SWO，跑出来是空日志）</li>
+        </ol>
       </fieldset>
 
       <fieldset>
@@ -486,7 +499,7 @@
       <div class="stats">
         <span id="g-status">待生成</span>
         <span class="spacer"></span>
-        <span class="hint">默认参数下与 <code>uvprojx2cmake.py</code> 的产物逐字节一致</span>
+        <span class="hint">模板逐字节移植自 <code>uvprojx2cmake.py</code>，默认再套 4 项修正（<code>make test-gen</code> 负责对账）</span>
       </div>
     </section>
   </div>
@@ -529,8 +542,8 @@
     <li>把 Keil <code>.uvprojx</code> 拖进页面：器件、Flash 起址、PyOCD / OpenOCD 目标会自动填好，其余参数都能手改。</li>
     <li>勾选要哪些文件，右侧是<b>实时预览</b>；「写入文件夹…」选一次目录就能把多个文件直接写进去（Edge / Chrome），
         其它浏览器自动改走「打包 ZIP」。</li>
-    <li>默认参数下产物与 <code>uvprojx2cmake.py</code>（另一个工具）<b>逐字节一致</b>（含 CRLF）；仓库里有
-        <code>make test-gen</code> 专门跑这份对账。</li>
+    <li>生成时在 <code>uvprojx2cmake.py</code> 的模板上<b>固定套 4 项修正</b>（RTT 范围收进 RAM、clean 不再删
+        <code>*.log</code>、OpenOCD 的 <code>-c</code> 改双引号、去掉 SWO 目标）；对账测试验证的是"不带修正时逐字节相同"。</li>
     <li>网页不能静默写你的项目目录 —— 必须你亲手选一次文件夹；<code>test_sram.bin</code> 是 RAM 测试图案，不是固件。</li>
   </ul>
   <form method="dialog"><button class="primary">知道了</button></form>

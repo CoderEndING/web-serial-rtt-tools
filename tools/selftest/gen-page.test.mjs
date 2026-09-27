@@ -16,8 +16,18 @@ const CDP = process.env.CDP || 'http://127.0.0.1:9333';
 const APP = process.env.APP || 'http://127.0.0.1:8899/index.html';
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..').replace(/\\/g, '/');
 const DL = join(ROOT, 'tmp', 'gen-dl');
-const FIX = join(ROOT, 'tools', 'fixtures', 'gen', 'mdk-arm');
+const FIXTURES = join(ROOT, 'tools', 'fixtures', 'gen', 'mdk-arm');
 const UVPROJX = join(ROOT, 'tools', 'fixtures', 'gen', 'uvprojx-sample', 'CubeMX_Config.uvprojx');
+
+// 页面**固定**套 4 项修正（app/gen/fixes.js），所以"期望字节" = 对账基线再走一遍同一套修正。
+// 修正逻辑本身在 gen-parity.mjs 里单独断言，这里只负责"页面确实按它产出了"。
+const { applyFixes } = await import('file://' + join(ROOT, 'app', 'gen', 'fixes.js'));
+const { ALL_FIXES, normalizeNewlines, toBytes } = await import('file://' + join(ROOT, 'app', 'gen', 'model.js'));
+const expectedBytes = name => {
+  const p = join(FIXTURES, name);
+  if (name.endsWith('.bin')) return readFileSync(p);
+  return Buffer.from(toBytes(applyFixes(name, normalizeNewlines(readFileSync(p, 'utf8')), ALL_FIXES), 'crlf'));
+};
 
 setTimeout(() => { console.error('[WATCHDOG] 总超时，强制退出'); process.exit(9); }, 120000);
 
@@ -68,6 +78,8 @@ const until = async (expr, what, tries = 80, gap = 150) => {
 await send('Page.enable');
 await send('Runtime.enable');
 await send('DOM.enable');
+// 关掉 HTTP 缓存：否则刚改完 JS 就跑测试，可能拿到上一次的模块（跑出"假失败"）
+try { await send('Network.enable'); await send('Network.setCacheDisabled', { cacheDisabled: true }); } catch {}
 await send('Page.navigate', { url: APP + '?t=' + Date.now() + '#gen' });   // 带 cache-bust：hash-only 导航不会重新执行模块
 await until('!!(window.__tools && window.__tools.gen && document.readyState === "complete")', '页面与 gen 模块就绪', 120, 200);
 
@@ -97,9 +109,10 @@ console.log('== 1b. 复位成已知状态（页面选项存在 localStorage 里�
   ok((await evaluate(`window.__tools.gen.files.length`)) === 6, '6 个产物重新全勾上');
 }
 
-console.log('== 2. 默认参数：产物字节 vs Python 工具基线 ==');
+console.log('== 2. 产物字节 = Python 工具基线 + 4 项固定修正 ==');
 {
-  // 项目名改成基线那个（其余默认值本就一致），然后逐字节比
+  // 项目名改成基线那个（其余默认值本就一致），然后逐字节比。
+  // 注意：页面**固定**套 4 项修正，所以期望值 = 基线文件再走一遍同一套修正逻辑。
   await evaluate(`(()=>{const e=document.getElementById('g-project');e.value='MDK-ARM';e.dispatchEvent(new Event('input',{bubbles:true}));return true})()`);
   await sleep(300);
   const files = await evaluate(`(async()=>{
@@ -108,15 +121,30 @@ console.log('== 2. 默认参数：产物字节 vs Python 工具基线 ==');
   })()`);
   ok(files.length === 6, `生成 6 个文件（实际 ${files.length}）`, files.map(f => f.name).join(','));
   for (const f of files){
-    const want = readFileSync(join(FIX, f.name));
+    const fixed = expectedBytes(f.name);
     const got = Buffer.from(f.b64, 'base64');
-    if (want.equals(got)) ok(true, `${f.name} 与基线逐字节相同（${got.length} B）`);
+    if (Buffer.compare(Buffer.from(fixed), got) === 0) ok(true, `${f.name} = 基线 + 修正 后逐字节相同（${got.length} B）`);
     else {
       let at = -1;
-      for (let i = 0; i < Math.min(want.length, got.length); i++) if (want[i] !== got[i]){ at = i; break; }
-      ok(false, `${f.name} 与基线逐字节相同`, `长度 ${want.length} vs ${got.length}，首个差异 @${at}`);
+      const w = Buffer.from(fixed);
+      for (let i = 0; i < Math.min(w.length, got.length); i++) if (w[i] !== got[i]){ at = i; break; }
+      ok(false, `${f.name} 逐字节相同`, `长度 ${w.length} vs ${got.length}，首个差异 @${at}`);
     }
   }
+}
+
+console.log('== 2b. 4 项修正真的生效（页面产物里逐条查）==');
+{
+  const text = async name => (await evaluate(`window.__tools.gen.files.find(f=>f.name===${JSON.stringify(name)}).text`)) || '';
+  const jl = await text('Makefile.jlink');
+  const oc = await text('Makefile.openocd');
+  ok(/RTT_SIZE \?= 0x2000/.test(jl) && !/RTT_SIZE \?= 0x5000/.test(jl), '① Makefile.jlink 的 RTT_SIZE = 0x2000');
+  ok(!/del \*\.log/.test(jl), '② clean-jlink 里没有删 *.log 那行');
+  ok(/-c "init;.*rtt setup .*\\"SEGGER RTT\\";.*rtt server start/.test(oc), '③ openocd-rtt 用双引号 + 转义内层引号');
+  ok(!/jlink-swo/.test(jl), '④ Makefile.jlink 里再没有 jlink-swo（目标/注释/help 都清了）');
+  ok(!/JLinkSWOViewerCL/.test(jl), '④ 顺带：SWO viewer 那行也没了');
+  const status = await evaluate(`document.getElementById('g-status').textContent`);
+  ok(/修正 4 项/.test(status), `状态栏标明修正项数：${status}`);
 }
 
 console.log('== 3. 预览区显示的就是要写出去的内容 ==');
@@ -143,19 +171,28 @@ console.log('== 4. 勾选与参数开关真的生效 ==');
   ok(before === 6 && !after.includes('Makefile.pyocd'), `取消勾选后不再生成 Makefile.pyocd（${before} → ${after}）`);
   await evaluate(`(()=>{const e=document.getElementById('g-c-pyocd');e.checked=true;e.dispatchEvent(new Event('change',{bubbles:true}));return true})()`);
 
+  // 参数改动 → 只该动那一行（拿页面自己的两个状态比，避免把修正项掺进来）
+  const baseJl = await evaluate(`window.__tools.gen.files.find(f=>f.name==='Makefile.jlink').text`);
   await evaluate(`(()=>{const e=document.getElementById('g-speed');e.value='50000';e.dispatchEvent(new Event('input',{bubbles:true}));return true})()`);
   await sleep(300);
   const tuned = await evaluate(`window.__tools.gen.files.find(f=>f.name==='Makefile.jlink').text`);
-  const want = readFileSync(join(FIX, 'Makefile.jlink'), 'utf8').replace('JLINK_SPEED ?= 25000', 'JLINK_SPEED ?= 50000');
-  ok(tuned.replace(/\r\n/g, '\n') === want.replace(/\r\n/g, '\n'), '改成 50000 后只动了那一行');
+  const la = baseJl.split('\n'), lb = tuned.split('\n');
+  const diffLines = la.map((l, i) => l === lb[i] ? null : i).filter(i => i !== null);
+  ok(la.length === lb.length && diffLines.length === 1
+     && /JLINK_SPEED \?= 25000/.test(la[diffLines[0]]) && /JLINK_SPEED \?= 50000/.test(lb[diffLines[0]]),
+     `改成 50000 后只动了 JLINK_SPEED 那一行（实际 ${diffLines.length} 行）`,
+     diffLines.map(i => `${la[i]} → ${lb[i]}`).join(' | '));
   await evaluate(`(()=>{const e=document.getElementById('g-speed');e.value='25000';e.dispatchEvent(new Event('input',{bubbles:true}));return true})()`);
+  await sleep(250);
 
+  const b64 = expr => evaluate(`(()=>{const u8=${expr}; let s=''; for(let i=0;i<u8.length;i+=4096) s += String.fromCharCode.apply(null, u8.subarray(i,i+4096)); return btoa(s)})()`);
+  const crlfBytes = Buffer.from(await b64(`window.__tools.gen.files.find(f=>f.name==='Makefile.jlink').data`), 'base64');
   await evaluate(`(()=>{const e=document.getElementById('g-newline');e.value='lf';e.dispatchEvent(new Event('change',{bubbles:true}));return true})()`);
   await sleep(300);
-  const lf = await evaluate(`(()=>{const b64 = u8 => { let s=''; for(let i=0;i<u8.length;i+=4096) s += String.fromCharCode.apply(null, u8.subarray(i,i+4096)); return btoa(s); }; return b64(window.__tools.gen.files.find(f=>f.name==='Makefile.jlink').data)})()`);
-  const wantLf = readFileSync(join(FIX, 'Makefile.jlink'), 'utf8').replace(/\r\n/g, '\n');
-  ok(Buffer.from(lf, 'base64').toString('utf8').replace(/\r\n/g, '\n') === wantLf, 'LF 开关：内容除换行外一致');
-  ok(Buffer.from(lf, 'base64').length === Buffer.byteLength(wantLf, 'utf8'), 'LF 模式字节数 = 去掉 CR 后的长度');
+  const lfBytes = Buffer.from(await b64(`window.__tools.gen.files.find(f=>f.name==='Makefile.jlink').data`), 'base64');
+  const crlfText = crlfBytes.toString('utf8');
+  ok(lfBytes.toString('utf8') === crlfText.replace(/\r\n/g, '\n'), 'LF 开关：内容除换行外一致');
+  ok(lfBytes.length === crlfBytes.length - (crlfText.match(/\r\n/g) || []).length, 'LF 模式字节数 = 去掉 CR 后的长度');
   await evaluate(`(()=>{const e=document.getElementById('g-newline');e.value='crlf';e.dispatchEvent(new Event('change',{bubbles:true}));return true})()`);
   await sleep(250);
 }
@@ -246,9 +283,9 @@ console.log('== 7. 「写入文件夹」的写入逻辑（拿假目录句柄跑�
   ok(/FAKE-PROJ/.test(r.status), `状态行报告写入目录：${r.status}`);
   for (const f of r.names){
     const b64 = await evaluate(`window.__mock.written[${JSON.stringify(f)}]`);
-    const want = readFileSync(join(FIX, f));
+    const want = expectedBytes(f);
     const got = Buffer.from(b64, 'base64');
-    ok(want.equals(got), `${f} 写出去的字节与基线一致（${got.length} B）`);
+    ok(want.equals(got), `${f} 写出去的字节 = 基线 + 修正（${got.length} B）`);
   }
   // 勾上「已存在就直接覆盖」→ 不该再问
   await evaluate(`(()=>{const e=document.getElementById('g-force');e.checked=true;e.dispatchEvent(new Event('change',{bubbles:true}));return true})()`);

@@ -54,7 +54,9 @@
 ## 工程生成（.uvprojx → 调试配套文件）
 
 第 5 个标签页。把 Keil 工程文件拖进去（`<Device>` / `<Cpu>` 里的 Flash、RAM 会被读出来自动填），
-勾一勾、改几个参数，就能拿到 5 类配套文件，**内容与 `uvprojx2cmake.py`（另一个 Python 工具）默认参数下的产物逐字节一致**：
+勾一勾、改几个参数，就能拿到 5 类配套文件：模板是**逐字节移植**自 `uvprojx2cmake.py`（另一个 Python 工具）的，
+页面再**固定套 4 项修正**（见下），所以默认产物 = Python 产物 + 这 4 处修补；
+把修正整个关掉（代码里传 `fixes: null`，对账自测走的就是这条路）即与 Python 工具**逐字节一致**。
 
 | 勾选 | 产物 | 用途 |
 |---|---|---|
@@ -72,7 +74,19 @@
 
 网页**不能**静默写你的项目目录 —— 必须你亲手选一次文件夹（浏览器安全模型）。
 
-两点与 Python 工具**故意不同**（更顺手，也更忠实于工程文件本身）：
+**固定套用的 4 项修正**（2026-09-27 逐条过审；改的是 Python 模板里用起来硌人的地方）：
+
+| # | 修正 | 原来会怎样 |
+|---|---|---|
+| 1 | `Makefile.jlink` 的 `RTT_SIZE` `0x5000 → 0x2000` | 在 20KB RAM 的 F103 上 `0x20002000+0x5000` 越过 RAM 顶 |
+| 2 | `clean-jlink` 不再删 `*.log` | 会把 J-Link 自己写的 `JLinkLog.txt` 一起删掉 |
+| 3 | `openocd-rtt` 改用双引号 `-c "…"`（内层 `\"SEGGER RTT\"`） | 原来 `-c '…'` 在 cmd.exe 里单引号不是引号 → 直接报错 |
+| 4 | 去掉 `jlink-swo` 目标 | 硬编码 72MHz 只对 F103 成立，且固件没开 PB3/TRACESWO，跑出来是空日志 |
+
+修正都是**逐行定点替换**，匹配不到就抛错（绝不静默产出半成品）；你自己在页面上填过的值优先，
+例如 RTT 范围填了 `0x1000` 就不会被改回 `0x2000`。
+
+三点与 Python 工具**故意不同**（更顺手，也更忠实于工程文件本身）：
 
 1. **项目名**：Python 工具取 `.uvprojx` 所在**目录名**；网页在拖入文件夹/相对路径时同样取目录名，否则退回 `<TargetName>`（再不然用文件名），反正这个框可以手改。
 2. **换行符**：默认 **CRLF**（与 Python 产物逐字节一致）；想给 git 用切成 LF 即可，除换行外内容完全相同。
@@ -98,7 +112,7 @@ app/
   core/                 bus/store/hex/format/rxview/stats/bin/b64 —— 与界面无关的纯逻辑
   serial/               session(Web Serial 封装) / assistant / terminal / demo(演示串口)
   rtt/                  protocol(RTT 协议) / dap-webusb(CMSIS-DAP) / bridge / elf / mock / view
-  gen/                  工程生成：templates(模板移植自 uvprojx2cmake.py) / model(参数+器件表+uvprojx 解析) / zip(零依赖打包) / view
+  gen/                  工程生成：templates(模板移植自 uvprojx2cmake.py) / fixes(固定 4 项修正) / model(参数+器件表+uvprojx 解析) / zip(零依赖打包) / view
   vendor/xterm/         xterm.js 本地副本（离线可用，MIT）
   ui/                   tabs / toast / dom 小工具
 bridge/

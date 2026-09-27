@@ -16,7 +16,7 @@ const app = join(root, 'app');
 const fixtures = join(root, 'tools', 'fixtures', 'gen', 'mdk-arm');
 
 const load = p => import('file://' + p.replace(/\\/g, '/'));
-const { buildOutputs, PARAM_DEFAULTS, parseUvprojx, suggestFromDevice, matchFamily } = await load(join(app, 'gen', 'model.js'));
+const { buildOutputs, PARAM_DEFAULTS, parseUvprojx, suggestFromDevice, matchFamily, normalizeNewlines } = await load(join(app, 'gen', 'model.js'));
 const { zipStore, crc32 } = await load(join(app, 'gen', 'zip.js'));
 
 let pass = 0, fail = 0;
@@ -26,6 +26,7 @@ const ok = (cond, name, extra = '') => {
 };
 
 // 与 tools/fixtures/gen/mdk-arm 对应的输入参数（取自 Python 工具那次生成时的实际值）
+// fixes: null = 不做任何修正 → 这一节要证明的正是"移植是逐字节精确的"
 const FIXTURE_PARAMS = {
   projectName: 'MDK-ARM',
   jlinkDevice: 'STM32F103RB',
@@ -36,6 +37,7 @@ const FIXTURE_PARAMS = {
   openocdInterface: 'interface/cmsis-dap.cfg',
   openocdTarget: 'target/stm32f1x.cfg',
   newline: 'crlf',
+  fixes: null,
   checks: { jlink: true, gdb: true, pyocd: true, openocd: true, testBin: true },
 };
 
@@ -173,6 +175,70 @@ console.log('== 6. .uvprojx 解析（拿真实工程文件试）==');
     ok(matchFamily('STM32F407VGT6') === 'STM32F4xx', '表外型号按前缀归族');
     ok(matchFamily('STM32H7B3VI') === 'STM32H7B3VI', '表内型号精确命中');
   }
+}
+
+console.log('== 7. 4 项固定修正（页面默认就套；用户 2026-09-27 逐条采纳）==');
+{
+  const { applyFixes, FIX_KEYS } = await import('file://' + join(app, 'gen', 'fixes.js'));
+  const all = Object.fromEntries(FIX_KEYS.map(k => [k, true]));
+  const base = name => normalizeNewlines(readFileSync(join(fixtures, name), 'utf8'));
+  const fixed = name => applyFixes(name, base(name), all);
+  // 用"行集合"比，不用下标比 —— 有删行时下标会整体错位
+  const removed = (a, b) => a.split('\n').filter(l => !b.split('\n').includes(l));
+  const added = (a, b) => b.split('\n').filter(l => !a.split('\n').includes(l));
+
+  ok(FIX_KEYS.length === 4, `共 4 项修正（实际 ${FIX_KEYS.length}）`, FIX_KEYS.join(','));
+
+  // ① RTT 范围
+  const jl = fixed('Makefile.jlink');
+  ok(/RTT_SIZE \?= 0x2000/.test(jl), '① RTT_SIZE 改成 0x2000');
+  ok(!/RTT_SIZE \?= 0x5000/.test(jl), '① 没有残留 0x5000');
+
+  // ② clean-jlink 不再删日志
+  ok(!/del \*\.log/.test(jl), '② clean-jlink 里没有删 *.log 那行');
+  ok(/clean-jlink:/.test(jl) && /del jlink_\*\.script/.test(jl), '② clean-jlink 本身还在、还删临时脚本');
+
+  // ③ openocd-rtt 双引号
+  const oc = fixed('Makefile.openocd');
+  const rttLine = oc.split('\n').find(l => l.includes('rtt server start')) || '';
+  ok(rttLine.includes('-c "init;') && rttLine.includes('\\"SEGGER RTT\\"') && !rttLine.includes("-c '"),
+     '③ openocd-rtt 用双引号 + 内层引号转义', rttLine.slice(-70));
+  ok(!/-c '/.test(oc), "③ 整个 Makefile.openocd 里再没有 -c '…'");
+
+  // ④ 去掉 jlink-swo
+  ok(!/jlink-swo/.test(jl), '④ 没有任何 jlink-swo 残留（目标/用法注释/.PHONY/help）');
+  ok(!/JLinkSWOViewerCL/.test(jl), '④ JLinkSWOViewerCL 那行也删了');
+  ok(/\.PHONY:/.test(jl) && !/\.PHONY:.*jlink-swo/.test(jl), '④ .PHONY 里也清了');
+
+  // 改动范围：少的行 = 7 行删除（用法注释 1 + SWO 目标块 4 + help 1 + 删日志 1）+ 2 行被改写；多的行 = 2 行
+  const rmJ = removed(base('Makefile.jlink'), jl), addJ = added(base('Makefile.jlink'), jl);
+  ok(rmJ.length === 9, `Makefile.jlink 少了 9 行（7 删除 + 2 改写：RTT_SIZE/.PHONY，实际 ${rmJ.length}）`, rmJ.map(s => JSON.stringify(s)).join(' | '));
+  ok(addJ.length === 2 && addJ.some(l => l.includes('RTT_SIZE ?= 0x2000')) && addJ.some(l => l.startsWith('.PHONY:') && !l.includes('jlink-swo')),
+     `新增/改写的行 = 2 行（RTT_SIZE + .PHONY，实际 ${addJ.length}）`, addJ.map(s => JSON.stringify(s)).join(' | '));
+  const belongs = /jlink-swo|JLinkSWOViewerCL|SWO viewer|SWO Viewer|del \*\.log|^\.PHONY:|^RTT_SIZE \?= 0x5000$/i;
+  ok(rmJ.every(l => belongs.test(l)), '少的这些行全部属于这 4 项修正，没有误伤',
+     rmJ.filter(l => !belongs.test(l)).map(s => JSON.stringify(s)).join(' | '));
+
+  const rmO = removed(base('Makefile.openocd'), oc), addO = added(base('Makefile.openocd'), oc);
+  ok(rmO.length === 1 && addO.length === 1 && rmO[0].includes('rtt server start'), 'Makefile.openocd 只换了 rtt 那一行', `${rmO.length}/${addO.length}`);
+
+  // 其它文件不受影响
+  ok(fixed('Makefile.pyocd') === base('Makefile.pyocd'), 'Makefile.pyocd 不受修正影响');
+  ok(fixed('jlink_gdb.script') === base('jlink_gdb.script'), 'jlink_gdb.script 不受修正影响');
+  ok(fixed('rtt_logger.py') === base('rtt_logger.py'), 'rtt_logger.py 不受修正影响');
+  ok(fixed('test_sram.bin') === base('test_sram.bin'), 'test_sram.bin 不受修正影响');
+
+  // 用户自己填过的值要尊重（不能被修正"纠正"回 0x2000）
+  const mine = buildOutputs({ ...FIXTURE_PARAMS, fixes: all, rttSize: '0x1000' }).find(f => f.name === 'Makefile.jlink').text;
+  ok(/RTT_SIZE \?= 0x1000/.test(mine), '用户把 RTT 范围填成 0x1000 时，修正不覆盖它');
+  // 默认参数走页面路径（不传 fixes）= 套修正
+  const pageDefault = buildOutputs({ ...FIXTURE_PARAMS, fixes: undefined }).find(f => f.name === 'Makefile.jlink').text;
+  ok(/RTT_SIZE \?= 0x2000/.test(pageDefault) && !/jlink-swo/.test(pageDefault), '不传 fixes 时默认就套修正（页面行为）');
+
+  // 模板漂移要报错，不能静默产出
+  let threw = false;
+  try { applyFixes('Makefile.jlink', 'some unrelated text\n', all); } catch { threw = true; }
+  ok(threw, '模板对不上时抛错（不静默产出半成品）');
 }
 
 console.log(`\n${fail ? 'FAIL' : 'OK'}  ${pass} 通过 / ${fail} 失败`);

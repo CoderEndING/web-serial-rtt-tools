@@ -133,6 +133,7 @@ check:
 	$(NODE) --check app/flash/view.js
 	$(NODE) --check app/flash/runner.js
 	$(NODE) --check app/gen/templates.js
+	$(NODE) --check app/gen/fixes.js
 	$(NODE) --check app/gen/model.js
 	$(NODE) --check app/gen/view.js
 	$(NODE) --check app/gen/zip.js

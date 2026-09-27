@@ -19,7 +19,7 @@ import { store } from '../core/store.js';
 import { zipStore } from './zip.js';
 import {
   OUTPUTS, PARAM_DEFAULTS, JLINK_DEVICES, OPENOCD_INTERFACES, OPENOCD_TARGETS,
-  parseUvprojx, suggestFromDevice, matchFamily, buildOutputs,
+  parseUvprojx, suggestFromDevice, matchFamily, buildOutputs, appliedFixes,
 } from './model.js';
 
 const FIELDS = [
@@ -140,10 +140,11 @@ export class GenView {
 
     const bytes = this.files.reduce((a, f) => a + f.data.length, 0);
     const kb = (bytes / 1024).toFixed(1);
+    const nfix = appliedFixes(this.p).length;
     if (!this.files.length){
       setStatus($('g-status'), '一个都没勾：至少勾一个产物', 'err');
     } else {
-      setStatus($('g-status'), `${this.files.length} 个文件 · ${kb} KB · ${this.p.newline === 'lf' ? 'LF' : 'CRLF'}`, 'ok');
+      setStatus($('g-status'), `${this.files.length} 个文件 · ${kb} KB · ${this.p.newline === 'lf' ? 'LF' : 'CRLF'} · 修正 ${nfix} 项`, 'ok');
     }
     this.renderDetect();
     return this.files;

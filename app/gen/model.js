@@ -12,6 +12,13 @@ import {
   renderJlinkMakefile, renderGdbScript, renderPyocdMakefile,
   renderOpenocdMakefile, renderRttLogger, makeTestSramBin,
 } from './templates.js';
+import { applyFixes, FIX_KEYS } from './fixes.js';
+
+/**
+ * 页面**默认**就在模板产物上套这 4 项修正（用户 2026-09-27 逐条采纳，见 app/gen/fixes.js）。
+ * 想做逐字节对账（与 Python 工具完全一致）就显式传 `fixes: null`。
+ */
+export const ALL_FIXES = Object.fromEntries(FIX_KEYS.map(k => [k, true]));
 
 // ============================================================================
 // 与 Python 工具一致的默认值
@@ -236,8 +243,12 @@ function pruneOverrides(obj){
 export function buildOutputs(p){
   const checks = p.checks || {};
   const newline = p.newline === 'lf' ? 'lf' : 'crlf';
-  const text = s => toBytes(s, newline);
-  const asText = (name, s) => ({ name, data: text(s), text: normalizeNewlines(s), bin: false });
+  // 默认套修正；`fixes: null` = 原汁原味（对账基线用）
+  const fixes = p.fixes === undefined ? ALL_FIXES : p.fixes;
+  const asText = (name, raw) => {
+    const lf = applyFixes(name, normalizeNewlines(raw), fixes);
+    return { name, data: toBytes(lf, newline), text: lf, bin: false };
+  };
 
   const base = {
     projectName: p.projectName || PARAM_DEFAULTS.projectName,
@@ -285,4 +296,10 @@ export function buildOutputs(p){
 /** 只要文件名（预览列表 / 冲突检查用） */
 export function outputNames(p){
   return buildOutputs(p).map(f => f.name);
+}
+
+/** 当前参数下实际生效的修正项（状态栏显示用） */
+export function appliedFixes(p){
+  const fixes = p?.fixes === undefined ? ALL_FIXES : p.fixes;
+  return FIX_KEYS.filter(k => fixes && fixes[k]);
 }
