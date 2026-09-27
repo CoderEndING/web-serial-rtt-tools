@@ -11,6 +11,7 @@
 | **终端** | Xshell 式串口终端：xterm.js 渲染 ANSI、本地回显、回车/退格映射、粘贴发送 | 同上（与串口助手共用同一个串口会话） |
 | **RTT Viewer** | SEGGER RTT 多通道查看 + 下行输入 + 复位目标，四种后端；同样支持记录到文件与高速自动关显示 | **零安装**：WebUSB + CMSIS-DAP 探针<br>**可选**：本地桥 + OpenOCD / J-Link |
 | **烧录器** | .elf/.hex/.bin 写进目标：**零安装 WebUSB**（页面跑 flashloader，擦/写/校验/复位一条龙）或**本地桥 OpenOCD** | 零安装：同上探针；桥：OpenOCD |
+| **工程生成** | 拖进 Keil `.uvprojx` 就能生成调试/下载配套文件：`Makefile.jlink`、`jlink_gdb.script`、`Makefile.pyocd`、`Makefile.openocd`（连带 `rtt_logger.py`）、`test_sram.bin`；参数可填可勾，产物**实时预览** | 不需要任何硬件/后端（纯前端生成） |
 
 > 为什么 RTT 要分三种后端：J-Link 与 OpenOCD 都是**本机程序**，网页无权启动进程、也无权开 TCP。
 > 所以零安装模式下 RTT 走 **WebUSB 直连 CMSIS-DAP 探针**；想用 J-Link/OpenOCD 就启动仓库里的桥（`bridge/`）。
@@ -21,9 +22,9 @@
 |---|---|
 | ![串口助手](docs/shots/1-serial.png) | ![终端](docs/shots/2-terminal.png) |
 
-| RTT Viewer（内置模拟目标） |
-|---|
-| ![RTT](docs/shots/3-rtt-mock.png) |
+| RTT Viewer（内置模拟目标） | 工程生成 |
+|---|---|
+| ![RTT](docs/shots/3-rtt-mock.png) | ![工程生成](docs/shots/4-gen.png) |
 
 （截图里第一个标签用的是**内置演示串口**，所以显示的是假设备；`?demo=serial` 就能自己试。）
 
@@ -50,6 +51,48 @@
 
 串口和 RTT 可以**同时**用（一个走 USB CDC、一个走探针）。
 
+## 工程生成（.uvprojx → 调试配套文件）
+
+第 5 个标签页。把 Keil 工程文件拖进去（`<Device>` / `<Cpu>` 里的 Flash、RAM 会被读出来自动填），
+勾一勾、改几个参数，就能拿到 5 类配套文件：模板是**逐字节移植**自 `uvprojx2cmake.py`（另一个 Python 工具）的，
+页面再**固定套 4 项修正**（见下），所以默认产物 = Python 产物 + 这 4 处修补；
+把修正整个关掉（代码里传 `fixes: null`，对账自测走的就是这条路）即与 Python 工具**逐字节一致**。
+
+| 勾选 | 产物 | 用途 |
+|---|---|---|
+| J-Link Makefile | `Makefile.jlink` | `make -f Makefile.jlink jlink-prog / jlink-rtt / jlink-gdb / jlink-debug` |
+| GDB 脚本 | `jlink_gdb.script` | 连 `JLinkGDBServerCL` 的 3333 端口、`load`、`break main`；OpenOCD/PyOCD 的 Makefile 也复用它 |
+| PyOCD Makefile | `Makefile.pyocd` | `pyocd erase/flash/gdbserver/rtt` |
+| OpenOCD Makefile | `Makefile.openocd` **+ `rtt_logger.py`** | 擦/烧/校验、`openocd-rtt`（RTT server + 那份 socket 日志脚本）、`openocd-sram` |
+| SRAM test bin | `test_sram.bin` | 20KB 的 `0x00 01 02 … FF` 递增图案，给 `openocd-sram` 灌进 RAM 再回读比对（**不是可执行代码**） |
+
+文件怎么落地：
+
+- **Edge / Chrome**：「写入文件夹…」选一次目录，多个文件**直接写进去**（不打包、不解压；同名文件会先问你，和 Python 工具"存在就不覆盖"一个意思）；
+- **其它浏览器**：自动退化成「打包 ZIP」落「下载」文件夹；
+- 预览区还能单独下载 / 复制当前那个文件。
+
+网页**不能**静默写你的项目目录 —— 必须你亲手选一次文件夹（浏览器安全模型）。
+
+**固定套用的 4 项修正**（2026-09-27 逐条过审；改的是 Python 模板里用起来硌人的地方）：
+
+| # | 修正 | 原来会怎样 |
+|---|---|---|
+| 1 | `Makefile.jlink` 的 `RTT_SIZE` `0x5000 → 0x2000` | 在 20KB RAM 的 F103 上 `0x20002000+0x5000` 越过 RAM 顶 |
+| 2 | `clean-jlink` 不再删 `*.log` | 会把 J-Link 自己写的 `JLinkLog.txt` 一起删掉 |
+| 3 | `openocd-rtt` 改用双引号 `-c "…"`（内层 `\"SEGGER RTT\"`） | 原来 `-c '…'` 在 cmd.exe 里单引号不是引号 → 直接报错 |
+| 4 | 去掉 `jlink-swo` 目标 | 硬编码 72MHz 只对 F103 成立，且固件没开 PB3/TRACESWO，跑出来是空日志 |
+
+修正都是**逐行定点替换**，匹配不到就抛错（绝不静默产出半成品）；你自己在页面上填过的值优先，
+例如 RTT 范围填了 `0x1000` 就不会被改回 `0x2000`。
+
+三点与 Python 工具**故意不同**（更顺手，也更忠实于工程文件本身）：
+
+1. **项目名**：Python 工具取 `.uvprojx` 所在**目录名**；网页在拖入文件夹/相对路径时同样取目录名，否则退回 `<TargetName>`（再不然用文件名），反正这个框可以手改。
+2. **换行符**：默认 **CRLF**（与 Python 产物逐字节一致）；想给 git 用切成 LF 即可，除换行外内容完全相同。
+
+细节与对账方法见 [`docs/gen-page.md`](docs/gen-page.md)。
+
 ## 支持的调试后端
 
 | 后端 | 通道 | 双向 | 目标控制 | 依赖 |
@@ -69,6 +112,7 @@ app/
   core/                 bus/store/hex/format/rxview/stats/bin/b64 —— 与界面无关的纯逻辑
   serial/               session(Web Serial 封装) / assistant / terminal / demo(演示串口)
   rtt/                  protocol(RTT 协议) / dap-webusb(CMSIS-DAP) / bridge / elf / mock / view
+  gen/                  工程生成：templates(模板移植自 uvprojx2cmake.py) / fixes(固定 4 项修正) / model(参数+器件表+uvprojx 解析) / zip(零依赖打包) / view
   vendor/xterm/         xterm.js 本地副本（离线可用，MIT）
   ui/                   tabs / toast / dom 小工具
 bridge/
@@ -76,7 +120,8 @@ bridge/
   bridge.config.json    目标配置（stm32f103 / esp32s31 / …）
   start-bridge.bat|sh   双击启动
 tools/
-  selftest/             自测：Node 协议测试 / 桥端到端 / 浏览器真机(CDP) / LA 参考流量
+  selftest/             自测：Node 协议测试 / 工程生成对账 / 桥端到端 / 浏览器真机(CDP) / LA 参考流量
+  fixtures/gen/         对账基线：Python 工具（uvprojx2cmake.py）对真实工程的原始产物，逐字节比对用
   la/                   逻辑分析仪：kingst_la.py（KingstVIS Socket API 单文件工具）+ SWD 流量发生器
   dev/                  extract-algo.py（从 pyOCD 抽 flash 算法，别手抄 base64）、help.ps1
   target-firmware/
@@ -95,6 +140,9 @@ docs/                   后端配置与排障；逻辑分析仪攻略.md（含 L
 ```powershell
 # 1) 纯逻辑（RTT 协议 / ELF 符号 / HEX 解析）—— 不需要浏览器、不需要硬件
 node tools\selftest\rtt.test.mjs
+
+# 1b) 工程生成页对账：与 Python 工具 uvprojx2cmake.py 的真实产物逐字节比对（含 ZIP 自解、.uvprojx 解析）
+node tools\selftest\gen-parity.mjs
 
 # 2) 页面端到端（内置演示串口，无需硬件）
 python -m http.server 8899 --bind 127.0.0.1        # 仓库根
