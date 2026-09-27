@@ -23,7 +23,13 @@ const CDP = process.env.CDP || 'http://127.0.0.1:9333';
 const APP = process.env.APP || 'http://127.0.0.1:8899/index.html';
 const CLOCKS = (process.env.CLOCKS || '1000,2000,4000,8000,12000,16000,20000,30000').split(',').map(Number);
 const SECS = Number(process.env.SECS || 4);
-const ELF = join(root, 'tools', 'target-firmware', 'stm32f103_rtt_speed', 'build', 'fw.elf');
+/**
+ * 换板子/换固件时用 ELF=<路径> 覆盖（例：STM32H7B0 那份固件）。
+ * 🚨 不覆盖就会拿 F103 的 g_bytes 地址去对账，读回来是垃圾 → 每档都被判"数据不可信"（假警报）。
+ * RAM= 可缩小控制块扫描范围（默认 0x20000000-0x20005000 覆盖 F103/H7B0 都够）。
+ */
+const ELF = process.env.ELF || join(root, 'tools', 'target-firmware', 'stm32f103_rtt_speed', 'build', 'fw.elf');
+const RANGE = process.env.RAM || '0x20000000-0x20005000';
 
 const syms = {};
 if (existsSync(ELF)){
@@ -74,7 +80,7 @@ for (const khz of CLOCKS){
       const u32 = async a => { if (!a) return null; const b = await p.readMem(a, 4); return (b[0]|(b[1]<<8)|(b[2]<<16)|(b[3]<<24))>>>0; };
       let out = {};
       try {
-        const found = await Rtt.locate(p, { ranges: parseRanges('0x20000000-0x20005000'), chunk: 1024 });
+        const found = await Rtt.locate(p, { ranges: parseRanges(${JSON.stringify(RANGE)}), chunk: 1024 });
         const rtt = new Rtt(p, { addr: found });
         await rtt.init();
         await rtt.readUp(0);
@@ -109,3 +115,5 @@ for (const khz of CLOCKS){
 const best = rows.filter(r => r.ok && r.bps).sort((a, b) => b.bps - a.bps)[0];
 console.log('\n结论：' + (best ? `最高可用档 ${best.khz} kHz → ${Math.round(best.bps)} B/s（${(best.bps / 1024).toFixed(1)} KB/s）` : '没有可用档位'));
 ws.close();
+// 🚨 显式退出：CDP WebSocket / 页面侧挂起的 promise 会让 node 吊着不结束（实测踩到）
+process.exit(0);

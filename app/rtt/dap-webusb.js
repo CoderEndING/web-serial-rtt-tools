@@ -361,12 +361,26 @@ export class WebUsbDapProbe {
    *    都会让这个探针的 SWJ 引擎进入"传输全 NO ACK"的状态 —— 必须按下面这一种写法。
    *    出处：SEGGER/pyOCD 的标准做法，也是本工作区 tools\cmsis_dap_raw.py 验证过的那份。
    */
+  /**
+   * SWD 激活序列 —— **照 OpenOCD 的规范形式：136 位**
+   *   `FF×7 9E E7 FF×7 00`（17 字节）
+   * 出处：`src/jtag/swd.h:115-125`（`swd_seq_jtag_to_swd`），v0.11.0 / v0.12.0 / 本机 dev 三版一致；
+   *     详见本仓库 docs/openocd-flow.md §1。
+   *
+   * 早期这里是 88 位（`9E E7 FF×8 00`，11 字节），在 STM32F103 上够用（所以一直没暴露），
+   * 但在 H7B0 上 SWJ-DP 的状态机不吃这一套 —— 表现为后面 DP 写一路 FAULT
+   * （页面上就是那句 'SWD FAULT（…地址 0x4/0x8）'）。线复位要"足够多的连续 1"才稳：
+   * OpenOCD 给的是切换前 7 字节 + 切换后 7 字节的 0xFF。
+   *
+   * 保留旧写法在本文件历史里（git log 可查），万一哪颗老目标只认 88 位再回退即可。
+   */
   async swdActivation(){
-    const data = new Uint8Array(11);
-    data[0] = 0x9e; data[1] = 0xe7;              // JTAG-to-SWD 切换
-    data.fill(0xff, 2, 10);                      // 8 字节 0xFF = 64 位线复位
-    data[10] = 0x00;                             // 8 位空闲（SWDIO 低）
-    await this.swjSequence(88, data);
+    const data = new Uint8Array(17);
+    data.fill(0xff, 0, 7);                       // 切换前：56 个 1
+    data[7] = 0x9e; data[8] = 0xe7;              // JTAG-to-SWD 切换（0xE79E 低位在前）
+    data.fill(0xff, 9, 16);                      // 切换后：56 个 1（线复位）
+    data[16] = 0x00;                             // 8 位空闲（SWDIO 低）
+    await this.swjSequence(136, data);
   }
 
   /**
@@ -483,14 +497,54 @@ export class WebUsbDapProbe {
       console.warn(`[dap] DP 上电失败（${e.message}），改用掉电-上电最后手段`);
       await this.powerCycle();
     }
-    await this._transfer([{ ap: false, rnw: false, addr: DP_SELECT, data: 0 }]);
-    await sleep(20);
-    const st = await this._readDP(DP_CTRL_STAT);
-    // 两个 ACK 位都要看：CSYSPWRUPACK(31) 与 CDBGPWRUPACK(30)。缺任何一个，后面 AP 访问都可能 FAULT。
-    if ((st & 0xC0000000) !== 0xC0000000){
-      console.warn(`DP 电源应答位没起来（CTRL/STAT=0x${st.toString(16)}，` +
-        `CSYSPWRUPACK=${(st >>> 31) & 1} CDBGPWRUPACK=${(st >>> 30) & 1}），继续试`);
+    /**
+     * 🚨 **APSEL 不能硬编码 0**。同一份代码要在不同芯片上跑：
+     *    · STM32F103 —— CM3 内存挂在 **AP0**；
+     *    · STM32H7B0 —— CM7 内存挂在 **AP2**（OpenOCD 自己的日志就是
+     *      `Info : [stm32h7x.ap2] Examination succeed`）。
+     *    硬写 0 的后果：H7B0 上写 CSW 直接 FAULT（不存在的 AP），而 F103 一路正常，
+     *    于是表现成"页面在 F103 好、在 H7 坏"。这里照 OpenOCD 的做法扫一遍 APSEL：
+     *    写 SELECT → 写 CSW(0x23000052) → 写 TAR=0xE000ED00 → 读 DRW，
+     *    **谁能返回合理的 CPUID 就用谁**（只看 ACK 不够：H7B0 上不存在的 AP0 也会"回 ACK"，
+     *    但读出来是 0x9576B58B 这种垃圾）。顺序 [0,2,1,3]：F103 第一下就中。
+     */
+    this.apIndex = 0;
+    for (const ap of [0, 2, 1, 3]){
+      /**
+       * CSW 也一起扫候选值 —— 出处 docs/openocd-flow.md（:1825/:1832/:1871）：
+       *   OpenOCD 的 `CSW_AHB_DEFAULT` = 0xA2000000（bit31/29/25），块读写再 |0x12 → **0xA2000012**；
+       *   而 **STM32H7 上它实际下发的是 0xAA000012（bit27 也置 1）**。
+       *   本文件旧值 0x23000052 是另一套 Prot 位（bit24 而非 bit31、没有 bit27）——
+       *   在 F103 上凑巧能用，在 H7 上写下去直接 FAULT。这里按"常用 → H7 → 旧值"依次试。
+       */
+      for (const csw of [0xa2000012, 0xaa000012, 0x23000052]){
+        try {
+          await this._transfer([{ ap: false, rnw: false, addr: DP_SELECT, data: (ap << 24) >>> 0 }]);
+          await this._transfer([{ ap: true, rnw: false, addr: AP_CSW, data: csw >>> 0 }]);
+          await this._transfer([{ ap: true, rnw: false, addr: AP_TAR, data: 0xE000ED00 }]);
+          const v = ((await this._transfer([{ ap: true, rnw: true, addr: AP_DRW }]))[0]) >>> 0;
+          if (v && v !== 0xffffffff){ this.apIndex = ap; this.cswUsed = csw; break; }
+        } catch (e){ /* 这组不行，试下一个 */ }
+        try { await this._transfer([{ ap: false, rnw: false, addr: 0x00, data: 0x0000001e }]); } catch {}
+      }
+      if (this.cswUsed) break;
+      try { await this._transfer([{ ap: false, rnw: false, addr: 0x00, data: 0x0000001e }]); } catch {}
     }
+    await this._transfer([{ ap: false, rnw: false, addr: DP_SELECT, data: (this.apIndex << 24) >>> 0 }]);
+    await sleep(20);
+    /**
+     * ⚠️ **不要在这里用 DP CTRL/STAT 的读值去判断"上电成功没有"**（这一段曾经这么做，
+     *    结果整晚排查方向跑偏，记录在此）：
+     *      · 本探针在刚做完一串 AP 读之后，`_readDP(CTRL/STAT)` 会**稳定地**回一个残留值
+     *        （实测拿到 AP 读出来的 CPUID `0x411FC271`，连读两遍都一样），
+     *        于是日志里刷"DP 电源应答位没起来"，而实际上 AP 访问一切正常；
+     *      · 而且 ACK 位本来就该看 **bit31 = CSYSPWRUPACK、bit29 = CDBGPWRUPACK**
+     *        （bit30/28 是 REQ 位），别按名字猜。
+     *    现在的策略与 OpenOCD 一致（见 docs/openocd-flow.md 的 dap_dp_init）：
+     *    **写了电源请求就不判死**，让第一笔 AP 访问去证伪 —— 上面 APSEL 扫描能读到合理 CPUID
+     *    就已经证明上电成功了。
+     */
+    await this._readDP(DP_CTRL_STAT);        // 保留一次读当"落地屏障"，不看结果
     // CSW：32 位 + 单次自增（保留其它位）
     const csw = await this._readAP(AP_CSW);
     const want = (csw & ~0x3f) | 0x02 | 0x10;
@@ -538,29 +592,39 @@ export class WebUsbDapProbe {
    *    网页里 sleep(50) 还会被后台节流成 ~200ms，掉电更彻底、命中率更高。
    * 这里保留一次「清 sticky 再重试」的兜底：万一真撞上 FAULT 也能自己爬起来。
    */
-  async _powerUpDP(attempts = 2){
-    let lastErr = null;
-    for (let i = 1; i <= attempts; i++){
+  async _powerUpDP(attempts = 3){
+    /**
+     * **照 OpenOCD 的 dap_dp_init 抄**（出处见 docs/openocd-flow.md，含 文件:行号）：
+     *   ① 无条件写 `DP_CTRL_STAT = CDBGPWRUPREQ|CSYSPWRUPREQ|SSTICKYERR|SSTICKYORUN`
+     *      = **0x50000022** —— 关键就是最后两位 sticky 清除位：
+     *      **带着 sticky 的 DP 会拒绝写**，所以"先 ABORT 清、再写 0x50000000"那条路是死路
+     *      （页面实测：写 CTRL/STAT 恒 FAULT）；OpenOCD 是**一笔写里同时请求上电 + 清 sticky**。
+     *   ② 轮询 CTRL/STAT 等 PWRUPACK（本机 H7B0 上这两位可能一直是 0，所以**只当参考**，
+     *      不通过也继续 —— OpenOCD 能跑通就证明 AP 可用性与这两位不必绑定）。
+     *   ③ 再写一次 `0x50000000`（撤掉 sticky 清除位，保留电源请求）——与 OpenOCD 一致。
+     */
+    for (let i = 0; i < attempts; i++){
       try {
-        await this._writeDP(DP_CTRL_STAT, DP_PWRUP);
-        return true;
+        await this._writeDP(DP_CTRL_STAT, 0x50000022);
       } catch (e){
-        lastErr = e;
-        if (e.ack !== 4) throw e;                    // 不是 FAULT（NO ACK / WAIT）→ 重试也没意义
-        /**
-         * FAULT → 清 sticky **并重新走一遍 SWD 激活序列**再重试。
-         * 只写 ABORT 清 sticky 是不够的：上一个会话（或被 kill 的工具）常把 SWJ-DP 留在
-         * "能读 IDCODE、但一写 DP 寄存器就 FAULT"的半死状态，必须重新线复位 + 重激活才能救回来。
-         */
-        await this.abort();
-        try {
-          await this.swdActivation();
-          await this._transfer([{ ap: false, rnw: true, addr: DP_IDCODE }]);
-        } catch {}
-        await sleep(20);
+        if (e.ack !== 4) throw e;
       }
+      let st = 0;
+      for (let k = 0; k < 20; k++){
+        try { st = ((await this._transfer([{ ap: false, rnw: true, addr: DP_CTRL_STAT }]))[0]) >>> 0; } catch { st = 0; }
+        if ((st & 0x30000000) === 0x30000000) break;
+        await sleep(10);
+      }
+      try { await this._writeDP(DP_CTRL_STAT, 0x50000000); } catch {}
+      this.lastDpStat = st;
+      if ((st & 0x30000000) === 0x30000000) return true;
+      try {
+        await this.swdActivation();
+        await this._transfer([{ ap: false, rnw: true, addr: DP_IDCODE }]);
+      } catch {}
+      await sleep(20);
     }
-    throw lastErr;
+    return true;   // 不判死：让第一笔 AP 访问去证伪（OpenOCD 也不因 ACK 缺失就放弃）
   }
 
   /**
@@ -721,7 +785,6 @@ export class WebUsbDapProbe {
     const bytes = new Uint8Array(end - start);
     const dv = new DataView(bytes.buffer);
     let a = start;
-    await this._setTAR(start, apIndex);
     /**
      * 🚨 这里**不要**加"prime 读"（写完 TAR 先读几个字丢掉）。
      *    我试过：prime 读 2 个字 → TAR 自增 8 字节 → 紧接着的正式读就从 **start+8** 开始，
@@ -732,7 +795,9 @@ export class WebUsbDapProbe {
      */
     while (a < end){
       const words = Math.min(this.maxWords, (end - a) >> 2, this._wordsToBoundary(a));
-      if (this._needsTarReset(a, start)) await this._setTAR(a, apIndex);      // 4KB 边界：自增会绕回
+      if (words <= 0) break;
+      // 🚨 **每块都重设 TAR**：自增只在"写 TAR 时那个 1KB 块"内有效（见 _wordsToBoundary 的实测记录）
+      await this._setTAR(a, apIndex);
       const { count: got, words: vals } = await this._transferBlock(true, words, AP_DRW, null, apIndex);
       /**
        * 🚨 探针**会把块读响应截短**（本机 120 字的请求常常只回一部分），
@@ -748,24 +813,30 @@ export class WebUsbDapProbe {
   }
 
   /**
-   * 一次块访问最多能走几个字（不许跨 **1KB 边界**，且到 4KB 边界必须重设 TAR）。
+   * 一次块访问最多能走几个字：**不许跨 1KB 边界**。
    *
-   * 🚨 ADIv5 的 TAR 自增是**有界**的：连续多块的 DAP_TransferBlock 不会一路加下去。
-   *    本机实测（读 0x08000000 起 0x1244 字节）：地址走到 0x08001000 时**绕回了 0x08000000**
-   *    —— 也就是 **4KB 边界回绕**（TAR[11:0] 清零、高位不变）。后果：
-   *      · 读：偏移 0x1000 之后读到的是本 4KB 页开头的数据（校验因此误报"读到 0x0"）；
-   *      · 写：**写进错误地址**（本该写的没写对）——"固件能写入、某个寄存器写不进去"就有它一份。
-   *    所以：块大小按 1KB 收窄（保守），并且**每当新块正好落在 4KB 边界上就重写一次 TAR**。
-   *    （很多人以为只有 1KB 回绕，实测这颗探针/这条 AHB-AP 是 4KB。）
+   * 🚨 ADIv5 的 TAR 自增是**有界**的，而且这个"界"比很多人以为的小得多。2026-09 用
+   *    "自描述字"（每个字写成 `0xAD000000 | 它本应去的地址`，读回来就知道跑到哪了）在这块
+   *    H7B0 + akaLinkPro 上实测，一次 DAP_TransferBlock 内：
+   *      · 起点 0x20000200 走 64 字（不跨界）→ **逐字正确**；
+   *      · 起点 0x200003F0 走 8 字（跨 0x400）→ 前 4 字对，**后 4 字跑到 0x20000000**（块首！）；
+   *      · 起点 0x20000FF0 走 8 字（跨 0x1000）→ 前 4 字对，**后 4 字跑到 0x20000C00**（块首！）。
+   *    → 规则唯一解：**自增只在"最后一次写 TAR 时所在的那个 1KB 块"内有效**
+   *      （TAR[31:10] 钉死、TAR[9:0] 回绕到块首），这正是 ADIv5 规范的说法。
+   *
+   *    踩过的坑（本条是本项目最贵的一个）：以前按"4KB 回绕"处理，只在 4KB 边界重设 TAR。
+   *    H7B0 的页缓冲在 0x200003F0、一页 8KB —— 数据越过 0x400 就回绕回 0x20000000，
+   *    **把算法自己的代码整个覆盖掉**，于是内核跑到 pc_program_page 取到垃圾指令 →
+   *    IACCVIOL → HardFault → 界面报「flashloader 执行超时」。F103 的页缓冲在 0x1000
+   *    正好是 4KB 对齐、2KB 一页也在块内，所以只有 H7 中招（"只有某块板子坏"的典型来源）。
+   *    更阴的是：读路径有同一个 bug，写坏之后**读回来也"一致"**，自校验反而通过 ✗。
+   *
+   *    现在的纪律：**每块都重写 TAR**（块已按 1KB 收窄，块内自增绝对安全）。
+   *    代价是每 ≤120 字多一次 DP 写，实测对 RTT 吞吐无感。
    */
   _wordsToBoundary(a){
     const next = (a + 1024) & ~1023;          // 下一个 1KB 边界
     return Math.max(0, (next - a) >> 2);
-  }
-
-  /** 块起始落在 4KB 边界上时必须重设 TAR（自增在那儿会绕回页首） */
-  _needsTarReset(a, start){
-    return a !== start && (a & 0xfff) === 0;
   }
 
   /**
@@ -809,11 +880,12 @@ export class WebUsbDapProbe {
   async _writeMemOnce(addr, data, apIndex = 0){
     if ((addr & 3) === 0 && (data.length & 3) === 0){
       const words = new Uint32Array(data.buffer, data.byteOffset, data.length >> 2);
-      await this._setTAR(addr, apIndex);
       let i = 0;
       while (i < words.length){
-        const n = Math.min(this.maxWords, words.length - i, this._wordsToBoundary(addr + i * 4));
-        if (n <= 0 || this._needsTarReset(addr + i * 4, addr)) await this._setTAR(addr + i * 4, apIndex);
+        const at = (addr + i * 4) >>> 0;
+        const n = Math.min(this.maxWords, words.length - i, this._wordsToBoundary(at));
+        if (n <= 0) break;
+        await this._setTAR(at, apIndex);       // 🚨 每块重设：自增只在"写 TAR 时那个 1KB 块"内有效
         await this._transferBlock(false, n, AP_DRW, words.subarray(i, i + n), apIndex);
         i += n;
       }
@@ -825,11 +897,12 @@ export class WebUsbDapProbe {
     const cur = await this.readMem(start, end - start, apIndex);
     cur.set(data, addr - start);
     const words = new Uint32Array(cur.buffer, cur.byteOffset, cur.length >> 2);
-    await this._setTAR(start, apIndex);
     let i = 0;
     while (i < words.length){
-      const n = Math.min(this.maxWords, words.length - i, this._wordsToBoundary(start + i * 4));
-      if (n <= 0 || this._needsTarReset(start + i * 4, start)) await this._setTAR(start + i * 4, apIndex);
+      const at = (start + i * 4) >>> 0;
+      const n = Math.min(this.maxWords, words.length - i, this._wordsToBoundary(at));
+      if (n <= 0) break;
+      await this._setTAR(at, apIndex);         // 同上：每块重设
       await this._transferBlock(false, n, AP_DRW, words.subarray(i, i + n), apIndex);
       i += n;
     }
