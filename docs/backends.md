@@ -219,6 +219,32 @@ OpenOCD 的读数本来也只有 ~17 KB/s，快轮询没有意义。
 > 真机步骤与预期数字见 `tools/target-firmware/stm32h7b0_rtt_speed/README.md` 的 bring-up 清单。
 > 实测吞吐数字待板子到手后补。
 
+## 五点八、STM32H7B0 首次接入失败记录（2026-09-27，硬件侧待查）
+
+自制 H7B0 板接上 MicroLink（SWD）后的实测现象：
+
+| 操作 | 结果 |
+|---|---|
+| 读 DP IDCODE | **0x6BA02477** ✅（H7 家族 SW-DP；连读 5 次稳定） |
+| 读 DP CTRL/STAT | 0x00000000（CSYSPWRUPACK=0、CDBGPWRUPACK=0） |
+| 写 DP SELECT / CTRL/STAT | **FAULT(4)** ❌ |
+| 读 AP CSW | FAULT ❌ |
+| nRESET 引脚 | 读到高；主动拉低再放开也一样 ❌ |
+
+**软件侧已排除的项**（都有脚本，全部无效）：写序调换、延迟 50ms、SWD 时钟
+250k/500k/1M/2M、`SWD_Configure` turnaround 1~4、线复位 64/256 位、重新激活、
+DAP_WriteABORT 清 sticky、**复位下连接**、把"读 IDCODE + 写寄存器"放进同一条 DAP_Transfer。
+
+**结论**：SWJ-DP 本体活着（IDCODE 读得到），但它后面的**调试/系统电源域起不来**，
+或器件处于**禁止调试写入**的状态。最可能是 **VCORE 没起来**（自制板漏了 VCAP 的 2.2µF、
+VDDA/VDD33USB 供电不全、QFP 电源脚虚焊），其次才是选项字节（RDP/TZEN）。
+—— 顺带修正一条旧认知：H7 **不容忍**只置 `CDBGPWRUPREQ` 的上电值（F1 能凑合），
+所以 `dap-webusb.js` 现在写 `0x70000000`（两个请求位都置），并会把两个 ACK 位分别报出来。
+
+复现脚本（都在 `tmp/`，裸 CMSIS-DAP，不依赖网页）：
+`h7_dp_probe.py`（策略梯子）、`h7_last_attempts.py`（turnaround/时钟/批处理/复位下连接）、
+`h7_release_nrst.py`（规范地驱动 nRESET 后重连）。
+
 
 另：激活序列「必须一次发 88 位」的旧结论只对部分固件成立 —— pyOCD 按
 [51 个 1][0x9EE7][51 个 1][8 个 0] 分四条发也能工作。写法不唯一，别照抄文档教条。

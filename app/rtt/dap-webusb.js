@@ -18,6 +18,11 @@ export const CMD = {
 const X_APnDP = 0x01, X_RnW = 0x02, X_ADDR = 0x0c;
 const AP_CSW = 0x00, AP_TAR = 0x04, AP_DRW = 0x0c;
 const DP_IDCODE = 0x00, DP_CTRL_STAT = 0x04, DP_SELECT = 0x08, DP_RDBUFF = 0x0c;
+/**
+ * DP CTRL/STAT 的上电值：CDBGPWRUPREQ(bit28) | CSYSPWRUPREQ(bit29) | bit30(只读 ACK，写 1 无害)。
+ * 🚨 必须是**两个请求位都有**：只置 CDBGPWRUPREQ 时 F1 能凑合、**H7 会直接 FAULT**（见 _powerUpDP 注释）。
+ */
+const DP_PWRUP = 0x70000000;
 const SWJ_nRESET = 1 << 7;
 const ACK = { 1: 'OK', 2: 'WAIT', 4: 'FAULT', 7: 'NO ACK' };
 const reqByte = (ap, rnw, addr) => (ap ? X_APnDP : 0) | (rnw ? X_RnW : 0) | (addr & X_ADDR);
@@ -474,7 +479,11 @@ export class WebUsbDapProbe {
     await this._transfer([{ ap: false, rnw: false, addr: DP_SELECT, data: 0 }]);
     await sleep(20);
     const st = await this._readDP(DP_CTRL_STAT);
-    if (!(st & (1 << 31))) console.warn('DP 电源应答位没起来（0x' + st.toString(16) + '），继续试');
+    // 两个 ACK 位都要看：CSYSPWRUPACK(31) 与 CDBGPWRUPACK(30)。缺任何一个，后面 AP 访问都可能 FAULT。
+    if ((st & 0xC0000000) !== 0xC0000000){
+      console.warn(`DP 电源应答位没起来（CTRL/STAT=0x${st.toString(16)}，` +
+        `CSYSPWRUPACK=${(st >>> 31) & 1} CDBGPWRUPACK=${(st >>> 30) & 1}），继续试`);
+    }
     // CSW：32 位 + 单次自增（保留其它位）
     const csw = await this._readAP(AP_CSW);
     const want = (csw & ~0x3f) | 0x02 | 0x10;
@@ -502,7 +511,17 @@ export class WebUsbDapProbe {
   }
 
   /**
-   * 给调试口上电：写 DP CTRL/STAT 的 CSYSPWRUPREQ|CDBGPWRUPREQ。
+   * 给调试口上电：写 DP CTRL/STAT 的 **CDBGPWRUPREQ(bit28) | CSYSPWRUPREQ(bit29)**。
+   *
+   * 🚨 **两个请求位都要置**。历史上这里写的是 `0x50000000` —— 只有 CDBGPWRUPREQ(bit28)
+   *    加上只读的 CDBGPWRUPACK(bit30)，**漏了 CSYSPWRUPREQ(bit29)**：
+   *      · STM32F1（Cortex-M3）容忍这一点（AP 照样能访问），所以一直没暴露，只是
+   *        CTRL/STAT 的 bit31（CSYSPWRUPACK）永远读不到 —— 那条"DP 电源应答位没起来"的
+   *        警告就是它；
+   *      · **STM32H7B0（Cortex-M7）不容忍**：系统电源没请求 → AP 访问直接 FAULT，
+   *        表现和"SWD 连不上"一模一样（实测：H7 上电写 `0x50000000` → `SWD FAULT（地址 0x4）`）。
+   *    现在写成 `0x70000000` = CDBGPWRUPREQ | CSYSPWRUPREQ | 那个只读 ACK 位（写 1 无害），
+   *    两块板子都通过。
    *
    * 🚨 **千万别先写 0「掉电」再上电**（6bba430 加过这一步，直接把 RTT 连接搞挂）：
    *    本机 MicroLink(CherryUSB) + STM32F103 实测，掉电写之后那个上电写会稳定返回
@@ -516,7 +535,7 @@ export class WebUsbDapProbe {
     let lastErr = null;
     for (let i = 1; i <= attempts; i++){
       try {
-        await this._writeDP(DP_CTRL_STAT, 0x50000000);
+        await this._writeDP(DP_CTRL_STAT, DP_PWRUP);
         return true;
       } catch (e){
         lastErr = e;
