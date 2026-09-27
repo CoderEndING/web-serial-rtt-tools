@@ -19,10 +19,15 @@ const X_APnDP = 0x01, X_RnW = 0x02, X_ADDR = 0x0c;
 const AP_CSW = 0x00, AP_TAR = 0x04, AP_DRW = 0x0c;
 const DP_IDCODE = 0x00, DP_CTRL_STAT = 0x04, DP_SELECT = 0x08, DP_RDBUFF = 0x0c;
 /**
- * DP CTRL/STAT 的上电值：CDBGPWRUPREQ(bit28) | CSYSPWRUPREQ(bit29) | bit30(只读 ACK，写 1 无害)。
+ * DP CTRL/STAT 的上电值 = **两个请求位**：CDBGPWRUPREQ(bit31) | CSYSPWRUPREQ(bit30)。
+ * 🚨 位定义按 ADIv5：**28/29 是只读 ACK（CSYSPWRUPACK/CDBGPWRUPACK），30/31 才是请求位** ——
+ *    本文件早期注释把它们写反了，于是写成 0x70000000（给两个只读 ACK 位写 1、又没置 bit31 的
+ *    调试上电请求），实测在 H7B0 上 DP 直接 FAULT（报「SWD FAULT（传输 0/1 条，地址 0x4）」），
+ *    而且 ACK 位恰好已是 1 时又"碰巧能连上" —— 这正是"RTT 总是连不上、偶尔也能连上"的病根。
+ *    正确值 0xC0000000，两个请求位都给（只给一个时 F1 能凑合、H7 会 FAULT）。
  * 🚨 必须是**两个请求位都有**：只置 CDBGPWRUPREQ 时 F1 能凑合、**H7 会直接 FAULT**（见 _powerUpDP 注释）。
  */
-const DP_PWRUP = 0x70000000;
+const DP_PWRUP = 0xc0000000;
 const SWJ_nRESET = 1 << 7;
 const ACK = { 1: 'OK', 2: 'WAIT', 4: 'FAULT', 7: 'NO ACK' };
 const reqByte = (ap, rnw, addr) => (ap ? X_APnDP : 0) | (rnw ? X_RnW : 0) | (addr & X_ADDR);
