@@ -220,18 +220,52 @@ export class FlashView {
     this._status('加载 flashloader 到目标 RAM…');
     await runner.load(algo);
 
+    /**
+     * 🚨 **擦除粒度必须问芯片，不能照抄算法表。**
+     *    `algos.js` 的 `page_size` 在本工程就是"擦除粒度"（runner 按它步进 erase_sector），
+     *    而 F1 那份是按**大容量**（256~512KB，2KB/页）填的。中容量（DEV_ID 0x410，例如
+     *    128KB 的 F103C8/CB）的页是 **1KB** —— 按 2KB 步进擦只会擦到第 0、8、16… 页，
+     *    `0x400~0x7FF` 这些页**根本没擦过**；接着往未擦除区域编程 → F1 报 PGERR →
+     *    flashloader 返回码 1（界面显示"擦写失败或地址/参数不对"）。
+     *    2026-09 实测现场：独立校验显示 flash 从 **0x08000400** 起全是旧数据（第一页之后全错），
+     *    用 OpenOCD 按 1KB 粒度补擦那几页后，同一份固件立刻烧录成功且逐字节一致。
+     *    所以这里读 DBGMCU_IDCODE(0xE0042000) 的 DEV_ID 定粒度（与 OpenOCD 的 stm32f1x 同款做法）。
+     *    只对认得出的 STM32F1 生效，其它芯片一律按算法表来（不动）。
+     */
+    let pageSize = algo.page_size;
+    try {
+      const idb = await this.probe.readMem(0xE0042000, 4);
+      const devId = (idb[0] | (idb[1] << 8)) & 0xfff;
+      const f1Page = {
+        0x410: 1024,   // 中容量 64~128KB  → 1KB/页
+        0x412: 1024,   // 小容量 16~32KB   → 1KB/页
+        0x414: 2048,   // 大容量 256~512KB → 2KB/页
+        0x418: 2048,   // 互联型
+        0x420: 1024,   // 超值型 低/中容量
+        0x422: 2048,   // 超值型 高容量
+        0x428: 2048,   // 超值型 XL
+      }[devId];
+      if (f1Page){
+        pageSize = f1Page;
+        if (f1Page !== algo.page_size){
+          this._log(`芯片 DEV_ID=0x${devId.toString(16)}（STM32F1）→ 擦除粒度按 ${f1Page}B/页，`
+            + `不是算法表里的 ${algo.page_size}B（差这一档会让没擦到的页编程失败）`);
+        }
+      }
+    } catch (e){ /* 读不到就按算法表来 */ }
+
     // 擦：覆盖固件的那些扇区
     let erased = 0, eraseTotal = 0;
     for (const seg of regions) this._checkRange(seg, algo);
     for (const seg of regions){
-      const ps = algo.page_size;
+      const ps = pageSize;          // 芯片实际粒度（见上面 DEV_ID 判定），不是 algo.page_size
       for (let a = algo.flash_start + Math.floor((seg.addr - algo.flash_start) / ps) * ps;
            a < seg.addr + seg.data.length; a += ps){
         eraseTotal++;
       }
     }
     for (const seg of regions){
-      const ps = algo.page_size;
+      const ps = pageSize;          // 芯片实际粒度（见上面 DEV_ID 判定），不是 algo.page_size
       for (let a = algo.flash_start + Math.floor((seg.addr - algo.flash_start) / ps) * ps;
            a < seg.addr + seg.data.length; a += ps){
         await runner.eraseSector(a);
