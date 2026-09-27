@@ -21,6 +21,9 @@
 #define RCC_D1CFGR      REG32(RCC_BASE + 0x18)
 #define RCC_D2CFGR      REG32(RCC_BASE + 0x1C)
 #define RCC_D3CFGR      REG32(RCC_BASE + 0x20)
+#define RCC_APB4ENR     REG32(RCC_BASE + 0x6C)   /* 🚨 APB4 外设时钟使能：含 SYSCFG 与 PWR */
+#define RCC_APB4ENR_SYSCFGEN (1u << 0)
+#define RCC_APB4ENR_PWREN    (1u << 24)
 #define RCC_PLLCKSELR   REG32(RCC_BASE + 0x28)   /* PLLSRC / DIVM1 */
 #define RCC_PLLCFGR     REG32(RCC_BASE + 0x2C)   /* PLL1RGE / DIVP1EN … */
 #define RCC_PLL1DIVR    REG32(RCC_BASE + 0x30)   /* DIVN1 / DIVP1 / DIVQ1 / DIVR1 */

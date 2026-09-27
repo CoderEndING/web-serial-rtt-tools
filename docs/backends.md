@@ -197,6 +197,28 @@ OpenOCD 的读数本来也只有 ~17 KB/s，快轮询没有意义。
 - 用 OpenOCD 反复烧过之后，偶发需要先 `make fw-flash`（OpenOCD 自带完整复位）清一次场，
   WebUSB 侧才肯重新连接；疑与 LOCKUP/中断屏蔽的残留状态有关，已加软复位兜底，继续观察。
 
+## 五点七、STM32H7B0（value line）接入记录（2026-09-27，板子未到 → 只做静态验证）
+
+给 H7B0 做 RTT 吞吐测试固件时，工具链这边补了这些（都用不依赖硬件的检查验过）：
+
+| 事项 | 做法 | 验证方式 |
+|---|---|---|
+| flash 算法进 `algos.js` | **不许手抄 base64**：`tools/dev/extract-algo.py` 从本机 pyOCD（0.45.1）的 `target_STM32H7B0xx.py` 抽 `FLASH_ALGO`，生成条目后由脚本插入 | `make algo-check` |
+| 算法条目自洽性 | 新增 `tools/dev/verify-algo.py`：blob 可解码、四个入口在 blob 内且指向**有效 Thumb 指令**、static_base/页缓冲/栈与 blob 不冲突、flash 参数与编程粒度合理 | 8 个系列全过 |
+| 烧录计划 | 新增 `tools/dev/check-flash-plan.mjs`：纯计算演练"擦除 → 分块 → 尾块补齐 → 范围检查" | H7B0 固件：擦 1 次(8KB)、编程 1 次(尾块补到 32B)、范围 ✅ |
+| 编程粒度 | H7 的 flash 按 **256 位（32B）flash word** 编程 → 条目加 `write_granularity: 32`，`flash/view.js` 的尾块补齐改成按它（默认 4） | `make flash-plan` |
+| 芯片预设 | `app/core/chips.js` 加 `stm32h7b0`：扫描范围给 DTCM + AXI SRAM **两段**（H7 内存是散的） | 页面「芯片」下拉 |
+| 桥目标 | `bridge/bridge.config.json` 加 `stm32h7b0`（OpenOCD 用 `stm32h7x.cfg`，其 RM0455 分支认 DBGMCU id 0x480） | `make bridge` + 页面连桥 |
+| H7 特有寄存器 | 固件 README 记了 9 条坑，关键是：**PWR/SYSCFG 时钟要先开**（`RCC_APB4ENR`，否则 PWR/SYSCFG 的写被静默忽略）、VOS0、升频前先加 flash latency | 逐条指令反汇编核对过 |
+
+顺带修掉一个**所有芯片都受益**的真 bug：`FlashRunner.chunkSize()` 单缓冲时用
+`begin_stack - page_buffers[0]` 当容量，而 L0/F0/F4 的算法把页缓冲放在**栈顶之上**（差值为负）
+→ 旧写法回落成 256B，比 L0 的 128B 页还大。改成单缓冲直接按页大小（pyOCD 保证缓冲 ≥ 一页），
+现在 L0 的块是 128B ✅。
+
+> 真机步骤与预期数字见 `tools/target-firmware/stm32h7b0_rtt_speed/README.md` 的 bring-up 清单。
+> 实测吞吐数字待板子到手后补。
+
 
 另：激活序列「必须一次发 88 位」的旧结论只对部分固件成立 —— pyOCD 按
 [51 个 1][0x9EE7][51 个 1][8 个 0] 分四条发也能工作。写法不唯一，别照抄文档教条。

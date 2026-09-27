@@ -48,6 +48,12 @@ static void delay_loop(volatile uint32_t n){ while (n--) __asm__ volatile("nop")
  * DIVM1/DIVN1/DIVP1 都是"值 - 1"写进去，别写成实际值（第一版就栽在这）。
  */
 static void clock_280mhz_hsi(void){
+  /* 0) 🚨 先把 **SYSCFG 与 PWR 的时钟打开**。
+   *    这两句最容易漏：复位后 RCC_APB4ENR = 0，PWR/SYSCFG 的寄存器写**会被直接忽略**
+   *    （不报错、也不生效），现象就是"PLL 配了但内核频率没变 / 一跑就 HardFault"。
+   *    ST 的 HAL 里 `__HAL_RCC_PWR_CLK_ENABLE()` + `__HAL_RCC_SYSCFG_CLK_ENABLE()` 干的就是这事。 */
+  RCC_APB4ENR |= RCC_APB4ENR_SYSCFGEN | RCC_APB4ENR_PWREN;
+
   /* 1) 打开 HSI 并等就绪（复位后本来就在跑，这里只是确凿一点） */
   RCC_CR |= RCC_CR_HSION;
   while (!(RCC_CR & RCC_CR_HSIRDY)) { }
@@ -65,10 +71,8 @@ static void clock_280mhz_hsi(void){
   RCC_PLLCKSELR = (0u << 6)                      /* PLLSRC = 00：HSI */
                 | (8u - 1u);                     /* DIVM1 = /8 */
   RCC_PLL1FRACR = 0;                             /* 不用小数分频 */
-  RCC_PLLCFGR = RCC_PLLCFGR & ~0x00010000u;
   RCC_PLLCFGR = (3u << 0)                        /* PLL1RGE = 0b11：8~16MHz 参考 */
-              | (1u << 16)                       /* DIVP1EN = 1：要 PLL1P 输出 */
-              | (0u << 17);                      /* DIVQ1EN/DIVR1EN 不用 */
+              | (1u << 16);                      /* DIVP1EN = 1：要 PLL1P 输出（CPU 时钟走它） */
   RCC_PLL1DIVR = ((70u - 1u) << 0)               /* DIVN1 */
                | ((2u - 1u) << 9)                /* DIVP1 */
                | ((2u - 1u) << 16)               /* DIVQ1（不用，填合法值） */

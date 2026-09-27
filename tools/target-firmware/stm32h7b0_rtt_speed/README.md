@@ -50,20 +50,39 @@ CLOCKS=4000,8000,12000,20000 SECS=4 node tools\selftest\rtt-speed-webusb-sweep.m
 1. **内存是散的**：DTCM 0x20000000(128KB，内核直连、免时钟) / AXI SRAM 0x24000000(1MB，要开 D1 时钟) /
    AHB SRAM 0x30000000…。本工程把代码放 flash、**数据/栈/RTT 缓冲全放 DTCM**，
    所以链接脚本只有两段内存（`ld/stm32h7b0.ld`），也**不用开任何外设时钟**。
-2. **280MHz 要 VOS0**：先 `SYSCFG_PWRCR.ODEN=1`，再把 `PWR_D3CR.VOS` 设成 `0b11`，
-   否则 PLL 配得再对内核也上不去（现象：一跑就 HardFault 或根本没切过去）。
-3. **Flash 等待周期**：升频**之前**就要把 `FLASH_ACR.LATENCY` 提上去。本工程取 4（宁可多等，
+2. **PWR/SYSCFG 的时钟要先开**（`RCC_APB4ENR` 的 `PWREN`/`SYSCFGEN`）：复位后它们是**关**的，
+   不打开的话写 `PWR_D3CR`/`SYSCFG_PWRCR` **会被直接忽略**（不报错、也不生效）——
+   现象是"PLL 配了但频率没变 / 一跑就 HardFault"。ST 的 HAL 里
+   `__HAL_RCC_PWR_CLK_ENABLE()` + `__HAL_RCC_SYSCFG_CLK_ENABLE()` 就是干这个的。
+3. **280MHz 要 VOS0**：先 `SYSCFG_PWRCR.ODEN=1`，再把 `PWR_D3CR.VOS` 设成 `0b11`（并等 `VOSRDY`），
+   否则 PLL 配得再对内核也上不去。
+4. **Flash 等待周期**：升频**之前**就要把 `FLASH_ACR.LATENCY` 提上去。本工程取 4（宁可多等，
    给少了会读到错指令），`WRHIGHFREQ` 按 185~285MHz 档。手上是 H7B3/H7A3 跑更高频时照 RM0455 复核。
-4. **HSI 就是 64MHz**：H7 不需要外部晶振也能到 280MHz —— 自定义板子常常没焊 HSE，这点很省事。
+5. **HSI 就是 64MHz**：H7 不需要外部晶振也能到 280MHz —— 自定义板子常常没焊 HSE，这点很省事。
    板上有晶振、想要更准的时钟：把 `clock_280mhz_hsi()` 换成 HSE 版本（改 `RCC_PLLCKSELR.PLLSRC` 与 DIVM1）。
-5. **烧录粒度 32 字节**：H7 的 flash 按 256 位（32B）flash word 编程 ——
+6. **烧录粒度 32 字节**：H7 的 flash 按 256 位（32B）flash word 编程 ——
    `app/flash/algos.js` 里 H7B0 条目带 `write_granularity: 32`，烧录器会照它补 0xFF。
-6. **H7B0 的 flash 只有 128KB**（value line）。如果你手上是 H7B3/H7A3（2MB/1MB），
+7. **H7B0 的 flash 只有 128KB**（value line）。如果你手上是 H7B3/H7A3（2MB/1MB），
    把 `ld/stm32h7b0.ld` 的 `FLASH LENGTH` 和 `app/flash/algos.js` 里的 `flash_length` 一起放大。
-7. **F7/M7 的 FPU**：编译开了 `-mfpu=fpv5-d16 -mfloat-abi=hard`，所以 `startup.c` 里必须打开
+8. **F7/M7 的 FPU**：编译开了 `-mfpu=fpv5-d16 -mfloat-abi=hard`，所以 `startup.c` 里必须打开
    CPACR 的 CP10/CP11（否则一用浮点指令就跑飞）。本工程其实不用浮点，留着是为了别踩这个坑。
-8. **SWD 引脚**：默认 PA13(SWDIO)/PA14(SWCLK)，别在固件里复用它们；nRST 建议接到探针（不接也能烧，
+9. **SWD 引脚**：默认 PA13(SWDIO)/PA14(SWCLK)，别在固件里复用它们；nRST 建议接到探针（不接也能烧，
    但"复位运行"要用 AIRCR 软复位，工具里已经这么做）。
+
+## 板子到手后的 bring-up 检查清单（照着走，出问题能立刻定位）
+
+| 步 | 做什么 | 期望看到 | 不对时先查 |
+|---|---|---|---|
+| 1 | 探针接 SWD、给板子上电，读 DP IDCODE | **0x6BA02477**（H7 的 SW-DP）<br>F103 是 0x1BA01477 | 接线/共地/上电；SWCLK-SWDIO 有没有接反 |
+| 2 | OpenOCD 认芯片：`make fw-h7-flash`（或桥连一次） | 日志里 `RM0455 (id 0x480) M7` | 晶振/BOOT 引脚；RDP 等级（读保护会挡住调试口） |
+| 3 | `make fw-h7-slow` 编译 + 烧录 + 网页 RTT 连接 | 控制块在 `0x2000xxxx`（DTCM）；<br>`hello world!` 刷屏；**能出 KB/s 数字** | 这一步只验证"接线+启动+DTCM 布局"，不碰 PLL |
+| 4 | `make fw-h7-build`（280MHz）再烧 | 同上，且速度数字与第 3 步接近 | 若挂：看是不是 VOS0/PLL/latency（第 2~4 条坑） |
+| 5 | 网页上把 SWD 时钟从「自动」切到 8/12/20MHz 各测一遍 | 找到这块板子最快的档 | 高了会 NO ACK 或错位读（页面会提示） |
+
+> 主机侧读 `g_sysclk_hz`（RAM 里的一个 word）就能确认目标是不是真的切到了 280MHz：
+> 控制块固定地址在 `0x2000_0010` 附近（`_SEGGER_RTT`），`g_sysclk_hz` 在它前面几个字 ——
+> 用页面的「RTT 控制块 → 地址」或烧录器的内存读都行。
+
 
 ## 预期数字（供对照）
 
