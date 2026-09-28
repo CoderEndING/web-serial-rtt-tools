@@ -33,10 +33,18 @@ code{font-family:var(--mono);background:var(--bg3);padding:0 4px;border-radius:4
 .topbar{
   display:flex;align-items:center;gap:14px;padding:7px 12px;
   background:var(--bg2);border-bottom:1px solid var(--line);flex:none;
+  flex-wrap:wrap;row-gap:6px;          /* 窗口窄时顶栏换行，而不是把右边的标签挤出去 */
 }
 .brand{font-weight:600;letter-spacing:.2px}
 .logo{font-family:var(--mono);color:var(--acc)}
-.tabs{display:flex;gap:4px}
+/**
+ * 🚨 标签栏必须能换行（或能横向滚）。
+ * 原来只有 `display:flex`：7 个标签在窄窗口 / 浏览器缩放下会往右溢出，而 body 是 overflow:hidden，
+ * 于是**排在前面的反而都在、后面的被裁掉** —— J-Scope 是第 5 个，用户看到的"线上没有这一页"
+ * 就是这么来的（本机 450px 宽的截图里也只到「RTT 转发」为止）。
+ * 现在让它换行：所有标签永远可见；`.topright` 的 margin-left:auto 仍把它推到行尾。
+ */
+.tabs{display:flex;gap:4px;flex-wrap:wrap;min-width:0;row-gap:4px}
 .tab{background:transparent;border:1px solid transparent;color:var(--fg2);padding:4px 12px;border-radius:6px}
 .tab:hover{color:var(--fg);background:var(--bg3)}
 .tab.active{background:var(--bg3);border-color:var(--line);color:var(--fg);font-weight:600}
