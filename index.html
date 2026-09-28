@@ -206,8 +206,18 @@
             <button id="r-usb-disconnect" disabled>断开</button>
           </div>
           <label class="row"><span>SWD 时钟</span>
-            <input id="r-usb-clock" class="num" list="usb-clock-list" inputmode="numeric" placeholder="自动"
-                   title="SWD 时钟 kHz；留空 = 自动（从高到低试到通为止）">
+            <select id="r-usb-clock" title="SWD 时钟：自动 = 从高到低试到通为止">
+              <option value="0">自动</option>
+              <option value="1000">1 MHz</option>
+              <option value="5000">5 MHz</option>
+              <option value="10000">10 MHz</option>
+              <option value="20000">20 MHz</option>
+              <option value="30000">30 MHz</option>
+              <option value="40000">40 MHz</option>
+              <option value="45000">45 MHz</option>
+              <option value="50000">50 MHz</option>
+              <option value="60000">60 MHz</option>
+            </select>
           </label>
           <label class="chk"><input type="checkbox" id="r-usb-all"> 显示所有 USB 设备（非 DAPLink）</label>
           <p class="hint">支持 CMSIS-DAP v2（bulk）探针：DAPLink、自制 cherrydap 等。<br>J-Link 探针不支持 WebUSB，请改用本地桥。</p>
@@ -221,7 +231,17 @@
               <input id="r-jlink-device" value="STM32F103C8" title="给 J-Link 的器件名（如 STM32F103C8 / STM32F103RB / STM32H7B0VB）">
             </label>
             <label class="row"><span>SWD kHz</span>
-              <input id="r-jlink-speed" class="num" list="speed-list" inputmode="numeric" value="50000" title="SWD 时钟（kHz）：50000 = 50MHz（J-Link PRO + STM32F103RB 实测可用）。调低只会更慢，不会更稳">
+              <select id="r-jlink-speed" title="SWD 时钟（J-Link）：50000 = 50MHz（J-Link PRO + STM32F103RB 实测可用）">
+                <option value="1000">1 MHz</option>
+                <option value="5000">5 MHz</option>
+                <option value="10000">10 MHz</option>
+                <option value="20000">20 MHz</option>
+                <option value="30000">30 MHz</option>
+                <option value="40000">40 MHz</option>
+                <option value="45000">45 MHz</option>
+                <option value="50000" selected>50 MHz</option>
+                <option value="60000">60 MHz</option>
+              </select>
             </label>
             <label class="chk"><input type="checkbox" id="r-jlink-fast"> 高速只读（JLinkRTTLogger）</label>
             <p class="hint">勾上走 JLinkRTTLogger 直写日志（实测 ~1463 KB/s）；不勾走桥自启的 GDB server telnet（全双工，但它的 RTT 轮询节奏把上限压在 ~565 KB/s）。<br>代价：高速模式<b>只读</b>，下方发送框不能向下发数据。</p>
@@ -232,7 +252,18 @@
           </div>
           <p class="hint" id="r-ocd-cfgs-hint" hidden>如 <code>interface/cmsis-dap.cfg, target/stm32f4x.cfg</code>（点「选择…」从列表挑，或直接手填）</p>
           <label class="row" id="r-ocd-custom-speed-row" hidden><span>SWD kHz</span>
-            <input id="r-ocd-speed" class="num" list="speed-list" placeholder="留空 = 不设（OpenOCD 默认）" inputmode="numeric">
+            <select id="r-ocd-speed">
+              <option value="">不设（默认）</option>
+              <option value="1000">1 MHz</option>
+              <option value="5000">5 MHz</option>
+              <option value="10000">10 MHz</option>
+              <option value="20000">20 MHz</option>
+              <option value="30000">30 MHz</option>
+              <option value="40000">40 MHz</option>
+              <option value="45000">45 MHz</option>
+              <option value="50000">50 MHz</option>
+              <option value="60000">60 MHz</option>
+            </select>
           </label>
           <div class="row btnrow">
             <button id="r-bridge-connect" class="primary">连接桥</button>
@@ -352,7 +383,18 @@
           <button id="f-cfgs-pick" type="button" title="列出桥所在机器的 OpenOCD cfg 让你挑">选择…</button>
         </div>
         <label class="row" id="f-custom-speed-row" hidden><span>SWD kHz</span>
-          <input id="f-speed" class="num" list="speed-list" placeholder="留空 = 不设（OpenOCD 默认）" inputmode="numeric">
+          <select id="f-speed">
+            <option value="">不设（默认）</option>
+            <option value="1000">1 MHz</option>
+            <option value="5000">5 MHz</option>
+            <option value="10000">10 MHz</option>
+            <option value="20000">20 MHz</option>
+            <option value="30000">30 MHz</option>
+            <option value="40000">40 MHz</option>
+            <option value="45000">45 MHz</option>
+            <option value="50000">50 MHz</option>
+            <option value="60000">60 MHz</option>
+          </select>
         </label>
         <p class="hint">烧录走仓库里的 <code>bridge/start-bridge.bat</code>（与 RTT 的桥同一个）。</p>
       </fieldset>
@@ -495,34 +537,6 @@
     </section>
   </div>
 </section>
-
-<datalist id="speed-list">
-  <option>1000</option>
-  <option>5000</option>
-  <option>10000</option>
-  <option>20000</option>
-  <option>30000</option>
-  <option>40000</option>
-  <option>45000</option>
-  <option>50000</option>
-  <option>60000</option>
-</datalist>
-
-<datalist id="usb-clock-list">
-  <option>8000</option>
-  <option>1000</option>
-  <option>5000</option>
-  <option>10000</option>
-  <option>12000</option>
-  <option>20000</option>
-  <option>30000</option>
-  <option>40000</option>
-  <option>45000</option>
-  <option>50000</option>
-  <option>60000</option>
-  <option>500</option>
-  <option>200</option>
-</datalist>
 
 </main>
 

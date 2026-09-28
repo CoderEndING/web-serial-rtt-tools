@@ -44,3 +44,24 @@ export function debounce(fn, ms = 120){
   let t = null;
   return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); };
 }
+
+/** kHz → 人看的标签：8000 → "8 MHz"、500 → "500 kHz" */
+export function mhzLabel(khz){
+  const n = Number(khz);
+  if (!n) return '';
+  return n >= 1000 ? (n / 1000) + ' MHz' : n + ' kHz';
+}
+
+/**
+ * 给下拉框补一个"当前值"选项。
+ * localStorage 里可能存着老版本的值（比如 8000/12000/20000 —— 新候选里没有），
+ * 不补的话 select 会显示成空白或跳回第一项，等于**悄悄改了用户的设置**。
+ */
+export function ensureSelectOption(sel, value, label){
+  const v = String(value ?? '');
+  if (!sel || v === '' || [...sel.options].some(o => o.value === v)) return;
+  const o = document.createElement('option');
+  o.value = v;
+  o.textContent = label || v;
+  sel.appendChild(o);
+}

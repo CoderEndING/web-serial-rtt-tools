@@ -3,7 +3,7 @@
  * 后端四种：WebUSB-CMSIS-DAP（零安装）/ 本地桥+OpenOCD / 本地桥+J-Link(ch0) / 内置模拟目标。
  * 显示三种：终端(ANSI，xterm) / 文本 / HEX —— 三种共用同一份 raw 记录，切换时重放，不丢历史。
  */
-import { $, seg, setFlag, setStatus } from '../ui/dom.js';
+import { $, seg, setFlag, setStatus, mhzLabel, ensureSelectOption } from '../ui/dom.js';
 import { toast } from '../ui/toast.js';
 import { store } from '../core/store.js';
 import { RxBuffer } from '../core/rxview.js';
@@ -89,6 +89,8 @@ export class RttView {
     store.bind($('r-ocd-target'), 'rtt.ocdTarget');
     store.bind($('r-ocd-cfgs'), 'rtt.ocdCfgs');
     store.bind($('r-ocd-speed'), 'rtt.ocdSpeed');
+    // 老版本这里是自由输入框，localStorage 里可能存着候选之外的值（4000/8000…）：补个选项，别悄悄改掉它
+    ensureSelectOption($('r-ocd-speed'), store.get('rtt.ocdSpeed', ''), mhzLabel(store.get('rtt.ocdSpeed', '')));
     /**
      * J-Link 这条路的两个参数（以前只有 localStorage、页面上没有入口，用户没法改）：
      *   · rtt.jlinkDevice —— 传给 J-Link 的器件名
@@ -98,6 +100,7 @@ export class RttView {
      */
     store.bind($('r-jlink-device'), 'rtt.jlinkDevice');
     store.bind($('r-jlink-speed'), 'rtt.jlinkSpeed');
+    ensureSelectOption($('r-jlink-speed'), store.get('rtt.jlinkSpeed', ''), mhzLabel(store.get('rtt.jlinkSpeed', '')));
     /**
      * 「高速只读」：数据源从桥自启的 GDBServer telnet（全双工，实测上限 ~565 KB/s）
      * 换成 JLinkRTTLogger 落文件 + 桥 tail（~1463 KB/s）。默认**关**——勾上就没有下行了。
@@ -150,6 +153,8 @@ export class RttView {
     $('r-clear').addEventListener('click', () => this._clear());
     $('r-save').addEventListener('click', () => this.save());
     store.bind($('r-usb-clock'), 'rtt.clockKhz');
+    // 老版本这里是 select（0/1000/500/200/2000/4000/8000/12000/20000）：存过 8000/12000 的要能显示出来
+    ensureSelectOption($('r-usb-clock'), store.get('rtt.clockKhz', ''), mhzLabel(store.get('rtt.clockKhz', '')));
     store.bind($('r-record-ts'), 'rtt.recordTs', 'checked');
     store.bind($('r-record-auto'), 'rtt.recordAuto', 'checked');
     $('r-record').addEventListener('click', () => this._toggleRecord());

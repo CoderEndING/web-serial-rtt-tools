@@ -162,31 +162,33 @@ export async function runUiSelfTest(tools){
     return 'OK';
   });
 
-  await step('SWD 速度候选（1M~60M 九档）就位', async () => {
+  await step('SWD 速度下拉（默认 + 1M~60M 九档）就位', async () => {
     const want = ['1000', '5000', '10000', '20000', '30000', '40000', '45000', '50000', '60000'];
+    const label = v => v >= 1000 ? (v / 1000) + ' MHz' : v + ' kHz';
     const opts = id => [...(document.getElementById(id)?.options || [])];
-    const read = id => opts(id).map(o => o.value);
-    const shared = read('speed-list');
-    if (want.join(',') !== shared.join(',')) throw new Error(`speed-list = ${shared.join(',')}`);
-    // 三个 kHz 输入框都要挂上这份候选
-    for (const id of ['r-jlink-speed', 'r-ocd-speed', 'f-speed']){
+    // 四个字段都必须是原生下拉（不是 datalist —— value/label 会被 Edge 画成两行）。
+    // 结构：r-usb-clock / r-ocd-speed / f-speed = 「默认」+ 九档；
+    //       r-jlink-speed 特殊 —— J-Link 的默认就是一个具体值（50MHz），所以它只有九档。
+    const withDefault = ['r-usb-clock', 'r-ocd-speed', 'f-speed'];
+    for (const id of [...withDefault, 'r-jlink-speed']){
       const el = $(id);
       if (!el) throw new Error('找不到 ' + id);
-      if (el.getAttribute('list') !== 'speed-list') throw new Error(`${id} 没挂 speed-list`);
+      if (el.tagName !== 'SELECT') throw new Error(`${id} 应该是原生下拉，实际 ${el.tagName}`);
+      if (el.getAttribute('list')) throw new Error(`${id} 还挂着 datalist`);
+      const all = opts(id);
+      const nine = (withDefault.includes(id) ? all.slice(1, 10) : all).map(o => o.value);
+      if (want.join(',') !== nine.join(',')) throw new Error(`${id} 九档 = ${nine.join(',')}`);
+      if (withDefault.includes(id)){
+        const d = all[0];
+        if (d.value !== '' && d.value !== '0') throw new Error(`${id} 第一条不是默认项：${d.outerHTML}`);
+      }
+      const bad = all.filter(o => !/^(0)?$/.test(o.value) && o.textContent.trim() !== label(+o.value));
+      if (bad.length) throw new Error(`${id} 选项文案不对：${bad.map(o => o.textContent).join(' / ')}`);
+      if (all.length > nine.length + 1 && !/^\d+$/.test(all[nine.length + 1].value)) throw new Error(`${id} 末尾的补丁项不对`);
     }
-    // 候选一律"纯值单行"：带 label 的话 Edge 会把 value 和 label 分两行显示（很丑）
-    for (const id of ['speed-list', 'usb-clock-list']){
-      const bad = opts(id).filter(o => o.getAttribute('label') || o.textContent.trim() !== o.value);
-      if (bad.length) throw new Error(`${id} 有条目不是纯值单行：${bad.map(o => o.outerHTML).join(' ')}`);
-    }
-    // WebUSB 那格可以手输（是 input 不是 select），候选里要有九档 + 实测最优/救命档
-    const usb = $('r-usb-clock');
-    if (usb.tagName !== 'INPUT') throw new Error('WebUSB 时钟应改成可手输的 input，实际 ' + usb.tagName);
-    if (usb.getAttribute('list') !== 'usb-clock-list') throw new Error('WebUSB 时钟没挂 usb-clock-list');
-    const usbVals = read('usb-clock-list');
-    const missing = [...want, '8000', '500', '200'].filter(v => !usbVals.includes(v));
-    if (missing.length) throw new Error('usb-clock-list 缺档：' + missing.join(','));
-    return `共用 ${shared.length} 档 / WebUSB ${usbVals.length} 档`;
+    // J-Link 那格必须永远有个具体速度（它没有"不设"这个语义）；其余三格可以是 不设/自动
+    if ($('r-jlink-speed').value === '') throw new Error('J-Link 速度不该为空');
+    return '4 个字段 = 原生下拉（3 个带默认项 + 九档）';
   });
 
   return out;
