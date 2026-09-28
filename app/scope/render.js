@@ -163,22 +163,58 @@ export class ScopeRenderer {
     //    （自测截图时肉眼发现：8 条线看着像"没画出来"）。
     const px = 1 / dpr;
     ctx.lineWidth = px;
+    const per = (z - a) / cols;                   // 每个像素列覆盖多少个样本
     for (let k = 0; k < st.channels.length; k++){
       const ch = st.channels[k];
       if (!this.isVisible(k) || !this._buf[k]) continue;
       const buf = this._buf[k];
-      ctx.strokeStyle = this.palette[k % this.palette.length];
-      ctx.beginPath();
+      const color = this.palette[k % this.palette.length];
+      ctx.strokeStyle = color;
+
+      /**
+       * 🚨 **列与列之间必须连起来**。第一版每列只画一条 min→max 的**竖线**：
+       *    信号变化快时相邻列的竖线挨在一起，看着像波形；
+       *    可信号慢的时候（每列几十上百个样本）每列就退化成**一个孤立的点** ——
+       *    用户看到的就是"一堆连不起来的点"（实测反馈："都没有连成线"）。
+       * 现在两种画法按"每列多少样本"切换：
+       *   · 每列 < 1.5 个样本 → **折线连点**（放大看原始采样点，就是一条干净的线）；
+       *   · 否则 → **上下包络 + 中间填充**（示波器的包络显示，慢信号自然连成一条线，
+       *     快信号显示为一条实心带，且**绝不漏尖峰**）。
+       */
+      if (per < 1.5){
+        ctx.beginPath();
+        let started = false;
+        for (let i = 0; i < cols; i++){
+          const v = buf.min[i];
+          if (!Number.isFinite(v)){ started = false; continue; }
+          const x = l + i + px / 2, y = yOf(v, k);
+          if (started) ctx.lineTo(x, y); else { ctx.moveTo(x, y); started = true; }
+        }
+        ctx.stroke();
+        continue;
+      }
+
+      // 上下包络：一条闭合路径（上包络左→右，下包络右→左），填充 + 描边
+      let any = false;
+      const top = [], bot = [];
       for (let i = 0; i < cols; i++){
         const mn = buf.min[i], mx = buf.max[i];
-        if (!Number.isFinite(mn) && !Number.isFinite(mx)) continue;
-        const x = l + i + px / 2;
-        // 每列一条竖线（min→max）：等价于示波器的包络显示
-        const y1 = yOf(mn, k), y2 = yOf(mx, k);
-        ctx.moveTo(x, y1);
-        ctx.lineTo(x, Math.max(y1 + px, y2));
+        if (!Number.isFinite(mn) || !Number.isFinite(mx)) continue;
+        top.push(l + i + px / 2, yOf(mx, k));
+        bot.push(l + i + px / 2, yOf(mn, k));
+        any = true;
       }
-      ctx.stroke();
+      if (!any) continue;
+      ctx.beginPath();
+      ctx.moveTo(top[0], top[1]);
+      for (let i = 2; i < top.length; i += 2) ctx.lineTo(top[i], top[i + 1]);
+      for (let i = bot.length - 2; i >= 0; i -= 2) ctx.lineTo(bot[i], bot[i + 1]);
+      ctx.closePath();
+      ctx.globalAlpha = 0.16;                    // 包络带：淡填充（多通道叠着时也不糊）
+      ctx.fillStyle = color;
+      ctx.fill();
+      ctx.globalAlpha = 1;
+      ctx.stroke();                              // 上下沿各描一遍（慢信号就是一条线）
     }
 
     // 游标

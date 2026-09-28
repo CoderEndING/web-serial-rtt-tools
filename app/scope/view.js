@@ -103,6 +103,7 @@ export class ScopeView {
     $('sc-fit').addEventListener('click', () => { this.renderer.fitAll(); this.follow = true; this._needDraw = true; });
     $('sc-zin').addEventListener('click', () => { this.renderer.zoomBy(1.6, 0.5); this._needDraw = true; });
     $('sc-zout').addEventListener('click', () => { this.renderer.zoomBy(1 / 1.6, 0.5); this._needDraw = true; });
+    $('sc-zoompts').addEventListener('click', () => this.zoomToPoints());
     $('sc-shared').addEventListener('change', e => { this.renderer.mode = e.target.checked ? 'shared' : 'auto'; this._needDraw = true; });
     $('sc-raw').addEventListener('change', e => { this.captureRaw = e.target.checked; if (!this.captureRaw) this.raw = []; });
     $('sc-csv').addEventListener('click', () => this.exportCsv());
@@ -164,6 +165,19 @@ export class ScopeView {
 
   onShow(){
     requestAnimationFrame(() => { this._needDraw = true; });
+  }
+
+  /** 「细看」：把视窗缩到"每列约 1 个采样点"，这时渲染器走**折线连点**模式 ——
+   *  看慢信号（100 Hz 正弦这类）的波形形状要靠它，全览时看到的是包络带。 */
+  zoomToPoints(){
+    const st = this.store;
+    if (!st?.count){ this.setStatusText('还没有数据', 'warn'); return; }
+    const w = Math.max(64, Math.round(this.renderer.plotW));
+    const end = st.count;
+    this.follow = false;
+    this.renderer.zoomTo(Math.max(0, end - w), end);
+    this._needDraw = true;
+    this.setStatusText(`细看：${Math.round(this.renderer.span)} 个样本铺满 ${w} 列（≈1 点/列）`, '');
   }
 
   // ================================================================= 连接
@@ -710,9 +724,11 @@ export class ScopeView {
       err.textContent = this.planMismatch ? `⚠ ${this.planMismatch}`
         : (this.stream.resyncs ? `重同步 ${this.stream.resyncs} 次 / 垃圾 ${this.stream.junk} B` : '');
     }
+    const perCol = this.renderer.span / Math.max(2, this.renderer.plotW);
     $('sc-window').textContent = st?.count
       ? `${fmtTime(st.timeAt(Math.max(0, Math.ceil(this.renderer.view.end) - 1)) - st.timeAt(Math.floor(this.renderer.view.start)))} 窗口 · ` +
-        `每列 ${(this.renderer.span / Math.max(2, this.renderer.plotW)).toFixed(1)} 样本 ${usedLod ? '(LOD)' : '(精确)'}` +
+        `每列 ${perCol.toFixed(1)} 样本 ${usedLod ? '(LOD)' : '(精确)'}` +
+        (perCol < 1.5 ? ' · 连点折线' : ' · 包络带（点「细看」看波形形状）') +
         (this.follow ? ' · 跟随最新' : '')
       : '';
     this.renderLegend();
