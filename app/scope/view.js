@@ -206,9 +206,20 @@ export class ScopeView {
       this.hid = hid;
       let info = '';
       try { const i = await hid.info(); info = `${i.model || 'akaLinkPro'}${i.fw ? ' · FW ' + i.fw : ''}`; }
-      catch { info = hid.label || 'akaLinkPro'; }
+      catch {
+        // 连上了但问不出型号 —— 十有八九选错了设备（触摸板/键盘也有 0xFF00 的 collection）
+        info = hid.label || '未知 HID 设备';
+        $('sc-info').textContent = info + '（HID 已连接，但**问不出型号**）';
+        this.setStatusText(`连到的 HID 设备是「${info}」，但它不响应探针协议 —— ` +
+          '选错设备了？请点「连接探针」并在弹框里选 **akaLinkPro**', 'err');
+        return;
+      }
       $('sc-info').textContent = info + '（HID 已连接）';
-      this.setStatusText(`探针已连接：${info}`, 'ok');
+      this.setStatusText(`探针已连接：${info}`, hid.isProbe ? 'ok' : 'warn');
+      if (!hid.isProbe){
+        $('sc-info').textContent = info + '（HID 已连接 · ⚠ 不是 akaLinkPro 的 VID/PID）';
+        this.setStatusText(`⚠ 连到的是「${info}」（VID/PID 不是 0d28:0204）—— 可能选错设备了`, 'warn');
+      }
     } catch (e){
       this.setStatusText('连接探针失败：' + (e?.message || e), 'err');
     }

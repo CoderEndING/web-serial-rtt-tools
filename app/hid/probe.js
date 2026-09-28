@@ -151,21 +151,51 @@ export class AkaLinkHid {
     return [d.productName || 'akaLinkPro', d.serialNumber ? '· ' + d.serialNumber : ''].join(' ').trim();
   }
 
-  /** 弹设备选择框（只列 vendor-defined HID：usage page 0xFF00，也就是探针那个 HID 接口） */
+  /** 这个句柄是不是探针（按 VID/PID 判；厂商改名字也不影响）*/
+  get isProbe(){
+    const d = this.device;
+    return !!d && d.vendorId === VID && d.productId === PID;
+  }
+
+  /**
+   * 从**已授权**的设备里挑出探针。
+   *
+   * 🚨 这里踩过一个大坑：光按 `usagePage === 0xFF00` 找会**挑错设备** ——
+   *    本机触摸板（Synaptics，VID 0x06cb）的 collections 里也有 vendor-defined 0xFF00，
+   *    而它排在列表前面，于是 `reconnect()` 打开的是触摸板，`sendReport()` 抛
+   *    **"Failed to write the report"** —— 看着像"探针被复位/句柄作废"，其实压根没连探针。
+   *    所以：**先按 VID/PID 精确匹配**，只有实在找不到时才退回"按 usage page"（并让上层提示可能选错）。
+   */
+  static pick(devs){
+    if (!devs?.length) return null;
+    const exact = devs.find(d => d.vendorId === VID && d.productId === PID &&
+                                 d.collections?.some(c => c.usagePage === USAGE_PAGE));
+    if (exact) return exact;
+    const byVid = devs.find(d => d.vendorId === VID && d.productId === PID);
+    if (byVid) return byVid;
+    return devs.find(x => x.collections?.some(c => c.usagePage === USAGE_PAGE)) || null;
+  }
+
+  /** 弹设备选择框。过滤条件带上 VID/PID —— 否则选择框里会混进触摸板这类同样有 0xFF00 的设备 */
   async request(){
     if (!AkaLinkHid.supported()) throw new Error('这个浏览器没有 WebHID（Chrome / Edge 桌面版才有）');
-    const devs = await navigator.hid.requestDevice({ filters: [{ usagePage: USAGE_PAGE }] });
+    const devs = await navigator.hid.requestDevice({
+      filters: [{ vendorId: VID, productId: PID, usagePage: USAGE_PAGE }],
+    });
     if (!devs.length) throw new Error('没有选择设备');
     await this.open(devs[0]);
     return this.device;
   }
 
-  /** 用之前授权过的设备直接连（浏览器记住过就不用再点弹框） */
+  /** 用之前授权过的探针直接连（浏览器记住过就不用再点弹框） */
   async reconnect(){
     if (!AkaLinkHid.supported()) throw new Error('这个浏览器没有 WebHID（Chrome / Edge 桌面版才有）');
     const devs = await navigator.hid.getDevices();
-    const d = devs.find(x => x.collections?.some(c => c.usagePage === USAGE_PAGE)) || devs[0];
-    if (!d) throw new Error('没有已授权的探针（先点一次「连接探针」）');
+    const d = AkaLinkHid.pick(devs);
+    if (!d){
+      const names = devs.map(x => x.productName || '(无名)').join('、');
+      throw new Error(`没有已授权的探针（已授权的 HID 设备：${names || '无'}）—— 点一次「连接探针」授权`);
+    }
     await this.open(d);
     return d;
   }
@@ -217,7 +247,7 @@ export class AkaLinkHid {
   async _reacquire(){
     if (!AkaLinkHid.supported()) throw new Error('这个浏览器没有 WebHID');
     const devs = await navigator.hid.getDevices();
-    const d = devs.find(x => x.collections?.some(c => c.usagePage === USAGE_PAGE)) || devs[0];
+    const d = AkaLinkHid.pick(devs);
     if (!d) throw new Error('浏览器里已经没有已授权的探针了（点「连接探针」重新授权一次）');
     await this.open(d);
     return d;

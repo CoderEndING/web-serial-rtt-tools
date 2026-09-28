@@ -13,7 +13,7 @@ const load = p => import('file://' + p.replace(/\\/g, '/'));
 
 const {
   CMD, RTT_ACT, PAYLOAD, buildRequest, rttData, rttConfigData,
-  parseStatus, startRcText, ascii, USAGE_PAGE, VID, PID,
+  parseStatus, startRcText, ascii, USAGE_PAGE, VID, PID, AkaLinkHid,
 } = await load(join(app, 'hid', 'probe.js'));
 const { MockAkaLinkHid } = await load(join(app, 'hid', 'mock.js'));
 
@@ -121,6 +121,28 @@ console.log('== 5. 常量与设备匹配 ==');
   ok(CMD.RTT === 0x31 && CMD.MODEL === 0x10 && CMD.FW_VER === 0x13 && CMD.DFU === 0xff, '命令码抽查');
   const acts = [RTT_ACT.STOP, RTT_ACT.START, RTT_ACT.STATUS, RTT_ACT.AUTOSTART, RTT_ACT.CONFIG, RTT_ACT.BENCH_RESULT];
   ok(acts.join(',') === '0,1,2,3,7,9', '动作码与 api_param.c 一致：' + acts.join(','));
+}
+
+console.log('== 6. 已授权设备里挑探针（别挑到触摸板）==');
+{
+  // 真机踩过：Synaptics 触摸板的 collections 里也有 vendor-defined 0xFF00，
+  // 而且排在列表前面 —— 只按 usage page 找就会打开触摸板，然后 sendReport 报
+  // "Failed to write the report"（看着像探针坏了）。必须**先按 VID/PID 精确匹配**。
+  const dev = (productName, vendorId, productId, pages) => ({
+    productName, vendorId, productId, collections: pages.map(usagePage => ({ usagePage })),
+  });
+  const touchpad = dev('HID Miniport Device', 0x06cb, 0x000f, [0x0d, 0xff00]);
+  const probe = dev('akaLinkPro CMSIS-DAP', 0x0d28, 0x0204, [0xff00]);
+  const other = dev('Some Keyboard', 0x1234, 0x5678, [0xff00]);
+  ok(AkaLinkHid.pick([touchpad, probe, other]) === probe, '列表里有触摸板 → 仍然挑中 akaLinkPro');
+  ok(AkaLinkHid.pick([probe]) === probe, '只有探针时正常挑中');
+  ok(AkaLinkHid.pick([touchpad, other]) === touchpad, '没有探针时退回"按 usage page"（上层会提示可能选错）');
+  ok(AkaLinkHid.pick([]) === null && AkaLinkHid.pick(undefined) === null, '列表为空/未定义 → null（不抛）');
+  const p = new AkaLinkHid();
+  p.device = probe;
+  ok(p.isProbe === true, 'isProbe：探针 → true');
+  p.device = touchpad;
+  ok(p.isProbe === false, 'isProbe：触摸板 → false（上层据此发警告）');
 }
 
 console.log(`\n${fail ? 'FAIL' : 'OK'}  ${pass} 通过 / ${fail} 失败`);
