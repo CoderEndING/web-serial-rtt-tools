@@ -25,7 +25,7 @@ FW_DIR   = tools/target-firmware/stm32f103
 LA       = tools/la/kingst_la.py
 
 .DEFAULT_GOAL := help
-.PHONY: help serve serve-stop browser open test test-ui test-gen test-gen-page test-hw test-bridge test-all \
+.PHONY: help serve serve-stop browser open test test-ui test-gen test-gen-page test-hid test-hw test-bridge test-all \
         bridge bridge-stop fw-build fw-flash fw-restore fw-h7-build fw-h7-slow fw-h7-flash \
         algo-check flash-plan la-info la-capture git-status git-log check clean
 
@@ -51,14 +51,20 @@ open:
 test:
 	$(NODE) tools/selftest/rtt.test.mjs
 	$(NODE) tools/selftest/gen-parity.mjs
+	$(NODE) tools/selftest/hid-proto.test.mjs
 
 # 「工程生成」页与 Python 工具（uvprojx2cmake.py）产物的逐字节对账
 test-gen:
 	$(NODE) tools/selftest/gen-parity.mjs
 
+# 探针自定义 HID（RTT→CDC 转发）协议自测：组包 / 状态字 / 假探针流程
+test-hid:
+	$(NODE) tools/selftest/hid-proto.test.mjs
+
+# 页面端到端（演示串口 + 假探针；驱动会自己拉 CDP 浏览器）
 test-ui:
 	pwsh -NoProfile -Command "if (-not (Get-NetTCPConnection -State Listen -LocalPort $(PORT) -ErrorAction SilentlyContinue)) { Start-Process -FilePath '$(PY)' -ArgumentList '-m','http.server','$(PORT)','--bind','127.0.0.1' -WindowStyle Hidden; Start-Sleep -Seconds 1 }"
-	$(NODE) tools/selftest/ui.selftest.mjs
+	$(NODE) tools/selftest/ui.page.test.mjs
 
 # 「工程生成」页的真页面验收（需要 8899 服务 + 9333 CDP 浏览器，见 make open）
 test-gen-page:
@@ -137,6 +143,9 @@ check:
 	$(NODE) --check app/gen/model.js
 	$(NODE) --check app/gen/view.js
 	$(NODE) --check app/gen/zip.js
+	$(NODE) --check app/hid/probe.js
+	$(NODE) --check app/hid/mock.js
+	$(NODE) --check app/hid/view.js
 	$(NODE) --check app/main.js
 	$(NODE) --check bridge/rtt-bridge.mjs
 	pwsh -NoProfile -Command "Write-Host '语法检查通过'"

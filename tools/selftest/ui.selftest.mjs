@@ -191,5 +191,27 @@ export async function runUiSelfTest(tools){
     return '4 个字段 = 原生下拉（3 个带默认项 + 九档）';
   });
 
+  await step('RTT→CDC 转发面板：假探针走一遍完整流程', async () => {
+    const hid = tools.hid;
+    if (!hid) throw new Error('没有 hid 视图对象（main.js 没接？）');
+    hid.useMock();                                   // 顶掉真设备，没插硬件也能验 UI 链路
+    document.querySelector('#tabs .tab[data-tab=terminal]').click();
+    await new Promise(r => setTimeout(r, 60));
+
+    $('h-addr').value = '0x24000000';
+    $('h-size').value = '0x80000';
+    $('h-start').click();
+    await until(() => tools.hid.summary().running, 100, '转发跑起来');
+    const s = tools.hid.summary();
+    if (s.cbAddr !== '0x24000000') throw new Error('控制块地址不对：' + s.cbAddr);
+    if (!/运行中/.test(s.state)) throw new Error('状态行没写运行中：' + s.state);
+    if ($('h-info').textContent.trim() === '') throw new Error('设备信息行是空的');
+
+    $('h-stop').click();
+    await until(() => !tools.hid.summary().running, 100, '转发停掉');
+    if (!/未运行/.test(tools.hid.summary().state)) throw new Error('停止后状态行不对：' + tools.hid.summary().state);
+    return s.state.slice(0, 70);
+  });
+
   return out;
 }

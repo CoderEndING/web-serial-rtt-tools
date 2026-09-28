@@ -8,7 +8,7 @@
 | 标签页 | 干什么 | 需要什么 |
 |---|---|---|
 | **串口助手** | SSCOM 那套核心功能：端口/波特率、ASCII/HEX 收发、**ANSI 彩色接收**（像 MobaXterm）、时间戳、定时发送、5 条快捷发送、保存接收数据、**记录到文件**（高速采集不丢数）、**高速自动关显示**（>50KB/s 停渲染、数据照收） | 桌面版 Chrome / Edge（Web Serial） |
-| **终端** | Xshell 式串口终端：xterm.js 渲染 ANSI、本地回显、回车/退格映射、粘贴发送 | 同上（与串口助手共用同一个串口会话） |
+| **终端** | Xshell 式串口终端：xterm.js 渲染 ANSI、本地回显、回车/退格映射、粘贴发送；侧栏还能开 **akaLinkPro 的 RTT→CDC 转发**（探针自己读 RTT 塞进 CDC，主机只读一个 COM 口） | 同上（与串口助手共用同一个串口会话）；转发功能需要 akaLinkPro 探针 |
 | **RTT Viewer** | SEGGER RTT 多通道查看 + 下行输入 + 复位目标，四种后端；同样支持记录到文件与高速自动关显示 | **零安装**：WebUSB + CMSIS-DAP 探针<br>**可选**：本地桥 + OpenOCD / J-Link |
 | **烧录器** | .elf/.hex/.bin 写进目标：**零安装 WebUSB**（页面跑 flashloader，擦/写/校验/复位一条龙）或**本地桥 OpenOCD** | 零安装：同上探针；桥：OpenOCD |
 | **工程生成** | 拖进 Keil `.uvprojx` 就能生成调试/下载配套文件：`Makefile.jlink`、`jlink_gdb.script`、`Makefile.pyocd`、`Makefile.openocd`（连带 `rtt_logger.py`）、`test_sram.bin`；参数可填可勾，产物**实时预览** | 不需要任何硬件/后端（纯前端生成） |
@@ -93,6 +93,20 @@
 
 细节与对账方法见 [`docs/gen-page.md`](docs/gen-page.md)。
 
+## RTT → CDC 转发（akaLinkPro 探针侧桥）
+
+终端页侧栏那块面板：让**探针自己**通过 SWD 轮询目标的 RTT 控制块、把数据塞进它的 CDC 虚拟串口 ——
+主机只要读一个 COM 口，不用每轮三次 USB 往返。本机实测（akaLinkPro + STM32F103 洪水固件）：
+**2468 KB/s**，而且满速转发时 HID 控制通道照样 260 ms 一次应答。
+
+用法：终端页 →「连接探针」（HID，授权一次后页面会自动重连）→ RTT 地址手填或「载入 ELF…」自动解析
+`_SEGGER_RTT` →「启动转发」→ 回串口助手打开探针的 CDC 口即可。「停止」把 CDC 交回 UART。
+
+⚠️ Cortex-M7（H743 / H7B3…）的 DTCM 探针读不到，地址要给 AXI SRAM（如 `0x24000000`）。
+
+协议、返回码（含 `-100` = "排队中"这个坑）、实测数字与踩坑记录都在 [`docs/rtt-cdc.md`](docs/rtt-cdc.md)。
+自测：`make test-hid`（协议层，不需要硬件）+ `make test-ui`（页面里假探针走一遍）。
+
 ## 支持的调试后端
 
 | 后端 | 通道 | 双向 | 目标控制 | 依赖 |
@@ -113,6 +127,7 @@ app/
   serial/               session(Web Serial 封装) / assistant / terminal / demo(演示串口)
   rtt/                  protocol(RTT 协议) / dap-webusb(CMSIS-DAP) / bridge / elf / mock / view
   gen/                  工程生成：templates(模板移植自 uvprojx2cmake.py) / fixes(固定 4 项修正) / model(参数+器件表+uvprojx 解析) / zip(零依赖打包) / view
+  hid/                  akaLinkPro 自定义 HID：probe(协议 + WebHID 客户端) / mock(假探针) / view(RTT→CDC 转发面板)
   vendor/xterm/         xterm.js 本地副本（离线可用，MIT）
   ui/                   tabs / toast / dom 小工具
 bridge/
@@ -120,7 +135,7 @@ bridge/
   bridge.config.json    目标配置（stm32f103 / esp32s31 / …）
   start-bridge.bat|sh   双击启动
 tools/
-  selftest/             自测：Node 协议测试 / 工程生成对账 / 桥端到端 / 浏览器真机(CDP) / LA 参考流量
+  selftest/             自测：Node 协议测试 / 工程生成对账 / HID 协议 / 页面端到端(CDP) / 桥端到端 / 浏览器真机(CDP) / LA 参考流量
   fixtures/gen/         对账基线：Python 工具（uvprojx2cmake.py）对真实工程的原始产物，逐字节比对用
   la/                   逻辑分析仪：kingst_la.py（KingstVIS Socket API 单文件工具）+ SWD 流量发生器
   dev/                  extract-algo.py（从 pyOCD 抽 flash 算法，别手抄 base64）、help.ps1
@@ -143,6 +158,9 @@ node tools\selftest\rtt.test.mjs
 
 # 1b) 工程生成页对账：与 Python 工具 uvprojx2cmake.py 的真实产物逐字节比对（含 ZIP 自解、.uvprojx 解析）
 node tools\selftest\gen-parity.mjs
+
+# 1c) akaLinkPro 自定义 HID 协议（RTT→CDC 转发）：组包 / 状态字 / 假探针流程
+node tools\selftest\hid-proto.test.mjs
 
 # 2) 页面端到端（内置演示串口，无需硬件）
 python -m http.server 8899 --bind 127.0.0.1        # 仓库根

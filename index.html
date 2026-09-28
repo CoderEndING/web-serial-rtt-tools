@@ -177,6 +177,41 @@
         </div>
         <p class="hint">选中即复制（Ctrl+Shift+C）；Ctrl+Shift+V 粘贴；Ctrl+Shift+L 清屏。</p>
       </fieldset>
+
+      <fieldset>
+        <legend>RTT → CDC 转发（akaLinkPro）</legend>
+        <div class="row btnrow">
+          <button id="h-connect" class="primary" title="走探针的自定义 HID（usage page 0xFF00）选设备">连接探针</button>
+          <button id="h-reconnect" title="用浏览器记住的探针直接连（不用再点一次弹框）">重连</button>
+        </div>
+        <p class="hint" id="h-info">未连接</p>
+        <label class="row"><span>RTT 地址</span>
+          <input id="h-addr" value="0x20000000" title="控制块搜索起点。Cortex-M7（H743 / H7B3 等）的 DTCM 探针读不到，要给 AXI SRAM（如 0x24000000）">
+        </label>
+        <div class="row btnrow">
+          <button id="h-elf" title="从 ELF 里读 _SEGGER_RTT 符号，顺手把搜索长度收成 0x1000">载入 ELF…</button>
+        </div>
+        <label class="row"><span>搜索长度</span>
+          <input id="h-size" class="num" value="0" title="0 = 探针默认 64 KB（从上面的地址起搜）">
+        </label>
+        <label class="row"><span>通道</span>
+          <input id="h-chan" class="num" value="0" title="RTT 上行通道号，0 = channel 0">
+        </label>
+        <label class="row"><span>SWD 时钟</span>
+          <select id="h-clock" title="运行时调参（HID 0x31 action 7），改完立刻生效"></select>
+        </label>
+        <div class="row btnrow">
+          <button id="h-start" class="primary">启动转发</button>
+          <button id="h-stop">停止</button>
+        </div>
+        <div class="row btnrow">
+          <button id="h-auto" title="让探针自己从 0x20000000 起扫 64 KB 找 &quot;SEGGER RTT&quot; 签名">自动搜控制块</button>
+          <button id="h-refresh">刷新状态</button>
+        </div>
+        <p class="hint" id="h-state">未启动</p>
+        <p class="hint">启动后回「串口助手」打开这颗探针的 CDC 口（平时那个 VCOM），出来的就是 RTT 数据。<br>
+          探针只在 DAP 空闲 ≥20 ms 时轮询，正常调试会话不受影响。</p>
+      </fieldset>
     </aside>
     <section class="main">
       <div class="toolbar"><span id="t-status">未连接</span></div>
@@ -578,6 +613,15 @@
     <li>生成时在 <code>uvprojx2cmake.py</code> 的模板上<b>固定套 4 项修正</b>（RTT 范围收进 RAM、clean 不再删
         <code>*.log</code>、OpenOCD 的 <code>-c</code> 改双引号、去掉 SWO 目标）；对账测试验证的是"不带修正时逐字节相同"。</li>
     <li>网页不能静默写你的项目目录 —— 必须你亲手选一次文件夹；<code>test_sram.bin</code> 是 RAM 测试图案，不是固件。</li>
+  </ul>
+  <h3>RTT → CDC 转发（终端页那块，akaLinkPro 探针）</h3>
+  <ul>
+    <li>让<b>探针自己</b>通过 SWD 轮询目标的 RTT 控制块、把数据塞进它的 CDC 串口 —— 主机只要读一个 COM 口，
+        比主机侧轮询快得多（本机实测 <b>2.4 MB/s</b>）。</li>
+    <li>「连接探针」走探针的自定义 HID（usage page 0xFF00）；授权一次后页面会自动重连。</li>
+    <li>RTT 地址可以手填，也可以「载入 ELF…」从 <code>_SEGGER_RTT</code> 符号自动解析（和 RTT Viewer 一样）。</li>
+    <li>启动后回「串口助手」打开探针的 CDC 口（平时那个 VCOM）就能看到 RTT 数据；「停止」把该口交回 UART。</li>
+    <li>⚠️ Cortex-M7（H743 / H7B3…）要给 AXI SRAM 地址（如 <code>0x24000000</code>）：DTCM 探针读不到。</li>
   </ul>
   <form method="dialog"><button class="primary">知道了</button></form>
 </dialog>

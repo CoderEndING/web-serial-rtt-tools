@@ -10,6 +10,7 @@ import { TerminalView } from './serial/terminal.js';
 import { RttView } from './rtt/view.js';
 import { FlashView } from './flash/view.js';
 import { GenView } from './gen/view.js';
+import { RttCdcView } from './hid/view.js';
 
 // ---------- 错误收集（自检/排障用；平时看不见） ----------
 const errors = [];
@@ -22,12 +23,14 @@ const terminal = new TerminalView(session);
 const rtt = new RttView();
 const flash = new FlashView();
 const gen = new GenView();
+const hid = new RttCdcView();
 
 assistant.init();
 terminal.init();
 rtt.init();
 flash.init();
 gen.init();
+hid.init();
 
 initTabs(name => {
   if (name === 'terminal') requestAnimationFrame(() => terminal.onShow());
@@ -48,6 +51,7 @@ function summary(){
     tabs: [...document.querySelectorAll('#tabs .tab')].map(t => t.dataset.tab),
     quickSlots: document.querySelectorAll('#s-quick .qrow').length,
     genFiles: (gen?.files || []).map(f => f.name),
+    hid: hid?.summary?.() || null,
     vendor: 'serial-rtt-tools',
   };
 }
@@ -56,7 +60,7 @@ box.id = 'selftest';
 box.hidden = true;
 document.body.appendChild(box);
 
-window.__tools = { session, assistant, terminal, rtt, flash, gen, summary, errors };
+window.__tools = { session, assistant, terminal, rtt, flash, gen, hid, summary, errors };
 
 // ---------- 浏览器端端到端自检：?demo=serial&selftest=1 ----------
 const q = new URLSearchParams(location.search);
