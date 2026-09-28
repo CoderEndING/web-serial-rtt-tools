@@ -5,8 +5,15 @@
  *      变成**可客观判定**。做法是：每一个被采样的量都有**精确已知的数学波形**，
  *      主机按取到的 `i_tick` 就能反算其余通道的应有值，从而逐点断言。
  *
- * 时基：HSI 8 MHz（不配 PLL，与兄弟例程一致）→ SysTick 每 800 周期中断 = **10 kHz**。
+ * 时基：**HSE 8 MHz ×12 = 96 MHz**（照抄兄弟例程 `stm32f103_rtt_speed` 的
+ *      `clock_init()`；F103 额定 72 MHz，96 是超频但 flash 等待周期够，那边实测稳）
+ *      → SysTick 每 9600 周期中断 = **10 kHz**。
  *      ISR 里所有量一次更新完（更新顺序见下），`g_tick` 是主计数器。
+ *
+ * ⚠️ **为什么必须提频**：AHB-AP 的每次读都要花目标侧几个 HCLK，探针把 SWD 拉到多高都没用。
+ *    8 MHz 时实测块读封顶 **1.47 MB/s（0.68 µs/字节）**，而且 45 MHz 与 30 MHz 的读数
+ *    一模一样（目标已饱和）；96 MHz 下同一路径是 **3.4 MB/s（0.29 µs/字节）**。
+ *    拿 8 MHz 的靶子量采样率，量到的是靶子的上限（≈46 kHz），不是探针的上限。
  *
  * ---------------------------------------------------------------------------
  * 变量表（t = 10 kHz tick 序号；两组变量在地址上刻意分开，用来对比"读计划"的两条路径）
@@ -49,8 +56,66 @@
 #include "stm32f103_regs.h"
 
 #define TICK_HZ      10000u
-#define CPU_HZ       8000000u
-#define SYST_RELOAD  (CPU_HZ / TICK_HZ - 1u)      /* 800 - 1 */
+#define CPU_HZ       96000000u
+#define SYST_RELOAD  (CPU_HZ / TICK_HZ - 1u)      /* 9600 - 1 */
+
+/* ---- 96 MHz 时钟序列：照抄 script_test/stm32f103_rtt_speed/src/main.c ----
+ * 三条关键点（那边都实测踩过）：
+ *   1. FLASH_ACR 必须先给足等待周期 + 预取，**再**提速；
+ *   2. PLL 的配置位在 PLLON=1 时是**写保护**的 —— 必须走完整时序
+ *      （SW→HSI、关 PLL、改倍频、开 PLL、SW→PLL），直接改倍频位无效；
+ *   3. HSE 起不来就退回 HSI/2×16 = 64 MHz，绝不把板子跑死（时基会偏，check.py 会报）。 */
+#define FLASH_ACR (*(volatile uint32_t *)0x40022000)
+#define RCC_CR_HSEON   (1u << 16)
+#define RCC_CR_HSERDY  (1u << 17)
+#define RCC_CR_PLLON   (1u << 24)
+#define RCC_CR_PLLRDY  (1u << 25)
+#define RCC_CFGR_SW_HSI  (0u)
+#define RCC_CFGR_SW_PLL  (2u)
+#define RCC_CFGR_SWS_MASK (3u << 2)
+#define HSE_MHZ 8u
+#define PLL_MULL (((CPU_HZ / 1000000u) / HSE_MHZ) - 2u)   /* PLLMULL 编码：0 == ×2 */
+
+static void clock_init(void)
+{
+  /* 1) 开 HSE 并等起振 */
+  RCC_CR |= RCC_CR_HSEON;
+  for (volatile uint32_t i = 0; i < 200000u; i++) {
+    if (RCC_CR & RCC_CR_HSERDY) { break; }
+  }
+  if (!(RCC_CR & RCC_CR_HSERDY)) {
+    RCC_CFGR = (RCC_CFGR & ~(0xFu | (7u << 8) | (7u << 11) | (3u << 16) | (0xFu << 18)))
+             | (0x5u << 8) | (0x4u << 11) | (0u << 16) | (0xEu << 18);   /* HSI/2 ×16 */
+    RCC_CR |= RCC_CR_PLLON;
+    while (!(RCC_CR & RCC_CR_PLLRDY)) { }
+    RCC_CFGR = (RCC_CFGR & ~3u) | RCC_CFGR_SW_PLL;
+    while ((RCC_CFGR & RCC_CFGR_SWS_MASK) != (RCC_CFGR_SW_PLL << 2)) { }
+    return;
+  }
+
+  /* 2) Flash 等待周期 + 预取 —— 必须在提速之前 */
+  FLASH_ACR = 0x12;                        /* latency 2 + prefetch */
+
+  /* 3) 先切回 HSI 并关掉 PLL（否则下面的倍频位写不进去） */
+  RCC_CFGR = (RCC_CFGR & ~3u) | RCC_CFGR_SW_HSI;
+  while ((RCC_CFGR & RCC_CFGR_SWS_MASK) != (RCC_CFGR_SW_HSI << 2)) { }
+  RCC_CR &= ~RCC_CR_PLLON;
+  while (RCC_CR & RCC_CR_PLLRDY) { }
+
+  /* 4) 分频与倍频：AHB=/1, APB1=/4 (24 MHz), APB2=/2 (48 MHz), PLLSRC=HSE, ×12 */
+  RCC_CFGR = (RCC_CFGR & ~(0xFu | (7u << 8) | (7u << 11) | (3u << 16) | (0xFu << 18)))
+           | (0x0u << 4)               /* HPRE  = /1  */
+           | (0x5u << 8)               /* PPRE1 = /4  */
+           | (0x4u << 11)              /* PPRE2 = /2  */
+           | (1u << 16)                /* PLLSRC = HSE */
+           | ((uint32_t)PLL_MULL << 18);
+
+  /* 5) 开 PLL、等锁定、切过去 */
+  RCC_CR |= RCC_CR_PLLON;
+  while (!(RCC_CR & RCC_CR_PLLRDY)) { }
+  RCC_CFGR = (RCC_CFGR & ~3u) | RCC_CFGR_SW_PLL;
+  while ((RCC_CFGR & RCC_CFGR_SWS_MASK) != (RCC_CFGR_SW_PLL << 2)) { }
+}
 
 /* 连续块：24 B。字段顺序/偏移见文件头表格，改动请同步改表与 README */
 typedef struct {
@@ -128,6 +193,8 @@ void SysTick_Handler(void){
 }
 
 int main(void){
+  clock_init();      /* 先把主频顶到 96 MHz —— SYST_RELOAD 是按 96 MHz 算的，顺序不能反 */
+
   /* 只开时钟，不碰任何外设（和兄弟例程一样，越小越干净） */
   RCC_APB2ENR |= RCC_APB2ENR_AFIOEN | RCC_APB2ENR_IOPAEN | RCC_APB2ENR_IOPCEN;
 

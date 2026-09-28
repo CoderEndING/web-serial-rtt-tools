@@ -1,6 +1,6 @@
 # 构建产物 / 临时文件
 build/
-tools/target-firmware/**/build/
+tools/target-firmware/**/build*/
 node_modules/
 tmp/
 *.log

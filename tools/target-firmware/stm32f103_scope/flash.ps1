@@ -10,12 +10,14 @@
     3) PATH 里的 openocd
   🚨 必须 0.12+ 并且显式 "cmsis-dap backend usb_bulk" —— CMSIS-DAP v2（bulk）只有 0.12 才认。
 #>
-param([switch]$Erase, [string]$OpenOcd, [string]$Scripts)
+param([switch]$Erase, [string]$OpenOcd, [string]$Scripts,
+      [ValidateSet('c8', 'ze')][string]$Board = 'ze')
 
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
-$elf = Join-Path $root 'build\fw.elf'
-if (-not (Test-Path $elf)){ throw "先跑 build.ps1（找不到 $elf）" }
+$BOARDS = @{ ze = 'build'; c8 = 'build-c8' }
+$elf = Join-Path $root ((Join-Path $BOARDS[$Board] 'fw.elf'))
+if (-not (Test-Path $elf)){ throw "先跑 build.ps1 -Board $Board（找不到 $elf）" }
 
 function Find-OpenOcd {
   $cands = @()

@@ -201,8 +201,8 @@ tools/
   target-firmware/
     stm32f103/          STM32F103 测试固件（UART + RTT，含 SEGGER RTT 源码）
     stm32f103_rtt_speed/      F103 RTT 吞吐测试（死循环灌 hello world）
-    stm32f103_scope/          **F103 J-Scope 靶子固件**：10 kHz 时基 + 契约已知的波形/变量，
-                              check.py 客观验收（含 4 KB 地址空洞 → 两个 span 的读计划场景）
+    stm32f103_scope/          **F103 J-Scope 靶子固件**：**96 MHz** 时基 + 契约已知的波形/变量，
+                              `-Board ze|c8`（默认 ze）、check.py 客观验收（含 4 KB 地址空洞 → 两个 span 的读计划场景）；与探针仓库里那份逐字节同步
     stm32h7b0_rtt_speed/      **H7B0 RTT 吞吐测试**（HSI→PLL1 280MHz，DTCM 布局，见其 README）
 docs/                   后端配置与排障；逻辑分析仪攻略.md（含 LA 工具完整源码与踩坑）；
                         scope-page.md（J-Scope 波形页方案：探针侧 HSS 采样，**尚未实现**）

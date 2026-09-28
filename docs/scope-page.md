@@ -474,8 +474,16 @@ tools/probe-firmware/  探针固件补丁草稿（scope_sampler.c/.h + patch-not
 | 撕裂**量化** | `g_pair_a`/`g_pair_b`（`= t` / `= ~t`） | `a^b != 0xFFFF` 的样本占比 = 撕裂率 |
 | 精度 | `g_pack.u_hi`（`0x10000000\|(t&0xFFFF)`）、`g_ramp64`（f64） | 验 u32 不被 Float32 截断、验 8 字节载荷 |
 
-配套：`build.ps1`（`-g3 -gdwarf-4`，打印变量地址）、`flash.ps1`（OpenOCD 自动查找，0.12+ + `usb_bulk`）、
+配套：`build.ps1`（`-g3 -gdwarf-4`，打印变量地址；`-Board ze|c8` 选板子，默认 **ze**）、
+`flash.ps1`（OpenOCD 自动查找，0.12+ + `usb_bulk`）、
 `check.py`（halt → dump RAM → **逐项核对契约 + 反测 10 kHz 时基**，也可作为 scope 页面的对账真值）、`README.md`。
+
+> **时基 = 96 MHz**（HSE 8 MHz × 12，F103 超频但 flash 等待周期够；SysTick 9600 周期 = 10 kHz）。
+> 为什么必须提频：AHB-AP 每次读都要花目标侧几个 HCLK，探针把 SWD 拉到多高都没用 ——
+> 8 MHz 时块读封顶 1.47 MB/s（45/30 MHz 读数一模一样 = 目标已饱和），96 MHz 下同一路径 3.4 MB/s。
+> **拿 8 MHz 的靶子量采样率，量到的是靶子的上限（≈46 kHz），不是探针的上限。**
+> 这份例程与探针仓库里的 `script_test/stm32f103_scope/` **逐字节同一份**（`src/main.c`、
+> 两个 `.ld`、`build.ps1`、`flash.ps1` 都做过 SHA256 对账），改一边记得同步另一边。
 
 > 这块板子**没有 D-cache**，所以在这里量到的任何异常都归采样/协议本身；H7 的 cache 一致性问题要在 H7 上单独验。
 

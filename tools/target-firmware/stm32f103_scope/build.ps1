@@ -1,14 +1,25 @@
 <#
   STM32F103 scope 测试固件编译脚本（不需要 make，也不需要 Keil）
-    pwsh -File build.ps1
+    pwsh -File build.ps1                 # 默认 ZE（512KB flash / 64KB RAM）
+    pwsh -File build.ps1 -Board c8       # 中等密度 64KB flash / 20KB RAM
     pwsh -File build.ps1 -Clean
   依赖：arm-none-eabi-gcc 在 PATH 里（本机在 E:\Share\env-windows\tools\gnu_gcc\arm_gcc\mingw\bin）
+
+  默认板的产物固定落在 build\ —— check.py / flash.ps1 / 文档都按这个路径找。
 #>
-param([switch]$Clean)
+param([switch]$Clean, [ValidateSet('c8', 'ze')][string]$Board = 'ze')
 
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
-$build = Join-Path $root 'build'
+
+$BOARDS = @{
+  ze = @{ Ld = 'stm32f103ze.ld'; Out = 'build';    Note = '512KB flash / 64KB RAM' }
+  c8 = @{ Ld = 'stm32f103c8.ld'; Out = 'build-c8'; Note = '64KB flash  / 20KB RAM' }
+}
+$b = $BOARDS[$Board]
+$build = Join-Path $root $b.Out
+$ldpath = Join-Path $root ('ld\' + $b.Ld)
+if (-not (Test-Path $ldpath)) { throw "找不到链接脚本 $ldpath" }
 
 $gcc = (Get-Command arm-none-eabi-gcc -ErrorAction SilentlyContinue).Source
 if (-not $gcc){
@@ -40,13 +51,14 @@ $cflags = @(
   '-ffunction-sections', '-fdata-sections', '-fno-common',
   '-Wall', '-Wextra', '-Wno-unused-parameter',
   "-I$root\src",
-  "-T$root\ld\stm32f103c8.ld",
+  "-T$ldpath",
   '-nostartfiles', '-specs=nano.specs', '-specs=nosys.specs',
   '-Wl,--gc-sections', "-Wl,-Map=$build\fw.map"
 )
 
 & $gcc @cflags @sources -o $elf
 if ($LASTEXITCODE -ne 0) { throw "编译失败 (exit $LASTEXITCODE)" }
+Write-Output ("board   : {0}  ({1})" -f $Board, $b.Note)
 
 & $objcopy -O binary $elf (Join-Path $build 'fw.bin')
 & $objcopy -O ihex   $elf (Join-Path $build 'fw.hex')
