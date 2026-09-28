@@ -196,6 +196,12 @@ export class ScopeView {
     try {
       if (!AkaLinkHid.supported()) throw new Error('这个浏览器没有 WebHID（桌面版 Chrome / Edge 才有）');
       const hid = new AkaLinkHid();
+      // 探针被复位/拔插 → 浏览器会发 disconnect：立刻把状态写清楚，别等用户点开始采样才报一句英文错
+      hid.onDisconnect = () => {
+        this.setStatusText('探针断开了（被复位、拔插或掉电？）—— 点「重连」，或拔插一次探针', 'err');
+        $('sc-info').textContent = '探针已断开';
+        if (this.running) this.stop().catch(() => {});
+      };
       if (request) await hid.request(); else await hid.reconnect();
       this.hid = hid;
       let info = '';

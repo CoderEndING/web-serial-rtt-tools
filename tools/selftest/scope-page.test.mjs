@@ -293,6 +293,52 @@ console.log('== 9. 勾选顺序 ≠ 地址顺序（帧内顺序 = 地址排序�
   await ev(`document.querySelector('[data-group=sclayout] button[data-v=overlay]').click(); return true;`);
 }
 
+console.log('== 10. HID 句柄作废（探针被复位过）能自愈 ==');
+{
+  // 用户实际遇到的现象：探针自己重启 → USB 重新枚举 → 浏览器手里的 HIDDevice 作废 →
+  // sendReport 抛 "Failed to write the report"（点「开始采样」才炸，看不出原因）。
+  // 这里用一个假设备复现：第一次 sendReport 抛这个错，第二次（重新取到的设备）正常回包。
+  const r = await ev(`
+    const { AkaLinkHid } = await import('/app/hid/probe.js');
+    const mk = (name, fail) => ({
+      name, opened: true, collections: [{ usagePage: 0xFF00 }],
+      addEventListener(){}, removeEventListener(){}, close: async () => {},
+      open: async () => {},
+      sendReport: async () => { if (fail) throw new Error('Failed to write the report.'); 
+                                queueMicrotask(() => hid._handleInput({ data: new DataView(new Uint8Array(63).map((_, i) => i === 1 ? 0x13 : 0).buffer) })); },
+    });
+    const bad = mk('旧句柄（已作废）', true);
+    const good = mk('新句柄', false);
+    const hid = new AkaLinkHid();
+    hid.device = bad;
+    // 重新枚举后 getDevices() 会给到"新的"对象
+    const orig = navigator.hid.getDevices;
+    navigator.hid.getDevices = async () => [good];
+    let out;
+    try {
+      const res = await hid.xfer(0x13, undefined, 1500);      // 固件版本查询
+      out = { ok: true, cmd回显: res[1], reconnects: hid.reconnects, 换成新句柄: hid.device === good };
+    } catch (e){ out = { ok: false, err: String(e.message || e) }; }
+    finally { navigator.hid.getDevices = orig; }
+    return out;`);
+  ok(r.ok === true, '第一次写失败后自动重取设备并重试成功', JSON.stringify(r));
+  ok(r.reconnects === 1 && r['换成新句柄'] === true,
+     `重连计数 = ${r.reconnects}，且换成了重新枚举后的设备对象`);
+  const r2 = await ev(`
+    const { AkaLinkHid } = await import('/app/hid/probe.js');
+    const hid = new AkaLinkHid();
+    hid.device = { opened: true, collections: [{ usagePage: 0xFF00 }], addEventListener(){}, removeEventListener(){},
+                   close: async () => {}, open: async () => {},
+                   sendReport: async () => { throw new Error('Failed to write the report.'); } };
+    const orig = navigator.hid.getDevices;
+    navigator.hid.getDevices = async () => [];               // 连重新取都取不到（设备真没了）
+    try { await hid.xfer(0x13, undefined, 1000); return { threw: false }; }
+    catch (e){ return { threw: true, msg: String(e.message || e) }; }
+    finally { navigator.hid.getDevices = orig; }`);
+  ok(r2.threw === true && /复位\/拔插|重连|拔插一次/.test(r2.msg),
+     '设备真的没了时给出可操作的中文提示：' + String(r2.msg).slice(0, 70));
+}
+
 console.log(`\n${fail ? '❌' : '✅'} scope-page.test: ${pass} 通过 / ${fail} 失败`);
 ws.close();
 process.exit(fail ? 1 : 0);

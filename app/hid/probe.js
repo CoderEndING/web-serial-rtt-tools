@@ -206,25 +206,58 @@ export class AkaLinkHid {
     this.onDisconnect?.();
   }
 
-  /** 发一条请求并等回包；同一时刻只允许一条在飞 */
+  /**
+   * 重新拿一次设备对象并打开。
+   *
+   * 为什么要这个：探针**被复位/拔插**之后会重新枚举，浏览器手里那个 `HIDDevice` 就作废了 ——
+   * 之后 `sendReport()` 会抛 `Failed to write the report`（本机实测：探针自己重启过一次，
+   * 用户点「开始采样」就报这个，而且完全不知道发生了什么）。
+   * 重新枚举后 `getDevices()` 会给到**新的**对象，所以这里不是"重开旧的"，是重新取。
+   */
+  async _reacquire(){
+    if (!AkaLinkHid.supported()) throw new Error('这个浏览器没有 WebHID');
+    const devs = await navigator.hid.getDevices();
+    const d = devs.find(x => x.collections?.some(c => c.usagePage === USAGE_PAGE)) || devs[0];
+    if (!d) throw new Error('浏览器里已经没有已授权的探针了（点「连接探针」重新授权一次）');
+    await this.open(d);
+    return d;
+  }
+
+  /** 发一条请求并等回包；同一时刻只允许一条在飞。
+   *  写失败（多半是探针被复位/拔插过、句柄过期）时**自动重新取设备再重试一次**；
+   *  仍失败则抛出带操作建议的错误 —— 别让用户只看到一句 "Failed to write the report"。 */
   async xfer(cmd, data, timeout = 3000){
     if (!this.connected) throw new Error('探针没连上');
     if (this._pending) throw new Error('上一条请求还没回来');
     const pkt = buildRequest(cmd, data);
-    const wait = new Promise((resolve, reject) => {
-      this._pending = { cmd, resolve, reject };
-      setTimeout(() => {
-        if (this._pending && this._pending.cmd === cmd){ this._pending = null; reject(new Error(`探针 ${timeout}ms 没响应`)); }
-      }, timeout);
-    });
-    try {
+    const once = async () => {
+      const wait = new Promise((resolve, reject) => {
+        this._pending = { cmd, resolve, reject };
+        setTimeout(() => {
+          if (this._pending && this._pending.cmd === cmd){ this._pending = null; reject(new Error(`探针 ${timeout}ms 没响应`)); }
+        }, timeout);
+      });
       await this.device.sendReport(1, pkt);
+      return await wait;
+    };
+    try {
+      let res;
+      try {
+        res = await once();
+      } catch (e){
+        const msg = String(e?.message || e);
+        if (!/write the report|disconnect|not.*connected|NetworkError/i.test(msg)) throw e;
+        this._pending = null;
+        this.reconnects = (this.reconnects || 0) + 1;
+        await this._reacquire();                 // 探针重新枚举过：拿新句柄再试
+        res = await once();
+      }
+      return res;                                // res[1] 已保证 === cmd（见 _handleInput）
     } catch (e){
       this._pending = null;
-      throw new Error('HID 发送失败：' + (e?.message || e));
+      throw new Error('HID 发送失败：' + (e?.message || e) +
+        '（探针很可能刚被**复位/拔插**过 —— 点「重连」；还不行就拔插一次探针）');
     }
-    const res = await wait;
-    return res;                            // res[1] 已保证 === cmd（见 _handleInput）
   }
 
   // ---------------- 便捷方法 ----------------
