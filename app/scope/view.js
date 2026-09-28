@@ -18,7 +18,7 @@ import { Elf } from '../elf/elf.js';
 import { listSampleable } from '../elf/dwarf.js';
 import * as P from './protocol.js';
 import { SampleStore, Trigger, TRIG, TRIG_NAME, findTrigger, windowFor } from './store.js';
-import { ScopeRenderer, legendRows, fmtTime, fmtVal } from './render.js';
+import { ScopeRenderer, legendRows, fmtTime, fmtVal, fmtHz } from './render.js';
 import { VendorEpTransport, MockTransport } from './transport.js';
 import { MockScopeProbe } from './mock.js';
 import { bytes as fmtBytes, fileStamp, download } from '../core/format.js';
@@ -61,6 +61,8 @@ export class ScopeView {
     this.periodActualUs = 0;
     this._raf = 0;
     this._needDraw = true;
+    this._lastPktT = null;      // 上一包的起始时刻 / 帧数（用来估包内真实间隔，见 DATA 分支）
+    this._lastPktN = 0;
   }
 
   // ================================================================= 初始化
@@ -115,6 +117,12 @@ export class ScopeView {
         ? `分道显示：${this.renderer.visibleCount?.() ?? '各'}通道各占一条泳道，每条自己的量程`
         : '叠加显示：所有通道画在同一片区域', '');
     });
+    $('sc-mark-clear').addEventListener('click', () => {
+      if (!this.renderer.cursors.a && !this.renderer.cursors.b){ this.setStatusText('还没有放游标：点一下波形放 A、Shift+点放 B', 'warn'); return; }
+      this.renderer.clearMarks();
+      this._needDraw = true;
+      this.setStatusText('已清除测量游标 A/B', '');
+    });
     $('sc-raw').addEventListener('change', e => { this.captureRaw = e.target.checked; if (!this.captureRaw) this.raw = []; });
     $('sc-csv').addEventListener('click', () => this.exportCsv());
     $('sc-save').addEventListener('click', () => this.saveRaw());
@@ -126,6 +134,7 @@ export class ScopeView {
     }
 
     this._wireCanvas();
+    this._wireKeys();
     this.renderVars();
     this.updatePlan();
     this.syncButtons();
@@ -142,7 +151,15 @@ export class ScopeView {
 
   _wireCanvas(){
     const c = this.canvas;
-    let dragging = false, lastX = 0, moved = 0;
+    let dragging = false, lastX = 0, moved = 0, grab = null, shiftClick = false;
+    /** 鼠标落在哪条测量游标上（±5 px 内算抓住它）*/
+    const markNear = x => {
+      for (const which of ['a', 'b']){
+        const m = this.renderer.markAt(which);
+        if (m && Math.abs(this.renderer.xOf(m.index) - x) <= 5) return which;
+      }
+      return null;
+    };
     c.addEventListener('wheel', e => {
       e.preventDefault();
       const r = c.getBoundingClientRect();
@@ -151,10 +168,41 @@ export class ScopeView {
       this.follow = false;                      // 手动缩放即退出"跟随最新"
       this._needDraw = true;
     }, { passive: false });
-    c.addEventListener('mousedown', e => { dragging = true; lastX = e.clientX; moved = 0; c.style.cursor = 'grabbing'; });
-    window.addEventListener('mouseup', () => { if (dragging){ dragging = false; c.style.cursor = 'crosshair'; } });
+    c.addEventListener('mousedown', e => {
+      const r = c.getBoundingClientRect();
+      const x = e.clientX - r.left;
+      grab = e.button === 0 ? markNear(x) : null;      // 抓在游标线上 = 拖它，不是平移
+      dragging = !grab; lastX = e.clientX; moved = 0; shiftClick = e.shiftKey;
+      c.style.cursor = grab ? 'ew-resize' : 'grabbing';
+    });
+    window.addEventListener('mouseup', e => {
+      if (grab){ dragging = false; grab = null; c.style.cursor = 'crosshair'; return; }
+      if (!dragging) return;
+      dragging = false; c.style.cursor = 'crosshair';
+      const r = c.getBoundingClientRect();
+      const x = e.clientX - r.left;
+      if (moved >= 4 || !this.store?.count) return;    // 拖动过 = 平移，不当点击
+      if (x < this.renderer.padding.l || x > c.clientWidth - this.renderer.padding.r) return;
+      // 单击放 A、Shift+单击放 B（量周期就靠这两条线）
+      const which = shiftClick ? 'b' : 'a';
+      const idx = Math.round(this.renderer.sampleAt(x));
+      const at = this.renderer.setMark(which, idx);
+      this._needDraw = true;
+      const d = this.renderer.delta();
+      this.setStatusText(d
+        ? `游标 ${which.toUpperCase()} 放在样本 #${at} · Δt ${fmtTime(d.absUs)} → ${fmtHz(d.hz)}`
+        : `游标 ${which.toUpperCase()} 放在样本 #${at}（再 ${which === 'a' ? 'Shift+' : ''}点一下放 ${which === 'a' ? 'B' : 'A'} 就能量间隔）`, '');
+    });
     window.addEventListener('mousemove', e => {
       const r = c.getBoundingClientRect();
+      if (grab){
+        const x = e.clientX - r.left;
+        if (x >= this.renderer.padding.l && x <= c.clientWidth - this.renderer.padding.r){
+          this.renderer.setMark(grab, Math.round(this.renderer.sampleAt(x)));
+          this._needDraw = true;
+        }
+        return;
+      }
       if (dragging){
         const dx = e.clientX - lastX;
         lastX = e.clientX; moved += Math.abs(dx);
@@ -175,6 +223,35 @@ export class ScopeView {
 
   onShow(){
     requestAnimationFrame(() => { this._needDraw = true; });
+  }
+
+  /** 键盘：Esc 清测量游标、Home/End 跳首尾（只在探针页可见、焦点不在输入框时生效）*/
+  _wireKeys(){
+    window.addEventListener('keydown', e => {
+      const tab = document.getElementById('tab-scope');
+      if (!tab || !tab.classList.contains('active')) return;      // 切页由 tabs.js 管（.active）
+      const t = e.target;
+      if (t && /^(INPUT|SELECT|TEXTAREA)$/.test(t.tagName)) return;
+      const st = this.store;
+      if (e.key === 'Escape'){
+        if (!this.renderer.cursors.a && !this.renderer.cursors.b && this.renderer.cursor == null) return;
+        const had = !!(this.renderer.cursors.a || this.renderer.cursors.b);
+        this.renderer.clearMarks();
+        this.renderer.cursor = null;
+        this._needDraw = true;
+        if (had) this.setStatusText('已清除测量游标 A/B', '');
+        return;
+      }
+      if (!st?.count) return;
+      if (e.key === 'Home' || e.key === 'End'){
+        const w = Math.min(st.count, Math.round(this.renderer.span));
+        const start = e.key === 'Home' ? 0 : Math.max(0, st.count - w);
+        this.follow = false;
+        this.renderer.zoomTo(start, start + w);
+        this._needDraw = true;
+        e.preventDefault();
+      }
+    });
   }
 
   /** 「细看」：把视窗缩到"每列约 1 个采样点"，这时渲染器走**折线连点**模式 ——
@@ -425,6 +502,9 @@ export class ScopeView {
     this.store = new SampleStore(vars, capacity);
     this.renderer.setStore(this.store);
     this.renderer.setTrigger(null);
+    this.renderer.clearMarks();     // 新的一轮 = 新的样本编号，旧游标位置没意义
+    this.renderer.cursor = null;
+    this._lastPktT = null; this._lastPktN = 0;    // 包内间隔估计也要重新起头（见 DATA 分支）
     this.stream = new P.PacketStream();
     this.seqT = new P.SeqTracker();
     this.timeU = new P.TimeUnwrap();
@@ -619,11 +699,24 @@ export class ScopeView {
           const nums = P.decodeSamples(vars, pkt.payload, pkt.n, []);
           const nv = vars.length;
           const t0 = this.timeU.unwrap(pkt.tUs);
+          /**
+           * 包内每个样本的时刻：用**上一包实测出来的间隔**折算，而不是配置里的名义周期。
+           * 探针的实际节奏会飘（真机实测同一次采集里 10.00 → 10.31 µs/样本），
+           * 死套名义值会让包内 20 来个样本最多偏 6 µs —— 量周期时就是白送的误差。
+           * 只在"上一包紧邻且没丢"时采用（丢包时那个除法的分母就不对了）。
+           */
+          const nominal = this.periodActualUs || this._periodUs || 100;   // 优先用探针在 DEF 里回报的**实际**周期
+          let per = nominal;
+          if (this._lastPktT != null && this._lastPktN && st.ok && st.why !== 'gap'){
+            const est = (t0 - this._lastPktT) / this._lastPktN;
+            if (est > nominal * 0.5 && est < nominal * 2) per = est;    // 离谱就退回名义值
+          }
+          this._lastPktT = t0; this._lastPktN = pkt.n;
           for (let i = 0; i < pkt.n; i++){
             const fr = nums.slice(i * nv, (i + 1) * nv);
             if (!fr.length) break;
             const idx = this.store.count;
-            this.store.pushFrame(fr, t0 + i * (this._periodUs || 100));
+            this.store.pushFrame(fr, t0 + i * per);
             if (this.trigger.mode !== TRIG.NONE && this.trigger.feed(fr, idx)){
               this.renderer.setTrigger({ index: idx, pre: this.trigger.pre, post: this.trigger.post });
             }
@@ -651,6 +744,10 @@ export class ScopeView {
     this.seqT = new P.SeqTracker();
     this.packets = 0; this.lost = 0; this.decodeErr = 0; this.raw = []; this.rawBytes = 0;
     this.renderer.setTrigger(null);
+    // 测量游标按**样本索引**记位置，换了数据集（清空/重采/回放）就必须丢掉，否则指的已经不是那一刻
+    this.renderer.clearMarks();
+    this.renderer.cursor = null;
+    this._lastPktT = null; this._lastPktN = 0;
     this.trigger.reset();
     this.renderer.fitAll();
     this.follow = true;
@@ -753,6 +850,9 @@ export class ScopeView {
       const periodUs = this.periodUs();
       this.store = new SampleStore(vars, Math.ceil(buf.length / 16) + 1024);
       this.renderer.setStore(this.store);
+      this.renderer.clearMarks();
+      this.renderer.cursor = null;
+      this._lastPktT = null; this._lastPktN = 0;
       this.stream = new P.PacketStream();
       this.seqT = new P.SeqTracker();
       this.timeU = new P.TimeUnwrap();
@@ -818,8 +918,12 @@ export class ScopeView {
     }
     const perCol = this.renderer.span / Math.max(2, this.renderer.plotW);
     const ct = this.renderer.cursorTime();
+    const dl = this.renderer.delta();
     $('sc-window').textContent = st?.count
-      ? (ct ? `游标 t=${ct.text}（#${ct.index}） · ` : '') +
+      // 最要紧的 Δt / 频率放**最前面**：这行右边可能被省略号截掉（见 app.css 里 #sc-window 的注释）
+      ? (dl ? `Δt ${fmtTime(dl.absUs)}${dl.dtUs < 0 ? '（B 在前）' : ''} · ${fmtHz(dl.hz)}` +
+              `（A ${fmtTime(dl.a.relUs)} → B ${fmtTime(dl.b.relUs)} · ${dl.samples} 样本） · `
+            : (ct ? `游标 t=${ct.text}（#${ct.index}） · ` : '')) +
         `${fmtTime(st.timeAt(Math.max(0, Math.ceil(this.renderer.view.end) - 1)) - st.timeAt(Math.floor(this.renderer.view.start)))} 窗口 · ` +
         `每列 ${perCol.toFixed(1)} 样本 ${usedLod ? '(LOD)' : '(精确)'}` +
         (perCol < 1.5 ? ' · 连点折线' : ' · 包络带（点「细看」看波形形状）') +

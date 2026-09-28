@@ -36,9 +36,9 @@
 |---|
 | ![J-Scope 波形](docs/shots/6-scope.png) |
 
-| J-Scope 波形（**真机** · akaLinkPro 探针 HSS · 分道显示：正弦/锯齿/方波各一条泳道 · 97.99 kHz · 丢样本 0 · 标尺停在 5.086 s） |
+| J-Scope 波形（**真机** · akaLinkPro 探针 HSS · 分道显示：正弦/锯齿/方波各一条泳道 · 100.00 kHz · 丢样本 0 · 标尺停在 13.56 ms，A/B 量出一个完整周期 Δt 10.00 ms → 100.00 Hz） |
 |---|
-| ![J-Scope 真机](docs/shots/12-scope-cursor-time.png) |
+| ![J-Scope 真机](docs/shots/13-scope-ab-cursors.png) |
 
 （截图里第一个标签用的是**内置演示串口**，所以显示的是假设备；`?demo=serial` 就能自己试。）
 

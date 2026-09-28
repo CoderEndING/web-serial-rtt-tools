@@ -267,6 +267,21 @@ console.log('== 6. 类型化缓冲 + LOD 金字塔 ==');
   ok(near(st3.timeAt(5), 500, 1), `timeAt(5) ≈ 500 µs（实际 ${st3.timeAt(5).toFixed(1)}）`);
   ok(st3.bytes() > 10 * 2, `显存占用统计含 LOD（${st3.bytes()} B）`);
 
+  // 段内插值必须用**相邻锚点**的实测间隔，不能用全局平均：
+  // 真机采到过 40 ms 的长卡顿，若拿"首尾÷样本数"的平均速率插值，段内局部读数会整体偏。
+  const st4 = new S.SampleStore([{ name: 'x', addr: 0, size: 2, scalar: 'u16' }], 256);
+  for (let i = 0; i < 128; i++){
+    // 前 64 个样本 10 µs 一个，后 64 个 100 µs 一个（模拟采样期间被拖慢）
+    st4.pushFrame([i], i < 64 ? i * 10 : 640 + (i - 64) * 100);
+  }
+  const globalUs = i => i * 1e6 / st4.rate();          // 老算法（全局平均速率）会给出的读数
+  ok(near(st4.timeAt(32), 320, 1),
+     `第一段内按本段实测间隔插值：timeAt(32)=${st4.timeAt(32).toFixed(1)} µs（全局平均会算成 ${globalUs(32).toFixed(1)}）`);
+  ok(near(st4.timeAt(96), 640 + 32 * 100, 1), `第二段内同样按本段间隔：timeAt(96)=${st4.timeAt(96).toFixed(1)} µs`);
+  const dLocal = st4.timeAt(96) - st4.timeAt(32);
+  ok(Math.abs(dLocal - (3200 + 320)) < 2,
+     `跨段 Δt 用各自段的真实间隔（${dLocal.toFixed(1)} µs，全局平均会算成 ${(globalUs(96) - globalUs(32)).toFixed(1)}）`);
+
   // scale/offset（显示变换）
   const ch = new S.Channel({ name: 'v', scalar: 'i16', capacity: 4, scale: 0.001, offset: -1 });
   ch.push(0, 1500);

@@ -100,6 +100,11 @@ legend{font-size:11.5px;color:var(--fg2);padding:0 5px;letter-spacing:.4px}
   border:1px solid var(--line);border-radius:9px;padding:4px 9px;
 }
 .stats b{color:var(--fg);font-weight:600}
+/* J-Scope 状态行右侧的读数会随鼠标动（"0 µs" ↔ "10.94 s"）：它一变长就可能让整行换行，
+   而画布是 flex:1 —— 行高一变，图就跟着上下跳一格。所以让它**只会被压缩**、不会被折行。
+   读数开头是最要紧的（游标 t / A·B·Δt），从尾部省略不丢关键信息。 */
+#sc-window{flex:1 1 0;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-align:right}
+#sc-markhint{flex:none;white-space:nowrap}
 .err{color:var(--err)}
 .ok{color:var(--ok)}
 .sendbar{

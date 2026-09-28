@@ -200,12 +200,15 @@ console.log('== 5.5 标尺移到哪，就显示那里的时间 ==');
                     status: document.getElementById('sc-window').textContent,
                     legend: document.querySelector('#sc-legend .lrow').textContent };
     // 轴槽里那行"白字"只可能来自游标标签（刻度文字是灰的 #7b8794）
+    // 采样区直接取渲染器报出来的标签矩形 —— 用"画布高度 − padding"自己猜坐标会跟
+    // 布局/缩放（dpr=1.25 这类）差几像素，自测就会时灵时不灵
     const dpr = cv.width / cv.clientWidth;
     const strip = () => {
       const ctx = cv.getContext('2d');
-      const y0 = Math.round((cv.clientHeight - sc.renderer.padding.b + 6) * dpr);
-      const y1 = Math.round((cv.clientHeight - sc.renderer.padding.b + 17) * dpr);
-      const d = ctx.getImageData(0, y0, cv.width, Math.max(1, y1 - y0)).data;
+      const r = sc.renderer._reserved?.[0];
+      if (!r) return 0;
+      const px = (a, b) => Math.max(1, Math.round(b * dpr) - Math.round(a * dpr));
+      const d = ctx.getImageData(Math.round(r.x * dpr), Math.round(r.y * dpr), px(r.x, r.x + r.w), px(r.y, r.y + r.h)).data;
       let bright = 0;
       for (let i = 0; i < d.length; i += 4) if (d[i] > 200 && d[i+1] > 200 && d[i+2] > 200) bright++;
       return bright;
@@ -223,7 +226,7 @@ console.log('== 5.5 标尺移到哪，就显示那里的时间 ==');
   ok(c.first.cursor > 0, `鼠标移动真的设上了游标（样本 #${c.first.cursor}）`);
   ok(/^[\d.]+\s*(µs|ms|s)$/.test(c.first.label || ''), `游标标签是"时刻"：「${c.first.label}」`);
   ok(c.withCursor > 20 && c.noCursor === 0,
-     `标签真的画在 X 轴槽里（有游标 ${c.withCursor} 个亮像素 / 无游标 ${c.noCursor} 个）`);
+     `标签真的画在 X 轴槽里（标签矩形内 ${c.withCursor} 个亮像素 / 无游标 ${c.noCursor} 个）`);
   ok(c.first.label !== c.second.label,
      `标尺移动 → 时刻跟着变（${c.first.label} → ${c.second.label}）`);
   ok(/游标 t=/.test(c.first.status), `状态行同时报出游标时刻：${c.first.status.slice(0, 52)}…`);
@@ -231,6 +234,98 @@ console.log('== 5.5 标尺移到哪，就显示那里的时间 ==');
   const expectMs = (c.cur - c.t0) / 1000;                       // 假探针 100 µs/样本
   ok(Math.abs(expectMs - c.first.cursor / 10) < 1,
      `换算对得上：样本 #${c.first.cursor} = ${expectMs.toFixed(2)} ms（${(c.rate / 1000).toFixed(2)} kHz）`);
+  // 状态行读数变长（"0 µs" → "10.94 s"）不许把画布挤矮：画布是 flex:1，行高一变波形就跳
+  const stable = await ev(`
+    const sc = window.__tools.scope;
+    const cv = document.getElementById('sc-canvas');
+    const win = document.getElementById('sc-window');
+    const before = { h: cv.clientHeight, w: cv.clientWidth, text: win.textContent.length };
+    sc.renderer.cursor = 1; sc.drawFrame();
+    const short = { h: cv.clientHeight, w: cv.clientWidth, len: win.textContent.length };
+    sc.renderer.cursor = sc.store.count - 1; sc.drawFrame();
+    const long = { h: cv.clientHeight, w: cv.clientWidth, len: win.textContent.length };
+    win.textContent = 'x'.repeat(400);                       // 极端：直接塞超长文本
+    const huge = { h: cv.clientHeight, w: cv.clientWidth };
+    sc.drawFrame();
+    const after = { h: cv.clientHeight, w: cv.clientWidth };
+    sc.renderer.cursor = null; sc.drawFrame();
+    return { before, short, long, huge, after };`);
+  ok(stable.short.h === stable.long.h && stable.long.h === stable.huge.h && stable.before.h === stable.huge.h,
+     `状态行文字再长也不改画布尺寸（${stable.before.h} → 短 ${stable.short.h} → 长 ${stable.long.h} → 超长 ${stable.huge.h}）`);
+}
+
+console.log('== 5.6 双游标 A/B：量周期 ==');
+{
+  const c = await ev(`
+    const sc = window.__tools.scope;
+    const cv = document.getElementById('sc-canvas');
+    const box = cv.getBoundingClientRect();
+    const at = f => box.left + sc.renderer.padding.l + sc.renderer.plotW * f;
+    const click = (f, shift) => {
+      const clientX = at(f);
+      cv.dispatchEvent(new MouseEvent('mousedown', { clientX, clientY: box.top + 60, bubbles: true, button: 0, shiftKey: !!shift }));
+      window.dispatchEvent(new MouseEvent('mouseup', { clientX, clientY: box.top + 60, bubbles: true, button: 0, shiftKey: !!shift }));
+    };
+    sc.follow = false; sc.renderer.fitAll(); sc.renderer.clearMarks(); sc.drawFrame();
+    click(0.25, false);                       // 单击 → 放 A
+    const afterA = { a: sc.renderer.cursors.a, b: sc.renderer.cursors.b, delta: sc.renderer.delta() };
+    click(0.75, true);                        // Shift+单击 → 放 B
+    sc.drawFrame();
+    const d = sc.renderer.delta();
+    const st = sc.store;
+    const now = {
+      a: sc.renderer.cursors.a, b: sc.renderer.cursors.b,
+      label: sc.renderer.deltaLabel,
+      window: document.getElementById('sc-window').textContent,
+      state: document.getElementById('sc-state').textContent,
+      dtUs: d && d.dtUs, samples: d && d.samples,
+      expectUs: d ? st.timeAt(d.b.index) - st.timeAt(d.a.index) : null,
+      hz: d && d.hz, rate: st.rate(),
+    };
+    // 拖动 B 的竖线：抓在线上拖到 60% 处
+    const spanBefore = sc.renderer.span;
+    const xB = sc.renderer.xOf(sc.renderer.cursors.b);
+    cv.dispatchEvent(new MouseEvent('mousedown', { clientX: box.left + xB, clientY: box.top + 60, bubbles: true, button: 0 }));
+    window.dispatchEvent(new MouseEvent('mousemove', { clientX: at(0.6), clientY: box.top + 60, bubbles: true }));
+    window.dispatchEvent(new MouseEvent('mouseup', { clientX: at(0.6), clientY: box.top + 60, bubbles: true, button: 0 }));
+    sc.drawFrame();
+    const dragged = { b: sc.renderer.cursors.b, dtUs: sc.renderer.delta().dtUs, follow: sc.follow,
+                      spanBefore, span: sc.renderer.span,
+                      want: Math.round(sc.renderer.view.start + sc.renderer.span * 0.6),
+                      // MouseEvent.clientX 是整数，落点最多偏 0.5 px；1 px 值多少样本要按当前缩放折算
+                      tol: Math.ceil(sc.renderer.span / sc.renderer.plotW) + 2 };
+    // 拖空白处 = 平移（不能顺手放游标）
+    const beforePan = { a: sc.renderer.cursors.a, b: sc.renderer.cursors.b };
+    cv.dispatchEvent(new MouseEvent('mousedown', { clientX: at(0.5), clientY: box.top + 60, bubbles: true, button: 0 }));
+    window.dispatchEvent(new MouseEvent('mousemove', { clientX: at(0.4), clientY: box.top + 60, bubbles: true }));
+    window.dispatchEvent(new MouseEvent('mouseup', { clientX: at(0.4), clientY: box.top + 60, bubbles: true, button: 0 }));
+    const afterPan = { a: sc.renderer.cursors.a, b: sc.renderer.cursors.b };
+    // Esc 清除
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    sc.drawFrame();
+    const cleared = { a: sc.renderer.cursors.a, b: sc.renderer.cursors.b, label: sc.renderer.deltaLabel };
+    // 反过来放（B 在 A 左边）→ Δt 必须报负数，不许悄悄取绝对值
+    sc.renderer.setMark('a', 900); sc.renderer.setMark('b', 300);
+    const neg = sc.renderer.delta();
+    sc.renderer.clearMarks(); sc.drawFrame();
+    return { afterA, now, dragged, beforePan, afterPan, cleared, neg: { dtUs: neg.dtUs, hz: neg.hz } };`);
+  ok(c.afterA.a != null && c.afterA.b == null && !c.afterA.delta, `单击只放 A，不放 B（A=#${c.afterA.a}）`);
+  ok(c.now.a != null && c.now.b != null && c.now.a < c.now.b, `Shift+单击放下 B（A=#${c.now.a} → B=#${c.now.b}）`);
+  ok(/^Δt /.test(c.now.label) && /Hz/.test(c.now.label), `轴槽给出 Δt 与等效频率：「${c.now.label}」`);
+  ok(c.now.dtUs > 0 && Math.abs(c.now.dtUs - c.now.expectUs) < 1e-6,
+     `Δt 与 store.timeAt(B)-timeAt(A) 一致（${(c.now.dtUs / 1000).toFixed(3)} ms / ${c.now.samples} 样本）`);
+  ok(Math.abs(c.now.hz - 1e6 / c.now.dtUs) < 1e-6, `等效频率 = 1/Δt（${(c.now.hz / 1000).toFixed(2)} kHz）`);
+  // Δt 必须排在**最前面**：这行会被省略号从右边截断，结论性的数字不能排在末尾
+  ok(/^Δt .*（A .* → B .* 样本）/.test(c.now.window),
+     `状态行把 Δt/频率 排在最前（${c.now.window.slice(0, 58)}…）`);
+  ok(/Δt/.test(c.now.state), `点击后的提示语带 Δt：${c.now.state.slice(0, 40)}`);
+  ok(c.dragged.b !== c.now.b && Math.abs(c.dragged.b - c.dragged.want) <= c.dragged.tol,
+     `抓住线拖动 = 只微调那个游标（B #${c.now.b} → #${c.dragged.b}，期望 #${c.dragged.want} ±${c.dragged.tol} 样本 = 1 px）`);
+  ok(c.dragged.span === c.dragged.spanBefore && c.dragged.follow === false,
+     `拖游标不会顺手把视图平移掉（span ${Math.round(c.dragged.spanBefore)} 不变）`);
+  ok(c.afterPan.a === c.beforePan.a && c.afterPan.b === c.beforePan.b, '拖空白处只平移，不会把游标挪走/新放一个');
+  ok(c.cleared.a === null && c.cleared.b === null && c.cleared.label === null, 'Esc 清除 A/B');
+  ok(c.neg.dtUs < 0 && c.neg.hz > 0, `B 在前（A 在后）时 Δt 报负数（${c.neg.dtUs} µs），频率仍取 |Δt|`);
 }
 
 console.log('== 6. 触发（实时 + 离线重定位）==');

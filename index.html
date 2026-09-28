@@ -527,6 +527,7 @@
         <label class="chk" title="叠加模式下：所有通道共用一个 Y 轴量程；关掉则每个通道各自自适应。（分道模式下每路天生就是自己的量程）"><input type="checkbox" id="sc-shared"> 共用 Y 轴</label>
         <label class="chk" title="把原始 512 B 包另存一份，可离线回放（也方便把现场数据留给排查）"><input type="checkbox" id="sc-raw"> 记录原始包</label>
         <span class="spacer"></span>
+        <button id="sc-mark-clear" title="清除测量游标 A/B（Esc 也行）">清游标</button>
         <button id="sc-csv" title="按当前缓冲导出 CSV（分块生成，长采集也不会卡死）">导出 CSV</button>
         <button id="sc-save" title="把记录的原始包存成 .jsp（可以离线回放）">保存原始</button>
         <button id="sc-open" title="打开 .jsp 回放 —— 不用连硬件也能看波形/调触发">打开回放</button>
@@ -541,6 +542,7 @@
         <span class="err" id="sc-err"></span>
         <span class="spacer"></span>
         <span class="hint" id="sc-window" style="margin:0"></span>
+        <span class="hint" id="sc-markhint" style="margin:0" title="点波形放游标 A，Shift+点放游标 B（两条线之间就是被测间隔）；抓住线可以拖动微调，Esc 或「清游标」清除">点波形放 A · Shift+点放 B · 拖线微调 · Esc 清除</span>
       </div>
     </section>
   </div>

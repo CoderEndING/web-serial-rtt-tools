@@ -168,13 +168,25 @@ export class SampleStore {
     return dt > 0 ? (this.count - 1) * 1e6 / dt : 0;
   }
 
-  /** 第 i 个样本的绝对时间（µs）—— 用**它前面最近的那个锚点** + 实测速率插值。
-   *  锚点每 64 个样本一个，所以插值误差 ≪ 1 个像素（实测速率差 0.1% 时误差是微秒级）。 */
+  /** 第 i 个样本的绝对时间（µs）。
+   *  锚点每 64 个样本一个（真时间戳），段内用**相邻两个锚点的实测间隔**插值：
+   *  🚨 这里踩过坑：早先用全局平均速率插值，那个速率是按"首尾时间戳 ÷ 样本数"算的，
+   *  一旦中途卡顿/丢包（真机实测出现过 40 ms 的长间隔），整段数据都被摊薄 ——
+   *  段内局部读数会偏（64 样本 × 0.45 µs ≈ 29 µs；量 1 kHz 方波一个周期就是 3% 误差）。
+   *  用相邻锚点插值，误差只跟"这一小段"的真实抖动有关。 */
   timeAt(i){
-    if (this.tsN === 0) return i;                              // 没有时间戳：退化成"样本序号"
-    const k = Math.min(this.tsN - 1, Math.max(0, Math.floor(i / this.tsEvery)));
+    const n = this.tsN;
+    if (n === 0) return i;                                     // 没有时间戳：退化成"样本序号"
+    const k = Math.min(n - 1, Math.max(0, Math.floor(i / this.tsEvery)));
     const idx0 = k * this.tsEvery;
     const base = this.tsUs[k];
+    if (k + 1 < n){                                            // 还有下一个锚点 → 用它量这一段的间隔
+      const dtSeg = this.tsUs[k + 1] - base;
+      if (dtSeg > 0) return base + (i - idx0) * dtSeg / this.tsEvery;
+    } else if (this.tLastUs != null && this.count - 1 > idx0){  // 最后一段（不满 64 个）
+      const dtTail = this.tLastUs - base;                       // 最后一个锚点 → 最后一个样本
+      if (dtTail > 0) return base + (i - idx0) * dtTail / (this.count - 1 - idx0);
+    }
     const dt = this.rate();
     return dt > 0 ? base + (i - idx0) * 1e6 / dt : base + (i - idx0);
   }

@@ -13,6 +13,9 @@
  * 所以"时间"是目标侧的时间戳，不是浏览器的时间。
  */
 const PALETTE = ['#4ea1ff', '#ffb020', '#38d39f', '#ff6b6b', '#c792ea', '#ffd166', '#7bdff2', '#f78fb3'];
+export const MARK_A = '#ffd166';   // 测量游标 A（黄）
+export const MARK_B = '#7bdff2';   // 测量游标 B（青）
+const TAG_FONT = '11px ui-monospace, Consolas, monospace';
 
 export class ScopeRenderer {
   constructor(canvas, opts = {}){
@@ -21,8 +24,10 @@ export class ScopeRenderer {
     this.palette = opts.palette || PALETTE;
     this.store = null;
     this.view = { start: 0, end: 1 };
-    this.cursor = null;            // 样本索引
+    this.cursor = null;            // 样本索引（鼠标悬停的"读数游标"）
     this.cursorLabel = null;       // 游标处的时刻文本（页脚/图例/自测共用）
+    this.cursors = { a: null, b: null };   // 测量游标 A/B（样本索引，点一下放 A、Shift+点放 B）
+    this.deltaLabel = null;        // "Δt …" 文本（页面/自测共用）
     this.trigger = null;           // {index, pre, post}
     this.mode = opts.mode || 'auto';  // （叠加模式下）auto = 每通道自适应量程；shared = 共用
     this.layout = opts.layout || 'overlay';   // overlay = 叠加；lanes = 分道（每通道一条泳道、各自量程）
@@ -101,6 +106,37 @@ export class ScopeRenderer {
     return { index: i, relUs, text: fmtTime(relUs) };
   }
 
+  // ---- 测量游标 A/B（量周期、算两点间隔用）----
+  /** 某个测量游标的位置（索引 + 相对采集起点的时刻），没放就返回 null */
+  markAt(which){
+    const st = this.store;
+    const i = this.cursors[which];
+    if (!st || !st.count || i == null || i < 0 || i >= st.count) return null;
+    return { which, index: i, relUs: st.timeAt(i) - st.timeAt(0) };
+  }
+
+  /** 放置/移动测量游标；传 null 或越界 = 取消它。返回生效后的索引 */
+  setMark(which, index){
+    const n = this.store?.count || 0;
+    this.cursors[which] = (index == null || !(index >= 0) || index >= n) ? null : Math.round(index);
+    return this.cursors[which];
+  }
+
+  clearMarks(){ this.cursors = { a: null, b: null }; this.deltaLabel = null; }
+
+  /**
+   * A/B 之间的时间差：`Δt = t(B) − t(A)`（**可负** —— 先放 B 再放 A 也照样算，不装作没事）。
+   * 频率是 `1/|Δt|`：量一个周期最想要的就是它（16.31 ms ↔ 61.3 Hz）。
+   */
+  delta(){
+    const a = this.markAt('a'), b = this.markAt('b');
+    if (!a || !b) return null;
+    const dtUs = b.relUs - a.relUs;
+    return { a, b, dtUs, absUs: Math.abs(dtUs),
+             hz: Math.abs(dtUs) > 1e-9 ? 1e6 / Math.abs(dtUs) : 0,
+             samples: Math.abs(b.index - a.index) };
+  }
+
   /** 主绘制。返回本次是否用了 LOD（排障/自测用） */
   draw(){
     const c = this.canvas, ctx = this.ctx;
@@ -125,6 +161,25 @@ export class ScopeRenderer {
       this._buf = [];                       // 每通道**各自**的包络缓冲（共用一份会把前面通道覆盖掉）
     }
 
+    // 轴槽标签（读数游标 + Δt）先排版：网格刻度和后面的绘制都要知道它们占了哪儿
+    const ct0 = this.cursorTime();
+    const dl0 = this.delta();
+    this.cursorLabel = ct0 ? ct0.text : null;
+    this.deltaLabel = dl0 ? `Δt ${fmtTime(dl0.absUs)}${dl0.dtUs < 0 ? '（B 在前）' : ''} · ${fmtHz(dl0.hz)}` : null;
+    const rulerRect = ct0 ? this._tagRect(`t=${ct0.text}`, this.xOf(ct0.index)) : null;
+    this._dtRect = null;
+    if (dl0){
+      const w = this._tagRect(this.deltaLabel, 0).w;
+      const mid = (this.xOf(dl0.a.index) + this.xOf(dl0.b.index)) / 2;
+      // 优先挤在 A/B 中间；和读数标签打架就退到左右角（读数标签压在上面，不能把它盖没了）
+      for (const cx of [mid, l + 3 + w / 2, l + pw - 3 - w / 2]){
+        const r = this._tagRect(this.deltaLabel, cx, w);
+        if (!rulerRect || r.x + r.w + 6 < rulerRect.x || r.x > rulerRect.x + rulerRect.w + 6){ this._dtRect = r; break; }
+      }
+      if (!this._dtRect) this._dtRect = this._tagRect(this.deltaLabel, l + pw - 3 - w / 2, w);
+    }
+    this._reserved = [rulerRect, this._dtRect].filter(Boolean);
+
     // 触发窗口底色（先画，压在波形下面）
     if (this.trigger && this.trigger.index >= 0){
       const x = this.xOf(this.trigger.index);
@@ -133,6 +188,13 @@ export class ScopeRenderer {
       ctx.strokeStyle = '#ff6b6b'; ctx.setLineDash([4, 3]); ctx.lineWidth = 1;
       ctx.beginPath(); ctx.moveTo(Math.round(x) + 0.5, t); ctx.lineTo(Math.round(x) + 0.5, t + ph); ctx.stroke();
       ctx.setLineDash([]);
+    }
+
+    // A/B 之间的区间底色（量周期时一眼看出测的是哪一段）
+    if (dl0){
+      const x1 = this.xOf(dl0.a.index), x2 = this.xOf(dl0.b.index);
+      const xa = Math.max(l, Math.min(x1, x2)), xb = Math.min(l + pw, Math.max(x1, x2));
+      if (xb > xa){ ctx.fillStyle = 'rgba(255,209,102,0.07)'; ctx.fillRect(xa, t, xb - xa, ph); }
     }
 
     // 抽包络 + 量程
@@ -274,9 +336,8 @@ export class ScopeRenderer {
       ctx.stroke();                              // 上下沿各描一遍（慢信号就是一条线）
     }
 
-    // 游标：竖线 + 各通道取值点 + **轴下时刻标签**（标尺移到哪，时间就显示在哪）
+    // 游标：竖线 + 各通道取值点（时刻标签在轴槽里，统一到最后画）
     const ct = this.cursorTime();
-    this.cursorLabel = ct ? ct.text : null;
     if (ct){
       const dpr2 = (typeof devicePixelRatio === 'number' ? devicePixelRatio : 1) || 1;
       const x = this.xOf(ct.index);
@@ -288,12 +349,41 @@ export class ScopeRenderer {
         ctx.fillStyle = this.palette[k % this.palette.length];
         ctx.beginPath(); ctx.arc(x, y, 2.5, 0, Math.PI * 2); ctx.fill();
       }
-      this._cursorTag(ctx, `t=${ct.text}`, x, t + ph);
+    }
+    // 测量游标 A/B：虚线 + 道内顶部时刻标签（读数游标之上、边框之下）
+    const markColors = { a: MARK_A, b: MARK_B };
+    const markTags = [];
+    for (const which of ['a', 'b']){
+      const m = this.markAt(which);
+      if (!m) continue;
+      const x = this.xOf(m.index);
+      ctx.strokeStyle = markColors[which]; ctx.lineWidth = 1 / dpr;
+      ctx.setLineDash([6, 4]);
+      ctx.beginPath(); ctx.moveTo(Math.round(x) + 0.5, t); ctx.lineTo(Math.round(x) + 0.5, t + ph); ctx.stroke();
+      ctx.setLineDash([]);
+      markTags.push({ which, x, text: `${which.toUpperCase()} ${fmtTime(m.relUs)}` });
     }
 
     // 边框
     ctx.strokeStyle = '#2a3340'; ctx.lineWidth = px;
     ctx.strokeRect(l + px / 2, t + px / 2, pw - px, ph - px);
+
+    // A/B 时刻标签（A 靠线右侧、B 靠线左侧；挨太近就错行，别叠成一团）
+    if (markTags.length){
+      ctx.font = TAG_FONT;
+      const wA = markTags[0] ? ctx.measureText(markTags[0].text).width : 0;
+      const wB = markTags[1] ? ctx.measureText(markTags[1].text).width : 0;
+      const clash = markTags.length === 2 && Math.abs(markTags[1].x - markTags[0].x) < wA + wB + 12;
+      markTags.forEach((m, i) => {
+        const y = t + 10 + (i === 1 && clash ? 13 : 0);
+        const ax = m.which === 'a' ? m.x + 4 : m.x - 4;
+        this._text(ctx, m.text, ax, y, markColors[m.which], m.which === 'a' ? 'left' : 'right');
+      });
+    }
+
+    // 轴槽标签：Δt（黄的）先画，读数游标压在上面
+    if (this.deltaLabel && this._dtRect) this._drawTag(this._dtRect, { bg: '#2b2410', border: '#7a6320', color: MARK_A });
+    if (ct && rulerRect) this._drawTag(rulerRect);
     return usedLod;
   }
 
@@ -317,12 +407,16 @@ export class ScopeRenderer {
     const st = this.store;
     if (st && st.count){
       const base = st.timeAt(0);
+      ctx.font = TAG_FONT;
       for (let i = 0; i <= 4; i++){
         const x = l + pw * i / 4;
-        // 游标标签会盖住最近的刻度，干脆让位（标签本身就带时间，不会丢信息）
-        if (this.cursor != null && Math.abs(x - this.xOf(this.cursor)) < 34) continue;
         const idx = Math.min(st.count - 1, Math.max(0, Math.round(this.view.start + this.span * i / 4)));
-        this._text(ctx, fmtTime(st.timeAt(idx) - base), x + 3, t + ph + 14, '#7b8794', i === 4 ? 'right' : 'left');
+        const txt = fmtTime(st.timeAt(idx) - base);
+        // 会被轴槽标签（游标时刻 / Δt）盖住的刻度干脆不画 —— 标签本身就带时间，不丢信息
+        const w = ctx.measureText(txt).width + 6;
+        const left = i === 4 ? x - w : x + 3;
+        if (this._reserved?.some(r => left < r.x + r.w + 4 && left + w > r.x - 4)) continue;
+        this._text(ctx, txt, x + 3, t + ph + 14, '#7b8794', i === 4 ? 'right' : 'left');
       }
     }
     if (sharedRange){
@@ -335,23 +429,28 @@ export class ScopeRenderer {
     void W; void H;
   }
 
-  /** 轴槽里的圆角时刻标签（跟随游标，靠边时自动收回画布内）*/
-  _cursorTag(ctx, text, x, axisY){
-    const dpr = (typeof devicePixelRatio === 'number' ? devicePixelRatio : 1) || 1;
+  /** 轴槽标签的尺寸与位置（只排版不画）—— 靠边自动收回画布内，绝不让字跑出画布 */
+  _tagRect(text, cx, w = null){
+    const ctx = this.ctx;
+    ctx.font = TAG_FONT;
+    const width = w == null ? ctx.measureText(text).width + 10 : w;
     const W = this.canvas.clientWidth || 300;
-    ctx.font = '11px ui-monospace, Consolas, monospace';
-    const w = ctx.measureText(text).width + 10;
-    const h = 15;
-    const cx = Math.min(W - 2 - w / 2, Math.max(2 + w / 2, x));
-    const top = axisY + 4;
-    ctx.fillStyle = '#1b2430'; ctx.strokeStyle = '#3d4c60'; ctx.lineWidth = 1 / dpr;
+    const x = Math.min(W - 2 - width, Math.max(2, cx - width / 2));
+    return { x, y: this.padding.t + this.plotH + 4, w: width, h: 15, text };
+  }
+
+  /** 画一个轴槽标签 */
+  _drawTag(rect, { bg = '#1b2430', border = '#3d4c60', color = '#e6edf3' } = {}){
+    const ctx = this.ctx;
+    const dpr = (typeof devicePixelRatio === 'number' ? devicePixelRatio : 1) || 1;
+    ctx.fillStyle = bg; ctx.strokeStyle = border; ctx.lineWidth = 1 / dpr;
     if (typeof ctx.roundRect === 'function'){
-      ctx.beginPath(); ctx.roundRect(cx - w / 2, top, w, h, 3); ctx.fill(); ctx.stroke();
+      ctx.beginPath(); ctx.roundRect(rect.x, rect.y, rect.w, rect.h, 3); ctx.fill(); ctx.stroke();
     } else {
-      ctx.fillRect(cx - w / 2, top, w, h); ctx.strokeRect(cx - w / 2, top, w, h);
+      ctx.fillRect(rect.x, rect.y, rect.w, rect.h); ctx.strokeRect(rect.x, rect.y, rect.w, rect.h);
     }
-    ctx.fillStyle = '#e6edf3'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    ctx.fillText(text, cx, top + h / 2);
+    ctx.fillStyle = color; ctx.font = TAG_FONT; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(rect.text, rect.x + rect.w / 2, rect.y + rect.h / 2);
   }
 
   _text(ctx, s, x, y, color, align = 'left'){
@@ -369,9 +468,16 @@ export function fmtTime(us){
   return `${(us / 1e6).toFixed(3)} s`;
 }
 
+/** 频率格式化：µs 级间隔换出来的 Hz 可能是几十 kHz */
+export function fmtHz(hz){
+  if (!Number.isFinite(hz) || hz <= 0) return '—';
+  if (hz >= 1e6) return `${(hz / 1e6).toFixed(3)} MHz`;
+  if (hz >= 1e3) return `${(hz / 1e3).toFixed(2)} kHz`;
+  return `${hz.toFixed(2)} Hz`;
+}
+
 /** 数值格式化：大数不写满屏零 */
-export function fmtVal(v){
-  const a = Math.abs(v);
+export function fmtVal(v){  const a = Math.abs(v);
   if (!Number.isFinite(v)) return '—';
   if (a === 0) return '0';
   if (a >= 1e7 || a < 1e-4) return v.toExponential(2);
