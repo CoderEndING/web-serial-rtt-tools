@@ -28,6 +28,7 @@ export class MockAkaLinkHid {
     this.chunkBytes = 512;
     this.discard = false;
     this.failNextStart = 0;   // 测试用：下一次启动强制返回这个码
+    this.stall = false;       // 测试用：true = 搬运计数冻住（模拟另一路抢走了 RTT 缓冲）
     this.calls = [];
     this.onDisconnect = null;
   }
@@ -94,11 +95,13 @@ export class MockAkaLinkHid {
 
   async status(){
     this._tick();
-    if (this.running){
+    if (this.running && !this.stall){       // stall = 模拟"另一路把 RTT 缓冲读走了，桥搬不到东西"
       this.polls += 37;
       this.transfers += 12;
       this.moved += 4096;
       if (this.rdErrNext){ this.rdErr += this.rdErrNext; this.rdErrNext = 0; }
+    } else if (this.running){
+      this.polls += 37;
     }
     const st = this.statusObj();
     return { rc: 0, status: st };

@@ -218,6 +218,14 @@ export async function runUiSelfTest(tools){
     $('h-start').click();
     await until(() => tools.hid.summary().running, 100, '转发跑起来');
     if (tools.hid.summary().cbAddr !== '0x24000000') throw new Error('控制块地址不对：' + tools.hid.summary().cbAddr);
+
+    // ④ "桥在跑但搬不到数据"要被认出来（真机上踩过：另一路把 RTT 缓冲读走了）
+    tools.hid.mock.stall = true;
+    for (let i = 0; i < 4; i++){ await tools.hid.refresh(); }
+    if (tools.hid.summary().stall < 2) throw new Error('没累计到停滞计数');
+    if (!/不涨|抢/.test($('h-state').textContent)) throw new Error('状态行没提示：' + $('h-state').textContent);
+    tools.hid.mock.stall = false;
+
     $('h-stop').click();
     await until(() => !tools.hid.summary().running, 100, '转发停掉');
 

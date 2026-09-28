@@ -170,6 +170,8 @@ export class RttCdcView {
     try {
       const r = await this.dev.stop();
       this.last = r.status;
+      this._stall = 0; this._lastMoved = null;
+      clearInterval(this._timer);
       this.render();
       toast('已停止转发（CDC 口切回 UART）', 'ok');
     } catch (e){
@@ -180,11 +182,34 @@ export class RttCdcView {
   async refresh(){
     try {
       const r = await this.dev.status();
+      this._noteProgress(r.status);
       this.last = r.status;
       this.render();
     } catch (e){
       this.render({ error: e?.message || String(e) });
     }
+  }
+
+  /**
+   * 桥在跑，但"已搬运字节"长时间不涨 —— 十有八九是**另一路在抢同一个 RTT 上行缓冲**
+   * （RTT Viewer 的 WebUSB / 桥自己的 RTT 会话都在读同一块环，谁快谁拿走），
+   * 或者目标那边根本没在写。这个提示能省掉"为什么没输出"的半天天摸。
+   */
+  _noteProgress(st){
+    if (!st.running){ this._stall = 0; this._lastMoved = null; return; }
+    if (this._lastMoved === null || st.moved > this._lastMoved){ this._lastMoved = st.moved; this._stall = 0; return; }
+    this._stall = (this._stall || 0) + 1;
+  }
+
+  /** 跑起来之后每 2 秒自己查一次，界面"活着"，也能发现上面那种卡住 */
+  _armAutoRefresh(){
+    clearInterval(this._timer);
+    this._timer = setInterval(() => {
+      if (this.mock) return;                       // 假探针不用自动查
+      if (!this.dev.connected) return;
+      if (!this.last?.running) return;
+      this.refresh();
+    }, 2000);
   }
 
   /**
@@ -195,6 +220,7 @@ export class RttCdcView {
     const t0 = Date.now();
     for (;;){
       const r = await this.dev.status();
+      this._noteProgress(r.status);
       this.last = r.status;
       this.render();
       const st = r.status;
@@ -204,7 +230,10 @@ export class RttCdcView {
       await new Promise(res => setTimeout(res, 150));
     }
     const st = this.last;
-    if (st?.running && st.cbAddr) toast(`转发已启动 · 控制块 ${hex(st.cbAddr)} · 档位 ${st.swdMhz} MHz`, 'ok', 5000);
+    if (st?.running && st.cbAddr){
+      toast(`转发已启动 · 控制块 ${hex(st.cbAddr)} · 档位 ${st.swdMhz} MHz`, 'ok', 5000);
+      this._armAutoRefresh();
+    }
     else if (st?.running) toast(`桥跑起来了，但还没找到控制块（读错 ${st.rdErr}）—— 地址窗口 / SWD 接线 / 目标供电检查一下`, 'warn', 8000);
     else if (st?.startRc === START_PENDING) toast('启动还在排队（探针还没给出结果，稍后点「刷新状态」看看）', 'warn', 6000);
     else if (st?.startRc) toast('启动失败：' + startRcText(st.startRc), 'err', 6000);
@@ -250,15 +279,22 @@ export class RttCdcView {
     if (error && dev.connected) setStatus(el, error, 'err');
     else if (!st) setStatus(el, dev.connected ? '未启动' : '—', '');
     else if (st.running && !st.cbAddr){
-      // 桥跑起来了但还没找到控制块：地址不对 / 接线或供电问题（探针会一直扫，读错在涨）
+      // 桥跑起来了但还没找到控制块：三种常见原因按概率排 —— 主机侧 DAP 在抢 SWD、地址窗口不对、目标没在跑/接线
       setStatus(el, `运行中 · 还没找到 RTT 控制块（读错 ${st.rdErr} / RdOff 错 ${st.wrErr}`
-        + ` · 档位 ${st.swdMhz} MHz）—— 地址窗口给对了吗？Cortex-M7 要给 AXI SRAM；再查 SWD 接线与目标供电`, 'err');
+        + ` · 档位 ${st.swdMhz} MHz${st.dapYield ? ` · 给 DAP 让路 ${st.dapYield} 次` : ''}）`
+        + ' —— ① 是不是同时开着 RTT Viewer 的 WebUSB（它在抢同一根 SWD，先断开）'
+        + '；② 地址窗口给对了吗（Cortex-M7 要给 AXI SRAM）；③ 目标在跑吗 / 查 SWD 接线与供电', 'err');
     }
     else if (st.running){
+      const stall = (this._stall || 0) >= 2
+        ? ' ⚠ 桥在跑但「已搬运」不涨 —— 多半是另一路在抢同一个 RTT 缓冲（RTT Viewer 的 WebUSB / 桥的 RTT 会话），'
+          + '或者目标根本没在写。把那边断开再试'
+        : '';
       setStatus(el, `运行中 · 控制块 ${hex(st.cbAddr)} · 上行缓冲 ${hex(st.upAddr)} · 通道 ${st.channel}`
         + ` · 已搬运 ${kb(st.moved)}（${st.transfers} 次）· 轮询 ${st.polls}`
         + ` · 读错 ${st.rdErr} / RdOff 错 ${st.wrErr} · 档位 ${st.swdMhz} MHz`
-        + (st.discard ? ' · 丢弃模式' : ''), 'ok');
+        + (st.dapYield ? ` · 给 DAP 让路 ${st.dapYield} 次` : '')
+        + (st.discard ? ' · 丢弃模式' : '') + stall, stall ? 'err' : 'ok');
     } else if (st.startRc === START_PENDING){
       setStatus(el, '正在启动…（探针还在排队搜控制块）', '');
     } else if (st.startRc){
@@ -281,6 +317,12 @@ export class RttCdcView {
       cbAddr: st ? hex(st.cbAddr) : '',
       moved: st?.moved ?? 0,
       startRc: st?.startRc ?? null,
+      // 桥给 DAP 让路的次数：涨得快 = 有主机侧 DAP 在抢 SWD（比如 RTT Viewer 的 WebUSB 在轮询）
+      dapYield: st?.dapYield ?? 0,
+      rescans: st?.rescans ?? 0,
+      rdErr: st?.rdErr ?? 0,
+      swdMhz: st?.swdMhz ?? 0,
+      stall: this._stall || 0,
       state: $('h-state').textContent,
       info: $('h-info').textContent,
     };
