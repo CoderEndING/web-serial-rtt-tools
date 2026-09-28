@@ -204,7 +204,8 @@ export class RttCdcView {
       await new Promise(res => setTimeout(res, 150));
     }
     const st = this.last;
-    if (st?.running) toast(`转发已启动 · 控制块 ${hex(st.cbAddr)} · 档位 ${st.swdMhz} MHz`, 'ok', 5000);
+    if (st?.running && st.cbAddr) toast(`转发已启动 · 控制块 ${hex(st.cbAddr)} · 档位 ${st.swdMhz} MHz`, 'ok', 5000);
+    else if (st?.running) toast(`桥跑起来了，但还没找到控制块（读错 ${st.rdErr}）—— 地址窗口 / SWD 接线 / 目标供电检查一下`, 'warn', 8000);
     else if (st?.startRc === START_PENDING) toast('启动还在排队（探针还没给出结果，稍后点「刷新状态」看看）', 'warn', 6000);
     else if (st?.startRc) toast('启动失败：' + startRcText(st.startRc), 'err', 6000);
   }
@@ -248,6 +249,11 @@ export class RttCdcView {
     const el = $('h-state');
     if (error && dev.connected) setStatus(el, error, 'err');
     else if (!st) setStatus(el, dev.connected ? '未启动' : '—', '');
+    else if (st.running && !st.cbAddr){
+      // 桥跑起来了但还没找到控制块：地址不对 / 接线或供电问题（探针会一直扫，读错在涨）
+      setStatus(el, `运行中 · 还没找到 RTT 控制块（读错 ${st.rdErr} / RdOff 错 ${st.wrErr}`
+        + ` · 档位 ${st.swdMhz} MHz）—— 地址窗口给对了吗？Cortex-M7 要给 AXI SRAM；再查 SWD 接线与目标供电`, 'err');
+    }
     else if (st.running){
       setStatus(el, `运行中 · 控制块 ${hex(st.cbAddr)} · 上行缓冲 ${hex(st.upAddr)} · 通道 ${st.channel}`
         + ` · 已搬运 ${kb(st.moved)}（${st.transfers} 次）· 轮询 ${st.polls}`

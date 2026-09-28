@@ -10,6 +10,7 @@
 | **串口助手** | SSCOM 那套核心功能：端口/波特率、ASCII/HEX 收发、**ANSI 彩色接收**（像 MobaXterm）、时间戳、定时发送、5 条快捷发送、保存接收数据、**记录到文件**（高速采集不丢数）、**高速自动关显示**（>50KB/s 停渲染、数据照收） | 桌面版 Chrome / Edge（Web Serial） |
 | **终端** | Xshell 式串口终端：xterm.js 渲染 ANSI、本地回显、回车/退格映射、粘贴发送；侧栏还能开 **akaLinkPro 的 RTT→CDC 转发**（探针自己读 RTT 塞进 CDC，主机只读一个 COM 口） | 同上（与串口助手共用同一个串口会话）；转发功能需要 akaLinkPro 探针 |
 | **RTT Viewer** | SEGGER RTT 多通道查看 + 下行输入 + 复位目标，四种后端；同样支持记录到文件与高速自动关显示 | **零安装**：WebUSB + CMSIS-DAP 探针<br>**可选**：本地桥 + OpenOCD / J-Link |
+| **RTT 转发** | akaLinkPro 的**探针侧** RTT→CDC：探针自己通过 SWD 轮询目标控制块、把数据塞进它的 CDC 串口；本页开那个 COM 口收数据。**纯输出，没有发送**：ASCII/ANSI/HEX、时间戳、暂停、保存数据、记录到文件、高速自动关显示 | akaLinkPro 探针（配置走它的自定义 HID；接收走它的 CDC 口） |
 | **烧录器** | .elf/.hex/.bin 写进目标：**零安装 WebUSB**（页面跑 flashloader，擦/写/校验/复位一条龙）或**本地桥 OpenOCD** | 零安装：同上探针；桥：OpenOCD |
 | **工程生成** | 拖进 Keil `.uvprojx` 就能生成调试/下载配套文件：`Makefile.jlink`、`jlink_gdb.script`、`Makefile.pyocd`、`Makefile.openocd`（连带 `rtt_logger.py`）、`test_sram.bin`；参数可填可勾，产物**实时预览** | 不需要任何硬件/后端（纯前端生成） |
 
@@ -25,6 +26,10 @@
 | RTT Viewer（内置模拟目标） | 工程生成 |
 |---|---|
 | ![RTT](docs/shots/3-rtt-mock.png) | ![工程生成](docs/shots/4-gen.png) |
+
+| RTT 转发（探针侧 RTT→CDC；截图里是内置假探针 + 演示串口） |
+|---|
+| ![RTT 转发](docs/shots/5-rttcdc.png) |
 
 （截图里第一个标签用的是**内置演示串口**，所以显示的是假设备；`?demo=serial` 就能自己试。）
 
@@ -95,17 +100,22 @@
 
 ## RTT → CDC 转发（akaLinkPro 探针侧桥）
 
-终端页侧栏那块面板：让**探针自己**通过 SWD 轮询目标的 RTT 控制块、把数据塞进它的 CDC 虚拟串口 ——
-主机只要读一个 COM 口，不用每轮三次 USB 往返。本机实测（akaLinkPro + STM32F103 洪水固件）：
-**2468 KB/s**，而且满速转发时 HID 控制通道照样 260 ms 一次应答。
+独立一页（**RTT 转发**，排在 RTT Viewer 后面）：让**探针自己**通过 SWD 轮询目标的 RTT 控制块、
+把数据塞进它的 CDC 虚拟串口 —— 主机只要读一个 COM 口，不用每轮三次 USB 往返。本机实测
+（akaLinkPro + STM32F103 洪水固件）：**2468 KB/s**，而且满速转发时 HID 控制通道照样 260 ms 一次应答。
 
-用法：终端页 →「连接探针」（HID，授权一次后页面会自动重连）→ RTT 地址手填或「载入 ELF…」自动解析
-`_SEGGER_RTT` →「启动转发」→ 回串口助手打开探针的 CDC 口即可。「停止」把 CDC 交回 UART。
+这一页按「串口助手」的接收半边做，**砍掉了所有发送**（这是纯输出：数据是探针从目标搬过来的）：
+端口选择/连接、ASCII / ANSI / HEX 显示、时间戳、暂停、清空、自动滚动、**保存数据**、
+**记录到文件**（高速采集不丢数）、高速自动关显示。
+
+用法：RTT 转发页 →「连接探针」（HID，授权一次后页面会自动重连）→ RTT 地址手填或「载入 ELF…」
+自动解析 `_SEGGER_RTT` →「启动转发」→ 在**同一页**点「选择…」授权探针的 CDC 口并「连接」，
+数据就出来了。「停止」把 CDC 交回 UART。
 
 ⚠️ Cortex-M7（H743 / H7B3…）的 DTCM 探针读不到，地址要给 AXI SRAM（如 `0x24000000`）。
 
 协议、返回码（含 `-100` = "排队中"这个坑）、实测数字与踩坑记录都在 [`docs/rtt-cdc.md`](docs/rtt-cdc.md)。
-自测：`make test-hid`（协议层，不需要硬件）+ `make test-ui`（页面里假探针走一遍）。
+自测：`make test-hid`（协议层，不需要硬件）+ `make test-ui`（页面里假探针 + 演示串口走一遍）。
 
 ## 支持的调试后端
 
@@ -127,7 +137,7 @@ app/
   serial/               session(Web Serial 封装) / assistant / terminal / demo(演示串口)
   rtt/                  protocol(RTT 协议) / dap-webusb(CMSIS-DAP) / bridge / elf / mock / view
   gen/                  工程生成：templates(模板移植自 uvprojx2cmake.py) / fixes(固定 4 项修正) / model(参数+器件表+uvprojx 解析) / zip(零依赖打包) / view
-  hid/                  akaLinkPro 自定义 HID：probe(协议 + WebHID 客户端) / mock(假探针) / view(RTT→CDC 转发面板)
+  hid/                  akaLinkPro 自定义 HID：probe(协议 + WebHID 客户端) / mock(假探针) / view(桥的面板) / stream(RTT 转发页，纯输出接收)
   vendor/xterm/         xterm.js 本地副本（离线可用，MIT）
   ui/                   tabs / toast / dom 小工具
 bridge/

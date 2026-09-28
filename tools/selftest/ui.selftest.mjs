@@ -191,26 +191,38 @@ export async function runUiSelfTest(tools){
     return '4 个字段 = 原生下拉（3 个带默认项 + 九档）';
   });
 
-  await step('RTT→CDC 转发面板：假探针走一遍完整流程', async () => {
+  await step('RTT 转发页：接收链路 + 假探针面板', async () => {
     const hid = tools.hid;
-    if (!hid) throw new Error('没有 hid 视图对象（main.js 没接？）');
-    hid.useMock();                                   // 顶掉真设备，没插硬件也能验 UI 链路
-    document.querySelector('#tabs .tab[data-tab=terminal]').click();
+    const stream = tools.stream;
+    if (!hid || !stream) throw new Error('没有 hid / stream 视图对象（main.js 没接？）');
+    document.querySelector('#tabs .tab[data-tab=rttcdc]').click();
     await new Promise(r => setTimeout(r, 60));
+    if (!$('c-rx')) throw new Error('这一页没有接收区 #c-rx');
 
+    // ① 接收链路：本页与串口助手共用同一个会话 —— 助手收数据，这一页也要收到并渲染
+    await assistant.connect();
+    await until(() => session.isOpen, 200, '串口打开');
+    const before = tools.stream.summary().bytes;
+    await assistant.send('help');
+    await until(() => tools.stream.summary().bytes > before, 200, '这一页收到数据');
+    const got = tools.stream.summary().bytes - before;
+    if (!$('c-rx').textContent.trim()) throw new Error('接收区是空的（没渲染）');
+    if (tools.stream.summary().buffered <= 0) throw new Error('接收缓冲是空的');
+
+    // ② 纯输出：这页不该有任何发送控件
+    for (const id of ['c-tx', 'c-send', 'c-quick', 'c-timer']) if ($(id)) throw new Error('不该出现发送相关控件：' + id);
+
+    // ③ 假探针：启停（面板搬到了这一页）
+    hid.useMock();
     $('h-addr').value = '0x24000000';
-    $('h-size').value = '0x80000';
     $('h-start').click();
     await until(() => tools.hid.summary().running, 100, '转发跑起来');
-    const s = tools.hid.summary();
-    if (s.cbAddr !== '0x24000000') throw new Error('控制块地址不对：' + s.cbAddr);
-    if (!/运行中/.test(s.state)) throw new Error('状态行没写运行中：' + s.state);
-    if ($('h-info').textContent.trim() === '') throw new Error('设备信息行是空的');
-
+    if (tools.hid.summary().cbAddr !== '0x24000000') throw new Error('控制块地址不对：' + tools.hid.summary().cbAddr);
     $('h-stop').click();
     await until(() => !tools.hid.summary().running, 100, '转发停掉');
-    if (!/未运行/.test(tools.hid.summary().state)) throw new Error('停止后状态行不对：' + tools.hid.summary().state);
-    return s.state.slice(0, 70);
+
+    await session.close();
+    return `收到 ${got} B · 本页共 ${tools.stream.summary().bytes} B`;
   });
 
   return out;

@@ -1,0 +1,359 @@
+/**
+ * 「RTT 转发」页（放在 RTT Viewer 后面）：把 akaLinkPro 探针侧 RTT 桥转出来的 CDC 流当串口看。
+ *
+ * 为什么单独一页：这块是**纯输出**——数据从探针的 CDC 口出来，页面上没有任何发送，
+ * 所以照「串口助手」的接收半边做，砍掉发送框/快捷发送/定时发送/HEX 发送/行尾这些。
+ * 保留：端口选择与连接、ASCII/ANSI/HEX 显示、时间戳、暂停、清空、自动滚动、
+ *      保存数据、记录到文件（高速采集不丢数）、高速自动关显示（回滞门控）。
+ *
+ * 串口会话与「串口助手」「终端」**共用同一个**（一个 COM 口只能被一个程序打开，
+ * 三个标签是同一路数据的三种看法）—— 数据事件里自己也收一份进本页的接收区。
+ * 探针那边的启停/地址在 app/hid/view.js（HID 0x31），本文件不碰 HID。
+ */
+import { $, seg, setFlag, setStatus } from '../ui/dom.js';
+import { toast } from '../ui/toast.js';
+import { store } from '../core/store.js';
+import { RxBuffer } from '../core/rxview.js';
+import { Counter } from '../core/stats.js';
+import { FileRecorder } from '../core/recorder.js';
+import { SerialSession } from '../serial/session.js';
+import { DemoPort, demoEnabled } from '../serial/demo.js';
+import { bytes as fBytes, rate as fRate, fileStamp, download, stamp as stampOf } from '../core/format.js';
+
+const portKey = p => {
+  try { const i = p.getInfo?.() || {}; return `${i.usbVendorId ?? 0}-${i.usbProductId ?? 0}`; } catch { return 'x'; }
+};
+
+export class RttCdcStreamView {
+  constructor(session){
+    this.s = session;
+    this.rx = null;
+    this.rxc = new Counter();
+    this.rec = new FileRecorder();
+    this.ansiOn = false;
+    this.term = null;
+    this.fit = null;
+    this._lastWasCR = false;
+    this.suppressed = false;
+    this.suppManual = false;
+    this._bound = false;
+  }
+
+  // 门控阈值与串口助手一致（>100KB/s 停渲染，回落到 <50KB/s 才自动恢复）
+  static HS_OFF = 100 * 1024;
+  static HS_ON = 50 * 1024;
+
+  init(){
+    if (this._bound) return;
+    this._bound = true;
+
+    this.rx = new RxBuffer($('c-rx'), { maxLines: 4000, maxRaw: 2 * 1024 * 1024 });
+    const rxm = store.get('rttcdc.rxmode', 'ascii');
+    this.rx.setMode(rxm === 'ansi' ? 'ascii' : rxm);      // RxBuffer 只认 ascii/hex，ansi 走 xterm
+    this._seg = seg(document.querySelector('[data-group=crxmode]'), rxm, v => this._setRxMode(v));
+    this._setRxMode(rxm);
+
+    this._chk($('c-ts'), 'rttcdc.ts', v => this.rx.setTimestamps(v, $('c-tsabs').checked));
+    this._chk($('c-tsabs'), 'rttcdc.tsabs', v => this.rx.setTimestamps($('c-ts').checked, v));
+    this._chk($('c-autoscroll'), 'rttcdc.autoscroll', v => this.rx.setAutoscroll(v));
+    this._chk($('c-record-ts'), 'rttcdc.recordTs', v => { void v; });
+    this._chk($('c-record-auto'), 'rttcdc.recordAuto', v => { void v; });
+
+    store.bind($('c-baud'), 'rttcdc.baud');
+
+    if (!SerialSession.supported()){
+      setStatus($('c-err'), '这个浏览器没有 Web Serial（请用桌面版 Chrome / Edge 打开）', 'err');
+      $('c-open').disabled = true; $('c-pick').disabled = true;
+    }
+
+    $('c-pick').addEventListener('click', () => this.pickPort());
+    $('c-scan').addEventListener('click', () => this.refreshPorts());
+    $('c-open').addEventListener('click', () => this.connect());
+    $('c-close').addEventListener('click', () => this.s.close());
+    $('c-clear').addEventListener('click', () => { this.rx.clear(); this.term?.clear(); this._lastWasCR = false; });
+    $('c-save').addEventListener('click', () => this.save());
+    $('c-record').addEventListener('click', () => this._toggleRecord());
+    $('c-statclear').addEventListener('click', () => { this.rxc.reset(); this._stats(); });
+    $('c-err').addEventListener('click', () => {
+      if (this.suppressed){ this.suppManual = true; this._setSuppressed(false); }
+    });
+    $('c-pause').addEventListener('click', () => {
+      const on = !this.rx.paused;
+      this.rx.setPaused(on);
+      $('c-pause').textContent = on ? '继续' : '暂停';
+      $('c-pause').classList.toggle('primary', on);
+      if (!on && this.ansiOn) this._ansiRedraw();
+    });
+
+    this.rec.onChange = () => this._recordBtn();
+    this._recordBtn();
+
+    // ---------------- 会话事件（与助手/终端共用同一个会话） ----------------
+    this.s.on('open', ({ opts, info }) => {
+      $('c-open').disabled = true; $('c-close').disabled = false;
+      $('c-scan').disabled = true; $('c-pick').disabled = true; $('c-port').disabled = true;
+      setFlag($('conn-flag'), `已连接 ${info} @${opts.baudRate}`, 'on');
+      setStatus($('c-err'), '', null);
+      toast(`已打开 ${info}（CDC 波特率不生效，随便填）`, 'ok');
+      if ($('c-record-auto').checked && !this.rec.active) this._autoStartRecord();
+      this._stats();
+    });
+    this.s.on('close', ({ unexpected }) => {
+      $('c-open').disabled = false; $('c-close').disabled = true;
+      $('c-scan').disabled = false; $('c-pick').disabled = false; $('c-port').disabled = false;
+      setFlag($('conn-flag'), '未连接');
+      if (unexpected) toast('串口已断开（设备被拔掉或占用）', 'warn');
+      this.suppManual = false;
+      if (this.suppressed) this._setSuppressed(false);
+      this._stopRecord();
+      this._stats();
+    });
+    this.s.on('data', (b, t) => {
+      this.rxc.add(b.length);
+      this.rec.push(b, t);                 // 先落文件：接收区有 2MB 上限，记录不吃这个限制
+      this.rx.push(b, t);
+      if (this.ansiOn && this.term && !this.rx.paused && !this.suppressed) this._ansiFeed(b, t);
+    });
+    this.s.on('error', e => setStatus($('c-err'), String(e?.message || e), 'err'));
+
+    if (SerialSession.supported()){
+      navigator.serial.addEventListener('connect', () => { this.refreshPorts(); });
+      navigator.serial.addEventListener('disconnect', () => { this.refreshPorts(); });
+    }
+    this.refreshPorts();
+    setInterval(() => this._stats(), 500);
+  }
+
+  onShow(){
+    if (this.ansiOn){ try { this.fit?.fit(); } catch {} }
+    this._stats();
+  }
+
+  // ---------------- 端口 ----------------
+  async refreshPorts(){
+    // 演示模式（?demo=serial）：和串口助手一样，用内置假设备，方便演示/自检
+    if (demoEnabled()){
+      this.ports = [new DemoPort()];
+      const sel = $('c-port');
+      sel.innerHTML = '';
+      sel.appendChild(new Option('演示串口（假设备，点「连接」即可）', '0'));
+      setStatus($('c-note'), '当前是演示模式（?demo=serial）：这是页面内置的假串口，不是真硬件。', null);
+      return;
+    }
+    this.ports = await SerialSession.listPorts();
+    const sel = $('c-port');
+    const prev = sel.value;
+    sel.innerHTML = '';
+    if (!this.ports.length){
+      sel.appendChild(new Option('（没有已授权的串口 → 点「选择…」）', ''));
+      setStatus($('c-note'), '还没授权任何串口：点「选择…」在浏览器弹框里选探针的 CDC 口（第一次必须手动选一次）。', null);
+      return;
+    }
+    this.ports.forEach((p, i) => {
+      const alias = store.get('portAlias.' + portKey(p), '');
+      sel.appendChild(new Option(`${alias || `串口 ${i + 1}`} · ${SerialSession.describe(p)}`, String(i)));
+    });
+    sel.value = (prev !== '' && this.ports[Number(prev)]) ? prev : '0';
+    setStatus($('c-note'), `已授权 ${this.ports.length} 个串口：${this.ports.map(p => SerialSession.describe(p)).join('，')}`, null);
+  }
+
+  async pickPort(){
+    const before = new Set(this.ports || []);
+    try {
+      const picked = await SerialSession.requestPort();
+      await this.refreshPorts();
+      const idx = this.ports.findIndex(p => p === picked || !before.has(p));
+      if (idx >= 0) $('c-port').value = String(idx);   // 授权后自动跳到新端口（否则像"选了没反应"）
+      toast('端口已授权，可以点「连接」了', 'ok');
+    } catch (e){
+      if (e?.name !== 'NotFoundError') toast('选择端口失败：' + (e?.message || e), 'err');
+    }
+  }
+
+  async connect(){
+    const port = this.ports?.[Number($('c-port').value)];
+    if (!port){ toast('先点「选择…」授权一个串口（探针那个 CDC 口）', 'warn'); return; }
+    try {
+      await this.s.open(port, {
+        baudRate: Number($('c-baud').value) || 115200,
+        dataBits: 8, stopBits: 1, parity: 'none', flowControl: 'none',
+      });
+    } catch (e){ setStatus($('c-err'), String(e?.message || e), 'err'); }
+  }
+
+  // ---------------- 统计 / 门控 ----------------
+  _stats(){
+    const now = performance.now();
+    const r = this.rxc.rate(now);
+    $('c-rxbytes').textContent = fBytes(this.rxc.total);
+    $('c-rxframes').textContent = this.rxc.frames;
+    $('c-rxrate').textContent = fRate(r);
+    $('c-buf').textContent = fBytes(this.rx?.bytes ?? 0);
+    this._highspeedGate(r);
+    if (this.rx?.paused) $('c-pause').title = `暂停中，已缓存 ${fBytes(this.rx.bytes)}`;
+  }
+
+  _highspeedGate(r){
+    if (!this.s.isOpen){
+      if (this.suppressed) this._setSuppressed(false);
+      this.suppManual = false;
+      return;
+    }
+    if (!this.suppressed && !this.suppManual && r > RttCdcStreamView.HS_OFF) this._setSuppressed(true, r);
+    else if (this.suppressed && r < RttCdcStreamView.HS_ON){ this._setSuppressed(false); this.suppManual = false; }
+  }
+
+  _setSuppressed(on, r = 0){
+    if (this.suppressed === on) return;
+    this.suppressed = on;
+    this.rx.setDisplayOff(on);
+    if (on){
+      setStatus($('c-err'), `高速 ${fRate(r)}：渲染已停（收数/记录不受影响）· 点此恢复显示`, 'err');
+      $('c-err').title = '点击恢复显示。速率仍高于阈值时会再次自动关闭';
+    } else {
+      const skipped = this.rx.suppressedBytes;
+      this.rx.setDisplayOff(false);
+      if (this.ansiOn && this.term && skipped > 0){
+        this.term.write(`\x1b[90m（高速期间省略了 ${fBytes(skipped)} 的渲染；完整数据用「记录到文件」拿）\x1b[0m\r\n`);
+      }
+      setStatus($('c-err'), '', null);
+      $('c-err').title = '';
+    }
+  }
+
+  // ---------------- 保存 / 记录 ----------------
+  save(){
+    if (this.rx.empty){ toast('接收区没有数据', 'warn'); return; }
+    const name = `rtt-${fileStamp()}.txt`;
+    download(name, this.rx.text());
+    toast(`已保存 ${name}（${fBytes(this.rx.bytes)}）`, 'ok');
+  }
+
+  async _autoStartRecord(){
+    try {
+      const name = await this.rec.start({ name: 'rtt', timestamps: $('c-record-ts').checked });
+      this._recordBtn();
+      toast(`已自动开始记录 → ${name}`, 'ok', 5000);
+    } catch (e){
+      const why = e?.name === 'NotAllowedError' ? '浏览器要求弹保存框时页面正在响应用户点击' : (e?.message || e);
+      toast(`自动记录没启动（${why}）。手动点「记录到文件」即可`, 'warn', 6000);
+    }
+  }
+
+  async _toggleRecord(){
+    if (this.rec.active){
+      const info = await this.rec.stop();
+      this._recordBtn();
+      if (info?.error) toast('记录出错：' + (info.error.message || info.error), 'err', 6000);
+      else if (info) toast(`已保存 ${info.name}：${fBytes(info.bytes)} / ${info.frames} 段 / ${info.seconds.toFixed(1)} s`, 'ok', 6000);
+      return;
+    }
+    try {
+      const name = await this.rec.start({ name: 'rtt', timestamps: $('c-record-ts').checked });
+      this._recordBtn();
+      toast(`记录中 → ${name}（停止时写盘）`, 'ok', 5000);
+    } catch (e){
+      if (e?.name !== 'AbortError') toast('开始记录失败：' + (e?.message || e), 'err', 6000);
+    }
+  }
+
+  async _stopRecord(){
+    if (!this.rec.active) return;
+    const info = await this.rec.stop();
+    this._recordBtn();
+    if (info) toast(`记录已停止并保存：${info.name}（${fBytes(info.bytes)}）`, 'ok', 6000);
+  }
+
+  _recordBtn(){
+    const b = $('c-record');
+    if (!b) return;
+    const on = this.rec.active;
+    b.textContent = on ? `■ 停止记录 · ${fBytes(this.rec.bytes)}` : '● 记录到文件';
+    b.classList.toggle('primary', on);
+    b.title = on
+      ? `正在写入 ${this.rec.name}（${fBytes(this.rec.bytes)} / ${this.rec.frames} 段）`
+      : '把收到的字节直接写进本地文件（不走接收区 2MB 上限），高速采集用';
+  }
+
+  // ---------------- ANSI（和串口助手同一套） ----------------
+  _setRxMode(v){
+    store.set('rttcdc.rxmode', v);
+    this.ansiOn = v === 'ansi';
+    $('c-term').hidden = !this.ansiOn;
+    $('c-rx').hidden = this.ansiOn;
+    if (this.ansiOn){
+      if (!this._ensureAnsiTerm()){ this._seg.set('ascii'); store.set('rttcdc.rxmode', 'ascii'); return; }
+      this._ansiRedraw();
+      try { this.fit?.fit(); } catch {}
+    } else {
+      this.rx.setMode(v);
+    }
+  }
+
+  _ensureAnsiTerm(){
+    if (this.term) return true;
+    if (!window.Terminal){ toast('xterm.js 没加载成功，ANSI 模式不可用', 'err'); return false; }
+    this.term = new Terminal({
+      fontFamily: '"Cascadia Mono","JetBrains Mono",Consolas,"DejaVu Sans Mono",monospace',
+      fontSize: 14, lineHeight: 1.15, cursorBlink: false, scrollback: 5000,
+      convertEol: false, allowTransparency: true,
+      theme: {
+        background: '#010409', foreground: '#e6edf3', cursor: '#58a6ff',
+        selectionBackground: '#264f78', black: '#484f58', red: '#ff7b72',
+        green: '#3fb950', yellow: '#d29922', blue: '#58a6ff', magenta: '#bc8cff',
+        cyan: '#39c5cf', white: '#b1bac4',
+      },
+    });
+    try { this.fit = new FitAddon.FitAddon(); this.term.loadAddon(this.fit); } catch {}
+    this.term.open($('c-term'));
+    this.fit?.fit();
+    new ResizeObserver(() => { if (this.ansiOn){ try { this.fit?.fit(); } catch {} } }).observe($('c-term'));
+    return true;
+  }
+
+  _ansiFeed(bytes, t){
+    if (!this.term) return;
+    if (this.rx.timestamps) this.term.write(`\x1b[90m[${stampOf(t, this.rx.absolute)}]\x1b[0m `);
+    const out = [];
+    for (let i = 0; i < bytes.length; i++){
+      const b = bytes[i];
+      if (b === 0x0a && !this._lastWasCR) out.push(0x0d);
+      out.push(b);
+      this._lastWasCR = (b === 0x0d);
+    }
+    this.term.write(Uint8Array.from(out));
+  }
+
+  _ansiRedraw(){
+    if (!this.term) return;
+    this.term.clear();
+    this._lastWasCR = false;
+    for (const r of this.rx.raw) this._ansiFeed(r.b, r.t);
+  }
+
+  // ---------------- 小工具 ----------------
+  _chk(el, key, onChange){
+    const apply = () => { const v = store.get(key); if (v !== undefined) el.checked = !!v; };
+    apply();
+    el.addEventListener('change', () => { store.set(key, el.checked); onChange?.(el.checked); });
+    onChange?.(el.checked);
+    return el;
+  }
+
+  /** 自检用 */
+  summary(){
+    return {
+      open: this.s.isOpen,
+      bytes: this.rxc.total,
+      frames: this.rxc.frames,
+      rate: Math.round(this.rxc.rate()),
+      buffered: this.rx.bytes,
+      paused: this.rx.paused,
+      suppressed: this.suppressed,
+      mode: this.ansiOn ? 'ansi' : this.rx.mode,
+      recording: this.rec.active,
+      recordBytes: this.rec.bytes,
+      shown: $('c-rx').textContent.length,
+    };
+  }
+}

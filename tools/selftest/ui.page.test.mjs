@@ -30,7 +30,7 @@ async function ensureBrowser(){
   const ps = spawn('pwsh', ['-NoProfile', '-File', join(root, 'tools', 'selftest', 'launch-browser.ps1'), '-Port', '9333', '-Url', APP],
     { stdio: 'ignore', detached: true });
   ps.unref();
-  for (let i = 0; i < 40; i++){
+  for (let i = 0; i < 90; i++){          // Edge 冷启动偶尔要十几秒，给足 45s
     await sleep(500);
     try { await fetch(CDP + '/json/version', { signal: AbortSignal.timeout(2000) }); return; } catch {}
   }

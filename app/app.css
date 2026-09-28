@@ -156,6 +156,9 @@ dialog form{margin-top:16px;text-align:right}
 /* ---------------- 终端页的 RTT→CDC 转发面板 ---------------- */
 #tab-terminal .side .row>span:first-child{width:74px}   /* 「RTT 地址 / 搜索长度」比默认 60px 宽些 */
 
+/* ---------------- RTT 转发页 ---------------- */
+#tab-rttcdc .side .row>span:first-child{width:74px}
+
 @media (max-width:860px){
   body{overflow:auto}
   .ws{grid-template-columns:1fr;height:auto}
