@@ -164,7 +164,8 @@ export async function runUiSelfTest(tools){
 
   await step('SWD 速度候选（1M~60M 九档）就位', async () => {
     const want = ['1000', '5000', '10000', '20000', '30000', '40000', '45000', '50000', '60000'];
-    const read = id => [...(document.getElementById(id)?.options || [])].map(o => o.value);
+    const opts = id => [...(document.getElementById(id)?.options || [])];
+    const read = id => opts(id).map(o => o.value);
     const shared = read('speed-list');
     if (want.join(',') !== shared.join(',')) throw new Error(`speed-list = ${shared.join(',')}`);
     // 三个 kHz 输入框都要挂上这份候选
@@ -173,17 +174,18 @@ export async function runUiSelfTest(tools){
       if (!el) throw new Error('找不到 ' + id);
       if (el.getAttribute('list') !== 'speed-list') throw new Error(`${id} 没挂 speed-list`);
     }
-    // WebUSB 那个：九档 + 自动 + 实测最优/救命档，且必须能手输（是 input 不是 select）
+    // 候选一律"纯值单行"：带 label 的话 Edge 会把 value 和 label 分两行显示（很丑）
+    for (const id of ['speed-list', 'usb-clock-list']){
+      const bad = opts(id).filter(o => o.getAttribute('label') || o.textContent.trim() !== o.value);
+      if (bad.length) throw new Error(`${id} 有条目不是纯值单行：${bad.map(o => o.outerHTML).join(' ')}`);
+    }
+    // WebUSB 那格可以手输（是 input 不是 select），候选里要有九档 + 实测最优/救命档
     const usb = $('r-usb-clock');
     if (usb.tagName !== 'INPUT') throw new Error('WebUSB 时钟应改成可手输的 input，实际 ' + usb.tagName);
     if (usb.getAttribute('list') !== 'usb-clock-list') throw new Error('WebUSB 时钟没挂 usb-clock-list');
     const usbVals = read('usb-clock-list');
-    const missing = want.filter(v => !usbVals.includes(v));
+    const missing = [...want, '8000', '500', '200'].filter(v => !usbVals.includes(v));
     if (missing.length) throw new Error('usb-clock-list 缺档：' + missing.join(','));
-    if (!usbVals.includes('0') || !usbVals.includes('8000')) throw new Error('usb-clock-list 缺「自动」或 8MHz');
-    // 60M 必须标注超过 J-Link 上限
-    const m60 = [...document.getElementById('speed-list').options].find(o => o.value === '60000');
-    if (!/超过 J-Link 上限/.test(m60.label)) throw new Error('60M 没标注上限：' + m60.label);
     return `共用 ${shared.length} 档 / WebUSB ${usbVals.length} 档`;
   });
 
