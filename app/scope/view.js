@@ -817,8 +817,10 @@ export class ScopeView {
         : (this.stream.resyncs ? `重同步 ${this.stream.resyncs} 次 / 垃圾 ${this.stream.junk} B` : '');
     }
     const perCol = this.renderer.span / Math.max(2, this.renderer.plotW);
+    const ct = this.renderer.cursorTime();
     $('sc-window').textContent = st?.count
-      ? `${fmtTime(st.timeAt(Math.max(0, Math.ceil(this.renderer.view.end) - 1)) - st.timeAt(Math.floor(this.renderer.view.start)))} 窗口 · ` +
+      ? (ct ? `游标 t=${ct.text}（#${ct.index}） · ` : '') +
+        `${fmtTime(st.timeAt(Math.max(0, Math.ceil(this.renderer.view.end) - 1)) - st.timeAt(Math.floor(this.renderer.view.start)))} 窗口 · ` +
         `每列 ${perCol.toFixed(1)} 样本 ${usedLod ? '(LOD)' : '(精确)'}` +
         (perCol < 1.5 ? ' · 连点折线' : ' · 包络带（点「细看」看波形形状）') +
         (this.follow ? ' · 跟随最新' : '')
@@ -833,11 +835,13 @@ export class ScopeView {
     // 游标可能来自"窗口尺寸变了"之前的旧位置 —— 夹到有效范围，别显示一个不存在的样本号
     const cur = this.renderer.cursor != null ? Math.min(this.renderer.cursor, this.store.count - 1) : null;
     const rows = legendRows(this.store, cur, this.renderer.hidden);
-    const tag = cur != null ? ` @${cur}` : '';
+    // 游标时刻统一显示在画布下的标签和状态行里（每行都挂一遍太吵），这里只留 tooltip 带样本号
+    const ct = this.renderer.cursorTime();
+    const tip = ct ? ` title="t=${ct.text}（相对采集起点）· 样本 #${ct.index}"` : '';
     box.innerHTML = rows.map(r =>
-      `<span class="lrow${r.visible ? '' : ' off'}" data-k="${r.index}">` +
+      `<span class="lrow${r.visible ? '' : ' off'}" data-k="${r.index}"${tip}>` +
       `<i class="dot" style="background:${r.color}"></i>${r.name}` +
-      `<span class="lv">${fmtVal(r.value)}${tag}</span></span>`).join('');
+      `<span class="lv">${fmtVal(r.value)}${ct ? ' @' + ct.text : ''}</span></span>`).join('');
     for (const el of box.querySelectorAll('.lrow')){
       el.addEventListener('click', () => {
         const k = Number(el.dataset.k);

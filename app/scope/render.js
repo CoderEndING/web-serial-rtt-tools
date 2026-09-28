@@ -22,6 +22,7 @@ export class ScopeRenderer {
     this.store = null;
     this.view = { start: 0, end: 1 };
     this.cursor = null;            // 样本索引
+    this.cursorLabel = null;       // 游标处的时刻文本（页脚/图例/自测共用）
     this.trigger = null;           // {index, pre, post}
     this.mode = opts.mode || 'auto';  // （叠加模式下）auto = 每通道自适应量程；shared = 共用
     this.layout = opts.layout || 'overlay';   // overlay = 叠加；lanes = 分道（每通道一条泳道、各自量程）
@@ -86,6 +87,19 @@ export class ScopeRenderer {
   get plotH(){ return Math.max(1, this.canvas.clientHeight - this.padding.t - this.padding.b); }
   xOf(i){ return this.padding.l + (i - this.view.start) / this.span * this.plotW; }
   sampleAt(x){ return this.view.start + (x - this.padding.l) / this.plotW * this.span; }
+
+  /**
+   * 游标处的时刻：**相对采集起点**（µs）。
+   * 为什么不显示"样本序号"或"相对窗口左边缘"？——序号看不出时间，而相对窗口的时间会随缩放平移变化，
+   * 同一个位置两次读数不一样，没法对着 CSV 的 `t_us` 核。相对采集起点才是"这一刻到底发生了什么"。
+   */
+  cursorTime(){
+    const st = this.store;
+    if (!st || !st.count || this.cursor == null) return null;
+    const i = Math.min(st.count - 1, Math.max(0, Math.round(this.cursor)));
+    const relUs = st.timeAt(i) - st.timeAt(0);
+    return { index: i, relUs, text: fmtTime(relUs) };
+  }
 
   /** 主绘制。返回本次是否用了 LOD（排障/自测用） */
   draw(){
@@ -260,18 +274,21 @@ export class ScopeRenderer {
       ctx.stroke();                              // 上下沿各描一遍（慢信号就是一条线）
     }
 
-    // 游标
-    if (this.cursor != null && this.cursor >= 0 && this.cursor < n){
+    // 游标：竖线 + 各通道取值点 + **轴下时刻标签**（标尺移到哪，时间就显示在哪）
+    const ct = this.cursorTime();
+    this.cursorLabel = ct ? ct.text : null;
+    if (ct){
       const dpr2 = (typeof devicePixelRatio === 'number' ? devicePixelRatio : 1) || 1;
-      const x = this.xOf(this.cursor);
+      const x = this.xOf(ct.index);
       ctx.strokeStyle = '#e6edf3'; ctx.lineWidth = 1 / dpr2;
       ctx.beginPath(); ctx.moveTo(Math.round(x) + 0.5, t); ctx.lineTo(Math.round(x) + 0.5, t + ph); ctx.stroke();
       for (let k = 0; k < st.channels.length; k++){
         if (!this.isVisible(k)) continue;
-        const y = yOf(st.channels[k].value(this.cursor), k);
+        const y = yOf(st.channels[k].value(ct.index), k);
         ctx.fillStyle = this.palette[k % this.palette.length];
         ctx.beginPath(); ctx.arc(x, y, 2.5, 0, Math.PI * 2); ctx.fill();
       }
+      this._cursorTag(ctx, `t=${ct.text}`, x, t + ph);
     }
 
     // 边框
@@ -292,20 +309,20 @@ export class ScopeRenderer {
       const y = Math.round(t + ph * i / 4) + px / 2;
       ctx.beginPath(); ctx.moveTo(l, y); ctx.lineTo(l + pw, y); ctx.stroke();
     }
-    for (let i = 1; i < 6; i++){
-      const x = Math.round(l + pw * i / 6) + px / 2;
+    for (let i = 1; i < 4; i++){
+      const x = Math.round(l + pw * i / 4) + px / 2;
       ctx.beginPath(); ctx.moveTo(x, t); ctx.lineTo(x, t + ph); ctx.stroke();
     }
-    // X 轴时间刻度（0 / 1/4 / 1/2 / 3/4 / 末端 的相对时间）
+    // X 轴时间刻度（相对**采集起点**，和游标读数/CSV 的 t_us 同一把尺子）
     const st = this.store;
     if (st && st.count){
-      const t0 = st.timeAt(Math.max(0, Math.floor(this.view.start)));
-      const t1 = st.timeAt(Math.min(st.count - 1, Math.ceil(this.view.end)));
-      const spanUs = t1 - t0;
+      const base = st.timeAt(0);
       for (let i = 0; i <= 4; i++){
         const x = l + pw * i / 4;
-        const rel = spanUs * i / 4;
-        this._text(ctx, fmtTime(rel), x + 3, t + ph + 14, '#7b8794', i === 4 ? 'right' : 'left');
+        // 游标标签会盖住最近的刻度，干脆让位（标签本身就带时间，不会丢信息）
+        if (this.cursor != null && Math.abs(x - this.xOf(this.cursor)) < 34) continue;
+        const idx = Math.min(st.count - 1, Math.max(0, Math.round(this.view.start + this.span * i / 4)));
+        this._text(ctx, fmtTime(st.timeAt(idx) - base), x + 3, t + ph + 14, '#7b8794', i === 4 ? 'right' : 'left');
       }
     }
     if (sharedRange){
@@ -316,6 +333,25 @@ export class ScopeRenderer {
       }
     }
     void W; void H;
+  }
+
+  /** 轴槽里的圆角时刻标签（跟随游标，靠边时自动收回画布内）*/
+  _cursorTag(ctx, text, x, axisY){
+    const dpr = (typeof devicePixelRatio === 'number' ? devicePixelRatio : 1) || 1;
+    const W = this.canvas.clientWidth || 300;
+    ctx.font = '11px ui-monospace, Consolas, monospace';
+    const w = ctx.measureText(text).width + 10;
+    const h = 15;
+    const cx = Math.min(W - 2 - w / 2, Math.max(2 + w / 2, x));
+    const top = axisY + 4;
+    ctx.fillStyle = '#1b2430'; ctx.strokeStyle = '#3d4c60'; ctx.lineWidth = 1 / dpr;
+    if (typeof ctx.roundRect === 'function'){
+      ctx.beginPath(); ctx.roundRect(cx - w / 2, top, w, h, 3); ctx.fill(); ctx.stroke();
+    } else {
+      ctx.fillRect(cx - w / 2, top, w, h); ctx.strokeRect(cx - w / 2, top, w, h);
+    }
+    ctx.fillStyle = '#e6edf3'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(text, cx, top + h / 2);
   }
 
   _text(ctx, s, x, y, color, align = 'left'){

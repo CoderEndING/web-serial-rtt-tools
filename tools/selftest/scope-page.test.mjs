@@ -185,6 +185,54 @@ console.log('== 5. 缩放 / 平移 / 精确模式 ==');
   ok(followOff === true, '点「全览」会重新打开跟随（数据在长时视图自动跟上）');
 }
 
+console.log('== 5.5 标尺移到哪，就显示那里的时间 ==');
+{
+  // 用户提的：分道图里游标只有每路的取值，看不出"标尺停在什么时刻"。
+  const c = await ev(`
+    const sc = window.__tools.scope;
+    sc.follow = false; sc.renderer.fitAll();
+    const cv = document.getElementById('sc-canvas');
+    const box = cv.getBoundingClientRect();
+    // 用**真实鼠标事件**走一遍（不是直接改 renderer.cursor）：标尺拖到距左边界 100 px 处
+    cv.dispatchEvent(new MouseEvent('mousemove', { clientX: box.left + sc.renderer.padding.l + 100, clientY: box.top + 40, bubbles: true }));
+    sc.drawFrame();
+    const first = { cursor: sc.renderer.cursor, label: sc.renderer.cursorLabel,
+                    status: document.getElementById('sc-window').textContent,
+                    legend: document.querySelector('#sc-legend .lrow').textContent };
+    // 轴槽里那行"白字"只可能来自游标标签（刻度文字是灰的 #7b8794）
+    const dpr = cv.width / cv.clientWidth;
+    const strip = () => {
+      const ctx = cv.getContext('2d');
+      const y0 = Math.round((cv.clientHeight - sc.renderer.padding.b + 6) * dpr);
+      const y1 = Math.round((cv.clientHeight - sc.renderer.padding.b + 17) * dpr);
+      const d = ctx.getImageData(0, y0, cv.width, Math.max(1, y1 - y0)).data;
+      let bright = 0;
+      for (let i = 0; i < d.length; i += 4) if (d[i] > 200 && d[i+1] > 200 && d[i+2] > 200) bright++;
+      return bright;
+    };
+    const withCursor = strip();
+    const atX = sc.renderer.xOf(sc.renderer.cursor);
+    sc.renderer.cursor = null; sc.drawFrame();
+    const noCursor = strip();
+    // 再挪一次：时间必须跟着走
+    sc.renderer.cursor = Math.max(0, sc.store.count - 2); sc.drawFrame();
+    const second = { label: sc.renderer.cursorLabel, status: document.getElementById('sc-window').textContent };
+    const t = { t0: sc.store.timeAt(0), cur: sc.store.timeAt(first.cursor), rate: sc.store.rate() };
+    sc.renderer.cursor = null; sc.drawFrame();
+    return { first, second, withCursor, noCursor, atX, count: sc.store.count, ...t };`);
+  ok(c.first.cursor > 0, `鼠标移动真的设上了游标（样本 #${c.first.cursor}）`);
+  ok(/^[\d.]+\s*(µs|ms|s)$/.test(c.first.label || ''), `游标标签是"时刻"：「${c.first.label}」`);
+  ok(c.withCursor > 20 && c.noCursor === 0,
+     `标签真的画在 X 轴槽里（有游标 ${c.withCursor} 个亮像素 / 无游标 ${c.noCursor} 个）`);
+  ok(c.first.label !== c.second.label,
+     `标尺移动 → 时刻跟着变（${c.first.label} → ${c.second.label}）`);
+  ok(/游标 t=/.test(c.first.status), `状态行同时报出游标时刻：${c.first.status.slice(0, 52)}…`);
+  ok(c.first.legend.includes(c.first.label), `图例每行也带上同一时刻（${c.first.legend.slice(0, 30)}…）`);
+  const expectMs = (c.cur - c.t0) / 1000;                       // 假探针 100 µs/样本
+  ok(Math.abs(expectMs - c.first.cursor / 10) < 1,
+     `换算对得上：样本 #${c.first.cursor} = ${expectMs.toFixed(2)} ms（${(c.rate / 1000).toFixed(2)} kHz）`);
+}
+
 console.log('== 6. 触发（实时 + 离线重定位）==');
 {
   const hit = await ev(`
