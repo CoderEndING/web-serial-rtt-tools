@@ -154,6 +154,7 @@
   `frameBytes=32`（8×f32）→ `n=15`；`frameBytes=16` → `n=31`（正好 496）。
 - **DEF**：`swd_hz(4) period_us(4) flags(2) nvars(1)` + `nvars × (addr u32, size u8, typ u8, rsv u16)`
   → 主机拿到它与自己的计划**比对**，不一致就报错（防止"配置没生效却在画图"）。
+  `aux` = 变量数、`payload[11]` = **探针算出的 span 数**（与本地 `planReads()` 对账）。
 - **STAT**：`produced(4) dropped(4) pkts(4) usb_err(2) swd_err(2) period_actual(4) swd_mhz(1) clk_delay(1)`
   → 每 64 个包插一包，或按需插。**`dropped` 是硬指标**。
 - **EVT**：启动/停止/时钟降档/触发（v2 探针侧触发才会用）。
@@ -207,6 +208,7 @@
 | 0 | 停止 | — |
 | 1 | 启动推流 | — |
 | 2 | 查状态 | — |
+| **3** | **设 SWD 时钟** | `hz(4)`；0 = 不动。走 RTT 桥那套斜坡换挡，失败返回 -4 由固件降档 |
 | 4 | 触发配置（可选，v2） | `varIdx(1) mode(1) level(f32) pre(u32) post(u32)` |
 | **7** | **配置：周期 + 1~8 个变量** | `period_us(4) flags(1) nvars(1)` + `nvars × (addr(4) size(1) type(1))`；`nvars=8` 时 = 54 B ✔ 一条装下 |
 | 8 | 标定：用当前计划跑 N 次 | `iters(4)` → 结果走 action 9 |
@@ -219,7 +221,7 @@
 
 | 字 | 位域 |
 |---|---|
-| w0 | bit0 running；bit8-15 模式；bit16 SWD ready；bit24-31 时钟档索引 |
+| w0 | bit0 running；bit8-15 **探针算出的 span 数**；bit16 SWD ready；bit24-31 探针收到的变量数 |
 | w1 | 实际 SWD Hz |
 | w2 | produced 样本数 |
 | w3 | **dropped 样本数** |
@@ -295,6 +297,7 @@ app/scope/render.js   canvas min/max 包络 + 游标 + 触发标记 + 防抖量�
 app/scope/transport.js  VendorEp(0x83) 收流（3 条在飞 + 先停后收）/ 假传输   ✅
 app/scope/view.js     页面逻辑（选变量 → 配置 → 采样 → 绘图/触发/导出/回放）  ✅
 tools/selftest/scope-page.test.mjs  真页面 CDP 端到端 37 项              ✅
+tools/probe-firmware/  探针固件补丁草稿（scope_sampler.c/.h + patch-notes.md + README.md）  ✅ 待真机编译
 ```
 
 **M1 完成**（2026-09-29）：引擎层 103 项 + ELF/DWARF 61 项 + 真页面 37 项，全部不需要硬件。
@@ -464,7 +467,7 @@ tools/selftest/scope-page.test.mjs  真页面 CDP 端到端 37 项              
 |---|---|---|
 | **M0 标定** | 扩展固件 BENCH：测"朴素 / 读计划 / span"三种写法；实测 `transferIn(4096)` 吞吐与并发 | 拿到真实上限（kHz）与推荐参数 —— **这一步决定后面所有取舍**（靶子固件已就绪并验收通过，见 §11.3） |
 | **M1 协议+骨架** | `app/scope/{protocol,transport,store,render,view}` + 假探针 + 页面 + 单测 | `make test` 全绿；假数据能画、能触发、能导出。**已完成**（引擎 103 + DWARF 61 + 页面 37 项自测；页面 CDP 端到端含画布像素与触发） |
-| **M2 真硬件打通** | 固件 `scope_sampler.c`（照 `rtt_bridge.c` 骨架）+ HID 0x32 + 0x83 推流 | 8 变量 × 10 kHz × 20 s，零丢包，数值与 RTT 对账一致 |
+| **M2 真硬件打通** | 固件 `scope_sampler.c`（照 `rtt_bridge.c` 骨架）+ HID 0x32 + 0x83 推流 | 8 变量 × 10 kHz × 20 s，零丢包，数值与 RTT 对账一致。**补丁草稿已写好**（`tools/probe-firmware/`：6 处集成改动 + 验收清单），**待你在固件仓库里编译/烧录** |
 | **M3 极限** | 读计划优化（合并 span / 单命令多 op）+ 多缓冲推流 + 60 MHz 开关 | 达到 M0 标定上限的 ≥80%；丢包如实显示 |
 | **M4 触发+导出** | 主机侧触发（实时+离线重触发）、CSV、`.jsp` 原始录制与回放 | 已知波形（1 kHz 方波）触发稳定；CSV 可被 Excel/pandas 直接读 |
 | **M5 收尾** | `docs/scope-page.md` 完善、README 增行、截图、`make check` 覆盖新模块、合并推送 | 线上页面可用；自测项数入档 |

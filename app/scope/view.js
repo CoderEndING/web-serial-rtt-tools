@@ -346,6 +346,7 @@ export class ScopeView {
     try {
       const clockKhz = Number($('sc-clock').value) || 0;
       const flags = clockKhz >= 60000 ? 1 : 0;         // bit0 = 允许 60 MHz（文档 §7.1）
+      if (clockKhz > 0) await this.hidXfer(P.HID_CMD, P.clockData(clockKhz * 1000));
       await this.hidXfer(P.HID_CMD, P.configData({ periodUs, flags, vars }));
       let rc = P.START_PENDING;
       await this.hidXfer(P.HID_CMD, P.flagsData(P.ACT.START));
@@ -425,7 +426,13 @@ export class ScopeView {
           const d = P.parseDef(pkt.payload);
           this.defVars = d.vars;
           this.periodActualUs = d.periodUs;
-          this.probeDropped = Math.max(this.probeDropped, 0);
+          this.swdMhz = d.swdHz ? Math.round(d.swdHz / 1e6) : this.swdMhz;
+          // 探针回报的 span 数 vs 本地计划：不一致就说明两边的合并规则不一样了（改一边忘了另一边）
+          if (d.spans && this.plan && d.spans !== this.plan.spans.length){
+            this.planMismatch = `探针算出 ${d.spans} 个 span，本地计划是 ${this.plan.spans.length} 个`;
+          } else {
+            this.planMismatch = null;
+          }
           break;
         }
         case P.KIND.DATA: {
@@ -621,7 +628,10 @@ export class ScopeView {
     $('sc-mem').textContent = st ? fmtBytes(st.bytes()) : '0 B';
     $('sc-mhz').textContent = this.swdMhz ? `${this.swdMhz} MHz` : '—';
     const err = $('sc-err');
-    if (err) err.textContent = this.stream.resyncs ? `重同步 ${this.stream.resyncs} 次 / 垃圾 ${this.stream.junk} B` : '';
+    if (err){
+      err.textContent = this.planMismatch ? `⚠ ${this.planMismatch}`
+        : (this.stream.resyncs ? `重同步 ${this.stream.resyncs} 次 / 垃圾 ${this.stream.junk} B` : '');
+    }
     $('sc-window').textContent = st?.count
       ? `${fmtTime(st.timeAt(Math.max(0, Math.ceil(this.renderer.view.end) - 1)) - st.timeAt(Math.floor(this.renderer.view.start)))} 窗口 · ` +
         `每列 ${(this.renderer.span / Math.max(2, this.renderer.plotW)).toFixed(1)} 样本 ${usedLod ? '(LOD)' : '(精确)'}` +

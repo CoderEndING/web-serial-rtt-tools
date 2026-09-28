@@ -65,12 +65,13 @@ console.log('== 2. 512 B 包编解码（四种包）==');
 {
   const vars = [{ addr: 0x20001014, size: 4, scalar: 'f32' }, { addr: 0x2000101c, size: 4, scalar: 'i32' },
                 { addr: 0x20001024, size: 1, scalar: 'u8' }, { addr: 0x20001038, size: 8, scalar: 'f64' }];
-  const def = P.buildDef({ seq: 7, swdHz: 45000000, periodUs: 100, flags: 1, vars });
+  const def = P.buildDef({ seq: 7, swdHz: 45000000, periodUs: 100, flags: 1, vars, spans: 3 });
   ok(def.length === 512, 'DEF 包 = 512 B');
   const pk = P.parsePacket(def);
   ok(pk && pk.kind === P.KIND.DEF && pk.seq === 7, 'HEAD 解析：kind/seq');
   const d = P.parseDef(pk.payload);
   ok(d.swdHz === 45000000 && d.periodUs === 100 && d.flags === 1 && d.nvars === 4, 'DEF 字段逐个正确');
+  ok(d.spans === 3, 'DEF 里回报的 span 数（主机拿它和本地计划对账）');
   ok(d.vars[3].addr === 0x20001038 && d.vars[3].size === 8 && d.vars[3].scalar === 'f64', 'DEF 变量表（含类型码 → 名字）');
 
   // 8 种类型各来一发：打包 → 解码 必须**逐位相等**
@@ -196,6 +197,16 @@ console.log('== 5. HID 0x32 控制面 ==');
 
   const st = P.parseScopeStatus(new Uint8Array(48).fill(0).map((_, i) => i));
   ok(typeof st.running === 'boolean' && typeof st.dropped === 'number', '状态字解析出对象');
+  const cd = P.clockData(45000000);
+  ok(cd.length === 5 && cd[0] === P.ACT.CLOCK && new DataView(cd.buffer).getUint32(1, true) === 45000000,
+     'action 3 设 SWD 时钟报文（Hz 小端）');
+  const st2 = P.parseScopeStatus((() => {
+    const w = new Uint32Array(12);
+    w[0] = 1 | (2 << 8) | (1 << 16) | (7 << 24);      // running / nspans / swdReady / nvars
+    const b = new Uint8Array(48); new DataView(b.buffer).setUint32(0, w[0], true);
+    return b;
+  })());
+  ok(st2.nspans === 2 && st2.nvars === 7, 'w0 的位域：nspans 与 nvars（与固件 scope_sampler_status 一致）');
   ok(P.scopeRcText(-100).includes('启动中'), '-100 = "启动中"而不是错误');
   ok(P.scopeRcText(-3).includes('变量表'), '-3 的文案指向"变量表为空"');
   ok(P.scopeRcText(0) === '正常', 'rc=0 正常');

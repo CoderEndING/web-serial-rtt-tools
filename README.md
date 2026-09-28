@@ -141,6 +141,10 @@
 自测：`make test-scope`（引擎层 103 项，含 8 通道 × 10000 样本逐点对账）+
 `make test-dwarf`（ELF/DWARF 61 项）+ `make test-scope-page`（真页面 CDP 37 项）。
 
+真机还差探针固件那一步：补丁草稿在 [`tools/probe-firmware/`](tools/probe-firmware/) ——
+`scope_sampler.c/.h`（采样器本体）+ `patch-notes.md`（6 处集成改动，逐段可粘贴）+ 验收清单
+（M0 标定 → 用仓库里的 F103 靶子固件逐项对账 → 撕裂率/混叠的量化检查）。
+
 ## 支持的调试后端
 
 | 后端 | 通道 | 双向 | 目标控制 | 依赖 |

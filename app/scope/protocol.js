@@ -96,15 +96,17 @@ function header(kind, seq, tUs, n, aux){
   return b;
 }
 
-/** DEF：变量表（主机用它和本地计划对账）*/
-export function buildDef({ seq = 0, swdHz = 0, periodUs = 0, flags = 0, vars = [] } = {}){
+/** DEF：变量表（主机用它和本地计划对账）。
+ *  `payload[11]` = 探针自己算出来的 **span 数** —— 主机拿它和本地 `planReads()` 对账，
+ *  不一致就说明两边的合并规则不一样（比"波形看起来不对"好查得多）。 */
+export function buildDef({ seq = 0, swdHz = 0, periodUs = 0, flags = 0, vars = [], spans = 0 } = {}){
   const b = header(KIND.DEF, seq, 0, 0, vars.length);
   const dv = new DataView(b.buffer);
   dv.setUint32(HEADER, swdHz >>> 0, true);
   dv.setUint32(HEADER + 4, periodUs >>> 0, true);
   dv.setUint16(HEADER + 8, flags & 0xffff, true);
   b[HEADER + 10] = vars.length & 0xff;
-  b[HEADER + 11] = 0;
+  b[HEADER + 11] = spans & 0xff;
   let o = HEADER + 12;
   for (const v of vars){
     dv.setUint32(o, v.addr >>> 0, true);
@@ -118,7 +120,7 @@ export function buildDef({ seq = 0, swdHz = 0, periodUs = 0, flags = 0, vars = [
 export function parseDef(payload){
   const dv = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
   const out = { swdHz: dv.getUint32(0, true), periodUs: dv.getUint32(4, true),
-                flags: dv.getUint16(8, true), nvars: payload[10], vars: [] };
+                flags: dv.getUint16(8, true), nvars: payload[10], spans: payload[11], vars: [] };
   let o = 12;
   for (let i = 0; i < out.nvars; i++){
     out.vars.push({ addr: dv.getUint32(o, true), size: payload[o + 4], type: payload[o + 5],
@@ -292,8 +294,8 @@ export class TimeUnwrap {
 
 // ---------------------------------------------------------------- HID 0x32（控制面）
 export const HID_CMD = 0x32;
-export const ACT = { STOP: 0, START: 1, STATUS: 2, TRIGGER: 4, CONFIG: 7, BENCH: 8, BENCH_RESULT: 9 };
-export const ACT_NAME = { 0: '停止', 1: '启动', 2: '查状态', 4: '触发配置', 7: '配置', 8: '标定', 9: '取标定结果' };
+export const ACT = { STOP: 0, START: 1, STATUS: 2, CLOCK: 3, TRIGGER: 4, CONFIG: 7, BENCH: 8, BENCH_RESULT: 9 };
+export const ACT_NAME = { 0: '停止', 1: '启动', 2: '查状态', 3: '设 SWD 时钟', 4: '触发配置', 7: '配置', 8: '标定', 9: '取标定结果' };
 
 /** 单条 HID 报文的 data 上限：63 - 2（长度 + 命令） = 61 */
 export const HID_DATA_MAX = 61;
@@ -325,6 +327,14 @@ export function configData({ periodUs = 100, flags = 0, vars = [] } = {}){
 
 export function flagsData(action){ return Uint8Array.of(action & 0xff); }
 
+/** action 3：设 SWD 时钟（Hz）。放在 CONFIG 之前发；0 = 不动（用固件当前档）。 */
+export function clockData(hz){
+  const d = new Uint8Array(5);
+  d[0] = ACT.CLOCK;
+  new DataView(d.buffer).setUint32(1, hz >>> 0, true);
+  return d;
+}
+
 export function triggerData({ channel = 0, mode = 0, level = 0, pre = 0, post = 0 } = {}){
   const d = new Uint8Array(15);                 // action(1)+ch(1)+mode(1)+level(4)+pre(4)+post(4)
   const dv = new DataView(d.buffer);
@@ -352,9 +362,9 @@ export function parseScopeStatus(bytes){
     [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11].map(w);
   return {
     running: !!(w0 & 1),
-    mode: (w0 >>> 8) & 0xff,
+    nspans: (w0 >>> 8) & 0xff,       // 探针自己算出来的 span 数（与本地计划对账用）
     swdReady: !!(w0 & (1 << 16)),
-    clockIdx: (w0 >>> 24) & 0xff,
+    nvars: (w0 >>> 24) & 0xff,       // 探针收到的变量数（配置到底生效没有）
     swdHz: w1,
     produced: w2,
     dropped: w3,
