@@ -161,6 +161,7 @@ check:
 	$(NODE) --check app/scope/protocol.js
 	$(NODE) --check app/scope/store.js
 	$(NODE) --check app/scope/mock.js
+	$(NODE) --check app/scope/render.js
 	$(NODE) --check app/main.js
 	$(NODE) --check bridge/rtt-bridge.mjs
 	pwsh -NoProfile -Command "Write-Host '语法检查通过'"
