@@ -91,7 +91,7 @@ export class ScopeView {
 
     $('sc-connect').addEventListener('click', () => this.connectHid(true));
     $('sc-reconnect').addEventListener('click', () => this.connectHid(false));
-    $('sc-usb').addEventListener('click', () => this.connectUsb());
+    $('sc-usb').addEventListener('click', () => this.connectUsb(true));
     $('sc-mock').addEventListener('change', e => this.setMock(e.target.checked));
     $('sc-elf').addEventListener('click', () => this.elfInput.click());
     $('sc-varclear').addEventListener('click', () => { this.selected = []; this.renderVars(); this.updatePlan(); });
@@ -184,12 +184,24 @@ export class ScopeView {
     }
   }
 
-  async connectUsb(){
+  /**
+   * 连数据端点（WebUSB 的 0x83）。
+   * request=true 弹设备框；false 时先用浏览器**已授权**的设备直接连
+   * （和 HID 的「重连」一个道理：授权过一次就不用再点弹框，自动化测试也走这条路）。
+   */
+  async connectUsb(request = true){
     if (this.usingMock){ this.setStatusText('假探针模式下不需要数据端点', 'warn'); return; }
     try {
-      this.transport = await VendorEpTransport.request();
+      if (request){
+        this.transport = await VendorEpTransport.request();
+      } else {
+        const list = await VendorEpTransport.authorized();
+        if (!list.length) throw new Error('浏览器里没有已授权的探针（先点「连接数据端点…」授权一次）');
+        this.transport = new VendorEpTransport(list[0]);
+        await this.transport.open();
+      }
       $('sc-usbinfo').textContent = this.transport.label;
-      this.setStatusText('数据端点已就绪', 'ok');
+      this.setStatusText('数据端点已就绪：' + this.transport.label, 'ok');
     } catch (e){
       $('sc-usbinfo').textContent = '连接失败：' + (e?.message || e);
       this.setStatusText('连接数据端点失败：' + (e?.message || e), 'err');
@@ -290,10 +302,15 @@ export class ScopeView {
     const plan = P.planReads(vars);
     this.plan = plan;
     const khz = Math.round(plan.estHz / 1000);
+    // 单变量 4 字节：固件有条"抱住 TAR + 流水读"的快路径（每拍只 1 次传输），
+    // 实测 ≈1.6 µs @60 MHz / ≈3.1 µs @45 MHz —— 模型那 6.7 µs 是按"3 次传输"算的，偏保守。
+    const fast = plan.spans.length === 1 && plan.frameBytes === 4;
     $('sc-plan').innerHTML = vars.length
       ? `读计划：${plan.spans.length} 个 span / 帧 ${plan.frameBytes} B · ` +
-        `预计 ≈${plan.estUs.toFixed(1)} µs/样本 → 上限 <b>≈${khz} kHz</b>` +
-        (plan.saved > 0.15 ? `（合并省了 ${(plan.saved * 100).toFixed(0)}%）` : '')
+        `模型估算 ≈${plan.estUs.toFixed(1)} µs/样本 → 上限 <b>≈${khz} kHz</b>` +
+        (fast ? '（单字快路径实测 ≈1.6 µs → 600 kHz 量级，点「标定真实速率」看真值）' : '') +
+        (plan.saved > 0.15 ? `（合并省了 ${(plan.saved * 100).toFixed(0)}%）` : '') +
+        (this.benchUs ? ` · <b>已标定 ${this.benchUs.toFixed(3)} µs</b>（${Math.round(1e3 / this.benchUs)} kHz）` : '')
       : '选好变量后会显示读计划与预计上限';
     // 触发通道下拉跟着变量走
     const sel = $('sc-trig-ch');
@@ -315,7 +332,7 @@ export class ScopeView {
     return sc.map((s, i) => ({ name: `mock${i}.${s}`, addr: 0x20000000 + i * 4, size: P.SCALARS[s].size, scalar: s }));
   }
 
-  periodUs(){ return Math.max(1, Number($('sc-period').value) || 100); }
+  periodUs(){ return Math.max(2, Number($('sc-period').value) || 100); }   // 固件下限是 2 µs（整数微秒）
   seconds(){ return Math.max(0.5, Number($('sc-seconds').value) || 20); }
 
   // ================================================================= 采样
@@ -338,6 +355,8 @@ export class ScopeView {
     this.stream = new P.PacketStream();
     this.seqT = new P.SeqTracker();
     this.timeU = new P.TimeUnwrap();
+    this._awaitDef = true;          // 起跑线：丢掉上一轮的残留包，等新一轮的 DEF
+    this.stalePackets = 0;
     this.trigger = new Trigger();
     this.applyTrigger(true);
     this.packets = 0; this.lost = 0; this.decodeErr = 0; this.probeDropped = 0; this.raw = [];
@@ -345,9 +364,21 @@ export class ScopeView {
 
     try {
       const clockKhz = Number($('sc-clock').value) || 0;
-      const flags = clockKhz >= 60000 ? 1 : 0;         // bit0 = 允许 60 MHz（文档 §7.1）
+      // flags：bit0 允许 60 MHz；bit5 采样期间自动暂停 CDC/串口桥（探针主循环那几百周期）
+      const flags = (clockKhz >= 60000 ? 1 : 0) | ($('sc-cdcoff')?.checked ? 0x20 : 0);
       if (clockKhz > 0) await this.hidXfer(P.HID_CMD, P.clockData(clockKhz * 1000));
       await this.hidXfer(P.HID_CMD, P.configData({ periodUs, flags, vars }));
+
+      /**
+       * 🚨 **先开数据面读，再让探针开跑** —— 顺序反了会丢起跑线。
+       *    真机实测的教训：早先先发 START、再轮询 STATUS 等启动码（那是 120~240 ms），
+       *    这期间探针已经灌了几百个包，而设备只有 4 个包缓冲 ⇒ 最先发出的 **DEF 包
+       *    早就被丢掉**，于是"等 DEF 当起跑线"的守卫永远等不到、新采集一个样本都没有。
+       *    现在先 start() 读起来（顺便把上一轮的残留吃掉），再发 START。
+       */
+      await this.transport.start(chunk => this.onChunk(chunk));
+      this._awaitDefSince = performance.now();
+
       let rc = P.START_PENDING;
       await this.hidXfer(P.HID_CMD, P.flagsData(P.ACT.START));
       for (let i = 0; i < 20 && rc === P.START_PENDING; i++){    // -100 = 排队中，轮询等结果
@@ -356,10 +387,10 @@ export class ScopeView {
         rc = this.signed(res?.[2]);
       }
       if (rc < 0 && rc !== P.START_PENDING){
+        await this.transport.stop().catch(() => {});
         this.setStatusText('探针启动失败：' + P.scopeRcText(rc), 'err');
         return;
       }
-      await this.transport.start(chunk => this.onChunk(chunk));
       this.running = true;
       this.follow = true;
       this.state = '采样中';
@@ -367,6 +398,7 @@ export class ScopeView {
         (this.trigger.mode !== TRIG.NONE ? '（触发已布防）' : ''), 'ok');
     } catch (e){
       this.running = false;
+      try { await this.transport?.stop(); } catch { /* 忽略 */ }
       this.setStatusText('启动失败：' + (e?.message || e), 'err');
     }
     this.syncButtons();
@@ -385,19 +417,35 @@ export class ScopeView {
     this._needDraw = true;
   }
 
-  /** 探针侧标定：用当前计划空跑，回报每样本的真实耗时（M0）*/
+  /** 探针侧标定：用当前计划空跑，回报每样本的真实耗时（M0）。
+   *  🚨 必须**先**把当前 UI 上的周期/变量表/时钟发下去 —— 否则标定测的是**上一次**的配置
+   *     （真机实测：单变量那次报 11.088 µs，8 通道那次报 1.522 µs，正好是对方的数）。
+   *  顺带读固件回报的 **实际装载了哪个 blob** 与 `clock_delay` —— 没有这个数就分不出
+   *  "时钟命令被忽略" 和 "生效了但没差别"（他们的 README 里就是被这个坑咬过）。*/
   async bench(){
     if (!this.hid){ this.setStatusText('先连探针', 'warn'); return; }
     try {
+      const vars = (this.selected.length ? this.selected : (this.usingMock ? this.mockVars() : []));
+      if (!vars.length){ this.setStatusText('先选变量再标定（标定用的是当前计划）', 'warn'); return; }
+      const clockKhz = Number($('sc-clock').value) || 0;
+      const flags = (clockKhz >= 60000 ? 1 : 0) | ($('sc-cdcoff')?.checked ? 0x20 : 0);
+      if (clockKhz > 0) await this.hidXfer(P.HID_CMD, P.clockData(clockKhz * 1000));
+      await this.hidXfer(P.HID_CMD, P.configData({ periodUs: this.periodUs(), flags, vars }));
+      this.plan = this.updatePlan();
       await this.hidXfer(P.HID_CMD, P.benchData({ iters: 2000 }));
-      await sleep(400);
+      await sleep(600);
       const res = await this.hidXfer(P.HID_CMD, Uint8Array.of(P.ACT.BENCH_RESULT));
       const dv = new DataView(res.buffer, res.byteOffset, res.byteLength);
-      const ticks = dv.getUint32(3, true), iters = dv.getUint32(7, true);
-      const usPerSample = iters ? (ticks / 24) / iters : 0;      // MCHTMR 24 MHz
+      const ticks = dv.getUint32(3, true), iters = dv.getUint32(7, true), err = dv.getInt32(11, true);
+      const blob = dv.getUint32(15, true), delay = dv.getUint32(19, true);
+      const usPerSample = iters ? (ticks / 24) / iters : 0;
       this.benchUs = usPerSample;
-      this.setStatusText(`标定：${usPerSample.toFixed(2)} µs/样本 → 上限 ≈${Math.round(1e3 / usPerSample)} kHz` +
-        (this.plan ? `（模型估算 ${this.plan.estUs.toFixed(2)} µs）` : ''), 'ok');
+      const blobName = { 0x53c: '60M(6 指令/bit)', 0x60c: '45M(8)', 0x6e0: '36M(10)', 0x7c4: '30M(12)',
+                         0xa54: '20M(18)', 0x620: 'SLOW', 0xffffffff: '还没装载' }[blob] || `0x${blob.toString(16)}`;
+      this.blob = { offset: blob, name: blobName, delay };
+      this.setStatusText(`标定：${usPerSample.toFixed(3)} µs/样本 → 上限 ≈${Math.round(1e3 / usPerSample)} kHz` +
+        `（blob ${blobName}，clock_delay=${delay}${err ? `，err=${err}` : ''}）` +
+        (this.plan ? `；模型估算 ${this.plan.estUs.toFixed(2)} µs` : ''), 'ok');
     } catch (e){
       this.setStatusText('标定失败：' + (e?.message || e), 'err');
     }
@@ -418,6 +466,30 @@ export class ScopeView {
       this.raw.push(copy); this.rawBytes = (this.rawBytes || 0) + copy.length;
     }
     for (const pkt of this.stream.push(chunk)){
+      /**
+       * 🚨 **等 DEF 当"起跑线"**：探针的 4 个包缓冲和主机侧在飞的读里，
+       *    可能还留着**上一轮**没取走的包（上一轮的帧长/变量表都可能不同）。
+       *    真机上就撞到了：上一轮是单变量（4 B 帧），新的一轮是 8 通道（26 B 帧），
+       *    残留的 4 B 流被按 26 B 解 → 前 100 多个样本是垃圾，
+       *    而且时间戳往回跳 → `TimeUnwrap` 以为绕了 32 位 → 实测速率算成 55 Hz。
+       *    每次 start 探针都会**先发一个 DEF**，拿它当新一轮的起跑线最可靠。
+       */
+      if (this._awaitDef){
+        if (pkt.kind !== P.KIND.DEF){
+          this.stalePackets = (this.stalePackets || 0) + 1;
+          // 兜底：1.5 s 还没等到 DEF 就别死等（万一固件版本不发 DEF），
+          // 退化成"按本地变量表解码"，并在状态栏说清楚 —— 而不是一个样本都没有还不解释
+          if (this._awaitDefSince && performance.now() - this._awaitDefSince > 1500){
+            this._awaitDef = false;
+            this.setStatusText(`没等到探针的 DEF 包（已丢 ${this.stalePackets} 个残留包），` +
+              '按本地变量表解码 —— 波形若有错位请检查固件版本', 'warn');
+          } else {
+            continue;
+          }
+        } else {
+          this._awaitDef = false;
+        }
+      }
       this.packets++;
       const st = this.seqT.note(pkt.seq);
       if (!st.ok && st.why === 'gap') this.lost += st.missing || 1;
@@ -455,6 +527,8 @@ export class ScopeView {
         case P.KIND.STAT: {
           const s = P.parseStat(pkt.payload);
           this.probeDropped = s.dropped;
+          this.usbDrop = s.usbErr;                 // 固件 w4 高 16 位 = 无缓冲丢样本（主机排空不及）
+          this.probeYield = 0;
           this.swdMhz = s.swdMhz;
           if (s.periodUs) this.periodActualUs = s.periodUs;
           break;
@@ -622,8 +696,12 @@ export class ScopeView {
     $('sc-samples').textContent = String(st?.count || 0);
     $('sc-rate').textContent = rate ? `${(rate / 1000).toFixed(2)} kHz` : '0 Hz';
     $('sc-packets').textContent = String(this.packets);
-    const lost = this.lost + (this.probeDropped || 0) + (st?.overrun || 0);
-    $('sc-lost').textContent = String(lost);
+    // 🚨 三种"丢"要**分开显示**：探针跳拍是探针 CPU 的账，USB 是主机排空的账，缺口是链路层
+    const lostProbe = (this.probeDropped || 0) + (this.probeYield || 0);
+    const lostUsb = this.usbDrop || 0;
+    $('sc-lost').textContent = String(lostProbe);
+    $('sc-lostusb').textContent = String(lostUsb);
+    $('sc-gap').textContent = String(this.lost + (st?.overrun || 0));
     $('sc-buf').textContent = st ? `${Math.round(st.count / st.capacity * 100)}%` : '0%';
     $('sc-mem').textContent = st ? fmtBytes(st.bytes()) : '0 B';
     $('sc-mhz').textContent = this.swdMhz ? `${this.swdMhz} MHz` : '—';
@@ -676,6 +754,12 @@ export class ScopeView {
       capacity: st?.capacity || 0,
       packets: this.packets,
       lost: this.lost + (this.probeDropped || 0) + (st?.overrun || 0),
+      lostProbe: this.probeDropped || 0,          // 探针跳拍（探针 CPU 的账）
+      lostUsb: this.usbDrop || 0,                 // 无缓冲丢样本（主机排空的账）
+      lostGap: this.lost + (st?.overrun || 0),    // seq 缺口 + 缓冲溢出
+      benchUs: this.benchUs || null,
+      blob: this.blob || null,
+      connectErr: this.connectErr || null,
       rateHz: Math.round(st?.rate() || 0),
       trigger: { mode: this.trigger.mode, hit: this.trigger.hitIndex, hits: this.trigger.hits,
                  marker: !!this.renderer.trigger },

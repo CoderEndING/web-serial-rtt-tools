@@ -49,7 +49,8 @@ export class VendorEpTransport {
 
   get label(){
     const d = this.device;
-    return `${d?.productName || 'akaLinkPro'} · EP 0x${this.ep.toString(16)} · ${this.chunkBytes} B/读 × ${this.inFlight}`;
+    const addr = (this.epAddr || (this.ep | 0x80)).toString(16);
+    return `${d?.productName || 'akaLinkPro'} · EP 0x${addr} · ${this.chunkBytes} B/读 × ${this.inFlight}`;
   }
 
   /** 打开设备、找到带 0x83 的那个接口并认领 */
@@ -60,16 +61,29 @@ export class VendorEpTransport {
     let found = null;
     for (const iface of d.configuration.interfaces){
       for (const alt of iface.alternates){
-        const ep = (alt.endpoints || []).find(e => e.endpointNumber === this.ep && e.type === 'bulk' && e.direction === 'in');
+        /**
+         * 🚨 Chrome 的 WebUSB 报的 `endpointNumber` **不含方向位**：
+         *    描述符里的 `0x83`（IN EP3）这里读出来是 `3`、`0x02`（OUT EP2）是 `2`、
+         *    `0x81`（IN EP1）是 `1`。第一版按 `=== 0x83` 找，真机上永远找不到
+         *    （"这个设备没有 bulk IN 端点 0x83"）—— 只有上真机才会暴露，假探针测不出来。
+         *    而 `transferIn(ep)` / `clearHalt('in', ep)` 收的也是**这个不带方向位的编号**
+         *    （既有的 CMSIS-DAP 通路就是这么用的，所以它一直好使）。
+         */
+        const ep = (alt.endpoints || []).find(e =>
+          e.endpointNumber === (EP_SCOPE & 0x7f) && e.type === 'bulk' && e.direction === 'in');
         if (ep){ found = { iface, ep }; break; }
       }
       if (found) break;
     }
     if (!found){
-      throw new Error(`这个设备没有 bulk IN 端点 0x${this.ep.toString(16)} —— ` +
-        '是不是旧固件（SWO 端点没接出来）？或者选错设备了');
+      const seen = d.configuration.interfaces.flatMap(i => i.alternates.flatMap(a =>
+        (a.endpoints || []).map(e => `0x${(e.endpointNumber | (e.direction === 'in' ? 0x80 : 0)).toString(16)}/${e.type}`)));
+      throw new Error('没找到 bulk IN 端点 0x83（SWO 端点）—— 旧固件？选错设备了？' +
+        `这个设备暴露的端点：${seen.join(' ') || '(无)'}`);
     }
     this.iface = found.iface.interfaceNumber;
+    this.ep = found.ep.endpointNumber;         // 注意：不带方向位的编号（0x83 → 3）
+    this.epAddr = this.ep | 0x80;              // 描述符里的地址，只用于显示/排障
     try { await d.claimInterface(this.iface); }
     catch (e){ throw new Error(`占用 USB 接口失败：${e.message}（RTT Viewer / OpenOCD 是不是还开着？）`); }
     // 认领后清一次端点：上一场会话（或上一次断开）可能残留数据
