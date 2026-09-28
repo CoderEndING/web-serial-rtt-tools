@@ -356,6 +356,21 @@ console.log('== 6. 触发（实时 + 离线重定位）==');
 
 console.log('== 7. 停止 / 导出 CSV / 记录原始包 ==');
 {
+  // 「时长」= 目标侧真实时间，不是"攒够名义速率×时长 个样本" —— 用户实测："时长3s，怎么我采出来的有6.6s?"
+  const stop = await ev(`
+    const sc = window.__tools.scope, st = sc.store;
+    const d = { state: sc.state, stopAfter: sc._stopAfterUs, cap: st.capacity, count: st.count, full: st.full, tsN: st.tsN,
+                spanS: +((st.timeAt(st.count - 1) - st.timeAt(0)) / 1e6).toFixed(3), over: st.overrun, running: sc.running };
+    await sc.stop();
+    const after = { state: sc.state, count: sc.store.count, buf: document.getElementById('sc-buf').textContent,
+                    over: document.getElementById('sc-over').textContent };
+    return { d, after };`);
+  ok(stop.d.running === false && /时长到/.test(stop.d.state),
+     `到点自己停了，而且说清是"时长到"：${stop.d.state.slice(0, 46)}`);
+  ok(Math.abs(stop.d.spanS - 5) < 0.15,
+     `采到的时长就是要求的 5 s（实测 ${stop.d.spanS} s，缓冲只用了 ${Math.round(stop.d.count / stop.d.cap * 100)}%）`);
+  ok(stop.d.full === false && stop.d.over === 0,
+     `到点时缓冲没满、溢出为 0（满=${stop.d.full} 溢出=${stop.d.over}）—— 以前这里会涨成"缺口 1924246"那种数`);
   await ev(`document.getElementById('sc-stop').click(); return true;`);
   await sleep(500);
   const s = await ev('return window.__tools.scope.summary();');
@@ -480,6 +495,35 @@ console.log('== 10. HID 句柄作废（探针被复位过）能自愈 ==');
     finally { navigator.hid.getDevices = orig; }`);
   ok(r2.threw === true && /复位\/拔插|重连|拔插一次/.test(r2.msg),
      '设备真的没了时给出可操作的中文提示：' + String(r2.msg).slice(0, 70));
+}
+
+console.log('== 11. 探针跟不上时，「时长」也不能被拖长（用户实测：要 3 s 采出 6.6 s）==');
+{
+  // 复现用户现场的关键点：周期填得比探针实际能做的还短（名义 500 kHz，实得只有几十 kHz），
+  // 老代码按"名义速率 × 时长 × 1.25"开缓冲、满了才停 ⇒ 实际采到的时长被拉长到 2 倍多。
+  // 现在按真实时间轴到点就停，缓冲只当内存上限。
+  const r = await ev(`
+    const sc = window.__tools.scope;
+    document.getElementById('sc-mock').checked = true;
+    document.getElementById('sc-mock').dispatchEvent(new Event('change'));
+    // 假探针"实际做不到"请求的周期：周期 5 µs 想要 200 kHz，每样本实际要 11 µs ⇒ 实得 90.9 kHz，
+    // 和用户现场（要 200 kHz / 实得 112.9 kHz）同一类。老代码据此把 3 s 采成了 6.6 s。
+    sc.mockProbe.slowdown = 2.2;
+    document.getElementById('sc-period').value = '5';
+    document.getElementById('sc-seconds').value = '3';
+    await sc.start();
+    const at = { cap: sc.store.capacity, stopAfter: sc._stopAfterUs };
+    await new Promise(r2 => setTimeout(r2, 4200));            // 给足时间让它自己停
+    const st = sc.store;
+    const spanS = (st.timeAt(st.count - 1) - st.timeAt(0)) / 1e6;
+    return { at, running: sc.running, state: sc.state, count: st.count, spanS, full: st.full,
+             overrun: st.overrun, rate: st.rate(),
+             buf: document.getElementById('sc-buf').textContent };`);
+  ok(r.running === false, `到点自动停了（${r.state.slice(0, 40)}）`);
+  ok(Math.abs(r.spanS - 3) < 0.2,
+     `要 3 s 就只采 3 s：实测 ${r.spanS.toFixed(3)} s（实得 ${(r.rate / 1000).toFixed(1)} kHz，名义 200 kHz —— 老代码这里会跑成 6.6 s）`);
+  ok(r.full === false && r.overrun === 0 && r.count < r.at.cap,
+     `缓冲没满、也没有溢出帧（${r.count}/${r.at.cap} 样本 · ${r.buf} · 溢出 ${r.overrun}）`);
 }
 
 console.log(`\n${fail ? '❌' : '✅'} scope-page.test: ${pass} 通过 / ${fail} 失败`);

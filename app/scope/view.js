@@ -424,12 +424,24 @@ export class ScopeView {
     // 单变量 4 字节：固件有条"抱住 TAR + 流水读"的快路径（每拍只 1 次传输），
     // 实测 ≈1.6 µs @60 MHz / ≈3.1 µs @45 MHz —— 模型那 6.7 µs 是按"3 次传输"算的，偏保守。
     const fast = plan.spans.length === 1 && plan.frameBytes === 4;
+    /**
+     * 周期比"读一次"还短 ⇒ 探针必然跳拍，时间轴上会留空洞（主机看到的是洞，不是被压缩）。
+     * 用户实测就是踩在这里：周期填 5 µs 想要 200 kHz，实得 112.9 kHz，
+     * 于是「时长 3 s」按名义速率开出来的缓冲被填满花了 6.6 s。**这是开始采样前就该看见的**。
+     */
+    const wantHz = 1e6 / this.periodUs();
+    const estUs = this.benchUs || plan.estUs;
+    const slow = wantHz > 1e6 / estUs
+      ? `　⚠️ 你填的周期 ${this.periodUs()} µs（${(wantHz / 1000).toFixed(0)} kHz）快过这个${this.benchUs ? '标定值' : '估算'}：` +
+        `探针会跳拍，实得约 ${(1e6 / estUs / 1000).toFixed(1)} kHz（时长仍按真实时间轴算，不会拖长）`
+      : '';
     $('sc-plan').innerHTML = vars.length
       ? `读计划：${plan.spans.length} 个 span / 帧 ${plan.frameBytes} B · ` +
         `模型估算 ≈${plan.estUs.toFixed(1)} µs/样本 → ≈${khz} kHz（**偏保守**：单字 span 有快路径，实测 ≈1.6 µs → 600 kHz 量级）` +
         (plan.saved > 0.15 ? `（合并省了 ${(plan.saved * 100).toFixed(0)}%）` : '') +
         (this.benchUs ? ` · <b>已标定：读一次 ${this.benchUs.toFixed(3)} µs</b>（上限 ${Math.round(1e3 / this.benchUs)} kHz，建议周期 ≥ ${this.recPeriodUs} µs）` : '') +
-        '（周期下限 2 µs；周期 < 读一次 的耗时就会跳拍丢样本）'
+        '<br>时长 = **目标侧真实时间**，到点自动停（缓冲只是内存上限）' +
+        (slow || '（周期下限 2 µs；周期 < 读一次的耗时就会跳拍丢样本）')
       : '选好变量后会显示读计划与预计上限';
     // 触发通道下拉跟着变量走
     const sel = $('sc-trig-ch');
@@ -471,7 +483,14 @@ export class ScopeView {
 
     const periodUs = this.periodUs();
     const nominalHz = 1e6 / periodUs;
-    let capacity = Math.ceil(nominalHz * this.seconds() * 1.25) + 64;
+    /**
+     * 缓冲容量只是**内存预算**，不再是"时长"的实现方式（见 _stopAfterUs）。
+     * 1.1 的余量够用：探针的周期是下限，实得速率不会超过名义速率；
+     * 真超了也还有"缓冲满就停"兜底。老代码用 1.25 还指望它凑时长，白占 25% 内存。
+     */
+    let capacity = Math.ceil(nominalHz * this.seconds() * 1.1) + 64;
+    this._stopAfterUs = Math.round(this.seconds() * 1e6);
+    this._stopReason = null;
     /**
      * 🚨 内存闸：周期可以设到 2 µs、时长可以设到几百秒，两者一乘就是几千万样本 ——
      *    8 通道 × 2 B × 1200 万 = 两百多 MB，标签页会卡死甚至崩。
@@ -548,8 +567,10 @@ export class ScopeView {
       this.follow = true;
       this.state = '采样中';
       // 周期比"读一次"还短 ⇒ 必丢拍（固件侧的账），这一条要当面说清楚
-      const tooFast = (this.benchUs && periodUs < this.benchUs)
-        ? `　⚠️ 周期 ${periodUs} µs 小于"读一次"的 ${this.benchUs.toFixed(2)} µs，探针会跳拍丢样本（建议 ≥ ${this.recPeriodUs} µs）` : '';
+      const estUs = this.benchUs || this.plan?.estUs || 0;
+      const tooFast = (estUs && periodUs < estUs)
+        ? `　⚠️ 周期 ${periodUs} µs 小于${this.benchUs ? '标定' : '模型估算'}的每样本 ${estUs.toFixed(2)} µs，探针会跳拍丢样本（实得约 ${(1e6 / estUs / 1000).toFixed(0)} kHz，时长不受影响）`
+        : '';
       this.setStatusText(`采样中：${vars.length} 通道 × ${(1e6 / periodUs / 1000).toFixed(2)} kHz，缓冲 ${capacity} 样本` +
         (this.trigger.mode !== TRIG.NONE ? '（触发已布防）' : '') + tooFast + wireNote + capNote,
       (tooFast || wireNote || capNote) ? 'warn' : 'ok');
@@ -562,16 +583,30 @@ export class ScopeView {
     this._needDraw = true;
   }
 
-  async stop(){
+  async stop(reason){
     if (!this.running && !this.transport?.running) return;
     this.running = false;
     try { await this.transport.stop(); } catch { /* 忽略 */ }
     try { await this.hidXfer(P.HID_CMD, P.flagsData(P.ACT.STOP)); } catch { /* 忽略 */ }
-    this.state = '已停止';
-    this.setStatusText(`已停止：${this.store?.count || 0} 个样本` +
-      (this.lost ? `，丢 ${this.lost} 个（seq 缺口）` : '，零丢包'), this.lost ? 'warn' : 'ok');
+    const st = this.store;
+    const spanUs = st?.count > 1 ? st.timeAt(st.count - 1) - st.timeAt(0) : 0;
+    const why = reason || this._stopReason;
+    this._stopReason = null;
+    this.state = why ? `已停止（${why}）` : '已停止';
+    this.setStatusText(`已停止${why ? `（${why}）` : ''}：${st?.count || 0} 个样本` +
+      (spanUs ? ` / ${fmtTime(spanUs)}` : '') +
+      (this.lost ? `，丢 ${this.lost} 个（seq 缺口）` : '，零丢包'), why === '缓冲已满' || this.lost ? 'warn' : 'ok');
     this.syncButtons();
     this._needDraw = true;
+  }
+
+  /** 自动收尾：谁来喊停（时长到 / 缓冲满）都走这里，保证"说停了就真停"。
+   *  🚨 老代码只在状态文字里写"缓冲已满：采样自动停止"，**其实根本没停** ——
+   *     用户实测 3 s 的采集跑了 20 多秒，多出来的帧全记成 overrun（界面显示"缺口 1924246"）。*/
+  _autoStop(reason){
+    if (!this.running || this._stopReason) return;
+    this._stopReason = reason;
+    this.stop().catch(() => {});
   }
 
   /** 探针侧标定：用当前计划空跑，回报每样本的真实耗时（M0）。
@@ -693,6 +728,13 @@ export class ScopeView {
           break;
         }
         case P.KIND.DATA: {
+          /**
+           * 🚨 收工之后**不再往缓冲里塞**。stop() 是异步的（要等 transport.stop() 排空、还要发 HID STOP），
+           *    这期间设备和已排队的分片还在送包 —— 实测"时长到 5.001 s"之后又灌进来 1612 个样本，
+           *    还把缓冲挤满（界面显示 100% + 溢出计数），停下来那一刻的数字全不可信。
+           *    起跑阶段（running=false）本来也只吃 DEF 当起跑线，DATA 丢掉正是要的行为。
+           */
+          if (!this.running) break;
           if (this.defMismatch) break;              // 变量表对不上：不解码（见 DEF 分支的说明）
           const vars = this.defVars || this.store?.vars;
           if (!vars?.length) break;
@@ -721,6 +763,17 @@ export class ScopeView {
               this.renderer.setTrigger({ index: idx, pre: this.trigger.pre, post: this.trigger.post });
             }
           }
+          /**
+           * 🚨「时长」= **目标侧过了多久**，不是"攒够多少个样本"。
+           *    老算法把缓冲按"名义速率 × 时长 × 1.25"开好、满了才停，而探针达不到名义速率时
+           *    （用户实测：周期 5 µs 想要 200 kHz，实得 112.9 kHz）就会采出 6.6 s —— 用户原话
+           *    "时长3s，怎么我采出来的有6.6s?"。现在按 store 的真实时间轴到点就停。
+           */
+          if (this.running && this._stopAfterUs > 0 && this.store.count > 1){
+            const span = this.store.timeAt(this.store.count - 1) - this.store.timeAt(0);
+            if (span >= this._stopAfterUs) this._autoStop(`时长到 ${fmtTime(span)}`);
+          }
+          if (this.running && this.store.full) this._autoStop('缓冲已满');
           break;
         }
         case P.KIND.STAT: {
@@ -902,12 +955,15 @@ export class ScopeView {
     $('sc-samples').textContent = String(st?.count || 0);
     $('sc-rate').textContent = rate ? `${(rate / 1000).toFixed(2)} kHz` : '0 Hz';
     $('sc-packets').textContent = String(this.packets);
-    // 🚨 三种"丢"要**分开显示**：探针跳拍是探针 CPU 的账，USB 是主机排空的账，缺口是链路层
+    // 🚨 三种"丢"要**分开显示**：探针跳拍是探针 CPU 的账，USB 是主机排空的账，缺口是链路层。
+    //    overrun（缓冲满之后还在来的帧）单独算一类 —— 它以前被混进"缺口"，
+    //    用户看到过"缺口 1924246"这种吓人的数（其实是采集没停、白收了 17 s）。
     const lostProbe = (this.probeDropped || 0) + (this.probeYield || 0);
     const lostUsb = this.usbDrop || 0;
     $('sc-lost').textContent = String(lostProbe);
     $('sc-lostusb').textContent = String(lostUsb);
-    $('sc-gap').textContent = String(this.lost + (st?.overrun || 0));
+    $('sc-gap').textContent = String(this.lost);
+    if ($('sc-over')) $('sc-over').textContent = String(st?.overrun || 0);
     $('sc-buf').textContent = st ? `${Math.round(st.count / st.capacity * 100)}%` : '0%';
     $('sc-mem').textContent = st ? fmtBytes(st.bytes()) : '0 B';
     $('sc-mhz').textContent = this.swdMhz ? `${this.swdMhz} MHz` : '—';
@@ -930,7 +986,17 @@ export class ScopeView {
         (this.follow ? ' · 跟随最新' : '')
       : '';
     this.renderLegend();
-    if (st?.full && this.running) this.setStatusText('缓冲已满：采样自动停止（要更长时间就把「时长」调大）', 'warn');
+    // 采集中：把"已采多久 / 想要多久"和缓冲占用一起摆出来 —— 用户就是被"时长 3 s 却采出 6.6 s"坑到的。
+    // 4 Hz 刷新够了（别每帧刷，也别把别处的提示语一直盖掉），跟不上周期时才标黄。
+    if (this.running && st?.count > 1 && this._stopAfterUs > 0 && performance.now() - (this._lastProg || 0) > 250){
+      this._lastProg = performance.now();
+      const spanUs = st.timeAt(st.count - 1) - st.timeAt(0);
+      const lag = this._periodUs && rate && rate < 1e6 / this._periodUs * 0.8;
+      this.setStatusText(`采样中 ${fmtTime(spanUs)} / ${fmtTime(this._stopAfterUs)}` +
+        `（${st.count} 样本 · 实得 ${(rate / 1000).toFixed(1)} kHz · 缓冲 ${Math.round(st.count / st.capacity * 100)}%）` +
+        (lag ? `　⚠️ 探针跟不上 ${this._periodUs} µs 的周期，时间轴会有空洞（点「标定真实速率」看它到底要多久）` : ''),
+        lag ? 'warn' : '');
+    }
   }
 
   renderLegend(){

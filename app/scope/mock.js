@@ -40,6 +40,7 @@ export class MockScopeProbe {
     this.vars = [];
     this.periodUs = opts.periodUs ?? 100;          // 10 kHz
     this.periodUsActual = this.periodUs;
+    this.slowdown = opts.slowdown ?? 1;            // 探针跟不上请求周期时的倍数（见 poll()）
     this.swdMhz = opts.swdMhz ?? 45;
     this.dropEvery = opts.dropEvery ?? 0;
     this.stallAfter = opts.stallAfter ?? 0;
@@ -181,31 +182,35 @@ export class MockScopeProbe {
     return this._startRcValue ?? 0;
   }
 
-  /** 模拟时间推进：按 periodUs 产出样本，返回 512 B 包数组 */
+  /** 模拟时间推进：按 periodUs 产出样本，返回 512 B 包数组。
+   *  `slowdown` = 探针**实际**做不到请求的周期时要乘的倍数（真机常态：周期是下限，不是承诺）。
+   *  例：周期填 5 µs 想要 200 kHz，探针每样本要 11 µs ⇒ slowdown = 2.2，实得 90.9 kHz ——
+   *  时间轴照实推进，于是"名义速率 × 时长"开出来的缓冲会被提前/滞后填满（用户正是被这个坑到）。*/
   poll(nowUs){
     if (!this.running) return [];
     if (this._lastPollUs == null) this._lastPollUs = nowUs;
     if (this.stallAfter && this.produced >= this.stallAfter) return [];   // 卡住（不发也不涨）
-    const want = Math.floor((nowUs - this._lastPollUs) / this.periodUs);
+    const perEff = this.periodUs * (this.slowdown || 1);
+    const want = Math.floor((nowUs - this._lastPollUs) / perEff);
     if (want <= 0) return [];
-    this._lastPollUs += want * this.periodUs;
+    this._lastPollUs += want * perEff;
     const out = [];
     if (!this._sentDef){ out.push(buildDef({ seq: this.seq++, swdHz: Math.round(this.swdMhz * 1e6),
                                              periodUs: this.periodUs, flags: this._discarding ? 1 : 0,
                                              vars: this.vars }));
       this._sentDef = true; this.pkts++; }
-    for (let i = 0; i < want; i++) this._emit(out);
+    for (let i = 0; i < want; i++) this._emit(out, perEff);
     return out;
   }
 
-  _emit(out){
+  _emit(out, perEff = this.periodUs){
     if (this.stallAfter && this.produced >= this.stallAfter) return;
     const dropped = this.dropEvery && (this.produced % this.dropEvery === 0) && this.produced > 0;
     this.produced++;
     if (dropped){ this.dropped++; return; }
     const nums = this.vars.map((v, k) => this.valueAt(k, this._n));
     const spp = Math.max(1, samplesPerPacket(this.frameBytes()));
-    if (this._packetAccum.length === 0) this._pktT0 = this._n * this.periodUs;  // 包内**第一个**样本的时刻
+    if (this._packetAccum.length === 0) this._pktT0 = this._n * perEff;  // 包内**第一个**样本的时刻
     this._packetAccum.push(nums);
     this._n++;
     if (this._packetAccum.length >= spp){
