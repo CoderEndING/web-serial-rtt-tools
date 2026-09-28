@@ -1,0 +1,468 @@
+# J-Scope 波形页（探针侧 HSS 采样）方案
+
+**状态**：方案待评审（未动代码）。用户已拍板的前提见 §0。
+**目标页**：新标签 `#scope`「J-Scope 波形」，排在「RTT 转发」之后（第 5 个）。
+**数据来源**：探针（akaLinkPro）自己通过 SWD 周期读目标 RAM → 经**已有的空闲 bulk IN 端点**推给网页 → 网页解码、绘图、触发、导出。
+
+---
+
+## 0. 已拍板的范围（用户 2026-09-29 决策）
+
+| 项 | 决定 |
+|---|---|
+| 页面名 | **`#scope`**，标签文字「J-Scope 波形」 |
+| 路线 | **只做 A**：探针侧 HSS 采样（目标固件**一行不改**） |
+| 传输 | **WinUSB（vendor bulk EP）**，不走 CDC |
+| 变量数 | **1~8 个**（8 是上限）：由探针从**任意地址**读，读完自己组装成包发给主机 |
+| 变量类型 | `u8/i8/u16/i16/u32/i32/f32/f64` 已确认够用 |
+| 采样率 | **尽量高，做极限优化**（具体上限由 §6 的标定确定） |
+| SWD 时钟 | **由页面下拉设置**，与「RTT Viewer」的 WebUSB 那档同款（自动 + 1/5/10/20/30/40/45/50/60 MHz），运行时生效 |
+| 单次时长 | **20 s**（够） |
+| 变量挑选范围 | 全局/静态变量 + 结构体成员（不做局部变量、指针跟踪） |
+| 导出 | CSV 够 |
+| 触发 | **要做** |
+| 靶子固件 | 由本仓库提供：`tools/target-firmware/stm32f103_scope/`（F103，波形/变量自己定，见 §11.3） |
+| 其它页面 | **不改**「RTT 转发」页（不做二进制帧识别） |
+
+**明确不做**：目标侧发送通路、数据下行写目标、局部变量、指针跟踪、SWO 复用、断点式采样。
+
+---
+
+## 1. 结论摘要（先看这个）
+
+1. **不需要新增 USB 端点、不用改描述符、不用新增 Windows 驱动绑定、不需要新的授权类型**：
+   探针 **interface 0**（就是 CMSIS-DAP v2 那个 vendor 接口，浏览器今天已在用它的 `0x81`/`0x02`）上
+   已经有**第三个 bulk IN 端点 `SWO_IN_EP = 0x83`（512 B/包）**，
+   在描述符里声明、在固件里注册，但**从未被写过**——因为 `SWO_STREAM=0 / SWO_UART=0 / SWO_MANCHESTER=0`，SWO 功能整个关着。
+   它天然就是"探针 → 网页"的第二条大水管。→ **方案 A 的数据面就走 0x83。**
+2. **瓶颈不是 USB，是 SWD 读**（固件自己的 bench：纯读 3434 KB/s），所以**变量在内存里的排布方式比什么都重要**：
+   8 个散落的全局变量 vs 8 个挨在一起（同一个结构体）**差 3~4 倍**（§6 有算式）。
+3. **"每次采样 = 一批 DAP 操作"而不是"8 次 `swd_read_memory`"**：现有 `swd_read_memory` 每次调用有 5 次传输的固定开销，
+   拿它读 8 个小变量是**最慢的写法**。方案是主机下"读计划"，探针用一条 `DAP_ExecuteCommand` 把 8 个地址读完。
+4. **页面上要显示"读计划 + 预计周期"**，让用户一眼看到自己的变量排布值多少钱。
+5. 传输层是**字节流 + 自描述 512 B 包**（magic/seq/时间戳），丢包能被发现、能被计数，**绝不静默丢**。
+
+---
+
+## 2. 已核实的事实（不是推测）
+
+### 2.1 探针侧（固件源码：`E:\Share\github\akaLinkPro\firmware\application_5301`）
+
+| 事实 | 出处 |
+|---|---|
+| 探针侧 RTT 桥**已经把"后台读目标 RAM"的骨架写全**：复用 DAP 引擎（`DAP_ExecuteCommand`） | `src/rtt/rtt_bridge.c:9-12,154` |
+| 它自带 DAP 仲裁：DAP 空闲 ≥ N ms 才轮询，单次上限 2048 B | `rtt_bridge.c:14-17,68,80` |
+| 纯 SWD 读实测 **3434 KB/s**（512 B 块）/ **3476 KB/s**（2048 B 块）；更大无收益 | `rtt_bridge.c:60-61` |
+| 60 MHz 档纯读 3312 / 交付 2954 KB/s，但**长跑不稳**（3×10 s 里有 1 次出错）；45 MHz 3/3 稳 | `rtt_bridge.c:39-43` |
+| 每次块读固定开销 = **CSW/TAR/prime/RDBUFF 共 5 次传输**（块越大摊得越薄） | `rtt_bridge.c:106-107` |
+| 时基 **MCHTMR 24 MHz**（采样时间戳就用它） | `rtt_bridge.c:79` |
+| 已有 **BENCH**（action 8/9）：`rtt_read_bytes()` 循环 + MCHTMR 计时 | `rtt_bridge.c:780-819` |
+| USB 是 **HS**；`DAP_PACKET_SIZE=512`、`DAP_XFER_SIZE=1024`、`DAP_PACKET_COUNT=4` | `src/dap/DAP_config.h:102,119,133` |
+| **`SWO_IN_EP = 0x83`，bulk IN，512 B**；在 config descriptor 里声明、`usbd_add_endpoint` 注册，**全仓库无任何 `usbd_ep_start_write(SWO_IN_EP…)`** | `src/usb/usb_composite.h:19`、`usb_composite.c:256,292,581-583,683` |
+| SWO 三个开关全 0 → SWO 功能未编译 | `DAP_config.h:137,147,153` |
+| 设备已是 **WinUSB + WebUSB 复合设备**（WCID/BOS 都在），浏览器今天就在用 interface 0 的 bulk 端点 | `usb_composite.c:17-45,264-266`；`app/rtt/dap-webusb.js:166-215` |
+| HID 命令空间：只用了 `0x01~0x04 / 0x10~0x17 / 0x31 / 0xfe / 0xff` → **`0x32` 空闲** | `app/hid/probe.js:22-28`、`api_param.c:50-60` |
+| `0x31` 的形状：`payload[2]=rc`，`payload[3..]=12 个 32 位状态字`（新命令照抄） | `app/hid/probe.js:14,80-108` |
+| HID 报文体 **63 B** → 一条命令正好装下 **8 个变量**（见 §7.1） | `app/hid/probe.js:20` |
+
+### 2.2 ELF / DWARF 侧（实测仓库里的真固件 ELF）
+
+用 `tmp/elf-peek.py`（pyelftools，未入库）扫过 `tools/target-firmware/*/build/fw.elf`：
+
+| 事实 | 数据 |
+|---|---|
+| 调试信息版本 | **DWARF 4**（10 个 CU），**没有** DWARF5 的 `.debug_str_offsets/.debug_addr` |
+| 用到的 form 很窄 | `DW_AT_name=strp\|string`、`DW_AT_type=ref4`、`DW_AT_location=exprloc\|sec_offset`、`DW_AT_data_member_location=data1\|data2`、`DW_AT_upper_bound=data1\|data2`、`DW_AT_byte_size=data1\|data2` |
+| 类型图谱规模（H7B0 那份） | 268 × `DW_TAG_variable`（48 个带固定地址）、985 × `DW_TAG_member`、74 × 数组、11 × 枚举、105 × typedef |
+| **`.symtab` 不够用** | 同一份 ELF 的符号表只有 24 个 `STT_OBJECT`（19 个在 RAM）；`static` 文件级变量在符号表里**根本看不见** |
+| 结论 | **变量浏览必须解析 DWARF**；符号表只够"按名字精确查找"（现有 `app/rtt/elf.js` 就是这种，71 行） |
+
+> 这三个例程（`tools/target-firmware/{stm32f103,stm32f103_rtt_speed,stm32h7b0_rtt_speed}`）就是用户认可的
+> "项目下的测试例程"，可以直接当 DWARF 解析的 fixture（真 ELF、DWARF 4）。
+> 但它们的 CU 级可采样变量只有 1~5 个（H7B0 那份只有 `g_bytes/g_loops/g_ms/g_sysclk_hz/g_clk_src` 一类），
+> **不够验证"8 个变量 + 结构体展开 + 数组"** —— 所以另外做了 `stm32f103_scope`（§11.3），
+> 它的变量契约是精确已知的，专门用来验收。
+
+---
+
+## 3. 总体架构
+
+```
+   .elf ──(DWARF4 子集解析)──▶ 变量表 ◀── 用户勾选 8 个
+                                │
+                    主机算「读计划」(地址分组/span 合并 + 预计周期)
+                                │
+                HID 0x32 CONFIG ┴────────────────────────────┐
+                                                             ▼
+                                              ┌────────── akaLinkPro 固件 ──────────┐
+   目标 RAM ◀──SWD(45/60 MHz)── 采样循环 ◀──── │ scope_sampler.c（照 rtt_bridge 骨架）│
+                                              │  周期由 MCHTMR 定；DAP 独占         │
+                                              └──────────────┬──────────────────────┘
+                                                             │ bulk IN 0x83（512 B/包）
+   网页：WebUSB transferIn(4096, 多条在飞) ◀──────────────────┘
+        └─▶ 包校验/重同步 ─▶ 按类型解码 ─▶ 类型化环形缓冲 + LOD 金字塔
+                                            └─▶ canvas 渲染 / 触发 / CSV / 原始录制
+   HID 0x32 STATUS 轮询（低速，看 dropped/时钟/实际周期）
+```
+
+四个解耦点（都很重要）：
+- **`SampleTransport`**（今天只有 `VendorEp` 一种实现；留 `Cdc` 接口备用，因为协议与载体无关）
+- **`ScopeProtocol`**（纯函数：组包/解析/丢包统计 → Node 自测）
+- **`SampleStore`**（类型化环形缓冲 + LOD；与 UI 无关 → 可单测）
+- **`SampleSource`**（真探针 / 假探针 / 文件回放，三选一 → 页面在没硬件时也能开发与自测）
+
+---
+
+## 4. 传输层：为什么是 0x83，而不是 CDC 或新端点
+
+| 方案 | 带宽 | 代价 | 结论 |
+|---|---|---|---|
+| **A. 复用 `SWO_IN_EP=0x83`（选定）** | HS bulk 512 B/包；**非 high-bandwidth 下 4 MB/s**，够（我们最多 ~2 MB/s） | 固件里给它写个 `usbd_ep_start_write(0x83,…)` + 完成回调；**SWO 不能同时用**（现在也没用）。浏览器侧：`0x83` 随同一个 USB 设备的 WebUSB 授权一起可用（该 origin 若还没授权过 WebUSB，需一次设备选择，和 RTT Viewer 共用） | ✅ 零描述符改动、零新增驱动绑定 |
+| B. CDC（现有 RTT 转发那条） | 实测**端口侧** 2468~2954 KB/s | 抢占 CDC 源（目标 UART 上不了 COM 口）；CDC 环 + 刷新定时器（1024 B / 200 µs~10 ms）带来**批量抖动**；且要过 Web Serial | ❌ 抖动与互斥都不划算 |
+| C. 新增一个独立 bulk EP | 更高 | 改描述符 + 重新绑定 WinUSB + 重新授权 + 可能影响 DFU/MSC 布局 | ❌ 收益为零（SWD 才是瓶颈） |
+
+**关于「Web Serial 够不够 3 MB/s」**：端口侧的 2.4~3.0 MB/s 是**脚本读 COM 口**测出来的；
+**浏览器 Web Serial 侧的持续吞吐我们还没测过**（`docs/rtt-cdc.md:74` 那个数字不是页面测的）。
+不过既然定了 0x83，这个问题就不存在了——**Web Serial 根本不参与**。
+（如果将来要留 CDC 退路，M0 里顺手测一次即可，成本 5 分钟。）
+
+**WebUSB 侧要实测的两件事（M0）**：
+1. `transferIn(0x83, 4096)` 的**持续吞吐**（保持 2~4 条在飞）；
+2. Chrome 对同端点**并发 transferIn** 的行为（排队深度、超时语义）。
+   注意 `app/rtt/dap-webusb.js:39-49` 记的教训：WebUSB **没有取消接口**，超时只是"我们不等了"，
+   底层传输仍会挂着并偷走下一条响应 → 流式接收的收尾必须**先停止探针推流、再把在飞的读全部收干净**，不能一超时就跑。
+
+---
+
+## 5. 帧格式（512 B 自描述包，可独立校验）
+
+每个 USB 包 **512 B 定长**，内部自描述；主机一次 `transferIn(4096)` 拿 8 个包一起解（自描述 ⇒ 坏包只影响自己）。
+
+```
+偏移  长  字段
+0     2   magic = 0x4A53（'J','S'）
+2     1   ver = 1
+3     1   kind   0x01 DEF / 0x02 DATA / 0x03 STAT / 0x04 EVT
+4     4   seq    每包 +1（DATA/STAT 共用一条序列，用来发现丢包）
+8     4   t_us   本包首个样本的时间戳（MCHTMR/24，µs 低 32 位，回绕可算）
+12    2   n      本包样本数（DEF 包填 0）
+14    2   aux    DATA：载荷有效字节数；STAT：事件码；DEF：变量数
+16    496 载荷
+```
+
+- **DATA**：载荷 = `n × frameBytes`，变量按变量表顺序紧排、各按自己的 `size` 小端。尾部补 0。
+  `frameBytes=32`（8×f32）→ `n=15`；`frameBytes=16` → `n=31`（正好 496）。
+- **DEF**：`swd_hz(4) period_us(4) flags(2) nvars(1)` + `nvars × (addr u32, size u8, typ u8, rsv u16)`
+  → 主机拿到它与自己的计划**比对**，不一致就报错（防止"配置没生效却在画图"）。
+- **STAT**：`produced(4) dropped(4) pkts(4) usb_err(2) swd_err(2) period_actual(4) swd_mhz(1) clk_delay(1)`
+  → 每 64 个包插一包，或按需插。**`dropped` 是硬指标**。
+- **EVT**：启动/停止/时钟降档/触发（v2 探针侧触发才会用）。
+
+**丢包判定**：`seq` 跳号 ⇒ 丢包；`t_us` 跳变 ⇒ 时间轴有洞；`STAT.dropped` ⇒ 探针侧缓冲溢出。
+三者都要**显示在界面上**并在 CSV 里留痕（`--` 标记）。
+
+---
+
+## 6. 极限优化：钱花在哪
+
+### 6.1 成本模型（由固件自报的 3434 KB/s @45 MHz 反推）
+
+3.52 MB/s ÷ 45 MHz ≈ **每字节 12.8 个 SWD 时钟 → 每 32 位字约 51 个时钟**；
+每次块读固定开销 5 次传输 ≈ 250 时钟 ≈ **5.6 µs @45 MHz**。
+
+| 采样 8 个 4 字节变量的写法 | 每样本 SWD 时钟 | 45 MHz 下周期 | 上限 |
+|---|---|---|---|
+| 朴素：8 次 `swd_read_memory()` | 8×(250+51) ≈ 2400 | ~54 µs | **~18 kHz** |
+| 读计划：一条 `DAP_ExecuteCommand`，16 个 op（写 TAR + 读 DRW） | ~800 | ~18 µs | **~55 kHz** |
+| 8 个变量连续（同一结构体，一次块读 32 B） | 250+8×51 ≈ 660 | ~15 µs | **~67 kHz** |
+| 同上 + 60 MHz | — | ~11 µs | **~85 kHz**（⚠️ 长跑不稳） |
+
+> 全部是**时钟模型估算**，必须由 M0 的标定证伪（BENCH 扩展成测"读计划"路径）。
+> 参考上界：固件纯读 3434 KB/s；8×f32 的线速在 55 kHz 时只有 1.76 MB/s，**USB 侧很宽裕**。
+
+### 6.2 优化清单（按收益排序）
+
+1. **读计划（最大杠杆）**：把 8 个地址排序、计算 span；
+   - 相邻（间隔 ≲ 19 B，因为 `gap × 0.284 µs < 5.6 µs`）→ **合并成一次块读**；
+   - 否则 → 每个变量一组，用 `TAR 写 + DRW 读` 两个 op，**所有组塞进一条 `DAP_ExecuteCommand`**（一条命令最多 ~101 op，8 个变量＝16 op，绰绰有余）。
+   - 界面上直接显示："本计划 ≈ X µs/样本 → 上限 Y kHz（含 2 个 span）"。
+2. **SWD 时钟**：默认 **45 MHz**（稳）；提供 60 MHz 开关（明示"长跑可能出错"），并**保留固件的自动降档兜底**。
+3. **周期由 MCHTMR 定**，不用 `delay_ms` 凑；实测周期回填 STAT，主机显示"标称 vs 实际"。
+4. **零 memcpy 的采集路径**：`s_stage` 双缓冲 → 直接组包 → 直接 `usbd_ep_start_write`。
+5. **多缓冲推流**：2~4 个 512 B 缓冲轮转，避免等 USB 完成回调才开始下一次采样。
+6. **类型感知的字节数**：`u8/i8/u16/i16` 只发 2/1 字节（帧内按 size 紧排）→ 线速与解码都省。
+7. **采样期间独占链路**：不跑 DAP 让路逻辑（否则周期抖动），M0 标定也要按"独占"测。
+8. v2 可考虑：`f32` 差分/量化（**不建议**，会毁掉波形可信度）、目标侧序号同步（见 §12 坑 2）。
+
+---
+
+## 7. 协议
+
+### 7.1 HID `0x32 SCOPE`（控制面，形状照抄 `0x31`）
+
+响应：`payload[2] = rc`，`payload[3..] = 12 个 32 位小端状态字`。
+
+| action | 语义 | 数据段（`payload[2..]`） |
+|---|---|---|
+| 0 | 停止 | — |
+| 1 | 启动推流 | — |
+| 2 | 查状态 | — |
+| 4 | 触发配置（可选，v2） | `varIdx(1) mode(1) level(f32) pre(u32) post(u32)` |
+| **7** | **配置：周期 + 1~8 个变量** | `period_us(4) flags(1) nvars(1)` + `nvars × (addr(4) size(1) type(1))`；`nvars=8` 时 = 54 B ✔ 一条装下 |
+| 8 | 标定：用当前计划跑 N 次 | `iters(4)` → 结果走 action 9 |
+| 9 | 取标定结果 | → `ticks(4) iters(4) err(4)` |
+
+`type` 编码：`0=u8 1=i8 2=u16 3=i16 4=u32 5=i32 6=f32 7=f64`（够用；`f64` 单独走 8 字节）。
+`flags`：bit0 = 允许 60 MHz；bit1 = 丢弃模式（排障）；bit2 = 触发使能（v2）。
+
+**状态字（12 × u32，草案）**：
+
+| 字 | 位域 |
+|---|---|
+| w0 | bit0 running；bit8-15 模式；bit16 SWD ready；bit24-31 时钟档索引 |
+| w1 | 实际 SWD Hz |
+| w2 | produced 样本数 |
+| w3 | **dropped 样本数** |
+| w4 | 已推字节数低 16 位；高 16 位 usbErr |
+| w5 | 低 16 位 SWD 读错；高 16 位写错 |
+| w6 | 最近一包 seq |
+| w7 | 低 16 位 DAP 让路次数；高 16 位 重扫次数 |
+| w8 | 计划哈希（`addr/size/type` 的简单校验和，防止"配置没生效"） |
+| w9 | 最近一次命令 id / 响应 |
+| w10 | `startRc`（沿用 `-100 = 排队中` 的语义，见 `docs/rtt-cdc.md:63`） |
+| w11 | 配置的 period_us 低 16 位；bit16 丢弃；bit24-31 当前 SWD MHz |
+
+### 7.2 数据面：`0x83` 上的 512 B 包流（§5）
+
+主机侧：
+- 认领 interface 0（与 RTT Viewer 相同的接口），**选 `endpointNumber === 0x83` 的 bulk IN**；
+- 保持 2~4 条 `transferIn(0x83, 4096)` 在飞；
+- 收尾顺序：**先 HID STOP → 等 100~200 ms → 把在飞的读收干净 → 再 close**（WebUSB 没有取消接口）。
+
+---
+
+## 8. 浏览器侧设计
+
+### 8.1 存储：类型化环形缓冲 + LOD 金字塔
+
+- 每通道按类型分配（`f32→Float32Array`，`i32/u32→Int32Array/Uint32Array`，`i16→Int16Array`…）。
+  **不要一律用 Float32 存整数**：超过 2²⁴ 的整数会掉精度。
+- 容量 = `ceil(实测速率 × 时长 + 余量)`；页面顶部显示**当前/预计内存占用**（20 s × 67 kHz × 8 ch × 4 B ≈ **43 MB**）。
+- **LOD 金字塔**（必须有，否则 130 万个点没法每帧重画）：
+  每通道额外维护两级 `min/max` 块（1:16 与 1:256），增量更新（新样本到达时顺手更新块内极值）。
+  渲染时按"每像素列样本数"挑层：1600 px 宽 ⇒ 每帧最多读 `2 × 1600 × 8 ≈ 26k` 个值，稳 60 fps。
+
+### 8.2 渲染（canvas 2D，零依赖）
+
+- 每像素列取 min/max 画竖线（**保尖峰**，不做平均）。
+- 网格、图例（通道名 + 当前值 + 游标值）、X 轴时间（用 `t_us` 真实时间轴）、Y 轴自动量程（带防抖 + "暂停即冻结"）。
+- 交互：滚轮缩放（以鼠标为锚）、拖动平移、框选放大、双击复位、`Home/End` 跳首尾。
+- 状态栏：实测速率、丢包数/丢包率、缓冲占用、时钟档、`seq` 连续性。
+
+### 8.3 触发（**主机侧**，固件零成本）
+
+- 模式：无 / `>` / `<` / 上升沿 / 下降沿 / 变化。
+- 参数：触发通道、阈值、**预触发样本数**、后触发样本数、单次 / 连续。
+- 两种用法：
+  1. **实时**：在解码流上按样本扫描（O(1)/样本），命中后取环形缓冲里的前 N 个 + 后 M 个；
+  2. **离线重触发（免费得来的好东西）**：缓冲区里已经存了 20 s 全量数据，改阈值就能**立刻**重新提取触发段，不用重采。
+- 预触发长度受宿主环形缓冲容量限制（20 s 全存 ⇒ 预触发可以很长，这是主机侧触发的优势）。
+
+### 8.4 导出
+
+- **CSV**：`t, ch1…ch8`，分块生成 Blob（别一次性拼字符串，200 MB 会卡死）；可选抽稀（每 N 样本取 min/max 两行）。
+  文件名用现有 `format.fileStamp()`。
+- **原始录制 `.jsp`**：把进来的 512 B 包**原样落盘**（复用 `FileRecorder` 思路），零额外成本。
+  好处有二：① 长时间录制的兜底；② **回放素材** —— 录一次，之后改渲染/触发都不用再插板子。
+- 页面要能**打开 `.jsp` 回放**（这也是自测的主要手段之一）。
+
+### 8.5 后台标签页
+
+- 收数循环**不能依赖 rAF**（隐藏时 rAF 停摆），必须是纯粹的 promise 循环；渲染才用 rAF。
+- 隐藏时若仍全速接收，内存会涨到容量上限 ⇒ 策略：隐藏超过 N 秒 → 提示"后台接收中，已达 X MB"，
+  或按用户设置**自动停采**（沿用"高速自动关显示"的思路，但这里必须显式告知，不能悄悄丢）。
+- 停止/断开后要把 §7.2 的收尾顺序走完，否则探针的 IN 端点会留下挂起数据（下次连接会读到脏包）。
+
+---
+
+## 9. ELF / DWARF 方案
+
+### 9.1 解析范围（DWARF 4 子集，实测够用）
+
+- 段：`.debug_info / .debug_abbrev / .debug_str`（+ 可选 `.debug_loc` 只做"识别并跳过"）。
+- 需要处理的 tag：`compile_unit / subprogram`（只用来定位层级）、`variable / member / formal_parameter`（只取变量）、
+  `base_type / typedef / const_type / volatile_type / pointer_type / array_type / subrange_type /
+  structure_type / union_type / class_type / enumeration_type / enumerator`。
+- 需要处理的 form：`addr / data1,2,4,8 / sdata / udata / string / strp / ref1,2,4,8 / sec_offset /
+  exprloc / flag / flag_present / implicit_const / block*`；DWARF5 的 `strx*/addrx*` **暂不支持**（遇到就退化，并在界面说明）。
+- 变量筛选：`DW_TAG_variable` + `DW_AT_location` 是 `exprloc` 且首字节 `DW_OP_addr(0x03)` ⇒ **有固定地址，可采样**。
+  ⚠️ 实测 `DW_AT_location=sec_offset`（位置列表）出现 320 次 —— 这些是"被优化掉/在寄存器里"的变量，
+  **必须从候选列表剔除并写明原因**（不能点了没反应）。
+- **还要按地址过滤**（否则列表里一半是采不了的东西）：只保留 RAM 里的量 —— 经验规则是地址落在
+  `[0x20000000, 0x40000000)`（覆盖 F1/F4 的 SRAM+DTCM、H7 的 DTCM `0x20000000` 与 AXI SRAM `0x24000000`）。
+  要滤掉：flash/rodata（`0x08000000` 起，实测 `g_vectors` 就在那儿）、外设寄存器（`0x40000000` 起）、
+  以及 **F4 的 CCM RAM（`0x10000000`）—— 内核私有总线，AHB-AP 根本读不到**。
+- 结构体成员：`DW_AT_data_member_location` 实测就是 `data1/data2` 常量（**不用求值 DWARF 表达式**，省一大块）；
+  成员按 `byte_size` 展开成多通道（`st.pid.kp` 这种命名）。
+- 数组：`DW_TAG_subrange_type` + `DW_AT_upper_bound`（实测 `data1/data2`）。
+  v1 只把"元素"当一个通道（取首元素），整段数组当逻辑分析仪看**放到 v2**。
+
+### 9.2 工程约束
+
+- 放 **Web Worker** 解析（真工程 `.debug_str` 上兆，别卡 UI），带进度回调；
+- **惰性**：第一遍只收集"可采样的 CU 级变量/结构体成员"（名字 + 地址 + 类型引用），类型链在**选中时**才展开；
+- 退化路径：没有 DWARF（strip / 非 `-g` 构建）⇒ 用 `.symtab` 列符号 + **让用户手选类型**（下拉框），并明确提示；
+- 复用与扩展 `app/rtt/elf.js`（现有 71 行只做"按名找 `_SEGGER_RTT`"）→ 拆成 `app/elf/{elf.js, dwarf.js}`（**已完成**，见 §9.3）。
+
+### 9.3 已实现（2026-09-29）：`app/elf/{elf.js,dwarf.js}` + 61 项自测
+
+- `app/elf/elf.js`：ELF32/64 + 段表 + 符号表（`.debug_*` 按段名取，一律做边界检查）。
+- `app/elf/dwarf.js`：DWARF 4 的 abbrev/DIE/类型链；`listSampleable(elf)` 一步给出
+  **可采样通道**（结构体成员摊平成 `g_pack.f_sin`）、**类型**（编码与 HID `0x32` 的 type 字节一致）、
+  以及**每个采不了的原因**；没有 DWARF 时退化为 `listFromSymtab()`（有地址有大小、类型要手选）。
+- 自测：`node tools/selftest/dwarf.test.mjs`（61 项，已进 `make test` / `make test-dwarf`），
+  基线是 `tools/fixtures/dwarf/*.elf`（**真 ELF 快照**，二进制入库 —— `build/` 是被忽略的，干净克隆里没有）。
+- 三个真实固件都对过账：`stm32f103_scope`（19 个通道，结构体展开 9 个成员）、
+  `stm32f103_rtt_speed`（`_SEGGER_RTT` 成员）、`stm32h7b0_rtt_speed`（3245 个 DIE，9 ms 解析完）。
+
+**实测踩到的两个坑（都已修，且写进了注释）：**
+
+1. **abbrev 表的 code 号是"表内局部"的**：`.debug_abbrev` 里可以有多张表，每个 CU 用
+   `DW_AT_abbrev_offset` 指自己的那张，**同一个 code 在不同表里可以是完全不同的 tag/form**。
+   第一版把整段合并成一张表 → CU 0 的属性按别人的表读 → 走位失步 → 报"abbrev 里没有 code 23"。
+2. **定义 DIE 可能无名无类型**：GCC 给"定义"发的 DIE 只带地址，名字/类型在它用
+   `DW_AT_specification` 引用的"声明"那侧（实测 `_SEGGER_RTT` 在 SEGGER_RTT.c 里是 `SECTION(...)` 宏
+   包着的定义）。不追 specification 的话，**RTT 控制块会被无名地悄悄丢掉**；追上之后
+   `_SEGGER_RTT.MaxNumUpBuffers @0x2000001c (i32)` 这类成员就能正常列出。
+
+> DWARF 5 会被**明确拒绝**（提示"请用 `-gdwarf-4` 重新编译"）：strx/addrx/line_strp 会改变
+> "地址从哪来"的整条链路，猜着解析比报错危险得多。
+
+---
+
+## 10. 页面结构（`#scope`）
+
+排在第 5 个标签、位置在「RTT 转发」之后；**布局沿用现有约定**（左/上工具栏 + 右侧栏 + 右下 `.stats` 统计条），
+接收类控件一律放统计条（`rttcdc` 那次挪位置的教训）。
+
+```
+侧栏
+  ├─ 探针：连接（WebHID 0x32 控制 + WebUSB 0x83 数据，两步授权）
+  ├─ ELF：载入 …（解析进度/变量数）
+  ├─ 变量表：搜索 + 勾选（最多 8）+ 类型 + 地址 + 大小
+  │         ＋「读计划」预览：span 数 / 每样本 µs / 预计上限 kHz
+  ├─ 采样：周期(µs) / 时长(s) / **SWD 时钟（与 RTT Viewer 同款下拉：自动+1~60 MHz）** / 开始·停止 / 标定
+  └─ 触发：通道 / 模式 / 阈值 / 预触发 / 后触发 / 单次
+工具栏：缩放（适应/框选/复位）· 暂停 · 清空 · 导出 CSV · 保存原始 · 打开回放
+.stats：实测 kHz · 样本数 · 丢包 · 缓冲占用 · SWD MHz · seq 连续 · 内存占用
+```
+
+**变量表旁边的"读计划"提示是本页的核心 UX**：直接告诉用户
+「你这 8 个变量分属 6 个 span，预计 52 µs/样本 → 上限 19 kHz；把它们放进同一个结构体可以到 67 kHz」。
+
+---
+
+## 11. 自测与验收
+
+### 11.1 不需要硬件的（进 `make`）
+
+- `scope-proto.test.mjs`：组包/解析/丢包统计/坏包重同步/时间戳回绕；
+- `dwarf.test.mjs`：用仓库里的真 ELF 与 `pyelftools` 对账（变量名/地址/大小/类型链/成员偏移）；
+- `store.test.mjs`：环形缓冲 + LOD 金字塔（与暴力算法对拍）；
+- `trigger.test.mjs`：六种触发模式 + 预/后触发窗口边界；
+- `scope-page.test.mjs`（CDP）：假探针走一遍"选变量 → 采样 → 出波形 → 触发 → 导出 CSV"。
+
+### 11.2 需要硬件的
+
+| 步骤 | 验收标准 |
+|---|---|
+| **M0 标定** | 用真实地址表测：朴素 / 读计划 / 连续 span 三种写法的真实 µs/样本（这就是"极限"的答案） |
+| 8 变量 + 10 kHz + 20 s | `seq` 零缺口、`dropped = 0`、CSV 行数 = 速率×20 s（±1 包） |
+| 极限档 | 记录实测上限与此时的 `dropped`；允许丢包但必须**如实显示** |
+| 60 MHz 档 | 复现固件注释里的"3 次里 1 次出错"；确认自动降档生效且界面有提示 |
+| 与 RTT 对账 | 同一目标同时用 RTT 输出同一变量 → 两条通路数值一致（采样相位可不同） |
+
+### 11.3 靶子固件：`tools/target-firmware/stm32f103_scope/`（已写好）
+
+**已交付**（F103C8，SysTick 10 kHz 时基，不占任何外设）：每个被采样的量都有**精确已知的数学波形**，
+主机按 `g_tick` 就能反算其余通道的应有值 → 逐点断言。
+
+| 用途 | 变量 | 说明 |
+|---|---|---|
+| 主对齐/速率 | `g_tick`、`g_pack.i_tick`、`g_isr_count`、`g_far_cnt` | i32/u32，斜率 = 采样率；跳变 = 丢样本 |
+| 快路径（**一个 span**） | `g_pack`（24 B 连续：f32×2 + i32 + u16 + i16 + u8 + i8 + u32） | 一次块读全拿到 |
+| 慢路径（**两个 span**） | 上面那组 + `g_lfsr`/`g_far_cnt`/`g_far_sq100`（故意隔 4 KB 空洞） | 逼读计划出现 2 个 span |
+| 混叠 | `g_sq5k`（5 kHz 方波） | 采样率 < 10 kHz 必混叠，肉眼可辨 |
+| 触发 | `g_pulse`（5 Hz、5% 占空比）、`g_pack.i_sq1k`（1 kHz 方波） | 边沿/条件触发 |
+| 撕裂**量化** | `g_pair_a`/`g_pair_b`（`= t` / `= ~t`） | `a^b != 0xFFFF` 的样本占比 = 撕裂率 |
+| 精度 | `g_pack.u_hi`（`0x10000000\|(t&0xFFFF)`）、`g_ramp64`（f64） | 验 u32 不被 Float32 截断、验 8 字节载荷 |
+
+配套：`build.ps1`（`-g3 -gdwarf-4`，打印变量地址）、`flash.ps1`（OpenOCD 自动查找，0.12+ + `usb_bulk`）、
+`check.py`（halt → dump RAM → **逐项核对契约 + 反测 10 kHz 时基**，也可作为 scope 页面的对账真值）、`README.md`。
+
+> 这块板子**没有 D-cache**，所以在这里量到的任何异常都归采样/协议本身；H7 的 cache 一致性问题要在 H7 上单独验。
+
+---
+
+## 12. 风险与坑（先在文档里认下来）
+
+1. **探针 CPU 可能饱和**：SWD 是**比特bang**（45 MHz 的 SWD 时钟意味着 CPU 几乎全程在打时序），
+   再叠加采样循环 + USB 推流。→ M0 标定先给答案；不够就降 SWD 时钟或减变量数。**这是本方案第一风险。**
+2. **撕裂读 / 不同步**：目标是**运行中**被读，8 个变量不是一个原子快照（甚至同一变量的 4 字节也可能跨更新）。
+   → UI 提示；v2 可让目标维护"序号 + 双缓冲"，用序号做一致性判定。
+3. **D-cache（H7！）**：AHB-AP 读**绕过内核 D-cache**，核心里刚写还没回写的脏行会读到**旧值**
+   （表现：数字偶尔不动/跳变）。→ 被采样变量要放 non-cacheable / write-through 段（MPU），界面明确提示。
+4. **SWD 独占**：采样期间不能跑 RTT Viewer / RTT 转发 / 烧录；页面上做互斥与明示
+   （`docs/rtt-cdc.md` 已经踩过"DAP 抢链路导致 cbAddr=0"）。
+5. **`0x83` 的 FIFO 配额未核**：`DAP_PACKET_COUNT=4 × DAP_XFER_SIZE=1024` 已占不少；
+   要确认再加一条 512 B IN 流是否够（CherryUSB/HPM 端口的 FIFO 设置，源码里没直接看到）。
+   → 固件第一步就核；不够就减小 `DAP_PACKET_COUNT`。
+6. **60 MHz 不稳**（固件自报）：默认 45，60 走显式开关 + 自动降档 + 界面提示。
+7. **WebUSB 并发与超时语义**：见 `app/rtt/dap-webusb.js:39-49`。收尾顺序必须"先停推流再收干净"。
+8. **`transferIn(4096)` 的持续吞吐未实测**：M0 一起测（若不行，退回 512/1024 并加大在飞数量）。
+9. **后台标签页**：收数不能靠 rAF；隐藏时内存会涨（§8.5）。
+10. **DWARF 边界**：无固定地址变量、strip 过的 ELF、未来的 DWARF5 → 都有明确退化路径（§9）。
+11. **20 s × 高采样率的内存**：按实测速率算容量并显式提示占用；超限策略要明确（FIFO 覆盖 vs 停止采集）。
+12. **不许静默丢**：`seq` 缺口、`STAT.dropped`、`t_us` 跳变三条都要显示 + CSV 留痕。
+
+---
+
+## 13. 里程碑
+
+| 里程碑 | 内容 | 验收 |
+|---|---|---|
+| **M0 标定** | 扩展固件 BENCH：测"朴素 / 读计划 / span"三种写法；实测 `transferIn(4096)` 吞吐与并发 | 拿到真实上限（kHz）与推荐参数 —— **这一步决定后面所有取舍**（靶子固件已就绪并验收通过，见 §11.3） |
+| **M1 协议+骨架** | `app/scope/{protocol,transport,store,render}` + 假探针 + 页面骨架 + 单测 | `make test` 全绿；假数据能画、能触发、能导出。**ELF/DWARF 部分已完成**（`app/elf/*`，61 项自测） |
+| **M2 真硬件打通** | 固件 `scope_sampler.c`（照 `rtt_bridge.c` 骨架）+ HID 0x32 + 0x83 推流 | 8 变量 × 10 kHz × 20 s，零丢包，数值与 RTT 对账一致 |
+| **M3 极限** | 读计划优化（合并 span / 单命令多 op）+ 多缓冲推流 + 60 MHz 开关 | 达到 M0 标定上限的 ≥80%；丢包如实显示 |
+| **M4 触发+导出** | 主机侧触发（实时+离线重触发）、CSV、`.jsp` 原始录制与回放 | 已知波形（1 kHz 方波）触发稳定；CSV 可被 Excel/pandas 直接读 |
+| **M5 收尾** | `docs/scope-page.md` 完善、README 增行、截图、`make check` 覆盖新模块、合并推送 | 线上页面可用；自测项数入档 |
+
+---
+
+## 14. 已确认的决策（2026-09-29 第二轮）
+
+| 问题 | 结论 |
+|---|---|
+| 页面名 | `#scope`「J-Scope 波形」✔ |
+| 类型范围 | `u8/i8/u16/i16/u32/i32/f32/f64` 够 ✔ |
+| 变量个数与地址 | **1~8 个，地址任意**（8 只是上限）；探针负责读+组包 ✔ |
+| SWD 时钟 | 页面下拉设置，**与 RTT Viewer 那一档同款**（自动 + 1/5/10/20/30/40/45/50/60 MHz）✔ —— 原本问的"M0 标定能不能上 60 MHz"就是这个意思，已不需要单独确认：标定就用页面选的那档，固件自带的失败自动降档继续兜底 |
+| 靶子固件 | 本仓库 `tools/target-firmware/stm32f103_scope/` ✔（已写好，见 §11.3） |
+
+**仍未定（不挡开工）**：M0 标定要在真机上跑，需要 F103 目标板在线（本轮烧录时 SWD 连不上目标，
+见交付说明）；以及探针固件那边的 `scope_sampler.c` 由谁写（可由我出补丁）。
+
+---
+
+## 15. 附：本方案用到的现有代码
+
+| 现有件 | 本方案怎么用 |
+|---|---|
+| `app/hid/probe.js` | HID 客户端与组包约定**直接复用**，新增 `0x32` 的 action/状态字解析 |
+| `app/rtt/dap-webusb.js` | 认领 interface 0 的代码可参考；**注意它选的是"第一组 bulk in/out"，本页要按 `endpointNumber===0x83` 选** |
+| `app/rtt/elf.js` | 扩展成 `app/elf/`（symtab 全量 + DWARF） |
+| `app/core/{bin,format,stats,recorder}.js` | 二进制读写、`mhzLabel`、计数器、流式落盘 |
+| `app/hid/view.js` | 面板状态机与"启动中(-100)"处理方式照抄 |
+| `app/rtt/mock.js`、`app/hid/mock.js` | 假探针的写法照抄 → `app/scope/mock.js`（还要能生成已知波形） |
+| `tools/selftest/*` | 单测/页面测试的框架与 `ui.page.test.mjs`（CDP，记得禁用缓存） |

@@ -25,7 +25,7 @@ FW_DIR   = tools/target-firmware/stm32f103
 LA       = tools/la/kingst_la.py
 
 .DEFAULT_GOAL := help
-.PHONY: help serve serve-stop browser open test test-ui test-gen test-gen-page test-hid test-hw test-bridge test-all \
+.PHONY: help serve serve-stop browser open test test-ui test-gen test-gen-page test-hid test-dwarf test-hw test-bridge test-all \
         bridge bridge-stop fw-build fw-flash fw-restore fw-h7-build fw-h7-slow fw-h7-flash \
         algo-check flash-plan la-info la-capture git-status git-log check clean
 
@@ -52,6 +52,11 @@ test:
 	$(NODE) tools/selftest/rtt.test.mjs
 	$(NODE) tools/selftest/gen-parity.mjs
 	$(NODE) tools/selftest/hid-proto.test.mjs
+	$(NODE) tools/selftest/dwarf.test.mjs
+
+# ELF/DWARF 变量提取（scope 页的变量浏览器底座）—— 基线是真 ELF 快照
+test-dwarf:
+	$(NODE) tools/selftest/dwarf.test.mjs
 
 # 「工程生成」页与 Python 工具（uvprojx2cmake.py）产物的逐字节对账
 test-gen:
@@ -146,6 +151,8 @@ check:
 	$(NODE) --check app/hid/probe.js
 	$(NODE) --check app/hid/mock.js
 	$(NODE) --check app/hid/view.js
+	$(NODE) --check app/elf/elf.js
+	$(NODE) --check app/elf/dwarf.js
 	$(NODE) --check app/main.js
 	$(NODE) --check bridge/rtt-bridge.mjs
 	pwsh -NoProfile -Command "Write-Host '语法检查通过'"

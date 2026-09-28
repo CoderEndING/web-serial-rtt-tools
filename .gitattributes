@@ -3,3 +3,5 @@
 # （本地 checkout 又会转回 CRLF，于是"本机过、别处崩"）。这里把整棵 fixtures 目录标成不做换行转换。
 tools/fixtures/gen/** -text
 tools/fixtures/gen/mdk-arm/test_sram.bin binary
+# DWARF 解析的对账基线是**真 ELF**（二进制）：同样绝不能被换行转换碰（碰了段表/偏移全废）
+tools/fixtures/dwarf/** binary

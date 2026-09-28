@@ -147,13 +147,17 @@ bridge/
 tools/
   selftest/             自测：Node 协议测试 / 工程生成对账 / HID 协议 / 页面端到端(CDP) / 桥端到端 / 浏览器真机(CDP) / LA 参考流量
   fixtures/gen/         对账基线：Python 工具（uvprojx2cmake.py）对真实工程的原始产物，逐字节比对用
+  fixtures/dwarf/       DWARF 解析基线：两份**真 ELF**（scope 靶子固件 + RTT 吞吐固件）
   la/                   逻辑分析仪：kingst_la.py（KingstVIS Socket API 单文件工具）+ SWD 流量发生器
   dev/                  extract-algo.py（从 pyOCD 抽 flash 算法，别手抄 base64）、help.ps1
   target-firmware/
     stm32f103/          STM32F103 测试固件（UART + RTT，含 SEGGER RTT 源码）
     stm32f103_rtt_speed/      F103 RTT 吞吐测试（死循环灌 hello world）
+    stm32f103_scope/          **F103 J-Scope 靶子固件**：10 kHz 时基 + 契约已知的波形/变量，
+                              check.py 客观验收（含 4 KB 地址空洞 → 两个 span 的读计划场景）
     stm32h7b0_rtt_speed/      **H7B0 RTT 吞吐测试**（HSI→PLL1 280MHz，DTCM 布局，见其 README）
-docs/                   后端配置与排障；逻辑分析仪攻略.md（含 LA 工具完整源码与踩坑）
+docs/                   后端配置与排障；逻辑分析仪攻略.md（含 LA 工具完整源码与踩坑）；
+                        scope-page.md（J-Scope 波形页方案：探针侧 HSS 采样，**尚未实现**）
 ```
 
 ## 自测（不需要硬件也能跑一部分）
