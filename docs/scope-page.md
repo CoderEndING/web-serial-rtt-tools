@@ -292,9 +292,14 @@ app/scope/protocol.js 采样计划 / 512B 包编解码 / 流重同步 / HID 0x32
 app/scope/store.js    类型化缓冲 + 16/256/4096 三级 LOD + 触发         ✅
 app/scope/mock.js     假探针（可复现排队 -100 / 丢样本 / 卡住 / 启动失败）✅
 app/scope/render.js   canvas min/max 包络 + 游标 + 触发标记 + 防抖量程   ✅（页面自测里验）
-app/scope/transport.js  真·VendorEP(0x83) 收流（多条在飞 + 先停后收）   ⬜ 下一步
-app/scope/view.js     页面逻辑（选变量 → 配置 → 采样 → 绘图/触发/导出）  ⬜ 下一步
+app/scope/transport.js  VendorEp(0x83) 收流（3 条在飞 + 先停后收）/ 假传输   ✅
+app/scope/view.js     页面逻辑（选变量 → 配置 → 采样 → 绘图/触发/导出/回放）  ✅
+tools/selftest/scope-page.test.mjs  真页面 CDP 端到端 37 项              ✅
 ```
+
+**M1 完成**（2026-09-29）：引擎层 103 项 + ELF/DWARF 61 项 + 真页面 37 项，全部不需要硬件。
+页面里现在就能：勾「用假探针」→ 出波形 → 触发 → 导出 CSV / 存 `.jsp` / 打开回放；
+真机只差探针固件那边的 `HID 0x32`（M2）。截图见 `docs/shots/6-scope.png`。
 
 **"逐点对账"是这套引擎的核心自测手段**：假探针按类型确定性产生波形，
 测试把它的 512 B 包喂给 `PacketStream` → 解码 → 写进 `SampleStore`，
@@ -458,7 +463,7 @@ app/scope/view.js     页面逻辑（选变量 → 配置 → 采样 → 绘图/
 | 里程碑 | 内容 | 验收 |
 |---|---|---|
 | **M0 标定** | 扩展固件 BENCH：测"朴素 / 读计划 / span"三种写法；实测 `transferIn(4096)` 吞吐与并发 | 拿到真实上限（kHz）与推荐参数 —— **这一步决定后面所有取舍**（靶子固件已就绪并验收通过，见 §11.3） |
-| **M1 协议+骨架** | `app/scope/{protocol,transport,store,render}` + 假探针 + 页面骨架 + 单测 | `make test` 全绿；假数据能画、能触发、能导出。**已完成**：`protocol.js` / `store.js` / `mock.js` / `render.js`（**103 项自测**，含"8 通道 × 10000 样本逐点对账"）+ ELF/DWARF（61 项）；**剩**：`transport.js`（真 0x83）与 `view.js` + 页面接线 |
+| **M1 协议+骨架** | `app/scope/{protocol,transport,store,render,view}` + 假探针 + 页面 + 单测 | `make test` 全绿；假数据能画、能触发、能导出。**已完成**（引擎 103 + DWARF 61 + 页面 37 项自测；页面 CDP 端到端含画布像素与触发） |
 | **M2 真硬件打通** | 固件 `scope_sampler.c`（照 `rtt_bridge.c` 骨架）+ HID 0x32 + 0x83 推流 | 8 变量 × 10 kHz × 20 s，零丢包，数值与 RTT 对账一致 |
 | **M3 极限** | 读计划优化（合并 span / 单命令多 op）+ 多缓冲推流 + 60 MHz 开关 | 达到 M0 标定上限的 ≥80%；丢包如实显示 |
 | **M4 触发+导出** | 主机侧触发（实时+离线重触发）、CSV、`.jsp` 原始录制与回放 | 已知波形（1 kHz 方波）触发稳定；CSV 可被 Excel/pandas 直接读 |

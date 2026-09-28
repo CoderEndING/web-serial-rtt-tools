@@ -1,0 +1,686 @@
+/**
+ * 「J-Scope 波形」页（`#scope`）—— 把变量选择、探针配置、收流、绘图、触发、导出串起来。
+ *
+ * 页面骨架沿用仓库既有约定：左侧栏放"设置"，工具栏/右下统计条放"操作与指标"。
+ *
+ * 数据通路（两条，页面里只差一个对象）：
+ *   真机：HID 0x32 配置/启停（AkaLinkHid） + WebUSB 0x83 收流（VendorEpTransport）
+ *   假机：同一个 MockScopeProbe 既当 HID 又当数据源（MockTransport 注入它）
+ *   → 所以"假探针能跑通"就等于整条链路（配置 → 组包 → 收流 → 解码 → 缓冲 → 画图）跑通，
+ *     这也是本页能在没有硬件时自测的原因。
+ *
+ * 采样是**一次性窗口**（线性缓冲，满了就停）：容量 = 名义速率 × 时长 × 1.25。
+ * 满了之后新样本计入 `overrun` 并显示在"丢样本"里 —— 绝不静默丢。
+ */
+import { $, setStatus } from '../ui/dom.js';
+import { AkaLinkHid } from '../hid/probe.js';
+import { Elf } from '../elf/elf.js';
+import { listSampleable } from '../elf/dwarf.js';
+import * as P from './protocol.js';
+import { SampleStore, Trigger, TRIG, TRIG_NAME, findTrigger, windowFor } from './store.js';
+import { ScopeRenderer, legendRows, fmtTime, fmtVal } from './render.js';
+import { VendorEpTransport, MockTransport } from './transport.js';
+import { MockScopeProbe } from './mock.js';
+import { bytes as fmtBytes, fileStamp, download } from '../core/format.js';
+
+/** SWD 时钟档位：与 RTT Viewer 的 WebUSB 那档同款（0 = 自动）*/
+const CLOCKS = [[0, '自动'], [1000, '1 MHz'], [5000, '5 MHz'], [10000, '10 MHz'], [20000, '20 MHz'],
+                [30000, '30 MHz'], [40000, '40 MHz'], [45000, '45 MHz'], [50000, '50 MHz'], [60000, '60 MHz']];
+
+const MAX_VARS = 8;
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+export class ScopeView {
+  /** @param {{mockFactory?:Function}} opts 自测可以换一个"带丢包/会卡住"的假探针 */
+  constructor(opts = {}){
+    this.mockFactory = opts.mockFactory || (o => new MockScopeProbe(o));
+    this.elf = null;
+    this.all = [];          // 所有可采样通道
+    this.skipped = [];
+    this.selected = [];     // 勾选的（≤8）
+    this.hid = null;        // 真：AkaLinkHid；假：MockScopeProbe
+    this.transport = null;
+    this.mockProbe = null;
+    this.usingMock = false;
+    this.store = null;
+    this.renderer = null;
+    this.stream = new P.PacketStream();
+    this.seqT = new P.SeqTracker();
+    this.timeU = new P.TimeUnwrap();
+    this.trigger = new Trigger();
+    this.defVars = null;
+    this.raw = [];
+    this.captureRaw = false;
+    this.running = false;
+    this.state = '空闲';
+    this.packets = 0;
+    this.lost = 0;
+    this.decodeErr = 0;
+    this.probeDropped = 0;
+    this.swdMhz = 0;
+    this.periodActualUs = 0;
+    this._raf = 0;
+    this._needDraw = true;
+  }
+
+  // ================================================================= 初始化
+  init(){
+    this.canvas = $('sc-canvas');
+    this.renderer = new ScopeRenderer(this.canvas);
+    this.ctx = this.canvas.getContext('2d');
+    this.elfInput = this._fileInput('.elf,.axf', f => this.loadElfFile(f));
+    this.jspInput = this._fileInput('.jsp,.bin', f => this.replayFile(f));
+
+    // 时钟下拉
+    const clk = $('sc-clock');
+    for (const [v, label] of CLOCKS){
+      const o = document.createElement('option');
+      o.value = String(v); o.textContent = label;
+      clk.appendChild(o);
+    }
+    clk.value = '0';
+
+    // 触发模式 / 通道
+    const tm = $('sc-trig-mode');
+    for (const [v, label] of Object.entries(TRIG_NAME)){
+      const o = document.createElement('option');
+      o.value = v; o.textContent = label;
+      tm.appendChild(o);
+    }
+    tm.value = String(TRIG.NONE);
+
+    $('sc-connect').addEventListener('click', () => this.connectHid(true));
+    $('sc-reconnect').addEventListener('click', () => this.connectHid(false));
+    $('sc-usb').addEventListener('click', () => this.connectUsb());
+    $('sc-mock').addEventListener('change', e => this.setMock(e.target.checked));
+    $('sc-elf').addEventListener('click', () => this.elfInput.click());
+    $('sc-varclear').addEventListener('click', () => { this.selected = []; this.renderVars(); this.updatePlan(); });
+    $('sc-search').addEventListener('input', () => this.renderVars());
+    $('sc-start').addEventListener('click', () => this.start());
+    $('sc-stop').addEventListener('click', () => this.stop());
+    $('sc-bench').addEventListener('click', () => this.bench());
+    $('sc-clear').addEventListener('click', () => this.clear());
+    $('sc-fit').addEventListener('click', () => { this.renderer.fitAll(); this.follow = true; this._needDraw = true; });
+    $('sc-zin').addEventListener('click', () => { this.renderer.zoomBy(1.6, 0.5); this._needDraw = true; });
+    $('sc-zout').addEventListener('click', () => { this.renderer.zoomBy(1 / 1.6, 0.5); this._needDraw = true; });
+    $('sc-shared').addEventListener('change', e => { this.renderer.mode = e.target.checked ? 'shared' : 'auto'; this._needDraw = true; });
+    $('sc-raw').addEventListener('change', e => { this.captureRaw = e.target.checked; if (!this.captureRaw) this.raw = []; });
+    $('sc-csv').addEventListener('click', () => this.exportCsv());
+    $('sc-save').addEventListener('click', () => this.saveRaw());
+    $('sc-open').addEventListener('click', () => this.jspInput.click());
+    $('sc-trig-find').addEventListener('click', () => this.findNextTrigger());
+    $('sc-trig-clear').addEventListener('click', () => this.clearTrigger());
+    for (const id of ['sc-trig-mode', 'sc-trig-ch', 'sc-trig-level', 'sc-trig-pre', 'sc-trig-post', 'sc-trig-single']){
+      $(id).addEventListener('change', () => this.applyTrigger());
+    }
+
+    this._wireCanvas();
+    this.renderVars();
+    this.updatePlan();
+    this.syncButtons();
+    this._loop();
+  }
+
+  _fileInput(accept, onFile){
+    const inp = document.createElement('input');
+    inp.type = 'file'; inp.accept = accept; inp.hidden = true;
+    inp.addEventListener('change', () => { const f = inp.files?.[0]; if (f) onFile(f); inp.value = ''; });
+    document.body.appendChild(inp);
+    return inp;
+  }
+
+  _wireCanvas(){
+    const c = this.canvas;
+    let dragging = false, lastX = 0, moved = 0;
+    c.addEventListener('wheel', e => {
+      e.preventDefault();
+      const r = c.getBoundingClientRect();
+      const frac = Math.max(0, Math.min(1, (e.clientX - r.left - this.renderer.padding.l) / this.renderer.plotW));
+      this.renderer.zoomBy(e.deltaY < 0 ? 1.25 : 1 / 1.25, frac);
+      this.follow = false;                      // 手动缩放即退出"跟随最新"
+      this._needDraw = true;
+    }, { passive: false });
+    c.addEventListener('mousedown', e => { dragging = true; lastX = e.clientX; moved = 0; c.style.cursor = 'grabbing'; });
+    window.addEventListener('mouseup', () => { if (dragging){ dragging = false; c.style.cursor = 'crosshair'; } });
+    window.addEventListener('mousemove', e => {
+      const r = c.getBoundingClientRect();
+      if (dragging){
+        const dx = e.clientX - lastX;
+        lastX = e.clientX; moved += Math.abs(dx);
+        this.renderer.panBy(-dx / this.renderer.plotW * this.renderer.span);
+        this.follow = false;
+        this._needDraw = true;
+        return;
+      }
+      if (!this.store) return;
+      const x = e.clientX - r.left;
+      if (x < this.renderer.padding.l || x > c.clientWidth - this.renderer.padding.r){ this.renderer.cursor = null; this._needDraw = true; return; }
+      const idx = Math.round(this.renderer.sampleAt(x));
+      this.renderer.cursor = (idx >= 0 && idx < this.store.count) ? idx : null;
+      this._needDraw = true;
+    });
+    c.addEventListener('dblclick', () => { this.renderer.fitAll(); this.follow = true; this._needDraw = true; });
+  }
+
+  onShow(){
+    requestAnimationFrame(() => { this._needDraw = true; });
+  }
+
+  // ================================================================= 连接
+  async connectHid(request){
+    if (this.usingMock){ this.setStatusText('假探针模式下不需要连真探针', 'warn'); return; }
+    try {
+      if (!AkaLinkHid.supported()) throw new Error('这个浏览器没有 WebHID（桌面版 Chrome / Edge 才有）');
+      const hid = new AkaLinkHid();
+      if (request) await hid.request(); else await hid.reconnect();
+      this.hid = hid;
+      let info = '';
+      try { const i = await hid.info(); info = `${i.model || 'akaLinkPro'}${i.fw ? ' · FW ' + i.fw : ''}`; }
+      catch { info = hid.label || 'akaLinkPro'; }
+      $('sc-info').textContent = info + '（HID 已连接）';
+      this.setStatusText(`探针已连接：${info}`, 'ok');
+    } catch (e){
+      this.setStatusText('连接探针失败：' + (e?.message || e), 'err');
+    }
+  }
+
+  async connectUsb(){
+    if (this.usingMock){ this.setStatusText('假探针模式下不需要数据端点', 'warn'); return; }
+    try {
+      this.transport = await VendorEpTransport.request();
+      $('sc-usbinfo').textContent = this.transport.label;
+      this.setStatusText('数据端点已就绪', 'ok');
+    } catch (e){
+      $('sc-usbinfo').textContent = '连接失败：' + (e?.message || e);
+      this.setStatusText('连接数据端点失败：' + (e?.message || e), 'err');
+    }
+  }
+
+  setMock(on){
+    this.usingMock = !!on;
+    this.running = false;
+    if (on){
+      this.mockProbe = this.mockProbe || this.mockFactory({ periodUs: this.periodUs(), startDelayPolls: 1 });
+      this.hid = this.mockProbe;
+      this.transport = new MockTransport({ probe: this.mockProbe });
+      $('sc-info').textContent = '假探针（无需硬件）';
+      $('sc-usbinfo').textContent = '假探针模式：数据由页面生成';
+      this.setStatusText('已切到假探针：选变量 → 开始采样 即可看到波形', 'ok');
+    } else {
+      this.hid = null;
+      this.transport = null;
+      $('sc-info').textContent = '未连接';
+      $('sc-usbinfo').textContent = '未连接数据端点（假探针模式不需要）';
+      this.setStatusText('已切回真机模式：先连探针，再连数据端点', '');
+    }
+    this.syncButtons();
+  }
+
+  // ================================================================= ELF / 变量
+  async loadElfFile(file){
+    try {
+      const buf = new Uint8Array(await file.arrayBuffer());
+      const elf = new Elf(buf);
+      const r = listSampleable(elf);
+      this.elf = { name: file.name, source: r.source, versions: r.versions, stats: r.stats };
+      this.all = r.sampleable;
+      this.skipped = r.skipped;
+      this.selected = this.selected.filter(v => this.all.some(a => a.name === v.name && a.addr === v.addr));
+      $('sc-elfinfo').textContent =
+        `${file.name} · ${r.source === 'dwarf' ? `DWARF ${r.versions.join('/')}` : '符号表（无调试信息）'} · ` +
+        `可采样 ${r.sampleable.length} 个 · 采不了 ${r.skipped.length} 个`;
+      this.renderVars();
+      this.updatePlan();
+      this.setStatusText(`ELF 解析完成：${r.sampleable.length} 个可采样通道`, 'ok');
+    } catch (e){
+      $('sc-elfinfo').textContent = '解析失败：' + (e?.message || e);
+      this.setStatusText('ELF 解析失败：' + (e?.message || e), 'err');
+    }
+  }
+
+  renderVars(){
+    const box = $('sc-vars');
+    if (!box) return;
+    const q = ($('sc-search').value || '').trim().toLowerCase();
+    const list = this.all.filter(v => !q || v.name.toLowerCase().includes(q));
+    box.innerHTML = '';
+    if (!this.all.length){
+      box.innerHTML = '<div class="vsect">还没有变量：点「载入 ELF…」，或勾「用假探针」用内置的 8 个通道</div>';
+    }
+    for (const v of list.slice(0, 400)){
+      const sel = this.selected.some(s => s.name === v.name && s.addr === v.addr);
+      const row = document.createElement('label');
+      row.className = 'vrow' + (sel ? ' sel' : '') + (!sel && this.selected.length >= MAX_VARS ? ' dis' : '');
+      row.innerHTML = `<input type="checkbox" ${sel ? 'checked' : ''} ${!sel && this.selected.length >= MAX_VARS ? 'disabled' : ''}>` +
+        `<span class="nm" title="${v.name}">${v.name}</span>` +
+        `<span class="ty">${v.scalar || v.typeName || '?'}</span>` +
+        `<span class="ad">0x${v.addr.toString(16)}</span>`;
+      row.querySelector('input').addEventListener('change', e => this.toggleVar(v, e.target.checked));
+      box.appendChild(row);
+    }
+    if (list.length > 400){
+      const more = document.createElement('div');
+      more.className = 'vsect';
+      more.textContent = `还有 ${list.length - 400} 个没显示 —— 用上面的搜索框缩小范围`;
+      box.appendChild(more);
+    }
+    if (this.skipped.length){
+      const s = document.createElement('div');
+      s.className = 'vsect';
+      const g = this.skipped.slice(0, 3).map(x => `${x.name}（${x.reason}）`).join('；');
+      s.textContent = `采不了 ${this.skipped.length} 个，例如：${g}`;
+      box.appendChild(s);
+    }
+    $('sc-count').textContent = `已选 ${this.selected.length} / ${MAX_VARS}`;
+  }
+
+  toggleVar(v, on){
+    if (on){
+      if (this.selected.length >= MAX_VARS){ this.setStatusText(`最多选 ${MAX_VARS} 个变量（8 个正好装进一条 HID 配置报文）`, 'warn'); this.renderVars(); return; }
+      if (!this.selected.some(s => s.name === v.name && s.addr === v.addr)) this.selected.push(v);
+    } else {
+      this.selected = this.selected.filter(s => !(s.name === v.name && s.addr === v.addr));
+    }
+    this.renderVars();
+    this.updatePlan();
+  }
+
+  updatePlan(){
+    const vars = this.selected.length ? this.selected : this.mockVars();
+    const plan = P.planReads(vars);
+    this.plan = plan;
+    const khz = Math.round(plan.estHz / 1000);
+    $('sc-plan').innerHTML = vars.length
+      ? `读计划：${plan.spans.length} 个 span / 帧 ${plan.frameBytes} B · ` +
+        `预计 ≈${plan.estUs.toFixed(1)} µs/样本 → 上限 <b>≈${khz} kHz</b>` +
+        (plan.saved > 0.15 ? `（合并省了 ${(plan.saved * 100).toFixed(0)}%）` : '')
+      : '选好变量后会显示读计划与预计上限';
+    // 触发通道下拉跟着变量走
+    const sel = $('sc-trig-ch');
+    const want = vars.map(v => v.name);
+    if (sel.options.length !== want.length || [...sel.options].some((o, i) => o.value !== String(i) || o.textContent !== want[i])){
+      sel.innerHTML = '';
+      want.forEach((n, i) => {
+        const o = document.createElement('option');
+        o.value = String(i); o.textContent = `${i}: ${n}`;
+        sel.appendChild(o);
+      });
+    }
+    return plan;
+  }
+
+  /** 假探针内置的 8 个通道（没载 ELF 时给界面用）*/
+  mockVars(){
+    const sc = ['f32', 'f32', 'i32', 'u16', 'i16', 'u8', 'i8', 'f64'];
+    return sc.map((s, i) => ({ name: `mock${i}.${s}`, addr: 0x20000000 + i * 4, size: P.SCALARS[s].size, scalar: s }));
+  }
+
+  periodUs(){ return Math.max(1, Number($('sc-period').value) || 100); }
+  seconds(){ return Math.max(0.5, Number($('sc-seconds').value) || 20); }
+
+  // ================================================================= 采样
+  async start(){
+    const vars = (this.selected.length ? this.selected : (this.usingMock ? this.mockVars() : []));
+    if (!vars.length){ this.setStatusText('先选变量（或用假探针自带的通道）', 'warn'); return; }
+    if (!this.transport || !this.hid){ this.setStatusText(this.usingMock ? '假探针还没准备好' : '先连探针 + 数据端点', 'warn'); return; }
+    if (this.isReal() && !this.transport?.device){ this.setStatusText('真机模式要先点「连接数据端点…」', 'warn'); return; }
+
+    const periodUs = this.periodUs();
+    const nominalHz = 1e6 / periodUs;
+    const capacity = Math.ceil(nominalHz * this.seconds() * 1.25) + 64;
+    this.plan = this.updatePlan();
+    this.defVars = null;
+    this._periodUs = periodUs;
+    this._capacity = capacity;
+    this.store = new SampleStore(vars, capacity);
+    this.renderer.setStore(this.store);
+    this.renderer.setTrigger(null);
+    this.stream = new P.PacketStream();
+    this.seqT = new P.SeqTracker();
+    this.timeU = new P.TimeUnwrap();
+    this.trigger = new Trigger();
+    this.applyTrigger(true);
+    this.packets = 0; this.lost = 0; this.decodeErr = 0; this.probeDropped = 0; this.raw = [];
+    this.rawBytes = 0;
+
+    try {
+      const clockKhz = Number($('sc-clock').value) || 0;
+      const flags = clockKhz >= 60000 ? 1 : 0;         // bit0 = 允许 60 MHz（文档 §7.1）
+      await this.hidXfer(P.HID_CMD, P.configData({ periodUs, flags, vars }));
+      let rc = P.START_PENDING;
+      await this.hidXfer(P.HID_CMD, P.flagsData(P.ACT.START));
+      for (let i = 0; i < 20 && rc === P.START_PENDING; i++){    // -100 = 排队中，轮询等结果
+        await sleep(120);
+        const res = await this.hidXfer(P.HID_CMD, P.flagsData(P.ACT.STATUS));
+        rc = this.signed(res?.[2]);
+      }
+      if (rc < 0 && rc !== P.START_PENDING){
+        this.setStatusText('探针启动失败：' + P.scopeRcText(rc), 'err');
+        return;
+      }
+      await this.transport.start(chunk => this.onChunk(chunk));
+      this.running = true;
+      this.follow = true;
+      this.state = '采样中';
+      this.setStatusText(`采样中：${vars.length} 通道 × ${(1e6 / periodUs / 1000).toFixed(2)} kHz，缓冲 ${capacity} 样本` +
+        (this.trigger.mode !== TRIG.NONE ? '（触发已布防）' : ''), 'ok');
+    } catch (e){
+      this.running = false;
+      this.setStatusText('启动失败：' + (e?.message || e), 'err');
+    }
+    this.syncButtons();
+    this._needDraw = true;
+  }
+
+  async stop(){
+    if (!this.running && !this.transport?.running) return;
+    this.running = false;
+    try { await this.transport.stop(); } catch { /* 忽略 */ }
+    try { await this.hidXfer(P.HID_CMD, P.flagsData(P.ACT.STOP)); } catch { /* 忽略 */ }
+    this.state = '已停止';
+    this.setStatusText(`已停止：${this.store?.count || 0} 个样本` +
+      (this.lost ? `，丢 ${this.lost} 个（seq 缺口）` : '，零丢包'), this.lost ? 'warn' : 'ok');
+    this.syncButtons();
+    this._needDraw = true;
+  }
+
+  /** 探针侧标定：用当前计划空跑，回报每样本的真实耗时（M0）*/
+  async bench(){
+    if (!this.hid){ this.setStatusText('先连探针', 'warn'); return; }
+    try {
+      await this.hidXfer(P.HID_CMD, P.benchData({ iters: 2000 }));
+      await sleep(400);
+      const res = await this.hidXfer(P.HID_CMD, Uint8Array.of(P.ACT.BENCH_RESULT));
+      const dv = new DataView(res.buffer, res.byteOffset, res.byteLength);
+      const ticks = dv.getUint32(3, true), iters = dv.getUint32(7, true);
+      const usPerSample = iters ? (ticks / 24) / iters : 0;      // MCHTMR 24 MHz
+      this.benchUs = usPerSample;
+      this.setStatusText(`标定：${usPerSample.toFixed(2)} µs/样本 → 上限 ≈${Math.round(1e3 / usPerSample)} kHz` +
+        (this.plan ? `（模型估算 ${this.plan.estUs.toFixed(2)} µs）` : ''), 'ok');
+    } catch (e){
+      this.setStatusText('标定失败：' + (e?.message || e), 'err');
+    }
+  }
+
+  isReal(){ return !this.usingMock; }
+  signed(v){ const x = (v ?? 0) & 0xff; return x > 127 ? x - 256 : x; }
+  async hidXfer(cmd, data, timeout){
+    if (!this.hid) throw new Error('探针没连上');
+    if (this.usingMock) return await this.hid.xfer(cmd, data);
+    return await this.hid.xfer(cmd, data, timeout);
+  }
+
+  /** 数据面回调：字节流 → 包 → 解码 → 缓冲（+触发 +统计）*/
+  onChunk(chunk){
+    if (this.captureRaw){
+      const copy = chunk instanceof Uint8Array ? chunk.slice() : new Uint8Array(chunk);
+      this.raw.push(copy); this.rawBytes = (this.rawBytes || 0) + copy.length;
+    }
+    for (const pkt of this.stream.push(chunk)){
+      this.packets++;
+      const st = this.seqT.note(pkt.seq);
+      if (!st.ok && st.why === 'gap') this.lost += st.missing || 1;
+      switch (pkt.kind){
+        case P.KIND.DEF: {
+          const d = P.parseDef(pkt.payload);
+          this.defVars = d.vars;
+          this.periodActualUs = d.periodUs;
+          this.probeDropped = Math.max(this.probeDropped, 0);
+          break;
+        }
+        case P.KIND.DATA: {
+          const vars = this.defVars || this.store?.vars;
+          if (!vars?.length) break;
+          const nums = P.decodeSamples(vars, pkt.payload, pkt.n, []);
+          const nv = vars.length;
+          const t0 = this.timeU.unwrap(pkt.tUs);
+          for (let i = 0; i < pkt.n; i++){
+            const fr = nums.slice(i * nv, (i + 1) * nv);
+            if (!fr.length) break;
+            const idx = this.store.count;
+            this.store.pushFrame(fr, t0 + i * (this._periodUs || 100));
+            if (this.trigger.mode !== TRIG.NONE && this.trigger.feed(fr, idx)){
+              this.renderer.setTrigger({ index: idx, pre: this.trigger.pre, post: this.trigger.post });
+            }
+          }
+          break;
+        }
+        case P.KIND.STAT: {
+          const s = P.parseStat(pkt.payload);
+          this.probeDropped = s.dropped;
+          this.swdMhz = s.swdMhz;
+          if (s.periodUs) this.periodActualUs = s.periodUs;
+          break;
+        }
+        default: break;
+      }
+    }
+    this._needDraw = true;
+  }
+
+  clear(){
+    this.store?.reset();
+    this.stream = new P.PacketStream();
+    this.seqT = new P.SeqTracker();
+    this.packets = 0; this.lost = 0; this.decodeErr = 0; this.raw = []; this.rawBytes = 0;
+    this.renderer.setTrigger(null);
+    this.trigger.reset();
+    this.renderer.fitAll();
+    this.follow = true;
+    this.setStatusText('已清空', '');
+    this._needDraw = true;
+  }
+
+  // ================================================================= 触发
+  trigCfg(){
+    return {
+      channel: Number($('sc-trig-ch').value) || 0,
+      mode: Number($('sc-trig-mode').value) || 0,
+      level: Number($('sc-trig-level').value) || 0,
+      pre: Math.max(0, Number($('sc-trig-pre').value) || 0),
+      post: Math.max(0, Number($('sc-trig-post').value) || 0),
+      single: $('sc-trig-single').checked,
+    };
+  }
+
+  applyTrigger(silent){
+    const c = this.trigCfg();
+    this.trigger.configure(c);
+    if (this.store && this.trigger.mode !== TRIG.NONE){
+      // 已经采到的数据立刻重新定位一次（离线重触发）
+      const hit = findTrigger(this.store, c, 0);
+      if (hit >= 0){
+        this.trigger.fired = true; this.trigger.hitIndex = hit;
+        this.renderer.setTrigger({ index: hit, pre: c.pre, post: c.post });
+        $('sc-trig-state').textContent = `命中 @ 样本 ${hit}（离线重定位）`;
+      } else {
+        this.renderer.setTrigger(null);
+        $('sc-trig-state').textContent = '布防中（等条件满足）';
+      }
+    } else if (this.renderer){
+      this.renderer.setTrigger(null);
+      $('sc-trig-state').textContent = '未命中';
+    }
+    if (!silent && this.isReal() && this.hid){
+      // 探针侧触发是 v2（主机侧已经够用），这里只把配置发过去，失败不影响
+      this.hidXfer(P.HID_CMD, P.triggerData(c)).catch(() => {});
+    }
+    this._needDraw = true;
+  }
+
+  findNextTrigger(){
+    if (!this.store?.count){ this.setStatusText('还没有数据', 'warn'); return; }
+    const c = this.trigCfg();
+    if (c.mode === TRIG.NONE){ this.setStatusText('先把触发模式选上（现在是"不触发"）', 'warn'); return; }
+    const from = (this.trigger.hitIndex >= 0 ? this.trigger.hitIndex + 1 : 0);
+    const hit = findTrigger(this.store, c, from);
+    if (hit < 0){ this.setStatusText('没有下一个命中点（可以放宽阈值再试）', 'warn'); return; }
+    this.trigger.fired = true; this.trigger.hitIndex = hit;
+    this.renderer.setTrigger({ index: hit, pre: c.pre, post: c.post });
+    const w = windowFor(hit, c.pre, c.post, this.store.count);
+    this.follow = false;                 // 🚨 必须关掉"跟随最新"，否则下一帧 fitAll() 会把窗口冲掉
+    this.renderer.zoomTo(w.start, w.end);
+    $('sc-trig-state').textContent = `命中 @ 样本 ${hit}（窗口 ${w.start}..${w.end}${w.short ? '，预触发不足' : ''}）`;
+    this._needDraw = true;
+  }
+
+  clearTrigger(){
+    this.trigger.reset();
+    this.renderer.setTrigger(null);
+    $('sc-trig-state').textContent = '未命中';
+    this._needDraw = true;
+  }
+
+  // ================================================================= 导出 / 回放
+  exportCsv(){
+    const st = this.store;
+    if (!st?.count){ this.setStatusText('还没有数据可导出', 'warn'); return; }
+    const n = st.count;
+    const head = ['t_us', ...st.vars.map(v => v.name)].join(',');
+    const parts = [head + '\n'];
+    let buf = '';
+    for (let i = 0; i < n; i++){
+      const row = [st.timeAt(i).toFixed(0)];
+      for (const ch of st.channels) row.push(numToCsv(ch.value(i)));
+      buf += row.join(',') + '\n';
+      if (buf.length > 1 << 20){ parts.push(buf); buf = ''; }      // 1 MB 一块，别一次拼 200 MB 字符串
+    }
+    if (buf) parts.push(buf);
+    const blob = new Blob(parts, { type: 'text/csv' });
+    download(`scope-${fileStamp()}.csv`, blob, 'text/csv');
+    this.setStatusText(`已导出 CSV：${n} 行 × ${st.vars.length + 1} 列`, 'ok');
+  }
+
+  saveRaw(){
+    if (!this.raw.length){ this.setStatusText('没有记录原始包（先勾上「记录原始包」再采样）', 'warn'); return; }
+    const blob = new Blob(this.raw, { type: 'application/octet-stream' });
+    download(`scope-${fileStamp()}.jsp`, blob, 'application/octet-stream');
+    this.setStatusText(`已保存原始包：${this.raw.length} 块 / ${fmtBytes(this.rawBytes || 0)}`, 'ok');
+  }
+
+  /** 回放 .jsp：把当时的字节流重新喂一遍（不连硬件也能看波形 / 调触发）*/
+  async replayFile(file){
+    try {
+      const buf = new Uint8Array(await file.arrayBuffer());
+      const vars = this.selected.length ? this.selected : this.mockVars();
+      const periodUs = this.periodUs();
+      this.store = new SampleStore(vars, Math.ceil(buf.length / 16) + 1024);
+      this.renderer.setStore(this.store);
+      this.stream = new P.PacketStream();
+      this.seqT = new P.SeqTracker();
+      this.timeU = new P.TimeUnwrap();
+      this.packets = 0; this.lost = 0; this.defVars = null;
+      const chunk = 64 * 1024;
+      for (let o = 0; o < buf.length; o += chunk) this.onChunk(buf.subarray(o, o + chunk));
+      this.renderer.fitAll();
+      this.setStatusText(`回放完成：${this.store.count} 个样本 / ${this.packets} 个包`, 'ok');
+      this._needDraw = true;
+    } catch (e){
+      this.setStatusText('回放失败：' + (e?.message || e), 'err');
+    }
+  }
+
+  // ================================================================= 界面
+  setStatusText(text, kind){
+    this.state = text;
+    const el = $('sc-state');
+    if (el) setStatus(el, text, kind);
+    if (kind === 'err'){ const e = $('sc-err'); if (e) e.textContent = text; }
+  }
+
+  syncButtons(){
+    $('sc-start').disabled = this.running;
+    $('sc-stop').disabled = !this.running;
+  }
+
+  _loop(){
+    const tick = () => {
+      this._raf = requestAnimationFrame(tick);
+      if (document.hidden && !this.running && !this._needDraw) return;   // 后台且闲着：别白烧 CPU
+      if (this._needDraw || this.running){
+        this._needDraw = false;
+        this.drawFrame();
+      }
+    };
+    this._raf = requestAnimationFrame(tick);
+  }
+
+  drawFrame(){
+    // 跟随模式：数据在长，视图自动保持"全览"（用户一缩放/拖动就退出跟随）
+    if (this.follow && this.store?.count) this.renderer.fitAll();
+    const usedLod = this.renderer.draw();
+    this.usedLod = usedLod;
+    const st = this.store;
+    const rate = st?.rate() || 0;
+    $('sc-samples').textContent = String(st?.count || 0);
+    $('sc-rate').textContent = rate ? `${(rate / 1000).toFixed(2)} kHz` : '0 Hz';
+    $('sc-packets').textContent = String(this.packets);
+    const lost = this.lost + (this.probeDropped || 0) + (st?.overrun || 0);
+    $('sc-lost').textContent = String(lost);
+    $('sc-buf').textContent = st ? `${Math.round(st.count / st.capacity * 100)}%` : '0%';
+    $('sc-mem').textContent = st ? fmtBytes(st.bytes()) : '0 B';
+    $('sc-mhz').textContent = this.swdMhz ? `${this.swdMhz} MHz` : '—';
+    const err = $('sc-err');
+    if (err) err.textContent = this.stream.resyncs ? `重同步 ${this.stream.resyncs} 次 / 垃圾 ${this.stream.junk} B` : '';
+    $('sc-window').textContent = st?.count
+      ? `${fmtTime(st.timeAt(Math.max(0, Math.ceil(this.renderer.view.end) - 1)) - st.timeAt(Math.floor(this.renderer.view.start)))} 窗口 · ` +
+        `每列 ${(this.renderer.span / Math.max(2, this.renderer.plotW)).toFixed(1)} 样本 ${usedLod ? '(LOD)' : '(精确)'}` +
+        (this.follow ? ' · 跟随最新' : '')
+      : '';
+    this.renderLegend();
+    if (st?.full && this.running) this.setStatusText('缓冲已满：采样自动停止（要更长时间就把「时长」调大）', 'warn');
+  }
+
+  renderLegend(){
+    const box = $('sc-legend');
+    if (!box || !this.store) return;
+    // 游标可能来自"窗口尺寸变了"之前的旧位置 —— 夹到有效范围，别显示一个不存在的样本号
+    const cur = this.renderer.cursor != null ? Math.min(this.renderer.cursor, this.store.count - 1) : null;
+    const rows = legendRows(this.store, cur, this.renderer.hidden);
+    const tag = cur != null ? ` @${cur}` : '';
+    box.innerHTML = rows.map(r =>
+      `<span class="lrow${r.visible ? '' : ' off'}" data-k="${r.index}">` +
+      `<i class="dot" style="background:${r.color}"></i>${r.name}` +
+      `<span class="lv">${fmtVal(r.value)}${tag}</span></span>`).join('');
+    for (const el of box.querySelectorAll('.lrow')){
+      el.addEventListener('click', () => {
+        const k = Number(el.dataset.k);
+        this.renderer.setVisible(k, !this.renderer.isVisible(k));
+        this._needDraw = true;
+      });
+    }
+  }
+
+  // ================================================================= 自检摘要
+  summary(){
+    const st = this.store;
+    return {
+      state: this.state,
+      mode: this.usingMock ? 'mock' : 'real',
+      elf: this.elf,
+      vars: (this.selected.length ? this.selected : []).map(v => `${v.name}:${v.scalar}@0x${v.addr.toString(16)}`),
+      varCount: this.selected.length,
+      plan: this.plan ? { spans: this.plan.spans.length, frameBytes: this.plan.frameBytes,
+                          estUs: +this.plan.estUs.toFixed(2), estHz: this.plan.estHz } : null,
+      samples: st?.count || 0,
+      capacity: st?.capacity || 0,
+      packets: this.packets,
+      lost: this.lost + (this.probeDropped || 0) + (st?.overrun || 0),
+      rateHz: Math.round(st?.rate() || 0),
+      trigger: { mode: this.trigger.mode, hit: this.trigger.hitIndex, hits: this.trigger.hits,
+                 marker: !!this.renderer.trigger },
+      view: { start: Math.round(this.renderer.view.start), end: Math.round(this.renderer.view.end) },
+      lod: !!this.usedLod,
+      resyncs: this.stream.resyncs,
+      raw: this.raw.length,
+      running: this.running,
+      mockVars: this.mockVars().map(v => v.name),
+    };
+  }
+}
+
+function numToCsv(v){
+  if (Number.isInteger(v)) return String(v);
+  if (!Number.isFinite(v)) return '';
+  return v.toPrecision(9).replace(/0+$/, '').replace(/\.$/, '');
+}

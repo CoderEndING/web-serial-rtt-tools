@@ -4,7 +4,9 @@
  * 三条性能/正确性上的硬规矩：
  *  1. **每像素列只画 min/max 两条极值**（不是平均、更不是逐样本）—— 平均会把尖峰抹平，
  *     而尖峰恰恰是要看的东西。抽包络的活儿在 `store.Channel.columns()` 里（带 LOD 金字塔）。
- *  2. 复用缓冲：每帧不 new 数组（`_mn/_mx` 按画布宽度分配一次）。
+ *  2. 复用缓冲：每帧不 new 数组（包络缓冲按「画布宽度 × 通道数」分配一次）。
+ *     🚨 **每个通道一份**：早期版本所有通道共用一份 `_mn/_mx`，于是后算的通道把先算的覆盖掉 ——
+ *     画出来是 8 条完全重合的曲线（自测截图时一眼看出来的，代码"看着很合理"）。
  *  3. 高清屏用 `devicePixelRatio` 放大 backing store，线宽按 dpr 缩放（否则 1px 线糊成 2px 灰线）。
  *
  * 视图 = 样本索引区间 [start, end)。X 轴刻度用 `store.timeAt()` 换算成真实时间（µs），
@@ -24,8 +26,8 @@ export class ScopeRenderer {
     this.mode = opts.mode || 'auto';  // auto = 每通道自适应量程；shared = 共用
     this.showGrid = true;
     this.hidden = new Set();       // 隐藏的通道序号
-    this._mn = new Float64Array(0);
-    this._mx = new Float64Array(0);
+    this._cols = 0;
+    this._buf = [];                // 每通道一份 {min,max} 包络缓冲
     this._ranges = [];             // 每通道在可见窗口里的 [min,max]（防抖用）
     this.padding = { l: 52, r: 12, t: 10, b: 22 };
   }
@@ -102,7 +104,10 @@ export class ScopeRenderer {
     if (!st || !st.count){ this._text(ctx, '还没有数据 —— 连上探针并「开始采样」', l + 8, t + 20, '#7b8794'); return false; }
 
     const cols = Math.max(2, Math.floor(pw));
-    if (this._mn.length < cols){ this._mn = new Float64Array(cols); this._mx = new Float64Array(cols); }
+    if (!this._cols || this._cols < cols){
+      this._cols = cols;
+      this._buf = [];                       // 每通道**各自**的包络缓冲（共用一份会把前面通道覆盖掉）
+    }
 
     // 触发窗口底色（先画，压在波形下面）
     if (this.trigger && this.trigger.index >= 0){
@@ -123,10 +128,12 @@ export class ScopeRenderer {
     this._ranges = [];
     for (let k = 0; k < st.channels.length; k++){
       const ch = st.channels[k];
-      if (!this.isVisible(k)){ this._ranges.push(null); continue; }
-      usedLod = ch.columns(a, z, cols, this._mn, this._mx) || usedLod;
+      if (!this.isVisible(k)){ this._ranges.push(null); this._buf[k] = null; continue; }
+      if (!this._buf[k]) this._buf[k] = { min: new Float64Array(this._cols), max: new Float64Array(this._cols) };
+      const buf = this._buf[k];
+      usedLod = ch.columns(a, z, cols, buf.min, buf.max) || usedLod;
       let mn = Infinity, mx = -Infinity;
-      for (let i = 0; i < cols; i++){ if (this._mn[i] < mn) mn = this._mn[i]; if (this._mx[i] > mx) mx = this._mx[i]; }
+      for (let i = 0; i < cols; i++){ if (buf.min[i] < mn) mn = buf.min[i]; if (buf.max[i] > mx) mx = buf.max[i]; }
       // 防抖：量程变化小于 2% 就沿用上一次（否则波形会随噪声上下乱跳）
       const prev = this._ranges[k];
       if (prev && Number.isFinite(prev[0])){
@@ -151,28 +158,34 @@ export class ScopeRenderer {
     if (this.showGrid) this._grid(ctx, W, H, shared ? [gMin, gMax] : null);
 
     // 波形
-    ctx.lineWidth = 1;
+    // 🚨 高清屏（dpr≠1）必须把线宽和坐标都换算到**设备像素**再对齐：
+    //    否则 1 CSS px 的线落在 1.2 个设备像素上 → 抗锯齿把颜色摊成两层 → 波形发灰发淡
+    //    （自测截图时肉眼发现：8 条线看着像"没画出来"）。
+    const px = 1 / dpr;
+    ctx.lineWidth = px;
     for (let k = 0; k < st.channels.length; k++){
       const ch = st.channels[k];
-      if (!this.isVisible(k)) continue;
+      if (!this.isVisible(k) || !this._buf[k]) continue;
+      const buf = this._buf[k];
       ctx.strokeStyle = this.palette[k % this.palette.length];
       ctx.beginPath();
       for (let i = 0; i < cols; i++){
-        const mn = this._mn[i], mx = this._mx[i];
+        const mn = buf.min[i], mx = buf.max[i];
         if (!Number.isFinite(mn) && !Number.isFinite(mx)) continue;
-        const x = l + i + 0.5;
+        const x = l + i + px / 2;
         // 每列一条竖线（min→max）：等价于示波器的包络显示
         const y1 = yOf(mn, k), y2 = yOf(mx, k);
         ctx.moveTo(x, y1);
-        ctx.lineTo(x, Math.max(y1 + 0.6, y2));
+        ctx.lineTo(x, Math.max(y1 + px, y2));
       }
       ctx.stroke();
     }
 
     // 游标
     if (this.cursor != null && this.cursor >= 0 && this.cursor < n){
+      const dpr2 = (typeof devicePixelRatio === 'number' ? devicePixelRatio : 1) || 1;
       const x = this.xOf(this.cursor);
-      ctx.strokeStyle = '#e6edf3'; ctx.lineWidth = 1;
+      ctx.strokeStyle = '#e6edf3'; ctx.lineWidth = 1 / dpr2;
       ctx.beginPath(); ctx.moveTo(Math.round(x) + 0.5, t); ctx.lineTo(Math.round(x) + 0.5, t + ph); ctx.stroke();
       for (let k = 0; k < st.channels.length; k++){
         if (!this.isVisible(k)) continue;
@@ -183,21 +196,23 @@ export class ScopeRenderer {
     }
 
     // 边框
-    ctx.strokeStyle = '#2a3340'; ctx.lineWidth = 1;
-    ctx.strokeRect(l + 0.5, t + 0.5, pw - 1, ph - 1);
+    ctx.strokeStyle = '#2a3340'; ctx.lineWidth = px;
+    ctx.strokeRect(l + px / 2, t + px / 2, pw - px, ph - px);
     return usedLod;
   }
 
   _grid(ctx, W, H, sharedRange){
     const { l, t } = this.padding;
     const pw = this.plotW, ph = this.plotH;
-    ctx.strokeStyle = '#1c232c'; ctx.lineWidth = 1;
+    const dpr = (typeof devicePixelRatio === 'number' ? devicePixelRatio : 1) || 1;
+    const px = 1 / dpr;
+    ctx.strokeStyle = '#1c232c'; ctx.lineWidth = px;
     for (let i = 1; i < 4; i++){
-      const y = Math.round(t + ph * i / 4) + 0.5;
+      const y = Math.round(t + ph * i / 4) + px / 2;
       ctx.beginPath(); ctx.moveTo(l, y); ctx.lineTo(l + pw, y); ctx.stroke();
     }
     for (let i = 1; i < 6; i++){
-      const x = Math.round(l + pw * i / 6) + 0.5;
+      const x = Math.round(l + pw * i / 6) + px / 2;
       ctx.beginPath(); ctx.moveTo(x, t); ctx.lineTo(x, t + ph); ctx.stroke();
     }
     // X 轴时间刻度（0 / 1/4 / 1/2 / 3/4 / 末端 的相对时间）

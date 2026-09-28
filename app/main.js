@@ -12,6 +12,7 @@ import { FlashView } from './flash/view.js';
 import { GenView } from './gen/view.js';
 import { RttCdcView } from './hid/view.js';
 import { RttCdcStreamView } from './hid/stream.js';
+import { ScopeView } from './scope/view.js';
 
 // ---------- 错误收集（自检/排障用；平时看不见） ----------
 const errors = [];
@@ -26,6 +27,7 @@ const flash = new FlashView();
 const gen = new GenView();
 const hid = new RttCdcView();
 const stream = new RttCdcStreamView(session);
+const scope = new ScopeView();
 
 assistant.init();
 terminal.init();
@@ -34,11 +36,13 @@ flash.init();
 gen.init();
 hid.init();
 stream.init();
+scope.init();
 
 initTabs(name => {
   if (name === 'terminal') requestAnimationFrame(() => terminal.onShow());
   if (name === 'rtt') requestAnimationFrame(() => rtt.onShow());
   if (name === 'rttcdc') requestAnimationFrame(() => stream.onShow());
+  if (name === 'scope') requestAnimationFrame(() => scope.onShow());
   if (name === 'gen') requestAnimationFrame(() => gen.onShow());
 });
 
@@ -57,6 +61,7 @@ function summary(){
     genFiles: (gen?.files || []).map(f => f.name),
     hid: hid?.summary?.() || null,
     stream: stream?.summary?.() || null,
+    scope: scope?.summary?.() || null,
     vendor: 'serial-rtt-tools',
   };
 }
@@ -65,7 +70,7 @@ box.id = 'selftest';
 box.hidden = true;
 document.body.appendChild(box);
 
-window.__tools = { session, assistant, terminal, rtt, flash, gen, hid, stream, summary, errors };
+window.__tools = { session, assistant, terminal, rtt, flash, gen, hid, stream, scope, summary, errors };
 
 // ---------- 浏览器端端到端自检：?demo=serial&selftest=1 ----------
 const q = new URLSearchParams(location.search);

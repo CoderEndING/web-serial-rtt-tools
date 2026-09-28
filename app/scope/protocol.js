@@ -24,6 +24,7 @@ export const KIND_NAME = { 1: 'DEF', 2: 'DATA', 3: 'STAT', 4: 'EVT' };
 export const TYPES = [];
 for (const [name, s] of Object.entries(SCALARS)) TYPES[s.code] = { name, ...s };
 export const typeInfo = code => TYPES[code] || null;
+export { SCALARS };                    // 页面算帧长/画图都要用，从这里转出去省一次 import
 
 /** 采样计划/速率模型（由固件 bench 的 3434 KB/s @45 MHz 反推；见文档 §6.1）
  *  —— 只是**估算**，页面显示时要说清楚，真值由 M0 标定给。 */

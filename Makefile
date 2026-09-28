@@ -25,7 +25,7 @@ FW_DIR   = tools/target-firmware/stm32f103
 LA       = tools/la/kingst_la.py
 
 .DEFAULT_GOAL := help
-.PHONY: help serve serve-stop browser open test test-ui test-gen test-gen-page test-hid test-dwarf test-scope test-hw test-bridge test-all \
+.PHONY: help serve serve-stop browser open test test-ui test-gen test-gen-page test-hid test-dwarf test-scope test-scope-page test-hw test-bridge test-all \
         bridge bridge-stop fw-build fw-flash fw-restore fw-h7-build fw-h7-slow fw-h7-flash \
         algo-check flash-plan la-info la-capture git-status git-log check clean
 
@@ -81,6 +81,12 @@ test-gen-page:
 	pwsh -NoProfile -Command "if (-not (Get-NetTCPConnection -State Listen -LocalPort $(PORT) -ErrorAction SilentlyContinue)) { Start-Process -FilePath '$(PY)' -ArgumentList '-m','http.server','$(PORT)','--bind','127.0.0.1' -WindowStyle Hidden; Start-Sleep -Seconds 1 }"
 	pwsh -NoProfile -Command "try { $$null = Invoke-WebRequest 'http://127.0.0.1:$(CDP)/json/version' -TimeoutSec 2 -UseBasicParsing } catch { & 'tools/selftest/launch-browser.ps1' -Port $(CDP) -Url '$(APP)'; Start-Sleep -Seconds 2 }"
 	$(NODE) tools/selftest/gen-page.test.mjs
+
+# 「J-Scope 波形」页的真页面验收（假探针，不需要硬件；需要 8899 服务 + 9333 CDP 浏览器）
+test-scope-page:
+	pwsh -NoProfile -Command "if (-not (Get-NetTCPConnection -State Listen -LocalPort $(PORT) -ErrorAction SilentlyContinue)) { Start-Process -FilePath '$(PY)' -ArgumentList '-m','http.server','$(PORT)','--bind','127.0.0.1' -WindowStyle Hidden; Start-Sleep -Seconds 1 }"
+	pwsh -NoProfile -Command "try { $$null = Invoke-WebRequest 'http://127.0.0.1:$(CDP)/json/version' -TimeoutSec 2 -UseBasicParsing } catch { & 'tools/selftest/launch-browser.ps1' -Port $(CDP) -Url '$(APP)'; Start-Sleep -Seconds 3 }"
+	$(NODE) tools/selftest/scope-page.test.mjs
 
 test-hw:
 	$(NODE) tools/selftest/browser-hw.test.mjs webusb
@@ -162,6 +168,8 @@ check:
 	$(NODE) --check app/scope/store.js
 	$(NODE) --check app/scope/mock.js
 	$(NODE) --check app/scope/render.js
+	$(NODE) --check app/scope/transport.js
+	$(NODE) --check app/scope/view.js
 	$(NODE) --check app/main.js
 	$(NODE) --check bridge/rtt-bridge.mjs
 	pwsh -NoProfile -Command "Write-Host '语法检查通过'"

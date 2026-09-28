@@ -159,6 +159,33 @@ dialog form{margin-top:16px;text-align:right}
 /* ---------------- RTT 转发页 ---------------- */
 #tab-rttcdc .side .row>span:first-child{width:74px}
 
+/* ---------------- J-Scope 波形页 ---------------- */
+#tab-scope .side .row>span:first-child{width:66px}
+#tab-scope .row em.unit{flex:none;color:var(--fg2);font-size:11.5px;font-style:normal;width:26px}
+.varlist{
+  border:1px solid var(--line);border-radius:6px;background:var(--bg2);
+  max-height:210px;overflow:auto;margin:6px 0 0;padding:2px;
+}
+.varlist .vrow{display:flex;align-items:center;gap:6px;padding:2px 4px;border-radius:4px;font-size:12px}
+.varlist .vrow:hover{background:var(--bg3)}
+.varlist .vrow.sel{background:#132a45}
+.varlist .vrow .nm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--mono)}
+.varlist .vrow .ty{color:var(--fg2);font-size:11px;flex:none}
+.varlist .vrow .ad{color:var(--fg2);font-size:11px;font-family:var(--mono);flex:none}
+.varlist .vrow.dis{opacity:.45}
+.varlist .vsect{padding:4px 6px 2px;color:var(--fg2);font-size:11px;border-top:1px solid var(--line);margin-top:2px}
+.plotwrap{position:relative;flex:1;min-height:260px;display:flex}
+#sc-canvas{flex:1;width:100%;height:100%;min-height:260px;border-radius:6px;cursor:crosshair}
+.legend{
+  position:absolute;right:8px;top:8px;background:rgba(13,17,23,.82);border:1px solid var(--line);
+  border-radius:6px;padding:4px 7px;font-size:11.5px;font-family:var(--mono);max-width:46%;
+  display:flex;flex-direction:column;gap:2px;pointer-events:auto;
+}
+.legend .lrow{display:flex;align-items:center;gap:6px;cursor:pointer;white-space:nowrap}
+.legend .lrow.off{opacity:.4;text-decoration:line-through}
+.legend .dot{width:8px;height:8px;border-radius:2px;flex:none}
+.legend .lv{margin-left:auto;color:var(--fg2)}
+
 @media (max-width:860px){
   body{overflow:auto}
   .ws{grid-template-columns:1fr;height:auto}

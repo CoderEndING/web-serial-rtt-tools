@@ -11,6 +11,7 @@
 | **终端** | Xshell 式串口终端：xterm.js 渲染 ANSI、本地回显、回车/退格映射、粘贴发送；侧栏还能开 **akaLinkPro 的 RTT→CDC 转发**（探针自己读 RTT 塞进 CDC，主机只读一个 COM 口） | 同上（与串口助手共用同一个串口会话）；转发功能需要 akaLinkPro 探针 |
 | **RTT Viewer** | SEGGER RTT 多通道查看 + 下行输入 + 复位目标，四种后端；同样支持记录到文件与高速自动关显示 | **零安装**：WebUSB + CMSIS-DAP 探针<br>**可选**：本地桥 + OpenOCD / J-Link |
 | **RTT 转发** | akaLinkPro 的**探针侧** RTT→CDC：探针自己通过 SWD 轮询目标控制块、把数据塞进它的 CDC 串口；本页开那个 COM 口收数据。**纯输出，没有发送**：ASCII/ANSI/HEX、时间戳、暂停、保存数据、记录到文件、高速自动关显示 | akaLinkPro 探针（配置走它的自定义 HID；接收走它的 CDC 口） |
+| **J-Scope 波形** | 类 SEGGER J-Scope 的**变量示波器**：探针自己按固定周期读目标 RAM（HSS，目标固件不用改），数据走 WebUSB 的独立批量端点，网页画多通道波形、带**触发**、导出 CSV、原始包可回放 | **网页侧已可用**：勾「用假探针」或打开 `.jsp` 回放即可体验；真机需要探针固件支持 `HID 0x32`（见 [`docs/scope-page.md`](docs/scope-page.md)） |
 | **烧录器** | .elf/.hex/.bin 写进目标：**零安装 WebUSB**（页面跑 flashloader，擦/写/校验/复位一条龙）或**本地桥 OpenOCD** | 零安装：同上探针；桥：OpenOCD |
 | **工程生成** | 拖进 Keil `.uvprojx` 就能生成调试/下载配套文件：`Makefile.jlink`、`jlink_gdb.script`、`Makefile.pyocd`、`Makefile.openocd`（连带 `rtt_logger.py`）、`test_sram.bin`；参数可填可勾，产物**实时预览** | 不需要任何硬件/后端（纯前端生成） |
 
@@ -30,6 +31,10 @@
 | RTT 转发（探针侧 RTT→CDC；截图里是内置假探针 + 演示串口） |
 |---|
 | ![RTT 转发](docs/shots/5-rttcdc.png) |
+
+| J-Scope 波形（假探针 · 8 通道 · 20 kHz · 带触发标记） |
+|---|
+| ![J-Scope 波形](docs/shots/6-scope.png) |
 
 （截图里第一个标签用的是**内置演示串口**，所以显示的是假设备；`?demo=serial` 就能自己试。）
 
@@ -116,6 +121,25 @@
 
 协议、返回码（含 `-100` = "排队中"这个坑）、实测数字与踩坑记录都在 [`docs/rtt-cdc.md`](docs/rtt-cdc.md)。
 自测：`make test-hid`（协议层，不需要硬件）+ `make test-ui`（页面里假探针 + 演示串口走一遍）。
+
+## J-Scope 波形（变量示波器）
+
+探针侧 HSS 采样：探针自己按你设的周期去读目标 RAM 里那几个变量（**目标固件一行都不用改**），
+主机只负责收包、解码、画图。8 个变量正好装进一条 HID 配置报文，数据走 interface 0 上
+**原本闲置的 bulk IN 端点 `0x83`**（零描述符改动、不用装驱动）。
+
+页面里现在就能玩的（**不需要硬件**）：
+1. 勾「**用假探针（无需硬件）**」→「开始采样」→ 立刻出波形（8 个通道，f32/i32/u16/i16/u8/i8/f64 各一）；
+2. 「载入 ELF…」→ 从 DWARF 里选变量（**全局/静态变量 + 结构体成员**，带类型；采不了的会写明原因）；
+3. 触发：选通道/阈值/预触发 → 实时命中，或「**查找下一个**」在已采到的数据里重新定位（不用重采）；
+4. 导出 CSV、勾「记录原始包」存 `.jsp`、再用「打开回放」离线看波形。
+
+速率的关键不是 USB 而是 **SWD 读**：变量排在一起（同一个结构体）能比散落快 3~4 倍 ——
+页面上「读计划」那行会直接告诉你当前选择的 span 数与预计上限。
+原理、协议、速率模型、踩坑记录都在 [`docs/scope-page.md`](docs/scope-page.md)。
+
+自测：`make test-scope`（引擎层 103 项，含 8 通道 × 10000 样本逐点对账）+
+`make test-dwarf`（ELF/DWARF 61 项）+ `make test-scope-page`（真页面 CDP 37 项）。
 
 ## 支持的调试后端
 

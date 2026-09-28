@@ -18,6 +18,7 @@
     <button class="tab" data-tab="terminal">终端</button>
     <button class="tab" data-tab="rtt">RTT Viewer</button>
     <button class="tab" data-tab="rttcdc">RTT 转发</button>
+<button class="tab" data-tab="scope">J-Scope 波形</button>
     <button class="tab" data-tab="flash">烧录器</button>
     <button class="tab" data-tab="gen">工程生成</button>
   </nav>
@@ -445,6 +446,95 @@
         <label class="chk" title="默认开：每段前加一行 [时:分:秒.毫秒]，存 .txt 给人看；关掉则原样写字节存 .bin（二进制安全）"><input type="checkbox" id="c-record-ts" checked> 记录带时间戳</label>
         <label class="chk" title="连接成功后自动弹一次保存框开始记录。配合高速自动关显示（>100KB/s 停渲染、收数/记录照常），一上来就猛灌的场景全程无感"><input type="checkbox" id="c-record-auto"> 连接自动记录</label>
         <button id="c-statclear" class="mini">计数清零</button>
+      </div>
+    </section>
+  </div>
+</section>
+
+<!-- ============================ J-Scope 波形 ============================ -->
+<section class="panel" id="tab-scope">
+  <div class="ws">
+    <aside class="side">
+      <fieldset>
+        <legend>探针 · 采样</legend>
+        <div class="row btnrow">
+          <button id="sc-connect" class="primary" title="走探针的自定义 HID（usage page 0xFF00）选设备：配置与状态走这条">连接探针</button>
+          <button id="sc-reconnect" title="用浏览器记住的探针直接连（不用再点弹框）">重连</button>
+        </div>
+        <p class="hint" id="sc-info">未连接</p>
+        <label class="chk" title="不需要硬件：波形由页面确定性生成（f32 正弦 / i32 计数 / i16 方波 / f64 斜坡…），用来看界面、试触发、试导出"><input type="checkbox" id="sc-mock"> 用假探针（无需硬件）</label>
+        <div class="row btnrow">
+          <button id="sc-usb" title="WebUSB 认领 interface 0，走那个空闲的 bulk IN 端点 0x83">连接数据端点…</button>
+        </div>
+        <p class="hint" id="sc-usbinfo">未连接数据端点（假探针模式不需要）</p>
+      </fieldset>
+
+      <fieldset>
+        <legend>变量（1~8 个）</legend>
+        <div class="row btnrow">
+          <button id="sc-elf" title="解析 .elf 的 DWARF：全局/静态变量 + 结构体成员，自动带类型">载入 ELF…</button>
+          <button id="sc-varclear">清空勾选</button>
+        </div>
+        <p class="hint" id="sc-elfinfo">未载入（也可以用假探针自带的 8 个通道）</p>
+        <label class="row"><span>搜索</span><input id="sc-search" placeholder="变量名…"></label>
+        <div class="varlist" id="sc-vars"></div>
+        <p class="hint" id="sc-count">已选 0 / 8</p>
+      </fieldset>
+
+      <fieldset>
+        <legend>采样</legend>
+        <label class="row"><span>周期</span><input id="sc-period" class="num" value="100" inputmode="numeric" title="µs。100 µs = 10 kHz"><em class="unit">µs</em></label>
+        <label class="row"><span>时长</span><input id="sc-seconds" class="num" value="20" inputmode="numeric" title="缓冲容量 = 实测速率 × 时长（页面会显示占多少内存）"><em class="unit">s</em></label>
+        <label class="row"><span>SWD 时钟</span><select id="sc-clock" title="与 RTT Viewer 同款档位；固件自带失败自动降档"></select></label>
+        <div class="row btnrow">
+          <button id="sc-start" class="primary">开始采样</button>
+          <button id="sc-stop" disabled>停止</button>
+        </div>
+        <div class="row btnrow">
+          <button id="sc-bench" title="让探针用当前计划空跑一段，回报真实 µs/样本（M0 标定；假探针会假装一个结果）">标定真实速率</button>
+        </div>
+        <p class="hint" id="sc-plan">选好变量后会显示读计划与预计上限</p>
+        <p class="hint" id="sc-state">未开始</p>
+      </fieldset>
+
+      <fieldset>
+        <legend>触发（主机侧）</legend>
+        <label class="row"><span>模式</span><select id="sc-trig-mode"></select></label>
+        <label class="row"><span>通道</span><select id="sc-trig-ch"></select></label>
+        <label class="row"><span>阈值</span><input id="sc-trig-level" class="num" value="0"></label>
+        <label class="row"><span>预触发</span><input id="sc-trig-pre" class="num" value="200" inputmode="numeric"><em class="unit">样本</em></label>
+        <label class="row"><span>后触发</span><input id="sc-trig-post" class="num" value="800" inputmode="numeric"><em class="unit">样本</em></label>
+        <label class="chk"><input type="checkbox" id="sc-trig-single" checked> 单次（命中后不再重复报）</label>
+        <div class="row btnrow">
+          <button id="sc-trig-find" title="在已经采到的数据里重新找下一个命中点 —— 改个阈值就能立刻重新定位，不用重采">查找下一个</button>
+          <button id="sc-trig-clear">清除触发</button>
+        </div>
+        <p class="hint" id="sc-trig-state">未命中</p>
+      </fieldset>
+    </aside>
+
+    <section class="main">
+      <div class="toolbar">
+        <button id="sc-fit" title="全览（也支持双击画布）">全览</button>
+        <button id="sc-zin" title="放大（滚轮也行）">放大</button>
+        <button id="sc-zout">缩小</button>
+        <label class="chk" title="所有通道共用一个 Y 轴量程；关掉则每个通道各自自适应（混合单位时更好用）"><input type="checkbox" id="sc-shared"> 共用 Y 轴</label>
+        <label class="chk" title="把原始 512 B 包另存一份，可离线回放（也方便把现场数据留给排查）"><input type="checkbox" id="sc-raw"> 记录原始包</label>
+        <span class="spacer"></span>
+        <button id="sc-csv" title="按当前缓冲导出 CSV（分块生成，长采集也不会卡死）">导出 CSV</button>
+        <button id="sc-save" title="把记录的原始包存成 .jsp（可以离线回放）">保存原始</button>
+        <button id="sc-open" title="打开 .jsp 回放 —— 不用连硬件也能看波形/调触发">打开回放</button>
+        <button id="sc-clear">清空</button>
+      </div>
+      <div class="plotwrap">
+        <canvas id="sc-canvas"></canvas>
+        <div class="legend" id="sc-legend"></div>
+      </div>
+      <div class="stats">
+        <span>样本 <b id="sc-samples">0</b> · <b id="sc-rate">0 Hz</b> · 包 <b id="sc-packets">0</b> · 丢样本 <b id="sc-lost">0</b> · 缓冲 <b id="sc-buf">0%</b> · 内存 <b id="sc-mem">0 B</b> · SWD <b id="sc-mhz">—</b></span>
+        <span class="err" id="sc-err"></span>
+        <span class="spacer"></span>
+        <span class="hint" id="sc-window" style="margin:0"></span>
       </div>
     </section>
   </div>
