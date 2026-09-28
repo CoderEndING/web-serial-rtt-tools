@@ -521,7 +521,10 @@
         <button id="sc-zin" title="放大（滚轮也行）">放大</button>
         <button id="sc-zout">缩小</button>
         <button id="sc-zoompts" title="把视窗缩到「每列约 1 个采样点」—— 这时画的是**连起来的采样点折线**（不是包络带）；看慢信号（比如 100 Hz 正弦）的波形形状用这个">细看</button>
-        <label class="chk" title="所有通道共用一个 Y 轴量程；关掉则每个通道各自自适应（混合单位时更好用）"><input type="checkbox" id="sc-shared"> 共用 Y 轴</label>
+        <div class="seg" data-group="sclayout" title="叠加 = 所有通道画在同一片区域（量程差异大时会糊在一起）；分道 = 每个通道一条横带、各自独立的 Y 轴（多通道混合单位推荐）">
+          <button data-v="overlay" class="on">叠加</button><button data-v="lanes">分道</button>
+        </div>
+        <label class="chk" title="叠加模式下：所有通道共用一个 Y 轴量程；关掉则每个通道各自自适应。（分道模式下每路天生就是自己的量程）"><input type="checkbox" id="sc-shared"> 共用 Y 轴</label>
         <label class="chk" title="把原始 512 B 包另存一份，可离线回放（也方便把现场数据留给排查）"><input type="checkbox" id="sc-raw"> 记录原始包</label>
         <span class="spacer"></span>
         <button id="sc-csv" title="按当前缓冲导出 CSV（分块生成，长采集也不会卡死）">导出 CSV</button>
