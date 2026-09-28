@@ -144,11 +144,12 @@ console.log('== 4. 画布上真的有波形 ==');
       total++;
       if (Math.abs(d[i] - 17) + Math.abs(d[i+1] - 21) + Math.abs(d[i+2] - 28) > 40) colored++;
     }
-    return { colored, total, lod: !!sc.usedLod, w: c.width, h: c.height };`);
+    return { colored, total, lod: !!sc.usedLod, w: c.width, h: c.height,
+             span: Math.round(sc.renderer.span), cols: Math.round(sc.renderer.plotW), count: sc.store.count };`);
   ok(!px.err, '画布有尺寸', px.err || '');
   ok(px.colored > px.total * 0.005 && px.colored > 300,
      `画布上有 ${px.colored}/${px.total} 个非背景采样点（波形真的画出来了）`);
-  ok(px.lod === true, '缩到全览时走 LOD 快路径');
+  ok(px.lod === true, `缩到全览时走 LOD 快路径（span ${px.span} / ${px.cols} 列 = 每列 ${(px.span / px.cols).toFixed(1)} 样本，共 ${px.count} 个）`);
   const rows = await ev(`return [...document.querySelectorAll('#sc-legend .lrow')].map(e => e.textContent);`);
   ok(rows.length === 8, `图例 8 行（${rows.length}）`);
   const hidden = await ev(`

@@ -99,6 +99,7 @@ export class ScopeView {
     $('sc-start').addEventListener('click', () => this.start());
     $('sc-stop').addEventListener('click', () => this.stop());
     $('sc-bench').addEventListener('click', () => this.bench());
+    $('sc-recc').addEventListener('click', () => this.applyRecPeriod());
     $('sc-clear').addEventListener('click', () => this.clear());
     $('sc-fit').addEventListener('click', () => { this.renderer.fitAll(); this.follow = true; this._needDraw = true; });
     $('sc-zin').addEventListener('click', () => { this.renderer.zoomBy(1.6, 0.5); this._needDraw = true; });
@@ -321,10 +322,10 @@ export class ScopeView {
     const fast = plan.spans.length === 1 && plan.frameBytes === 4;
     $('sc-plan').innerHTML = vars.length
       ? `读计划：${plan.spans.length} 个 span / 帧 ${plan.frameBytes} B · ` +
-        `模型估算 ≈${plan.estUs.toFixed(1)} µs/样本 → 上限 <b>≈${khz} kHz</b>` +
-        (fast ? '（单字快路径实测 ≈1.6 µs → 600 kHz 量级，点「标定真实速率」看真值）' : '') +
+        `模型估算 ≈${plan.estUs.toFixed(1)} µs/样本 → ≈${khz} kHz（**偏保守**：单字 span 有快路径，实测 ≈1.6 µs → 600 kHz 量级）` +
         (plan.saved > 0.15 ? `（合并省了 ${(plan.saved * 100).toFixed(0)}%）` : '') +
-        (this.benchUs ? ` · <b>已标定 ${this.benchUs.toFixed(3)} µs</b>（${Math.round(1e3 / this.benchUs)} kHz）` : '')
+        (this.benchUs ? ` · <b>已标定：读一次 ${this.benchUs.toFixed(3)} µs</b>（上限 ${Math.round(1e3 / this.benchUs)} kHz，建议周期 ≥ ${this.recPeriodUs} µs）` : '') +
+        '（周期下限 2 µs；周期 < 读一次 的耗时就会跳拍丢样本）'
       : '选好变量后会显示读计划与预计上限';
     // 触发通道下拉跟着变量走
     const sel = $('sc-trig-ch');
@@ -358,7 +359,30 @@ export class ScopeView {
 
     const periodUs = this.periodUs();
     const nominalHz = 1e6 / periodUs;
-    const capacity = Math.ceil(nominalHz * this.seconds() * 1.25) + 64;
+    let capacity = Math.ceil(nominalHz * this.seconds() * 1.25) + 64;
+    /**
+     * 🚨 内存闸：周期可以设到 2 µs、时长可以设到几百秒，两者一乘就是几千万样本 ——
+     *    8 通道 × 2 B × 1200 万 = 两百多 MB，标签页会卡死甚至崩。
+     *    这里按"每样本字节数 × 通道数 × 1.35（LOD 开销）"估一下，超了就把容量砍到 256 MB 以内
+     *    并**明说**砍了多少（宁可少存点，也不能让页面挂掉还不知道为什么）。
+     */
+    const bytesPerFrame = vars.reduce((s, v) => s + (P.SCALARS[v.scalar]?.size || 4), 0);
+    const LIMIT = 128 * 1024 * 1024;
+    let capNote = '';
+    const est = cap => cap * bytesPerFrame * 1.35 + vars.length * 8192;
+    if (est(capacity) > LIMIT){
+      const capped = Math.max(1024, Math.floor((LIMIT - vars.length * 8192) / (bytesPerFrame * 1.35)));
+      capNote = `　⚠️ 缓冲按内存上限（128 MB）从 ${capacity} 收到 ${capped} 个样本` +
+        `（${((capped / nominalHz)).toFixed(2)} s @${(nominalHz / 1000).toFixed(1)} kHz）`;
+      capacity = capped;
+    }
+    // 线速闸：探针的 0x83 有个已知的"包率天花板"（~1.75 MB/s，每包 512 B 装 floor(496/frame) 个样本）。
+    // 超了不是采样不够快，而是**主机侧排空不及**——丢的是 USB 那笔账，界面要把它和探针跳拍分开说。
+    const wireBps = bytesPerFrame * nominalHz;
+    const wireNote = wireBps > 1.6e6
+      ? `　⚠️ 线速 ≈${(wireBps / 1048576).toFixed(2)} MB/s，超过 0x83 的包率天花板（≈1.75 MB/s）——` +
+        '丢样本会是"USB 排空不及"这笔账（STAT 的 usb_drop），不是探针读不过来'
+      : '';
     this.plan = this.updatePlan();
     this.defVars = null;
     this._periodUs = periodUs;
@@ -408,8 +432,12 @@ export class ScopeView {
       this.running = true;
       this.follow = true;
       this.state = '采样中';
+      // 周期比"读一次"还短 ⇒ 必丢拍（固件侧的账），这一条要当面说清楚
+      const tooFast = (this.benchUs && periodUs < this.benchUs)
+        ? `　⚠️ 周期 ${periodUs} µs 小于"读一次"的 ${this.benchUs.toFixed(2)} µs，探针会跳拍丢样本（建议 ≥ ${this.recPeriodUs} µs）` : '';
       this.setStatusText(`采样中：${vars.length} 通道 × ${(1e6 / periodUs / 1000).toFixed(2)} kHz，缓冲 ${capacity} 样本` +
-        (this.trigger.mode !== TRIG.NONE ? '（触发已布防）' : ''), 'ok');
+        (this.trigger.mode !== TRIG.NONE ? '（触发已布防）' : '') + tooFast + wireNote + capNote,
+      (tooFast || wireNote || capNote) ? 'warn' : 'ok');
     } catch (e){
       this.running = false;
       try { await this.transport?.stop(); } catch { /* 忽略 */ }
@@ -454,15 +482,31 @@ export class ScopeView {
       const blob = dv.getUint32(15, true), delay = dv.getUint32(19, true);
       const usPerSample = iters ? (ticks / 24) / iters : 0;
       this.benchUs = usPerSample;
+      /**
+       * 建议周期 = 单次采样耗时 × 1.15 + 1 µs（留余量给探针主循环的 USB/HID/按键那些活）。
+       * 为什么要"+1"而不是纯比例：周期贴着耗时跑，主循环里一有别的活儿就跳拍丢样本；
+       * 实测单变量 1.54 µs 时 2 µs 档会丢 ~11%，而 3 µs 档是零丢 —— 所以给一个绝对余量。
+       * 下限 3 µs（固件钳位是 2 µs，但 2 µs 只建议在"就想要最高速率、接受丢样本"时用）。
+       */
+      this.recPeriodUs = usPerSample > 0 ? Math.max(3, Math.ceil(usPerSample * 1.15) + 1) : null;
       const blobName = { 0x53c: '60M(6 指令/bit)', 0x60c: '45M(8)', 0x6e0: '36M(10)', 0x7c4: '30M(12)',
                          0xa54: '20M(18)', 0x620: 'SLOW', 0xffffffff: '还没装载' }[blob] || `0x${blob.toString(16)}`;
       this.blob = { offset: blob, name: blobName, delay };
-      this.setStatusText(`标定：${usPerSample.toFixed(3)} µs/样本 → 上限 ≈${Math.round(1e3 / usPerSample)} kHz` +
-        `（blob ${blobName}，clock_delay=${delay}${err ? `，err=${err}` : ''}）` +
-        (this.plan ? `；模型估算 ${this.plan.estUs.toFixed(2)} µs` : ''), 'ok');
+      this.setStatusText(`标定：读一次 ${usPerSample.toFixed(3)} µs → 上限 ≈${Math.round(1e3 / usPerSample)} kHz` +
+        `（blob ${blobName}，clock_delay=${delay}${err ? `，err=${err}` : ''}）；` +
+        `**建议周期 ≥ ${this.recPeriodUs} µs**（≈${Math.round(1e3 / this.recPeriodUs)} kHz，零丢档）`, 'ok');
     } catch (e){
       this.setStatusText('标定失败：' + (e?.message || e), 'err');
     }
+  }
+
+  /** 把周期填成标定给出的建议值（没标定过就先标一次） */
+  async applyRecPeriod(){
+    if (!this.recPeriodUs){ await this.bench(); }
+    if (!this.recPeriodUs){ this.setStatusText('先点「标定真实速率」', 'warn'); return; }
+    $('sc-period').value = String(this.recPeriodUs);
+    this.updatePlan();
+    this.setStatusText(`周期已设为 ${this.recPeriodUs} µs（≈${Math.round(1e3 / this.recPeriodUs)} kHz，按标定值留了 25% 余量）`, 'ok');
   }
 
   isReal(){ return !this.usingMock; }
