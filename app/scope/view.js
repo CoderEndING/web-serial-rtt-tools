@@ -418,28 +418,46 @@ export class ScopeView {
 
   updatePlan(){
     const vars = this.selected.length ? this.selected : this.mockVars();
-    const plan = P.planReads(vars);
+    const plan = P.planReads(vars, { fastWordUs: this.fastWordUs() });
     this.plan = plan;
     const khz = Math.round(plan.estHz / 1000);
-    // 单变量 4 字节：固件有条"抱住 TAR + 流水读"的快路径（每拍只 1 次传输），
-    // 实测 ≈1.6 µs @60 MHz / ≈3.1 µs @45 MHz —— 模型那 6.7 µs 是按"3 次传输"算的，偏保守。
-    const fast = plan.spans.length === 1 && plan.frameBytes === 4;
+    /**
+     * 计划行的主数字用 `bestUs`：单字 span 走固件的**流水快路径**时它是实测的 1.55 µs，
+     * 而不是模型那按"3 次传输"算出来的 6.7 µs。老写法把两个数并排写，用户一眼就看出自相矛盾：
+     * 「模型估算 ≈6.7 µs → ≈148 kHz（偏保守：实测 ≈1.6 µs → 600 kHz 量级）」。
+     */
+    const useFast = plan.fastPath;
+    const headlineUs = plan.bestUs, headlineHz = plan.bestHz;
     /**
      * 周期比"读一次"还短 ⇒ 探针必然跳拍，时间轴上会留空洞（主机看到的是洞，不是被压缩）。
      * 用户实测就是踩在这里：周期填 5 µs 想要 200 kHz，实得 112.9 kHz，
      * 于是「时长 3 s」按名义速率开出来的缓冲被填满花了 6.6 s。**这是开始采样前就该看见的**。
      */
     const wantHz = 1e6 / this.periodUs();
-    const estUs = this.benchUs || plan.estUs;
+    // 🚨 标定值只在"测的就是当前这套变量 + 时钟"时才算数（见 benchFresh）
+    const fresh = this.benchFresh();
+    const estUs = (fresh && this.benchUs) || plan.bestUs;
+    const srcName = (fresh && this.benchUs) ? '标定值' : (useFast ? '单字快路径实测' : '模型估算');
     const slow = wantHz > 1e6 / estUs
-      ? `　⚠️ 你填的周期 ${this.periodUs()} µs（${(wantHz / 1000).toFixed(0)} kHz）快过这个${this.benchUs ? '标定值' : '估算'}：` +
+      ? `　⚠️ 你填的周期 ${this.periodUs()} µs（${(wantHz / 1000).toFixed(0)} kHz）快过这个${srcName}：` +
         `探针会跳拍，实得约 ${(1e6 / estUs / 1000).toFixed(1)} kHz（时长仍按真实时间轴算，不会拖长）`
+      : '';
+    const benchTxt = this.benchUs
+      ? (fresh
+          ? ` · <b>已标定：读一次 ${this.benchUs.toFixed(3)} µs</b>（上限 ${Math.round(1e3 / this.benchUs)} kHz，建议周期 ≥ ${this.recPeriodUsFor(estUs)} µs）`
+          : ` · <s>已标定 ${this.benchUs.toFixed(3)} µs</s> <b>已失效</b>（那是「${(this._benchKey || {}).vars} @${(this._benchKey || {}).clock} kHz」测的，${this.benchKeyWhy()} —— 重新点「标定真实速率」）`)
       : '';
     $('sc-plan').innerHTML = vars.length
       ? `读计划：${plan.spans.length} 个 span / 帧 ${plan.frameBytes} B · ` +
-        `模型估算 ≈${plan.estUs.toFixed(1)} µs/样本 → ≈${khz} kHz（**偏保守**：单字 span 有快路径，实测 ≈1.6 µs → 600 kHz 量级）` +
+        (useFast
+          ? `单字 span 走固件**流水快路径**：实测 ≈${headlineUs.toFixed(2)} µs/样本 → ≈${Math.round(headlineHz / 1000)} kHz` +
+            `（保守模型算 ${plan.estUs.toFixed(1)} µs，那是按 3 次传输估的）`
+          : `模型估算 ≈${plan.estUs.toFixed(1)} µs/样本 → ≈${khz} kHz` +
+            (plan.spans.length === 1 && plan.frameBytes <= 4
+              ? '（快路径要求整段正好 4 字节且 4 字节对齐，这个计划用不上）'
+              : '（模型按 3 次传输估，偏保守；真值以「标定真实速率」为准）')) +
         (plan.saved > 0.15 ? `（合并省了 ${(plan.saved * 100).toFixed(0)}%）` : '') +
-        (this.benchUs ? ` · <b>已标定：读一次 ${this.benchUs.toFixed(3)} µs</b>（上限 ${Math.round(1e3 / this.benchUs)} kHz，建议周期 ≥ ${this.recPeriodUs} µs）` : '') +
+        benchTxt +
         '<br>时长 = **目标侧真实时间**，到点自动停（缓冲只是内存上限）' +
         (slow || '（周期下限 2 µs；周期 < 读一次的耗时就会跳拍丢样本）')
       : '选好变量后会显示读计划与预计上限';
@@ -566,10 +584,11 @@ export class ScopeView {
       this.running = true;
       this.follow = true;
       this.state = '采样中';
-      // 周期比"读一次"还短 ⇒ 必丢拍（固件侧的账），这一条要当面说清楚
-      const estUs = this.benchUs || this.plan?.estUs || 0;
+      // 周期比"读一次"还短 ⇒ 必丢拍（固件侧的账），这一条要当面说清楚。
+      // 用**新鲜**的标定值；过期的标定值会把一个能跑的周期说成跑不动（见 benchFresh）。
+      const estUs = (this.benchFresh() && this.benchUs) || this.plan?.bestUs || 0;
       const tooFast = (estUs && periodUs < estUs)
-        ? `　⚠️ 周期 ${periodUs} µs 小于${this.benchUs ? '标定' : '模型估算'}的每样本 ${estUs.toFixed(2)} µs，探针会跳拍丢样本（实得约 ${(1e6 / estUs / 1000).toFixed(0)} kHz，时长不受影响）`
+        ? `　⚠️ 周期 ${periodUs} µs 小于${this.benchFresh() ? '标定' : '单字快路径实测/模型估算'}的每样本 ${estUs.toFixed(2)} µs，探针会跳拍丢样本（实得约 ${(1e6 / estUs / 1000).toFixed(0)} kHz，时长不受影响）`
         : '';
       this.setStatusText(`采样中：${vars.length} 通道 × ${(1e6 / periodUs / 1000).toFixed(2)} kHz，缓冲 ${capacity} 样本` +
         (this.trigger.mode !== TRIG.NONE ? '（触发已布防）' : '') + tooFast + wireNote + capNote,
@@ -586,6 +605,8 @@ export class ScopeView {
   async stop(reason){
     if (!this.running && !this.transport?.running) return;
     this.running = false;
+    // 先给个即时反馈：后面两个 await（排空 + HID STOP）要几十毫秒，这期间界面上不该还写着"采样中"
+    this.setStatusText('正在停止…', '');
     try { await this.transport.stop(); } catch { /* 忽略 */ }
     try { await this.hidXfer(P.HID_CMD, P.flagsData(P.ACT.STOP)); } catch { /* 忽略 */ }
     const st = this.store;
@@ -599,6 +620,48 @@ export class ScopeView {
     this.syncButtons();
     this._needDraw = true;
   }
+
+  /** 标定的"身份"：测的是哪套变量 + 哪个时钟档。变了就不算数（见 benchFresh）。*/
+  benchKeyOf(){
+    const vars = (this.selected.length ? this.selected : this.mockVars()).map(v => v.name).sort().join('+');
+    return { vars: vars || '（空）', clock: Number($('sc-clock').value) || 0 };
+  }
+
+  /**
+   * 标定值还算不算数？—— 🚨 必须看！用户现场：先选 f_sin+i_sq1k 标定得 8.204 µs，
+   * 然后取消 i_sq1k 只留 f_sin，计划行还在报「已标定 8.204 µs（建议周期 ≥ 11 µs）」，
+   * 而单字 f_sin 实测只要 1.53 µs、3 µs 档零丢 —— 一个过期数字把他挡在门外。
+   */
+  benchFresh(){
+    const k = this.benchKeyOf();
+    return !!(this.benchUs && this._benchKey &&
+              this._benchKey.vars === k.vars && this._benchKey.clock === k.clock);
+  }
+
+  benchKeyWhy(){
+    const k = this.benchKeyOf(), o = this._benchKey || { vars: '?', clock: 0 };
+    const parts = [];
+    if (o.vars !== k.vars) parts.push(`变量从「${o.vars}」变成「${k.vars}」`);
+    if (o.clock !== k.clock) parts.push(`时钟从 ${o.clock} kHz 变成 ${k.clock} kHz`);
+    return parts.join('、') || '条件变了';
+  }
+
+  /**
+   * 单字流水读路径的成本（µs）随 SWD 时钟走。真机两点实测：60 MHz → 1.533 µs、45 MHz → 1.758 µs，
+   * 按 `a + b/f` 拟合（a = 0.86 µs 固定开销、b = 40.5 µs·MHz ≈ 一次 AP 读 + 收尾的时钟数）。
+   * 没显式选档（"自动"）就用最近一次探针回报的实际 MHz，再退到 60 MHz 档。
+   */
+  fastWordUs(){
+    const sel = Number($('sc-clock').value) || 0;
+    const mhz = sel > 0 ? sel / 1000 : (this.swdMhz || 60);
+    return mhz > 0 ? +(0.858 + 40.5 / mhz).toFixed(3) : 1.55;
+  }
+
+  /** 建议周期 = 单次采样耗时 × 1.15 + 1 µs（留余量给探针主循环的 USB/HID/按键那些活）。
+   *  为什么要"+1"而不是纯比例：周期贴着耗时跑，主循环里一有别的活儿就跳拍丢样本；
+   *  实测单变量 1.54 µs 时 2 µs 档会丢 ~11%，而 3 µs 档是零丢 —— 所以给一个绝对余量。
+   *  下限 3 µs（固件钳位是 2 µs，但 2 µs 只建议在"就想要最高速率、接受丢样本"时用）。*/
+  recPeriodUsFor(us){ return us > 0 ? Math.max(3, Math.ceil(us * 1.15) + 1) : null; }
 
   /** 自动收尾：谁来喊停（时长到 / 缓冲满）都走这里，保证"说停了就真停"。
    *  🚨 老代码只在状态文字里写"缓冲已满：采样自动停止"，**其实根本没停** ——
@@ -632,19 +695,19 @@ export class ScopeView {
       const blob = dv.getUint32(15, true), delay = dv.getUint32(19, true);
       const usPerSample = iters ? (ticks / 24) / iters : 0;
       this.benchUs = usPerSample;
-      /**
-       * 建议周期 = 单次采样耗时 × 1.15 + 1 µs（留余量给探针主循环的 USB/HID/按键那些活）。
-       * 为什么要"+1"而不是纯比例：周期贴着耗时跑，主循环里一有别的活儿就跳拍丢样本；
-       * 实测单变量 1.54 µs 时 2 µs 档会丢 ~11%，而 3 µs 档是零丢 —— 所以给一个绝对余量。
-       * 下限 3 µs（固件钳位是 2 µs，但 2 µs 只建议在"就想要最高速率、接受丢样本"时用）。
-       */
-      this.recPeriodUs = usPerSample > 0 ? Math.max(3, Math.ceil(usPerSample * 1.15) + 1) : null;
+      this._benchKey = this.benchKeyOf();          // 记住测的是哪套变量 + 哪个时钟（选择一变就失效）
+      this.recPeriodUs = this.recPeriodUsFor(usPerSample);
       const blobName = { 0x53c: '60M(6 指令/bit)', 0x60c: '45M(8)', 0x6e0: '36M(10)', 0x7c4: '30M(12)',
                          0xa54: '20M(18)', 0x620: 'SLOW', 0xffffffff: '还没装载' }[blob] || `0x${blob.toString(16)}`;
       this.blob = { offset: blob, name: blobName, delay };
-      this.setStatusText(`标定：读一次 ${usPerSample.toFixed(3)} µs → 上限 ≈${Math.round(1e3 / usPerSample)} kHz` +
-        `（blob ${blobName}，clock_delay=${delay}${err ? `，err=${err}` : ''}）；` +
+      // 计划行里那个"保守模型"和实测差多少，当场说清楚（单字 span 实测 1.53 µs，模型算 6.74）
+      const modelUs = this.plan?.estUs || 0;
+      const vsModel = (modelUs && Math.abs(modelUs - usPerSample) / usPerSample > 0.25)
+        ? `（模型估 ${modelUs.toFixed(2)} µs，${modelUs > usPerSample ? '偏保守' : '偏乐观'} ${(modelUs / usPerSample).toFixed(1)}×）` : '';
+      this.setStatusText(`标定：读一次 ${usPerSample.toFixed(3)} µs → 上限 ≈${Math.round(1e3 / usPerSample)} kHz${vsModel}` +
+        `（blob ${blobName}，对于「${this._benchKey}」${err ? `，err=${err}` : ''}）；` +
         `**建议周期 ≥ ${this.recPeriodUs} µs**（≈${Math.round(1e3 / this.recPeriodUs)} kHz，零丢档）`, 'ok');
+      this.updatePlan();
     } catch (e){
       this.setStatusText('标定失败：' + (e?.message || e), 'err');
     }
@@ -652,11 +715,17 @@ export class ScopeView {
 
   /** 把周期填成标定给出的建议值（没标定过就先标一次） */
   async applyRecPeriod(){
-    if (!this.recPeriodUs){ await this.bench(); }
-    if (!this.recPeriodUs){ this.setStatusText('先点「标定真实速率」', 'warn'); return; }
-    $('sc-period').value = String(this.recPeriodUs);
+    // 标定值过期（变量/时钟改过）就重新标一次 —— 别拿"上一次那两个变量"的数字往下走
+    if (!this.recPeriodUs || !this.benchFresh()) await this.bench();
+    const us = this.benchFresh() ? this.benchUs : this.plan?.bestUs;
+    const rec = this.recPeriodUsFor(us);
+    if (!rec){ this.setStatusText('先点「标定真实速率」', 'warn'); return; }
+    this.recPeriodUs = rec;
+    $('sc-period').value = String(rec);
     this.updatePlan();
-    this.setStatusText(`周期已设为 ${this.recPeriodUs} µs（≈${Math.round(1e3 / this.recPeriodUs)} kHz，按标定值留了 25% 余量）`, 'ok');
+    this.setStatusText(`周期已设为 ${rec} µs（≈${Math.round(1e3 / rec)} kHz）—— 依据：` +
+      (this.benchFresh() ? `标定值 ${us.toFixed(3)} µs` : `单字快路径实测 ${us.toFixed(2)} µs`) +
+      ' × 1.15 + 1 µs 余量；这样跑才是零丢样本档', 'ok');
   }
 
   isReal(){ return !this.usingMock; }

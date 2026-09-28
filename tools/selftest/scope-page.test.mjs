@@ -358,7 +358,13 @@ console.log('== 7. 停止 / 导出 CSV / 记录原始包 ==');
 {
   // 「时长」= 目标侧真实时间，不是"攒够名义速率×时长 个样本" —— 用户实测："时长3s，怎么我采出来的有6.6s?"
   const stop = await ev(`
-    const sc = window.__tools.scope, st = sc.store;
+    const sc = window.__tools.scope;
+    // 前面几节耗时不定，不能假设"已经跑够 5 s"了 —— 等到它自己停（或超时）再看结论。
+    // ⚠️ 停下来的瞬间 running 就变 false，但 stop() 里还有两个 await（排空 + HID STOP）才写结论文字，
+    //    所以这里要等状态文字落定，别读到中间态（否则这条断言会时好时坏 —— 本文件已踩过）。
+    for (let i = 0; i < 24 && sc.running; i++) await new Promise(r2 => setTimeout(r2, 250));
+    for (let i = 0; i < 20 && !/^已停止/.test(sc.state); i++) await new Promise(r2 => setTimeout(r2, 100));
+    const st = sc.store;
     const d = { state: sc.state, stopAfter: sc._stopAfterUs, cap: st.capacity, count: st.count, full: st.full, tsN: st.tsN,
                 spanS: +((st.timeAt(st.count - 1) - st.timeAt(0)) / 1e6).toFixed(3), over: st.overrun, running: sc.running };
     await sc.stop();
@@ -366,7 +372,7 @@ console.log('== 7. 停止 / 导出 CSV / 记录原始包 ==');
                     over: document.getElementById('sc-over').textContent };
     return { d, after };`);
   ok(stop.d.running === false && /时长到/.test(stop.d.state),
-     `到点自己停了，而且说清是"时长到"：${stop.d.state.slice(0, 46)}`);
+     `到点自己停了，而且说清是"时长到"：running=${stop.d.running} span=${stop.d.spanS} count=${stop.d.count} over=${stop.d.over} | ${stop.d.state.slice(0, 46)}`);
   ok(Math.abs(stop.d.spanS - 5) < 0.15,
      `采到的时长就是要求的 5 s（实测 ${stop.d.spanS} s，缓冲只用了 ${Math.round(stop.d.count / stop.d.cap * 100)}%）`);
   ok(stop.d.full === false && stop.d.over === 0,
@@ -519,11 +525,52 @@ console.log('== 11. 探针跟不上时，「时长」也不能被拖长（用户
     return { at, running: sc.running, state: sc.state, count: st.count, spanS, full: st.full,
              overrun: st.overrun, rate: st.rate(),
              buf: document.getElementById('sc-buf').textContent };`);
+  // 🚨 假探针对象是**跨轮复用**的（view.setMock 里 `this.mockProbe = this.mockProbe || ...`），
+  //    这里改过 slowdown 就必须改回去 —— 否则后面每一轮（甚至下一次跑测试）都还是"慢探针"，
+  //    采样数少一半，别的断言会莫名其妙地飘（本文件踩过一次：同一次跑出现 2 个时好时坏的失败）。
+  await ev(`if (window.__tools.scope.mockProbe) window.__tools.scope.mockProbe.slowdown = 1; return true;`);
   ok(r.running === false, `到点自动停了（${r.state.slice(0, 40)}）`);
   ok(Math.abs(r.spanS - 3) < 0.2,
      `要 3 s 就只采 3 s：实测 ${r.spanS.toFixed(3)} s（实得 ${(r.rate / 1000).toFixed(1)} kHz，名义 200 kHz —— 老代码这里会跑成 6.6 s）`);
   ok(r.full === false && r.overrun === 0 && r.count < r.at.cap,
      `缓冲没满、也没有溢出帧（${r.count}/${r.at.cap} 样本 · ${r.buf} · 溢出 ${r.overrun}）`);
+}
+
+console.log('== 12. 标定值必须跟着变量/时钟失效（否则一个过期数字把人挡在门外）==');
+{
+  // 用户现场：先用 f_sin+i_sq1k 标定得 8.204 µs，取消 i_sq1k 只剩 f_sin 后，
+  // 计划行还在报「已标定 8.204 µs（建议周期 ≥ 11 µs）」，而单字实测只要 1.53 µs、3 µs 档零丢。
+  const r = await ev(`
+    const sc = window.__tools.scope;
+    document.getElementById('sc-mock').checked = true;
+    document.getElementById('sc-mock').dispatchEvent(new Event('change'));
+    await sc.connectHid(false);                      // 假探针也有"标定"（会假装一个结果）
+    const pick = names => { sc.selected = [];
+      for (const n of names){ const v = sc.mockVars().find(x => x.name === n); if (v) sc.toggleVar(v, true); } };
+    pick(['mock0.f32']);
+    document.getElementById('sc-clock').value = '60000';
+    sc.updatePlan();
+    const single = { plan: document.getElementById('sc-plan').innerHTML, fast: sc.plan.fastPath,
+                     bestUs: sc.plan.bestUs, estUs: sc.plan.estUs };
+    await sc.bench();                                 // 标定单变量
+    const afterSingle = { bench: sc.benchUs, fresh: sc.benchFresh(), rec: sc.recPeriodUs };
+    pick(['mock0.f32', 'mock3.u16']);                 // 换成两个变量 → 上一次的标定失效
+    sc.updatePlan();
+    const stale = { fresh: sc.benchFresh(), plan: document.getElementById('sc-plan').innerHTML,
+                    why: sc.benchKeyWhy() };
+    await sc.bench();                                 // 重新标定 → 又新鲜了
+    const refixed = { fresh: sc.benchFresh(), key: sc.benchKeyOf() };
+    return { single, afterSingle, stale, refixed };`);
+  ok(r.single.fast === true && r.single.bestUs < 2 && r.single.estUs > 6,
+     `单字 f32 的计划行用快路径实测值（取用 ${r.single.bestUs} µs，模型 ${r.single.estUs} µs）`);
+  ok(/流水快路径/.test(r.single.plan) && !/模型估算 ≈6\.\d+ µs\/样本 → ≈1\d\d kHz/.test(r.single.plan),
+     `计划行不再自相矛盾（不再把 6.7 µs 当主数字）：${r.single.plan.replace(/<[^>]+>/g, '').slice(0, 60)}…`);
+  ok(r.afterSingle.fresh === true, `标定后就地生效（${r.afterSingle.bench?.toFixed?.(3)} µs，建议周期 ${r.afterSingle.rec} µs）`);
+  ok(r.stale.fresh === false && /已失效/.test(r.stale.plan),
+     `改了变量 → 标定值标为失效并说明原因（${r.stale.why}）`);
+  ok(r.refixed.fresh === true, '重新标定后又新鲜了');
+  await ev(`document.getElementById('sc-mock').checked = false;
+            document.getElementById('sc-mock').dispatchEvent(new Event('change')); return true;`);
 }
 
 console.log(`\n${fail ? '❌' : '✅'} scope-page.test: ${pass} 通过 / ${fail} 失败`);

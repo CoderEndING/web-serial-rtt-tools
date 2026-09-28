@@ -58,6 +58,24 @@ console.log('== 1. 采样计划（读计划 = 速率的最大杠杆）==');
   ok(mk(8) === 1 && mk(30) === 2, '间隙 8 B 合并 / 30 B 不合并');
   ok(P.planHash(pack) === P.planHash([...pack].reverse()), '计划指纹与变量顺序无关');
   ok(P.planHash(pack) !== P.planHash(mixed), '不同计划指纹不同');
+
+  // 单字流水读快路径：模型按"3 次传输"算 6.7 µs，实测只要 1.53 µs —— 计划行必须用后者，
+  // 否则一个能跑的周期会被说成跑不动（用户被"建议周期 ≥ 11 µs"挡在 3 µs 门外，而他实测零丢）
+  const one4 = P.planReads([{ name: 'f_sin', addr: 0x20001014, size: 4, scalar: 'f32' }]);
+  ok(one4.fastPath === true && one4.estUs > 6 && one4.bestUs < 2,
+     `单字 f32 走快路径：模型 ${one4.estUs.toFixed(2)} µs / 取用 ${one4.bestUs.toFixed(2)} µs（≈${Math.round(one4.bestHz / 1000)} kHz）`);
+  const one4b = P.planReads([{ name: 'f_sin', addr: 0x20001014, size: 4, scalar: 'f32' }], { fastWordUs: 1.758 });
+  ok(one4b.bestUs === 1.758, '快路径成本可覆盖（不同 SWD 时钟档）');
+  ok(P.planReads([{ name: 'u_ramp', addr: 0x20001020, size: 2, scalar: 'u16' }]).fastPath === false,
+     '单个 u16（半字）不走快路径 —— 固件要求整段正好 4 字节直读');
+  ok(P.planReads([{ name: 'a', addr: 0x20000002, size: 4, scalar: 'u32' }]).fastPath === false,
+     '地址没 4 字节对齐也不走快路径');
+  ok(P.planReads([{ name: 'a', addr: 0x20000000, size: 4, scalar: 'u32' },
+                  { name: 'b', addr: 0x20000004, size: 4, scalar: 'u32' }]).fastPath === false,
+     '两个单字（合并成 8 B span）不走快路径 —— 固件守卫是"只有一个 4 字节 span"');
+  ok(P.planReads([{ name: 'a', addr: 0x20000000, size: 2, scalar: 'u16' },
+                  { name: 'b', addr: 0x20000002, size: 2, scalar: 'i16' }]).fastPath === true,
+     '两个连续 u16（合成一个 4 B 字）仍可以走快路径');
 }
 
 // ------------------------------------------------------------------ 2

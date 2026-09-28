@@ -27,8 +27,9 @@ export const typeInfo = code => TYPES[code] || null;
 export { SCALARS };                    // 页面算帧长/画图都要用，从这里转出去省一次 import
 
 /** 采样计划/速率模型（由固件 bench 的 3434 KB/s @45 MHz 反推；见文档 §6.1）
- *  —— 只是**估算**，页面显示时要说清楚，真值由 M0 标定给。 */
-export const COST = { perBlockUs: 5.6, perByteUs: 0.284, refMhz: 45 };
+ *  —— 只是**估算**，页面显示时要说清楚，真值由 M0 标定给。
+ *  `fastWordUs` 例外：它是**实测值**（单字流水读路径，见 planReads 的注释）。 */
+export const COST = { perBlockUs: 5.6, perByteUs: 0.284, refMhz: 45, fastWordUs: 1.55 };
 
 // ---------------------------------------------------------------- 采样计划
 /**
@@ -60,9 +61,23 @@ export function planReads(vars, opts = {}){
   }
   const estUs = spans.length * COST.perBlockUs + frameBytes * COST.perByteUs;
   const naiveUs = list.length * COST.perBlockUs + frameBytes * COST.perByteUs;
+  /**
+   * 固件有条**单字流水读**快路径（`s_pipe_ok`）：只有一个 span、4 字节对齐、整段正好 4 字节、
+   * 且变量在内存与帧里都连续时，每拍**只发一次 DRW 读**、拿回来的值是上一拍的结果（AHB-AP 读是 posted 的）。
+   * 判据与固件 `scope_span_is_direct()` + `s_nspans == 1 && len == 4` 一一对应，改一边别忘了另一边。
+   * 实测（2026-10，F103 + akaLinkPro @60 MHz）：单字 f32 = **1.53 µs/样本**（复测 1.533），
+   * 而模型那 6.74 µs 是按"3 次传输"算的 —— 拿模型当"能不能跑某个周期"的依据会把人吓退：
+   * 用户就被"建议周期 ≥ 11 µs"挡住过，而他实测 3 µs 零丢、318.8 kHz。
+   */
+  const sp0 = spans.length === 1 ? spans[0] : null;
+  const fastPath = !!sp0 && (sp0.start & 3) === 0 && (sp0.end - sp0.start) === 4 &&
+    sp0.vars.reduce((s, v) => s + v.size, 0) === 4;
+  const fastWordUs = opts.fastWordUs ?? COST.fastWordUs;
+  const bestUs = fastPath ? Math.min(fastWordUs, estUs) : estUs;
   return {
-    spans, frameBytes, estUs, naiveUs,
+    spans, frameBytes, estUs, naiveUs, fastPath, bestUs,
     estHz: estUs > 0 ? Math.round(1e6 / estUs) : 0,
+    bestHz: bestUs > 0 ? Math.round(1e6 / bestUs) : 0,
     /** 合并省下来的比例（0.7 = 省了 70%）*/
     saved: naiveUs > 0 ? 1 - estUs / naiveUs : 0,
   };
