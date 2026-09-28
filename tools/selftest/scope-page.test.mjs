@@ -249,6 +249,50 @@ console.log('== 8. 清空与收尾 ==');
   ok(Array.isArray(errs) && errs.length === 0, '全程没有 JS 错误', JSON.stringify(errs));
 }
 
+console.log('== 9. 勾选顺序 ≠ 地址顺序（帧内顺序 = 地址排序）==');
+{
+  // 真机踩过的坑：用户按 u_ramp(0x…20) → f_sin(0x…14) 的顺序勾，而固件按**地址**打包，
+  // 于是通道与数据整体错位（u_ramp 那格装的是 f_sin 的 ±1）。这里用假探针复现并要求它被修住。
+  const r = await ev(`
+    const sc = window.__tools.scope;
+    document.getElementById('sc-mock').checked = true;
+    document.getElementById('sc-mock').dispatchEvent(new Event('change'));
+    // 故意**逆着地址**勾：先 0x…20 的 u_ramp，再 0x…14 的 f_sin，最后 0x…22 的 i_sq1k
+    const order = ['mock3.u16', 'mock0.f32', 'mock5.u8'];
+    sc.selected = [];
+    for (const n of order){ const v = sc.mockVars().find(x => x.name === n); sc.toggleVar(v, true); }
+    document.getElementById('sc-period').value = '100';
+    document.getElementById('sc-seconds').value = '3';
+    await sc.start();
+    await new Promise(r2 => setTimeout(r2, 1500));
+    await sc.stop();
+    const st = sc.store;
+    const names = st.channels.map(c => c.name);
+    const stats = st.channels.map(c => ({ name: c.name, type: c.scalar, min: c.min, max: c.max,
+                                          first: c.at(0), last: c.at(st.count - 1) }));
+    return { picked: order, storeNames: names, stats, count: st.count,
+             defVars: sc.defVars?.map(v => '0x' + v.addr.toString(16)) || null, mismatch: sc.defMismatch };`);
+  ok(r.storeNames.length === 3 && r.count > 0, `采到 ${r.count} 个样本`);
+  const sortedByAddr = ['mock0.f32', 'mock3.u16', 'mock5.u8'];   // mockVars 的地址是 0x20000000 + i*4
+  ok(JSON.stringify(r.storeNames) === JSON.stringify(sortedByAddr),
+     `缓冲按地址排序（勾选 ${r.picked.join(' → ')} ⇒ 缓冲 ${r.storeNames.join(' → ')}）`);
+  const byName = Object.fromEntries(r.stats.map(s => [s.name, s]));
+  ok(byName['mock0.f32'] && byName['mock0.f32'].min >= -1.001 && byName['mock0.f32'].max <= 1.001,
+     `f32 正弦落在 ±1（实际 ${byName['mock0.f32']?.min?.toFixed(3)}..${byName['mock0.f32']?.max?.toFixed(3)}）`);
+  ok(byName['mock3.u16'] && byName['mock3.u16'].min >= 0 && byName['mock3.u16'].max <= 999,
+     `u16 锯齿落在 0..999（实际 ${byName['mock3.u16']?.min}..${byName['mock3.u16']?.max}）`);
+  ok(byName['mock5.u8'] && byName['mock5.u8'].min >= 0 && byName['mock5.u8'].max <= 255,
+     `u8 落在 0..255（实际 ${byName['mock5.u8']?.min}..${byName['mock5.u8']?.max}）`);
+  ok(r.mismatch === null, 'DEF 变量数与本地缓冲一致（没有触发"解码已暂停"）', r.mismatch || '');
+  // 分道显示：每路一条泳道
+  const lanes = await ev(`
+    document.querySelector('[data-group=sclayout] button[data-v=lanes]').click();
+    const sc = window.__tools.scope; sc.drawFrame();
+    return { layout: sc.renderer.layout, n: sc.renderer.visibleCount() };`);
+  ok(lanes.layout === 'lanes' && lanes.n === 3, `切到分道：${lanes.n} 条泳道`);
+  await ev(`document.querySelector('[data-group=sclayout] button[data-v=overlay]').click(); return true;`);
+}
+
 console.log(`\n${fail ? '❌' : '✅'} scope-page.test: ${pass} 通过 / ${fail} 失败`);
 ws.close();
 process.exit(fail ? 1 : 0);

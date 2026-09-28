@@ -36,9 +36,9 @@
 |---|
 | ![J-Scope 波形](docs/shots/6-scope.png) |
 
-| J-Scope 波形（**真机** · akaLinkPro 探针 HSS · 8 通道 68.9 kHz · F103 靶子固件 · 丢样本 0） |
+| J-Scope 波形（**真机** · akaLinkPro 探针 HSS · 分道显示：正弦/锯齿/方波各一条泳道 · 91.6 kHz · 丢样本 0） |
 |---|
-| ![J-Scope 真机](docs/shots/7-scope-real.png) |
+| ![J-Scope 真机](docs/shots/10-scope-lanes.png) |
 
 （截图里第一个标签用的是**内置演示串口**，所以显示的是假设备；`?demo=serial` 就能自己试。）
 

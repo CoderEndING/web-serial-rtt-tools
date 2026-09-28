@@ -23,7 +23,8 @@ export class ScopeRenderer {
     this.view = { start: 0, end: 1 };
     this.cursor = null;            // 样本索引
     this.trigger = null;           // {index, pre, post}
-    this.mode = opts.mode || 'auto';  // auto = 每通道自适应量程；shared = 共用
+    this.mode = opts.mode || 'auto';  // （叠加模式下）auto = 每通道自适应量程；shared = 共用
+    this.layout = opts.layout || 'overlay';   // overlay = 叠加；lanes = 分道（每通道一条泳道、各自量程）
     this.showGrid = true;
     this.hidden = new Set();       // 隐藏的通道序号
     this._cols = 0;
@@ -35,6 +36,7 @@ export class ScopeRenderer {
   setStore(store){ this.store = store; this.fitAll(); }
   setVisible(i, on){ if (on) this.hidden.delete(i); else this.hidden.add(i); }
   isVisible(i){ return !this.hidden.has(i); }
+  visibleCount(){ let n = 0; for (let i = 0; i < (this.store?.channels.length || 0); i++) if (this.isVisible(i)) n++; return n; }
   setTrigger(t){ this.trigger = t; }
 
   /** 全览 */
@@ -147,12 +149,30 @@ export class ScopeRenderer {
     if (gMax - gMin < 1e-12){ gMax = gMin + 1; }
 
     const shared = this.mode === 'shared';
+    /**
+     * 分道（lanes）：每个可见通道占一条横带，**各自独立量程** —— 这是多通道混合单位的正解
+     * （叠加模式下每路都自动量程到满高，三个信号叠起来就是一坨，用户实测反馈过）。
+     * 带内留 12% 上下留白，免得波形顶到分隔线上；通道被隐藏时泳道自动重排。
+     */
+    const laneIdx = [];
+    for (let k = 0; k < st.channels.length; k++) if (this.isVisible(k)) laneIdx.push(k);
+    const nLanes = Math.max(1, laneIdx.length);
+    const band = ph / nLanes;
+    const laneOf = k => {
+      const i = laneIdx.indexOf(k);
+      return { top: t + i * band, h: band };
+    };
     const yOf = (v, k) => {
-      let lo, hi;
-      if (shared){ lo = gMin; hi = gMax; }
+      let lo, hi, top = t, height = ph;
+      if (this.layout === 'lanes'){
+        const L = laneOf(k); top = L.top; height = L.h;
+        const r = this._ranges[k] || [gMin, gMax]; lo = r[0]; hi = r[1];
+      } else if (shared){ lo = gMin; hi = gMax; }
       else { const r = this._ranges[k] || [gMin, gMax]; lo = r[0]; hi = r[1]; }
       if (!Number.isFinite(lo) || !Number.isFinite(hi) || hi - lo < 1e-12){ lo = 0; hi = 1; }
-      return t + ph - (v - lo) / (hi - lo) * ph;
+      const inset = this.layout === 'lanes' ? height * 0.12 : 0;
+      const uh = height - inset * 2;
+      return top + inset + uh - (v - lo) / (hi - lo) * uh;
     };
 
     if (this.showGrid) this._grid(ctx, W, H, shared ? [gMin, gMax] : null);
@@ -163,6 +183,29 @@ export class ScopeRenderer {
     //    （自测截图时肉眼发现：8 条线看着像"没画出来"）。
     const px = 1 / dpr;
     ctx.lineWidth = px;
+    // 分道模式：先画泳道分隔线 + 每道的名字/当前值（压在波形下面）
+    if (this.layout === 'lanes'){
+      for (let i = 0; i < laneIdx.length; i++){
+        const k = laneIdx[i];
+        const top = t + i * band;
+        if (i > 0){
+          ctx.strokeStyle = '#2a3340'; ctx.lineWidth = px;
+          ctx.beginPath(); ctx.moveTo(l, Math.round(top) + px / 2); ctx.lineTo(l + pw, Math.round(top) + px / 2); ctx.stroke();
+        }
+        // 每道自己的中线（该道量程中点）淡画一条：一眼看出"围绕中点波动"
+        const rr = this._ranges[k];
+        if (rr && Number.isFinite(rr[0])){
+          const yMid = yOf((rr[0] + rr[1]) / 2, k);
+          ctx.strokeStyle = '#1c232c';
+          ctx.beginPath(); ctx.moveTo(l, yMid); ctx.lineTo(l + pw, yMid); ctx.stroke();
+        }
+        // 道内左上角：通道名 + 当前值（信息量同图例，但不占画布外的地方）
+        const chn = st.channels[k];
+        const idx2 = this.cursor != null ? this.cursor : st.count - 1;
+        const val2 = idx2 >= 0 && idx2 < st.count ? chn.value(idx2) : NaN;
+        this._text(ctx, `${chn.name}  ${fmtVal(val2)}`, l + 6, top + 10, this.palette[k % this.palette.length]);
+      }
+    }
     const per = (z - a) / cols;                   // 每个像素列覆盖多少个样本
     for (let k = 0; k < st.channels.length; k++){
       const ch = st.channels[k];
@@ -243,7 +286,9 @@ export class ScopeRenderer {
     const dpr = (typeof devicePixelRatio === 'number' ? devicePixelRatio : 1) || 1;
     const px = 1 / dpr;
     ctx.strokeStyle = '#1c232c'; ctx.lineWidth = px;
-    for (let i = 1; i < 4; i++){
+    // 分道模式：横向网格交给泳道分隔线去画（画满宽会横穿泳道，反而更乱）
+    const hLines = this.layout === 'lanes' ? 0 : 4;
+    for (let i = 1; i < hLines; i++){
       const y = Math.round(t + ph * i / 4) + px / 2;
       ctx.beginPath(); ctx.moveTo(l, y); ctx.lineTo(l + pw, y); ctx.stroke();
     }

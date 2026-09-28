@@ -12,7 +12,7 @@
  * 采样是**一次性窗口**（线性缓冲，满了就停）：容量 = 名义速率 × 时长 × 1.25。
  * 满了之后新样本计入 `overrun` 并显示在"丢样本"里 —— 绝不静默丢。
  */
-import { $, setStatus } from '../ui/dom.js';
+import { $, setStatus, seg } from '../ui/dom.js';
 import { AkaLinkHid } from '../hid/probe.js';
 import { Elf } from '../elf/elf.js';
 import { listSampleable } from '../elf/dwarf.js';
@@ -106,6 +106,15 @@ export class ScopeView {
     $('sc-zout').addEventListener('click', () => { this.renderer.zoomBy(1 / 1.6, 0.5); this._needDraw = true; });
     $('sc-zoompts').addEventListener('click', () => this.zoomToPoints());
     $('sc-shared').addEventListener('change', e => { this.renderer.mode = e.target.checked ? 'shared' : 'auto'; this._needDraw = true; });
+    // 叠加 / 分道：分道 = 每通道一条泳道、各自独立量程（多通道混合单位的正解）
+    this._layoutSeg = seg(document.querySelector('[data-group=sclayout]'), 'overlay', v => {
+      this.renderer.layout = v;
+      this.renderer._ranges = [];            // 换布局时丢掉防抖缓存，避免量程残留
+      this._needDraw = true;
+      this.setStatusText(v === 'lanes'
+        ? `分道显示：${this.renderer.visibleCount?.() ?? '各'}通道各占一条泳道，每条自己的量程`
+        : '叠加显示：所有通道画在同一片区域', '');
+    });
     $('sc-raw').addEventListener('change', e => { this.captureRaw = e.target.checked; if (!this.captureRaw) this.raw = []; });
     $('sc-csv').addEventListener('click', () => this.exportCsv());
     $('sc-save').addEventListener('click', () => this.saveRaw());
@@ -218,6 +227,7 @@ export class ScopeView {
       $('sc-usbinfo').textContent = this.transport.label;
       this.setStatusText('数据端点已就绪：' + this.transport.label, 'ok');
     } catch (e){
+      this.transport = null;                    // 没认领成功就别留着一个"半开"的对象：start() 会误以为能用
       $('sc-usbinfo').textContent = '连接失败：' + (e?.message || e);
       this.setStatusText('连接数据端点失败：' + (e?.message || e), 'err');
     }
@@ -352,7 +362,15 @@ export class ScopeView {
 
   // ================================================================= 采样
   async start(){
-    const vars = (this.selected.length ? this.selected : (this.usingMock ? this.mockVars() : []));
+    const pick = (this.selected.length ? this.selected : (this.usingMock ? this.mockVars() : []));
+    /**
+     * 🚨 **必须按地址排序后再建缓冲**：固件把变量按**地址顺序**紧排在帧里（协议规定），
+     *    DEF 里那张表也是地址顺序。而"勾选顺序"是用户随手点的 —— 两者不一致时，
+     *    通道和数据会**整体错位**（实测：先勾 u_ramp(0x…20) 再勾 f_sin(0x…14)，
+     *    结果 u_ramp 那一格装的是 f_sin 的 ±1，f_sin 那格装的是锯齿 0..999，
+     *    图表和标签全对不上 —— 而且只在"勾选顺序 ≠ 地址顺序"时才出现，很容易漏）。
+     */
+    const vars = [...pick].sort((a, b) => a.addr - b.addr);
     if (!vars.length){ this.setStatusText('先选变量（或用假探针自带的通道）', 'warn'); return; }
     if (!this.transport || !this.hid){ this.setStatusText(this.usingMock ? '假探针还没准备好' : '先连探针 + 数据端点', 'warn'); return; }
     if (this.isReal() && !this.transport?.device){ this.setStatusText('真机模式要先点「连接数据端点…」', 'warn'); return; }
@@ -563,9 +581,22 @@ export class ScopeView {
           } else {
             this.planMismatch = null;
           }
+          /**
+           * 🚨 **变量个数对不上就别解码**：说明配置没生效（或这一包是上一轮的残留）。
+           *    硬解下去就是"通道与数据整体错位"的垃圾波形（实测踩过），
+           *    宁可报错停在这儿 —— 数据错了比没数据更坏。
+           */
+          const want = this.store?.vars.length || 0;
+          if (want && d.vars.length !== want){
+            this.defMismatch = `探针回报 ${d.vars.length} 个变量，本地缓冲是 ${want} 个 —— 解码已暂停（配置没生效？）`;
+            this.setStatusText('⚠ ' + this.defMismatch, 'err');
+          } else {
+            this.defMismatch = null;
+          }
           break;
         }
         case P.KIND.DATA: {
+          if (this.defMismatch) break;              // 变量表对不上：不解码（见 DEF 分支的说明）
           const vars = this.defVars || this.store?.vars;
           if (!vars?.length) break;
           const nums = P.decodeSamples(vars, pkt.payload, pkt.n, []);
@@ -701,7 +732,7 @@ export class ScopeView {
   async replayFile(file){
     try {
       const buf = new Uint8Array(await file.arrayBuffer());
-      const vars = this.selected.length ? this.selected : this.mockVars();
+      const vars = [...(this.selected.length ? this.selected : this.mockVars())].sort((a, b) => a.addr - b.addr);
       const periodUs = this.periodUs();
       this.store = new SampleStore(vars, Math.ceil(buf.length / 16) + 1024);
       this.renderer.setStore(this.store);

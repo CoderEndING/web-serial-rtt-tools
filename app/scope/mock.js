@@ -150,7 +150,10 @@ export class MockScopeProbe {
   configure({ periodUs = this.periodUs, flags = 0, vars = this.vars } = {}){
     if (vars.length > 8) throw new Error('假探针：变量最多 8 个');
     // 线上只有 type 码，没有名字 —— 这里按类型表补回 scalar（组包时要用它决定怎么写位型）
-    this.vars = vars.map(v => ({ ...v, scalar: v.scalar || TYPES[v.type]?.name || 'u32' }));
+    // 🚨 **按地址排序**：真固件就是这么打包的（帧内顺序 = 地址顺序）。假探针必须一样，
+    //    否则"勾选顺序 ≠ 地址顺序"这类整体错位在自测里根本暴露不出来（真机上已经踩过一次）。
+    this.vars = vars.map(v => ({ ...v, scalar: v.scalar || TYPES[v.type]?.name || 'u32' }))
+                    .sort((a, b) => a.addr - b.addr);
     this.periodUs = Math.max(1, periodUs | 0);
     this.periodUsActual = this.periodUs;
     this._discarding = !!(flags & 1);

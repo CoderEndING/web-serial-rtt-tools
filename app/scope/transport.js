@@ -84,8 +84,22 @@ export class VendorEpTransport {
     this.iface = found.iface.interfaceNumber;
     this.ep = found.ep.endpointNumber;         // 注意：不带方向位的编号（0x83 → 3）
     this.epAddr = this.ep | 0x80;              // 描述符里的地址，只用于显示/排障
-    try { await d.claimInterface(this.iface); }
-    catch (e){ throw new Error(`占用 USB 接口失败：${e.message}（RTT Viewer / OpenOCD 是不是还开着？）`); }
+    this.claimed = false;
+    try { await d.claimInterface(this.iface); this.claimed = true; }
+    catch (e){
+      /**
+       * 🚨 一个 USB 接口同一时刻只能被一个"认领者"持有。最常见的冲突来源：
+       *    · 你在**另一个浏览器页签**里也连了这个数据端点（同一台机器上最常见）；
+       *    · 本仓库的 RTT Viewer 页 / 烧录器页正开着探针；
+       *    · OpenOCD / pyOCD / J-Link 那些本机程序还没退。
+       * 提示里要把这三条都点出来，不然用户只会看到一句"无法认领接口"。
+       */
+      throw new Error(`认领 USB 接口失败：${e.message}\n` +
+        '一个 USB 接口同时只能被一个程序/页签占用 —— 请检查：\n' +
+        '  · 是不是**另开了一个页签**连着同一个数据端点？\n' +
+        '  · 本工具的 RTT Viewer / 烧录器页还开着？\n' +
+        '  · OpenOCD / pyOCD / J-Link 之类的本机程序还没退出？');
+    }
     // 认领后清一次端点：上一场会话（或上一次断开）可能残留数据
     try { await d.clearHalt('in', this.ep); } catch { /* 有的设备不支持，忽略 */ }
     return this;
