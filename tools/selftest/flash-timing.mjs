@@ -57,7 +57,13 @@ class Cdp {
     if (hs) for (const h of hs) h(m.params);
   }
   async connect(){
-    const ver = await (await fetch(CDP + '/json/version')).json();
+    // 连不上 CDP 浏览器时别只抛 fetch failed —— 那句话看着像硬件问题（见 Makefile 的 page-prep）
+    let ver;
+    try { ver = await (await fetch(CDP + '/json/version')).json(); }
+    catch {
+      throw new Error(`连不上 CDP 浏览器（${CDP}）—— 真页面测试需要它。先 \`make open\`，` +
+        '或者直接用 `make flash-timing`（它会把 8899 服务与 9333 浏览器拉起来）。');
+    }
     this.browserWs = await this._open(ver.webSocketDebuggerUrl, (ws, m) => this._dispatch(ws, m));
     const list = await (await fetch(CDP + '/json/list')).json();
     const page = list.find(t => t.type === 'page' && t.url.includes('8899'));

@@ -16,6 +16,8 @@ import { findSymbol } from './elf.js';
 import { parseRanges } from '../core/bin.js';
 import { parseHex, textToBytes } from '../core/hex.js';
 import { pickCfgs } from '../ui/cfgpicker.js';
+import { closeProbeUsbDevices } from '../core/probe-bus.js';
+import { sleep } from '../core/pace.js';
 import { rate as fRate, bytes as fBytes, fileStamp, download, stamp as stampOf } from '../core/format.js';
 
 const EOL = { cr: '\r', crlf: '\r\n', lf: '\n', none: '' };
@@ -262,7 +264,23 @@ export class RttView {
         this._forcePick = false;
         const clockKhz = Number(store.get('rtt.clockKhz', 0)) || 0;
         if (auth.length){
-          this.probe = await withTimeout(WebUsbDapProbe.open(auth[0], { clockKhz }), 20000, '连接探针');
+          /**
+           * 🚨 **刚被别的会话用过的探针，第一次常常连不上**（2026-10 真机复现多次）：
+           *    烧录器/上一个页签刚断开时，浏览器释放 USB 接口要一会儿，紧接着 open() 会拿到
+           *    脏响应（`SWD ACK=0 / ACK=5`、`响应回显 0x3 ≠ 命令 0x0`）或 `Unable to claim interface`。
+           *    界面上的提示一直是"再点一次就好了" —— 那就**自己再点一次**：等 1.2 s、
+           *    把本页签残留的探针句柄 close 掉（僵尸认领会挡住重新认领），再开一次。
+           *    只重试一次：真坏了（没插/被别的程序占着）第二次照样会报错，不会无限转。
+           */
+          const openOnce = () => withTimeout(WebUsbDapProbe.open(auth[0], { clockKhz }), 20000, '连接探针');
+          try {
+            this.probe = await openOnce();
+          } catch (e1){
+            setStatus($('r-err'), `第一次连接失败（${e1.message}）—— 等 1.2 s 重试一次…`, 'warn');
+            await sleep(1200);
+            try { await closeProbeUsbDevices(); } catch { /* 关不掉就继续试 */ }
+            this.probe = await openOnce();          // 还失败就把错抛给上层（带着第二次的原因）
+          }
           toast('使用已授权探针：' + this.probe.name, 'ok');
         } else {
           this.probe = await withTimeout(WebUsbDapProbe.request($('r-usb-all').checked, { clockKhz }), 60000, '等你在浏览器里选探针');

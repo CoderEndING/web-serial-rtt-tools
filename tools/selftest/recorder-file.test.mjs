@@ -26,9 +26,14 @@ const WD = setTimeout(() => { console.log('!! 看门狗超时'); process.exit(9)
 class Cdp {
   constructor(){ this.seq = 0; this.pending = new Map(); }
   async connect(){
-    const list = await (await fetch(CDP + '/json/list')).json();
+    // 连不上 CDP 浏览器时给一句能照做的话（原始报错是 fetch failed / ECONNREFUSED，像硬件问题）
+    let list;
+    try { list = await (await fetch(CDP + '/json/list')).json(); }
+    catch {
+      throw new Error(`连不上 CDP 浏览器（${CDP}）—— 先 \`make open\`，或直接用 \`make test-record\`（它会拉起 8899 + 9333）。`);
+    }
     const page = list.find(t => t.type === 'page' && t.url.includes('8899'));
-    if (!page) throw new Error('没有 8899 的页面目标');
+    if (!page) throw new Error('没有 8899 的页面目标（服务起了吗？`make open`）');
     this.ws = new WebSocket(page.webSocketDebuggerUrl);
     await new Promise((res, rej) => { this.ws.onopen = res; this.ws.onerror = () => rej(new Error('CDP 连不上')); });
     this.ws.onmessage = ev => {
@@ -71,8 +76,7 @@ class Cdp {
 let pass = 0, fail = 0;
 const ok = (c, name, extra = '') => { if (c){ pass++; console.log(`  PASS  ${name}`); } else { fail++; console.log(`  FAIL  ${name} ${extra}`); } };
 
-const cdp = await new Cdp().connect();
-console.log(`== 记录到文件实测 == ${CDP}`);
+const cdp = await new Cdp().connect();console.log(`== 记录到文件实测 == ${CDP}`);
 await cdp.send('Page.navigate', { url: APP });
 await cdp.waitFor('window.__tools?.stream?.rec', 15000, '页面就绪');
 

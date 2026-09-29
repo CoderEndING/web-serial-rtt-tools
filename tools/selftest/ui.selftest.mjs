@@ -256,6 +256,14 @@ export async function runUiSelfTest(tools){
     if (!sel) throw new Error('没有芯片下拉 #f-chip');
     const hpm = [...sel.options].filter(o => o.value.startsWith('hpm'));
     if (hpm.length < 8) throw new Error(`芯片下拉里只有 ${hpm.length} 个 HPM 项（应为 10）`);
+    /**
+     * 🚨 这里只是**看一眼** HPM 选项，看完必须把芯片选回去（2026-10 真机踩到）：
+     *    `f-chip` 是 store 绑定的（存进 localStorage），这条自测把它留在 `hpm6800evk` 上，
+     *    之后任何"没自己设芯片"的脚本（如 hw-campaign）再烧 F103 固件就会每个都失败：
+     *    `固件段 0x8000000 不合法：地址 0x8000000 低于 flash 基址 0x80000000`
+     *    —— 报错看着像固件坏了，其实是上一次自测留下的下拉值。
+     */
+    const keep = sel.value;
     sel.value = 'hpm6800evk';
     sel.dispatchEvent(new Event('change'));
     await new Promise(r => setTimeout(r, 60));
@@ -265,7 +273,9 @@ export async function runUiSelfTest(tools){
     const chips = await import('/app/flash/hpm/chips.js');
     const b = chips.hpmBoard('hpm6800evk');
     if (!b || b.flashBase !== 0x80000000 || b.xpiBase !== 0xF3000000) throw new Error('HPM6800EVK 的板级参数不对');
-    return `HPM 选项 ${hpm.length} 个 · ${b.name}`;
+    sel.value = keep;                       // 复原，别把共享的测试 profile 带偏
+    sel.dispatchEvent(new Event('change'));
+    return `HPM 选项 ${hpm.length} 个 · ${b.name}（芯片选择已复原为 ${keep}）`;
   });
 
   return out;

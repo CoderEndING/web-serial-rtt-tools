@@ -13,6 +13,10 @@
 #     平台相关动作一律交给 `pwsh -NoProfile -Command`（Windows 必装 PowerShell）。
 #   · 路径统一用正斜杠（反斜杠会被 sh 当转义吃掉）。
 #   · 中文输出走 tools/dev/help.ps1（把控制台编码切到 UTF-8，避免 GBK 下乱码）。
+#   🚨 **配方（tab 后面那行）里一律不要写中文**（2026-10 实测，不只是乱码）：本机 make 走
+#      sh.exe，非 ASCII 字符串经编码转换后**有的能跑（输出乱码）、有的直接让这条配方
+#      Error 1 且不给任何提示** —— 可复现的最小例子是 `Write-Host '已在跑'`（换成
+#      `'port 8899 is already up'` 立刻正常）。中文只放在 # 注释里，或放进 .ps1 脚本。
 # ============================================================================
 
 PY      ?= python
@@ -25,7 +29,7 @@ FW_DIR   = tools/target-firmware/stm32f103
 LA       = tools/la/kingst_la.py
 
 .DEFAULT_GOAL := help
-.PHONY: help serve serve-stop browser open test test-ui test-gen test-gen-page test-hid test-dwarf test-scope test-scope-page test-scope-render test-hw test-record test-bridge test-bridge-gate test-hpm test-image test-all flash-timing hw-campaign \
+.PHONY: help serve serve-stop browser open page-prep test test-ui test-gen test-gen-page test-hid test-dwarf test-scope test-scope-page test-scope-render test-hw test-record test-bridge test-bridge-gate test-hpm test-image test-all flash-timing hw-campaign \
         bridge bridge-stop fw-build fw-flash fw-restore fw-h7-build fw-h7-slow fw-h7-flash \
         algo-check flash-plan la-info la-capture git-status git-log check clean
 
@@ -112,6 +116,16 @@ test-scope-render:
 	pwsh -NoProfile -Command "if (-not (Get-NetTCPConnection -State Listen -LocalPort $(PORT) -ErrorAction SilentlyContinue)) { Start-Process -FilePath '$(PY)' -ArgumentList '-m','http.server','$(PORT)','--bind','127.0.0.1' -WindowStyle Hidden; Start-Sleep -Seconds 1 }"
 	$(NODE) tools/selftest/scope-render.test.mjs
 
+# ---------------------------------------------------------------- 页面类脚本的共同前置
+# 8899 静态服务 + 9333 CDP 浏览器（哪个不在就起哪个）。
+# 🚨 2026-10 用户现场：直接 `make hw-campaign` 撞到
+#    `TypeError: fetch failed … ECONNREFUSED 127.0.0.1:9333` —— 那是**CDP 浏览器没起**，
+#    不是探针/板子的问题，但报错里只写着 "connect"，很容易往硬件上想。
+#    现在这些"CDP 驱动真页面"的目标都依赖本前置，一条命令就能跑。
+page-prep:
+	pwsh -NoProfile -Command "if (-not (Get-NetTCPConnection -State Listen -LocalPort $(PORT) -ErrorAction SilentlyContinue)) { Start-Process -FilePath '$(PY)' -ArgumentList '-m','http.server','$(PORT)','--bind','127.0.0.1' -WindowStyle Hidden; Start-Sleep -Seconds 1 }"
+	pwsh -NoProfile -Command "try { $$null = Invoke-WebRequest 'http://127.0.0.1:$(CDP)/json/version' -TimeoutSec 2 -UseBasicParsing } catch { & 'tools/selftest/launch-browser.ps1' -Port $(CDP) -Url '$(APP)'; Start-Sleep -Seconds 3 }"
+
 test-hw:
 	$(NODE) tools/selftest/browser-hw.test.mjs webusb
 
@@ -119,18 +133,18 @@ test-hw:
 #   make flash-timing                        # 一轮时间线
 #   make flash-timing ARGS=--minimize-after=1  # 第 2 轮前最小化窗口（真节流：页面不可见）
 #   make flash-timing ARGS=--clamp             # 确定性模拟"每个短等待都被钳成 1 s"
-flash-timing:
+flash-timing: page-prep
 	$(NODE) tools/selftest/flash-timing.mjs $(ARGS)
 
 # 「记录到文件」实测（OPFS 当 showSaveFilePicker 替身；createWritable/write/close 都是真的）
 # 含"把 write 拖慢"的积压用例与逐字节校验 —— 钉住 .crswap 那套落盘语义
-test-record:
+test-record: page-prep
 	$(NODE) tools/selftest/recorder-file.test.mjs
 
 # 真机场景基准（探针 + 目标板）:烧录 / RTT Viewer / RTT 转发 / J-Scope 全场景跑一遍并记时
-#   make hw-campaign                        # 3 轮全场景 + 狂发↔scope 交替烧录 5 遍
+#   make hw-campaign                        # 3 轮全场景 + 狂发↔scope 交替烧录 5 遍（约 4 分钟）
 #   make hw-campaign ARGS="--cycles=1 --alt=1"   # 只冒烟一遍
-hw-campaign:
+hw-campaign: page-prep
 	$(NODE) tools/selftest/hw-campaign.mjs $(ARGS)
 
 test-bridge:

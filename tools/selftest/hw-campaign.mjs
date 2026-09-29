@@ -5,10 +5,17 @@
  *   3) 上面 1)+2) 重复 3 遍
  *   4) 狂发 ↔ scope 交替烧录 5 遍，逐次计时
  *
- *   node tools/selftest/hw-campaign.mjs [--cycles=3] [--alt=5] [--com=COM5]     （等价：make hw-campaign）
+ *   node tools/selftest/hw-campaign.mjs [--cycles=3] [--alt=5] [--com=COM5] [--chip=stm32f103] [--keep-going]
+ *                                                                          （等价：make hw-campaign）
  *
- * 前置：8899 静态服务 + 9333 CDP 浏览器（tools/selftest/launch-browser.ps1）
+ * 前置：8899 静态服务 + 9333 CDP 浏览器（`make hw-campaign` 会自己拉起来，见 Makefile 的 page-prep）
  * 结果同时写 tmp/campaign-result.json（中途崩了也不丢已测得的数据）。
+ *
+ * 🚨 **出错就立刻抛**（2026-10 用户现场要求："不能等它跑完了看"）：任何一步失败都会**马上中止**、
+ *    打印原因并退 1；要继续跑剩下的用 `--keep-going`。开跑前还会做一次前置检查，
+ *    并且**自己把芯片选成 STM32F103** —— 那次事故就是共享测试 profile 里 `f-chip`
+ *    被上一次自测留在 `hpm6800evk`（flash 基址 0x80000000），于是每次烧 STM32 固件都报
+ *    `固件段 0x8000000 不合法：地址 0x8000000 低于 flash 基址 0x80000000`。
  *
  * 2026-10 基线（STM32F103ZE + akaLinkPro；3 轮全场景 + 5 遍交替烧录，共 16 次烧录零失败）：
  *   烧录：狂发（0.9 KB 数据）≈ 0.72 s · scope（3.3 KB 数据）≈ 1.04 s
@@ -24,6 +31,8 @@ const APP = (process.env.APP || 'http://127.0.0.1:8899/index.html') + '?t=' + Da
 const FW_SPAM = '/tools/target-firmware/stm32f103_rtt_speed/build/fw.elf';   // 狂发 hello world
 const FW_SCOPE = '/tools/target-firmware/stm32f103_scope/build/fw.elf';      // 19 个可采样变量
 const COM = (process.argv.find(a => a.startsWith('--com=')) || '--com=COM5').split('=')[1];
+const CHIP = (process.argv.find(a => a.startsWith('--chip=')) || '--chip=stm32f103').split('=')[1];
+const KEEP_GOING = process.argv.includes('--keep-going');
 const argN = (k, d) => { const a = process.argv.find(x => x.startsWith(`--${k}=`)); return a ? Number(a.split('=')[1]) : d; };
 const CYCLES = argN('cycles', 3);
 const ALT = argN('alt', 5);
@@ -58,7 +67,16 @@ class Cdp {
     if (hs) for (const h of hs) h(m.params);
   }
   async connect(){
-    const ver = await (await fetch(CDP + '/json/version')).json();
+    /**
+     * 🚨 连不上 CDP 浏览器时给一句能照做的话：原始报错是 `TypeError: fetch failed … ECONNREFUSED`，
+     *    看着像探针/板子的问题，其实就是"9333 上没浏览器"（2026-10 用户现场）。
+     */
+    let ver;
+    try { ver = await (await fetch(CDP + '/json/version')).json(); }
+    catch {
+      throw new Error(`连不上 CDP 浏览器（${CDP}）—— 真页面测试需要它。` +
+        '先 `make open`（起 8899 静态服务 + 9333 浏览器）；或者直接用 `make hw-campaign`，它会把这两样拉起来。');
+    }
     this.browserWs = await this._open(ver.webSocketDebuggerUrl, (ws, m) => this._dispatch(ws, m));
     const list = await (await fetch(CDP + '/json/list')).json();
     const page = list.find(t => t.type === 'page' && t.url.includes('8899'));
@@ -126,7 +144,36 @@ async function nap(ms){
 
 const cdp = await new Cdp().connect();
 console.log(`== 真机场景测试 ==  CDP ${CDP}  串口 ${COM}`);
-console.log(`   计划：${CYCLES} 轮 × (狂发→RTT Viewer ${RTT_SECS}s→RTT 转发 ${FWD_SECS}s→scope→J-Scope 4 组) ＋ 交替烧录 ${ALT} 遍`);
+console.log(`   计划：${CYCLES} 轮 × (狂发→RTT Viewer ${RTT_SECS}s→RTT 转发 ${FWD_SECS}s→scope→J-Scope 5 组) ＋ 交替烧录 ${ALT} 遍`);
+
+/**
+ * 前置检查：**自己把芯片/后端设好**，不信浏览器里存着的那一份。
+ * 🚨 2026-10 用户现场：每次烧录都报
+ *    `固件段 0x8000000 不合法：地址 0x8000000 低于 flash 基址 0x80000000` ——
+ *    因为共享的测试 profile 里 `f-chip` 被上一次自检留在了 **hpm6800evk**（RISC-V，
+ *    flash 在 0x80000000），而这里烧的是 STM32 固件（0x08000000）。报错看着像固件坏了。
+ */
+async function preflight(){
+  const st = await cdp.evalJson(`(()=>{
+    document.querySelector('.tab[data-tab="flash"]').click();
+    const c = document.getElementById('f-chip');
+    if (!c) throw new Error('页面上没有 #f-chip（页面没加载完？）');
+    const before = c.value;
+    c.value = ${JSON.stringify(CHIP)};
+    c.dispatchEvent(new Event('change'));
+    const b = document.getElementById('f-backend');
+    b.value = 'webusb'; b.dispatchEvent(new Event('change'));
+    const v = document.getElementById('f-verify'); if (v) v.checked = true;
+    const r = document.getElementById('f-reset'); if (r) r.checked = true;
+    // RTT Viewer 那一格也复位：地址格留空 = 让页面自己扫（存着的旧地址会把扫描限死在一个地方）
+    const ra = document.getElementById('r-addr'); if (ra) ra.value = '';
+    return { before, chip: c.value, chipText: c.options[c.selectedIndex]?.textContent || '', backend: b.value };
+  })()`);
+  console.log(`   前置：芯片 ${st.before || '(空)'} → ${st.chip}（${st.chipText}）· 后端 ${st.backend} · 校验/复位已勾`);
+  if (st.chip !== CHIP) throw new Error(`芯片下拉里没有 ${CHIP}（拿到「${st.chip}」）—— 页面模块是不是没加载完？`);
+  return st;
+}
+await preflight();
 
 const report = { startedAt: new Date().toISOString(), com: COM, cycles: [], alt: [], notes: [], errors: [] };
 const dump = () => { try { fs.writeFileSync('tmp/campaign-result.json', JSON.stringify(report, null, 1)); } catch {} };
@@ -173,9 +220,17 @@ async function flash(fw, label){
       log: document.getElementById('f-log').textContent.split('\\n') })`);
   const sum = [...st.log].reverse().find(l => l.includes('耗时小结')) || '';
   const okFlash = st.res.includes('✅');
-  if (!okFlash) report.errors.push(`${label} 烧录失败：${st.res}`);
   console.log(`   [烧录] ${label}：${(wall / 1000).toFixed(1)}s ${okFlash ? '✅' : '❌ ' + st.res}`);
   if (sum) console.log('          ' + sum);
+  /**
+   * 🚨 **烧录没成就是硬错误**：以前只往 report.errors 里记一笔、继续往下测 ——
+   *    结果后面的 RTT/J-Scope 数据全是在旧固件上量的（用户现场："固件没有烧录进去，
+   *    你不能等它跑完了看啊"）。这里直接抛，让调用方立刻停。
+   */
+  if (!okFlash){
+    const tail = st.log.filter(Boolean).slice(-5).join('\n          ');
+    throw new Error(`${label} 烧录失败：${st.res}${tail ? `\n          页面日志尾部：\n          ${tail}` : ''}`);
+  }
   return { label, fw: f.name, size: f.size, ms: wall, ok: okFlash, result: st.res, summary: sum, started };
 }
 
@@ -184,8 +239,30 @@ async function rttViewer(secs){
   await cdp.eval(`document.querySelector('.tab[data-tab="rtt"]').click()`);
   await cdp.eval(`(()=>{const b=document.getElementById('r-backend'); b.value='webusb'; b.dispatchEvent(new Event('change'));})()`);
   await cdp.eval(`document.getElementById('r-range').value='0x20000000-0x20005000'`);
-  await cdp.eval(`document.getElementById('r-usb-connect').click()`, true);
-  await cdp.waitFor(`window.__tools.rtt.rtt`, 20000, 'RTT 控制块定位');
+  await nap(600);                       // 刚烧完的会话要一点时间把接口/链路还回来
+  /**
+   * 🚨 **连不上就等 2 s 再点一次**（最多 3 次）：这是这套工具**已知且写在界面提示里**的现象 ——
+   *    刚断开探针的会话（烧录器就是）浏览器释放 USB 接口要一会儿，紧接着连 Viewer 会撞上
+   *    `Unable to claim interface` 或者正好读到上一场的脏响应（`ACK=5` 之类）。
+   *    用户的手动操作就是"再点一次"，这里照做；三次都失败才抛，并把**页面上的原因**一起带上。
+   */
+  let lastErr = '';
+  for (let attempt = 1; attempt <= 3; attempt++){
+    await cdp.eval(`document.getElementById('r-usb-connect').click()`, true);
+    try {
+      await cdp.waitFor(`window.__tools.rtt.rtt`, attempt === 1 ? 12000 : 9000, 'RTT 控制块定位');
+      lastErr = '';
+      break;
+    } catch (e){
+      const st = await cdp.evalJson(`({ probe: !!window.__tools.rtt.probe, err: document.getElementById('r-err').textContent,
+          cb: document.getElementById('r-cb').textContent, addr: document.getElementById('r-addr').value })`);
+      lastErr = `${e.message} ——「probe=${st.probe} · 控制块=${st.cb} · 地址格=${st.addr || '(空)'} · 状态栏=${st.err || '—'}」`;
+      console.log(`   [RTT Viewer] 第 ${attempt} 次没连上，等 2 s 重试：${lastErr}`);
+      try { await cdp.eval(`window.__tools.rtt.disconnect()`); } catch {}
+      await nap(2000);
+    }
+  }
+  if (lastErr) throw new Error(`RTT Viewer 连不上（试了 3 次）：${lastErr}`);
   await cdp.waitFor(`window.__tools.rtt.running`, 5000, 'RTT 轮询在跑');
   const a = await cdp.evalJson(`({b:window.__tools.rtt.stats.bytes,p:window.__tools.rtt.stats.polls,t:performance.now()})`);
   await nap(secs * 1000);
@@ -341,9 +418,16 @@ function chooseVars(meta){
 }
 
 /* ------------------------------------------------------------------ 主流程 */
+/**
+ * 出错**立刻停**（不跑完再看）：每轮/每遍自己 try，失败就打印原因、dump 已测数据、然后抛出；
+ * 只有显式给了 `--keep-going` 才继续跑剩下的。最外层接住它，照样把"已经量到的"汇总出来。
+ */
+let aborted = null;
+try {
 for (let c = 1; c <= CYCLES; c++){
   console.log(`\n========== 第 ${c}/${CYCLES} 轮 ==========`);
   const rec = { cycle: c };
+  let err = null;
   try {
     rec.flashSpam = await flash(FW_SPAM, `狂发 #${c}`);
     rec.rtt = await rttViewer(RTT_SECS);
@@ -360,25 +444,35 @@ for (let c = 1; c <= CYCLES; c++){
     rec.s3_fast = await scopeRun({ idxs: picks.three, periodUs: 2, secs: SCOPE_SECS, label: '3 变量 @2µs（冲上限）' });
     rec.s3_50k = await scopeRun({ idxs: picks.three, periodUs: 20, secs: SCOPE_SECS, label: '3 变量 @20µs（50 kHz 目标）' });
     rec.s3spread = await scopeRun({ idxs: picks.spread, periodUs: 2, secs: SCOPE_SECS, label: '3 变量·地址分散 @2µs' });
-  } catch (e){
-    console.log('   !! 本轮出错：' + (e?.message || e));
-    report.errors.push(`第 ${c} 轮：${e?.message || e}`);
-  }
+  } catch (e){ err = e; }
   report.cycles.push(rec);
   dump();
+  if (err){
+    console.log(`\n!! 第 ${c} 轮出错，立刻停：${err.message}`);
+    report.errors.push(`第 ${c} 轮：${err.message}`);
+    if (!KEEP_GOING) throw new Error(`第 ${c} 轮出错：${err.message}`);
+    console.log('   （--keep-going：继续下一轮）');
+  }
 }
 
 console.log(`\n========== 阶段 4：狂发 ↔ scope 交替烧录 ${ALT} 遍 ==========`);
 for (let i = 1; i <= ALT; i++){
+  let err = null;
   try {
     const a = await flash(FW_SPAM, `交替#${i} 狂发`);
     const b = await flash(FW_SCOPE, `交替#${i} scope`);
     report.alt.push({ i, spamMs: a.ms, spamOk: a.ok, scopeMs: b.ms, scopeOk: b.ok, spamSum: a.summary, scopeSum: b.summary });
-  } catch (e){
-    console.log('   !! 交替第 ' + i + ' 遍出错：' + (e?.message || e));
-    report.errors.push(`交替 ${i}：${e?.message || e}`);
-  }
+  } catch (e){ err = e; }
   dump();
+  if (err){
+    console.log(`\n!! 交替第 ${i} 遍出错，立刻停：${err.message}`);
+    report.errors.push(`交替 ${i}：${err.message}`);
+    if (!KEEP_GOING) throw new Error(`交替第 ${i} 遍出错：${err.message}`);
+    console.log('   （--keep-going：继续下一遍）');
+  }
+}
+} catch (e){
+  aborted = e;
 }
 
 /* ------------------------------------------------------------------ 汇总 */
@@ -402,5 +496,11 @@ const errs = await cdp.evalJson(`window.__tools.errors`).catch(() => []);
 if (errs.length) console.log('页面 JS 错误：' + JSON.stringify(errs).slice(0, 300));
 dump();
 clearTimeout(WD);
+if (aborted){
+  console.log('\n❌ 已中止：' + (aborted?.message || aborted));
+  console.log('   （出错就立刻停 —— 想跑完剩下的用 --keep-going；上面的汇总只有中止前测到的部分）');
+} else if (!report.errors.length){
+  console.log('\n✅ 全部跑完，没有错误');
+}
 console.log('\n结果已写 tmp/campaign-result.json');
-process.exit(report.errors.length ? 1 : 0);
+process.exit(aborted || report.errors.length ? 1 : 0);
