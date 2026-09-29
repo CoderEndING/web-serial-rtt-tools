@@ -91,20 +91,38 @@ export class HpmFlasher {
     if (!e) throw new Error(`没有入口 ${entry}`);
     // 参数放 a0..a4（x10..x14）
     for (let i = 0; i < args.length; i++) await this.dm.writeReg(0x1000 + 10 + i, args[i] >>> 0);
+    // 🚨 跑之前必须：置 dcsr.ebreak*（否则收尾的 ebreak 变成异常，核跑飞）+ fence.i（刚写进去的代码）
+    await this.dm.prepareRun();
     await this.dm.resume((HPM_ALGO.loadAddr + e.entryOffset) >>> 0);
     await this.dm.waitHalted(timeoutMs);
     const rc = await this.dm.readReg(0x1000 + 10);
     return rc >>> 0;
   }
 
-  /** 擦除 [addr, addr+len)：算法内部按扇区/块自己安排 */
+  /**
+   * 擦除 [addr, addr+len)：算法内部按扇区/块自己安排。
+   *
+   * 🚨 **传给算法的是"偏移"，不是绝对地址**（2026-10 真机定标）：
+   *    算法里 `flash_erase/program/read` 只在 `ROMAPI_SUPPORTS_HYBRIDXPI()`
+   *    （ROM API 版本 ≥ 0x56010300）时才做 `address += flash_base`；HPM6800EVK 这版 ROM
+   *    不是 hybrid，所以 `address` 必须**相对 XPI 窗口**（0x80000000 起算的偏移）。
+   *    实测：传绝对地址 0x80000000 → `rc=2`（out of range）；传偏移 → 擦/写/读全部 rc=0。
+   *    对外的 API 仍然用绝对地址（好看、好和芯片规格对照），在调用点换算。
+   */
   async erase(addr, len){
     const chk = hpmCheckRange(this.board, addr, len);
     if (!chk.ok) throw new Error('擦除范围不合法：' + chk.why);
     if (!this.inited) throw new Error('先 setup()');
-    const rc = await this.call('erase', [this.board.flashBase, addr >>> 0, len >>> 0], 60000);
+    const rc = await this.call('erase', [this.board.flashBase, this.offsetOf(addr), len >>> 0], 60000);
     if (rc) throw new Error(`flash_erase 失败：${hpmStatusText(rc)}`);
     this.log(`已擦除 0x${addr.toString(16)} 起 ${len} B`);
+  }
+
+  /** 绝对地址 → 算法要的偏移（XPI 窗口内）*/
+  offsetOf(addr){
+    const off = ((addr >>> 0) - (this.board.flashBase >>> 0)) >>> 0;
+    if (off >= (this.board.flashSize >>> 0)) throw new Error(`地址 0x${(addr >>> 0).toString(16)} 不在 flash 窗口内`);
+    return off;
   }
 
   /** 烧写：分块写进 RAM 中转区 → flash_program */
@@ -120,7 +138,7 @@ export class HpmFlasher {
       const padded = new Uint8Array(Math.ceil(n / 4) * 4).fill(0xff);
       padded.set(chunk);
       await this.dm.writeMem(this.dataBuf, padded);
-      const rc = await this.call('program', [this.board.flashBase, (addr + off) >>> 0, this.dataBuf, padded.length], 60000);
+      const rc = await this.call('program', [this.board.flashBase, this.offsetOf(addr + off), this.dataBuf, padded.length], 60000);
       if (rc) throw new Error(`flash_program 在 0x${(addr + off).toString(16)} 失败：${hpmStatusText(rc)}` +
         (rc === 1 ? '（该地址不是已擦除状态？先擦除，或地址落在别的 flash 窗口）' : ''));
       this.onProgress((off + n) / total, off + n, total);
@@ -137,7 +155,7 @@ export class HpmFlasher {
     for (let off = 0; off < data.length; off += this.chunkBytes){
       const n = Math.min(this.chunkBytes, data.length - off);
       const padded = Math.ceil(n / 4) * 4;
-      const rc = await this.call('read', [this.board.flashBase, this.dataBuf, (addr + off) >>> 0, padded], 60000);
+      const rc = await this.call('read', [this.board.flashBase, this.dataBuf, this.offsetOf(addr + off), padded], 60000);
       if (rc) throw new Error(`flash_read 在 0x${(addr + off).toString(16)} 失败：${hpmStatusText(rc)}`);
       const back = await this.dm.readMem(this.dataBuf, padded);
       for (let i = 0; i < n; i++){

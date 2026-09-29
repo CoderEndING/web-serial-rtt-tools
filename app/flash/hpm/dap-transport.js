@@ -91,10 +91,14 @@ export class DapJtagTransport {
     this.log(`DAP 已切到 JTAG（IR 长度 ${this.irLength}，TAP 数 ${cfg[1] ?? 1}）`);
   }
 
-  /** 读 TAP IDCODE（探活用；失败说明 JTAG 链路/接线/上电有问题）*/
-  async idcode(){
-    const r = await this.probe._ctrl(DAP.JTAG_IDCODE);
-    if (r[0] !== 0x00) throw new Error(`DAP_JTAG_IdCode 失败（状态 0x${r[0].toString(16)}）`);
+  /** 读 TAP IDCODE（探活用；失败说明 JTAG 链路/接线/上电有问题）。
+   *  🚨 **必须带一个字节的 TAP 序号**：固件 `DAP_JTAG_IdCode` 把 `*request` 当 device index，
+   *    不带的话它读到的是缓冲区里的垃圾 → `index >= count` → 直接回 `DAP_ERROR(0xFF)`
+   *    （2026-10 真机实测就是 0xff，卡了好一会儿）。akaLinkPro 的示例脚本也没带这个字节。*/
+  async idcode(index = 0){
+    const r = await this.probe._ctrl(DAP.JTAG_IDCODE, Uint8Array.of(index & 0xff));
+    if (r[0] !== 0x00) throw new Error(`DAP_JTAG_IdCode 失败（状态 0x${r[0].toString(16)}）——` +
+      ' 检查 JTAG 接线/供电，或探针 output_mode 是不是刚被切回去');
     const dv = new DataView(r.buffer, r.byteOffset, r.byteLength);
     return dv.getUint32(1, true) >>> 0;
   }

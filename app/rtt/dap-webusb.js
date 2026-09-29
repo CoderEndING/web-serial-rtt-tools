@@ -48,6 +48,15 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
  */
 const dirty = new WeakSet();
 
+/**
+ * 探针认哪种 bulk 封包写法（`short` = 规范的长度精确包；`pad` = 补齐到整包）。
+ * 记在设备对象上：同一台探针第二次 open 就不用再探测了。
+ * 依据（2026-10 真机实测，HPM6800EVK + akaLinkPro 探针）：
+ *   · 短包：`DAP_Info(0)`→`00 00`、`DAP_Connect(2)`→`02 00`、`SWJ_Clock`→`11 00`，全都有应答；
+ *   · 补齐 512 B：**一条都不回应**（"探针没响应"超时），且会把端点搞脏（之后短包也不应，需端口复位）。
+ */
+const FRAMING = new WeakMap();
+
 /** 给任意 promise 套超时（超时只是放弃等待；USB 层要靠 dirty+reset 收拾） */
 export async function withTimeout(p, ms, what){
   let t;
@@ -135,11 +144,19 @@ export class WebUsbDapProbe {
    *   skipInfo=true 连 DAP_Info 都不问，让命令流与"验证过的裸客户端"完全一致
    *   clockKhz>0 指定 SWD 时钟；不指定则从高到低自动选（见 CLOCK_CANDIDATES）
    */
-  async _setup({ skipTargetInit = false, skipInfo = false, skipClearHalt = false, clockKhz = 0 } = {}){
+  async _setup({ skipTargetInit = false, skipInfo = false, skipClearHalt = false, clockKhz = 0, framing = null } = {}){
     this.skipTargetInit = skipTargetInit;
     this.skipClearHalt = skipClearHalt;
     await this._claim();
     const prod = this.device.productName || 'CMSIS-DAP';
+
+    /**
+     * 🚨 **先定封包写法再发任何命令**（见 `_ctrl` 的注释）：当前固件只认**短包**，
+     *    老固件只认"补齐到整包"。这里用一条 `DAP_Info` 实测一次，定不下来就端口复位清干净再试另一种，
+     *    结论记住（存到模块级 WeakMap，同一台探针后续 open 不用再试）。
+     */
+    this._framing = framing || FRAMING.get(this.device) || await this._detectFraming();
+    if (this._framing === 'pad') console.warn('[dap] 这台探针认"补齐到整包"的写法（老固件）');
 
     // 先按"验证过能跑通"的裸客户端顺序把目标初始化好（tools\cmsis_dap_raw.py），
     // Info 查询放**后面**做 —— 那份脚本一个 Info 都没发，序列越接近它越稳。
@@ -252,19 +269,85 @@ export class WebUsbDapProbe {
    *    → 按命令回显匹配，不匹配的陈旧包丢掉重读（一次只发一条命令，不存在流水线，
    *      所以丢掉的一定是陈旧的，不会是别人的）。
    */
+  /**
+   * 实测这台探针认哪种封包写法，并记住结论（同一台设备后续 open 直接用）。
+   * 先试**规范写法（短包）**；没响应就端口复位把挂起的传输清掉，再试"补齐到整包"。
+   * 🚨 复位这一步不能省：短包没响应时那次 `transferIn` 还挂着，不清掉会把后面那条响应偷走。
+   *
+   * 🚨 2026-10 补的第二个坑：短包探测失败**有两种完全不同的原因**，不能混为一谈 ——
+   *   · 「超时（没响应）」才是固件不认短包，该换 `pad` 写法；
+   *   · 「响应回显不匹配」是 IN 端点里躺着**陈旧响应**（上一次网页会话被中途打断、
+   *     OpenOCD 退出时留下的那一两条），固件本身没问题。
+   *   一开始两种都当"要换写法"处理，于是偶尔会误判成 pad、然后一路超时打不开探针
+   *   （本机真机踩到：页面刷新后 3 次里 1 次打不开）。现在先清队列、按短包重试一次。
+   */
+  async _detectFraming(){
+    const tryOne = async (framing, timeout) => {
+      this._framing = framing;
+      await this._ctrlRaw(CMD.Info, Uint8Array.of(0), timeout);
+      return framing;
+    };
+    try {
+      const f = await tryOne('short', 900);
+      FRAMING.set(this.device, f);
+      return f;
+    } catch (e){
+      console.warn('[dap] 短包探测失败：' + e.message);
+      if (/响应回显/.test(e.message)){
+        console.info('[dap] 是陈旧响应包（不是固件不认短包）→ 清队列后按短包重试');
+        try { await resetDevice(this.device); } catch {}
+        await sleep(200);
+        await this._claim();                       // clearHalt + resync，把陈旧包吃掉
+        try {
+          const f = await tryOne('short', 1500);
+          FRAMING.set(this.device, f);
+          return f;
+        } catch (e2){
+          console.warn('[dap] 清完队列后短包还是不行：' + e2.message);
+        }
+      }
+    }
+    try { await resetDevice(this.device); } catch {}
+    await sleep(250);
+    await this._claim();
+    const f = await tryOne('pad', 2000);
+    FRAMING.set(this.device, f);
+    return f;
+  }
+
+  /** 一条命令的"写 + 读"，不做陈旧包重试（只给封包探测用）*/
+  async _ctrlRaw(cmd, payload, timeout = 1500){
+    const n = 1 + (payload ? payload.length : 0);
+    const req = this._framing === 'pad' ? new Uint8Array(this.pkt) : new Uint8Array(n);
+    req[0] = cmd;
+    if (payload) req.set(payload, 1);
+    await withTimeout(this.device.transferOut(this.epOut, req), timeout, 'USB 写');
+    const r = await withTimeout(this.device.transferIn(this.epIn, this.pkt), timeout, 'USB 读');
+    if (!r.data || !r.data.byteLength) throw new Error('收到空包');
+    const res = new Uint8Array(r.data.buffer, r.data.byteOffset, r.data.byteLength);
+    if (res[0] !== cmd) throw new Error(`响应回显 0x${res[0].toString(16)} ≠ 命令 0x${cmd.toString(16)}`);
+    return res.subarray(1);
+  }
+
   async _ctrl(cmd, payload){
     if (!this._ready) throw new Error('探针未连接');
     const n = 1 + (payload ? payload.length : 0);
     if (n > this.pkt) throw new Error(`CMSIS-DAP 命令太长（${n} > ${this.pkt} 字节/包）`);
-    // 补齐到整包再发：本工作区验证过的裸客户端（tools\cmsis_dap_raw.py）就是这么做的，
-    // 是这个探针唯一 100% 跑通的写法，照抄以消掉变量。
-    const req = new Uint8Array(this.pkt);
+    /**
+     * 🚨 **封包长度必须按固件实际认的写法发**（2026-10 真机踩到，两种固件行为不同）：
+     *   · `short`（默认，CMSIS-DAP 规范）：传输长度 = 实际命令长度。HPM6800EVK 上实测
+     *     `DAP_Info(0)`→`00 00`、`DAP_Connect(2)`→`02 00`（JTAG 拿到口）、`SWJ_Clock`→`11 00`。
+     *   · `pad`（老固件的写法）：补齐到整包（512 B）。当前固件对补齐包**完全不回应**
+     *     —— 现象是"探针没响应"超时，而同一根管子用短包立刻就有应答。
+     * 结论由 `_detectFraming()` 在 open 时**实测**一次定下来（见那里），不再靠注释里的传说。
+     */
+    const req = this._framing === 'pad' ? new Uint8Array(this.pkt) : new Uint8Array(n);
     req[0] = cmd;
     if (payload) req.set(payload, 1);
     try {
       await withTimeout(this.device.transferOut(this.epOut, req), 3000, 'USB 写');
     } catch (e){
-      dirty.add(this.device);                 // 写超时：底层传输可能还挂着 → 标脏
+      await this._onXferTimeout('USB 写');    // 写超时：底层传输可能还挂着 → 标脏 + 立刻复位救回来
       throw e;
     }
     for (let attempt = 0; attempt < 4; attempt++){
@@ -272,7 +355,7 @@ export class WebUsbDapProbe {
       try {
         r = await withTimeout(this.device.transferIn(this.epIn, this.pkt), 3000, 'USB 读');
       } catch (e){
-        dirty.add(this.device);               // 读超时：挂起传输会偷走后续响应 → 标脏
+        await this._onXferTimeout('USB 读');
         throw e;
       }
       if (!r.data || !r.data.byteLength) continue;                     // 空包：跳过
@@ -285,6 +368,31 @@ export class WebUsbDapProbe {
       return res.subarray(1);
     }
     throw new Error(`CMSIS-DAP 连续 4 次都没读到命令 0x${cmd.toString(16)} 的响应（探针掉线？）`);
+  }
+
+  /**
+   * 一次 USB 传输超时之后**立刻**把探针救回来（而不是留给下一次 open）。
+   *
+   * 🚨 为什么必须当场救：WebUSB 没有取消接口，超时那次 bulk 传输还挂在 USB 栈里，
+   *    它会偷走后面每条命令的响应；继续发命令只会一条接一条超时，
+   *    最后连 `getDevices()` 都不返回 —— 用户看到的是"页面卡死，只能拔插"。
+   *    （2026-10 真机踩到：SBA 去读一个没映射的外设窗口 → 之后整条链路都在等超时。）
+   *    做法：端口复位 + 重新认领接口 + 清队列。已经在复位中就跳过，避免连环调用。
+   */
+  async _onXferTimeout(what){
+    dirty.add(this.device);
+    if (this._recovering) return;
+    this._recovering = true;
+    try {
+      console.warn(`[dap] ${what} 超时 → 自动复位 USB 端口并清队列`);
+      await resetDevice(this.device);
+      await sleep(150);
+      await this._claim();
+      this._recovering = false;
+    } catch (e){
+      this._recovering = false;
+      console.warn('[dap] 超时后自动恢复失败：' + e.message + '（可能要拔插一次探针）');
+    }
   }
 
   async info(id){
@@ -305,10 +413,10 @@ export class WebUsbDapProbe {
    * 弃置的 transferIn 会偷走下一条响应 —— 用超时去 flush 就是踩这个坑）。
    */
   async resync(n = 8){
-    const pkt = new Uint8Array(this.pkt);
-    pkt[0] = CMD.Disconnect;
+    const req = this._framing === 'pad' ? new Uint8Array(this.pkt) : new Uint8Array(1);
+    req[0] = CMD.Disconnect;
     for (let i = 0; i < n; i++){
-      try { await withTimeout(this.device.transferOut(this.epOut, pkt), 1500, 'USB 同步写'); }
+      try { await withTimeout(this.device.transferOut(this.epOut, req), 1500, 'USB 同步写'); }
       catch { dirty.add(this.device); return 0; }
     }
     let saw = 0;

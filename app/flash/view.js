@@ -418,19 +418,43 @@ export class FlashView {
     const hid = new AkaLinkHid();
     try {
       await withTimeout(hid.reconnect(), 8000, '连探针 HID');
+      /**
+       * 🚨 **每次都要发这条**，不能"读回来已经是 1 就跳过" —— 2026-10 真机实测：
+       *    `CMD_GET_CONFIG` 明明报 output_mode=1，但 `DAP_Info(0xF0)` 的能力字里 JTAG=0、
+       *    `DAP_Connect(2)` 返回 0（DISABLED）；**重发一次 SET_CONFIG(1) 之后立刻就能拿到 JTAG 口**。
+       *    原因见固件注释：output_mode=0 时 TDI/TDO 被 VCOM(UART) 占着，探针宁可拒绝 JTAG 也不抢引脚；
+       *    那条"存储的模式"和"引脚实际归谁"是两码事，重发一次才把桥拆掉。
+       */
       await withTimeout(hid.xfer(0x02 /* CMD_SET_CONFIG */, setOutputModeData(PROBE_OUTPUT_MODE.SWD_JTAG)), 3000, '切输出模式');
-      this._log('已把探针 output_mode 设为 SWD+JTAG（RAM-only：掉电即失，重启后要重设）');
+      const cfg = await hid.xfer(0x01).catch(() => null);
+      this._log(`探针 output_mode = ${cfg ? cfg[3] : '?'}（1 = SWD+JTAG；已强制重设一次，JTAG 才拿得到口）`);
+      /**
+       * 🚨 还要让探针**自己的 RISC-V 引擎**放掉 TAP（HID 0x33 action 0）。
+       *    那个引擎（RISC-V 内存读写/bench）会一直占着 JTAG，不放开的话
+       *    `DAP_Connect(2)` 拿不到口 —— 他们的 README 里烧录前也是先跑这一步。
+       *    没响应也不当失败：本来就空闲时这条命令可能不回。
+       */
+      try {
+        await withTimeout(hid.riscvStop(), 2000, 'RISC-V 引擎 stop');
+        this._log('已请求探针 RISC-V 引擎放掉 TAP（0x33 action 0）');
+      } catch (e){
+        this._log('（0x33 stop 无响应，可能本来就空闲）');
+      }
     } catch (e){
-      this._log('⚠ 切 output_mode 失败（继续试 JTAG，可能本来就是 JTAG 模式）：' + (e?.message || e));
+      this._log('⚠ 切 output_mode 失败（继续试 JTAG）：' + (e?.message || e));
     } finally {
       try { await hid.close(); } catch {}
     }
 
     this._status('连接数据端点（WebUSB）…');
     const auth = await withTimeout(WebUsbDapProbe.authorized(), 5000, '枚举已授权探针');
+    // 🚨 必须 `skipTargetInit`：默认那套 open() 会按 **SWD** 协商时钟（DAP_Connect(SWD)+SWD_Configure+
+    //    读 IDCODE），而 HPM 是 RISC-V/JTAG 目标 —— 实测会卡在 USB 传输超时（"探针没响应"）。
+    //    这条路自己用 DAP_Connect(JTAG) 开链，见 DapJtagTransport.connectJtag()。
+    const openOpts = { skipTargetInit: true };
     const probe = auth.length
-      ? await withTimeout(WebUsbDapProbe.open(auth[0]), 15000, '连接探针（WebUSB）')
-      : await withTimeout(WebUsbDapProbe.request(false), 60000, '等你在浏览器里选探针');
+      ? await withTimeout(WebUsbDapProbe.open(auth[0], openOpts), 15000, '连接探针（WebUSB）')
+      : await withTimeout(WebUsbDapProbe.request(false, openOpts), 60000, '等你在浏览器里选探针');
     this.probe = probe;
     probe.fast = false;
 

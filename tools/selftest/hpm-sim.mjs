@@ -14,10 +14,17 @@
  * 真实 flash 的擦写时间与 SFDP 探测。
  */
 
-import { DM, DMI_OP, DMI_STATUS, SBCS, sbcsBlock, sbcsHold } from '../../app/flash/hpm/jtag.js';
+import { DM, DMI_OP, DMI_STATUS, SBCS, sbcsBlock, sbcsHold, REGNO, DCSR_EBREAK } from '../../app/flash/hpm/jtag.js';
 import { parseAlgoEntryTable, ENTRY_ORDER } from '../../app/flash/hpm/entry.js';
 
 const STATUS = { success: 0, invalidArgument: 1, outOfRange: 2, timeout: 3, noFlash: 4 };
+
+/** 真机 abstractcs 的常态值（datacount=4、progbufsize=8）*/
+const ABSTRACT_NOERR = 0x08000004;
+/** 真机 dmstatus 的"不变部分"（HPM6800EVK 实测 0x004003a2 去掉 halt/run 那几位）*/
+const DMSTATUS_BASE = 0x004000a2;
+/** dmstatus 里会翻转的位（legacy 排法）：halted / running / resumeack / havereset */
+const DMSTATUS_DYN = { halted: 0x300, running: 0xc00, resumeack: 0x30000, havereset: 0xc0000 };
 
 export class SimTarget {
   /**
@@ -33,12 +40,27 @@ export class SimTarget {
     this.sectorSize = opts.sectorSize ?? 0x1000;               // 4 KB 扇区
     this.blockSize = opts.blockSize ?? 0x10000;                // 64 KB 块
     // DM 寄存器
+    // dmstatus 按 **HPM6800EVK 真机标定**的 legacy 排法造（见 jtag.js 的 DMSTATUS_LAYOUT 注释）：
+    //   0x004003a2 = version=2 | authenticated | hasresethaltreq | confstrptrvalid
+    //                | allhalted/anyhalted(bit8/9) | impebreak(bit22)
+    //   halted ⇄ bit8/9，running ⇄ bit10/11，resumeack ⇄ bit16/17，havereset ⇄ bit18/19（都能翻转）
     this.dm = {
-      dmcontrol: 0, dmstatus: 0x2 | (1 << 8),   // version=2、allhalted=1（复位后停着）
-      abstractcs: 0x2,                          // datacount=3
+      dmcontrol: 0, dmstatus: DMSTATUS_BASE,
+      abstractcs: ABSTRACT_NOERR,               // datacount=4 / progbufsize=8（与真机一致）
       command: 0, data0: 0, sbcs: sbcsBlock() & 0x000fffff,
       sbaddress: 0,
     };
+    this.progbuf = [0, 0, 0, 0];                // progbuf0..3（主机侧只用前 3 个字放 fence）
+    this.progbufRuns = 0;
+    // dcsr：**故意按"刚上电、没被任何调试器动过"来造** —— ebreak* 全 0。
+    // 真机上我们第一次接手时读到的是 0x4000b643（ebreak* 已置），但那是上一次 OpenOCD 会话留下的；
+    // 全新板子不能指望这个，所以自测按最严的来：主机侧不置 dcsr.ebreak* 就会暴露。
+    this.dcsr = 0x40000003;                     // xdebugver=4 | prv=machine
+    this.dcsrEbreakEnabled = false;
+    this.resumeAcked = false;                   // 收到过 resumereq（dmstatus bit16/17，粘住）
+    this.havereset = false;                     // 被 ndmreset 复位过（dmstatus bit18/19，粘住）
+    this.trapped = false;                       // ebreak 变成异常"跑飞"过
+
     this.regs = new Uint32Array(32);            // x0..x31（a0 = x10 = regs[10]）
     this.pc = 0;
     this.halted = true;
@@ -161,7 +183,15 @@ export class SimTarget {
   _readReg(addr){
     const d = this.dm;
     switch (addr){
-      case DM.DMSTATUS: return (d.dmstatus | (this.halted ? 1 << 8 : 0)) >>> 0;
+      case DM.DMSTATUS: {
+        // 按真机的 legacy 排法合成：halted/running 互斥，resumeack 与 havereset 粘住
+        let v = DMSTATUS_BASE & ~(DMSTATUS_DYN.halted | DMSTATUS_DYN.running |
+                                  DMSTATUS_DYN.resumeack | DMSTATUS_DYN.havereset);
+        v |= this.halted ? DMSTATUS_DYN.halted : DMSTATUS_DYN.running;
+        if (this.resumeAcked) v |= DMSTATUS_DYN.resumeack;
+        if (this.havereset) v |= DMSTATUS_DYN.havereset;
+        return v >>> 0;
+      }
       case DM.DMCONTROL: return d.dmcontrol >>> 0;
       case DM.ABSTRACTCS: return d.abstractcs >>> 0;
       case DM.COMMAND: return d.command >>> 0;
@@ -173,10 +203,14 @@ export class SimTarget {
       case DM.SBADDRESS0: return d.sbaddress >>> 0;
       case DM.SBDATA0: {
         this.stats.sbaReads++;
-        const v = this._sbaLoad();
-        if (d.sbcs & SBCS.SBAUTOINC) d.sbaddress = (d.sbaddress + 4) >>> 0;
-        if (!(d.sbcs & SBCS.SBREADONDATA)) { /* 只在读地址时启动 */ }
-        return v;
+        // 读 sbdata0：若置了 sbreadondata 就顺带发起下一次读（块读靠它流水）
+        const v = (this.sbaNext !== undefined) ? (this.sbaNext & 0xffffffff) : this._sbaAccess(this.dm.sbaddress);
+        if (this.dm.sbcs & SBCS.SBREADONDATA){
+          this.sbaNext = this._sbaAccess(this.dm.sbaddress);   // 流水下一拍（地址已推进）
+        } else {
+          this.sbaNext = undefined;
+        }
+        return v >>> 0;
       }
       default: return 0;
     }
@@ -192,14 +226,18 @@ export class SimTarget {
         if (data & (1 << 31)){ this.halted = true; }                  // haltreq
         if (data & (1 << 30)){                                        // resumereq
           this.halted = false;
+          this.resumeAcked = true;                                    // dmstatus bit16/17（真机上也粘住）
           this._onResume();
         }
         if (!wasActive && (data & 1)) this.halted = true;             // dmactive 上升沿：DM 复位、hart 停住
-        // ndmreset 是电平式：拉高=拉复位、拉低=核从复位向量开始跑
-        if ((data & 2) && !wasReset) this.resetPulse = true;
+        // ndmreset 是电平式：拉高=拉复位（dmstatus 的 havereset 置起）、拉低=核从复位向量开始跑
+        if ((data & 2) && !wasReset){ this.resetPulse = true; this.havereset = true; }
         if (!(data & 2) && wasReset){ this.resetPulse = false; this.halted = false; this.pc = 0; }
         break;
       }
+      case DM.PROGBUF0: case DM.PROGBUF0 + 1: case DM.PROGBUF0 + 2: case DM.PROGBUF0 + 3:
+        this.progbuf[addr - DM.PROGBUF0] = data >>> 0;
+        break;
       case DM.COMMAND: {
         d.command = data >>> 0;
         this._onAbstract(data >>> 0);
@@ -214,7 +252,11 @@ export class SimTarget {
       }
       case DM.SBADDRESS0: {
         d.sbaddress = data >>> 0;
-        if (d.sbcs & SBCS.SBREADONADDR) this._sbaStartRead();
+        // 🚨 真实的 DM 语义：**写 sbaddress0 时若置了 sbreadonaddr 就立刻发起一次总线读**，
+        //    读成功后按 sbautoincrement 把地址 +4 —— 所以"写地址 → 写数据"这条路上，
+        //    第一笔数据会落到 addr+4（真机实测的错位就是这样来的）。
+        //    模拟器必须照这个来，否则主机侧的 sbcs 配错在自测里根本发现不了。
+        if (d.sbcs & SBCS.SBREADONADDR){ this.sbaNext = this._sbaAccess(d.sbaddress); }
         break;
       }
       case DM.SBDATA0: {
@@ -228,14 +270,11 @@ export class SimTarget {
   }
 
   // ---------------------------------------------------------------- SBA
-  _sbaStartRead(){
-    // 读地址即发起第一次读：值放在 data0（由 SBDATA0 的读取走）
-    this.sbaNext = this._loadWord(this.dm.sbaddress);
-  }
-
-  _sbaLoad(){
-    if (this.sbaNext !== undefined){ const v = this.sbaNext; this.sbaNext = undefined; return v; }
-    return this._loadWord(this.dm.sbaddress);
+  /** 一次"系统总线读"访问（会按 sbautoincrement 推进地址）—— 真实 DM 的语义 */
+  _sbaAccess(addr){
+    const v = this._loadWord(addr);
+    if (this.dm.sbcs & SBCS.SBAUTOINC) this.dm.sbaddress = (addr + 4) >>> 0;
+    return v;
   }
 
   _sbaStore(v){
@@ -261,6 +300,18 @@ export class SimTarget {
 
   // ---------------------------------------------------------------- 目标核 + flashloader
   /**
+   * 自测用的直通入口：按"主机侧那一套"摆好参数与 pc，再走一次 resume。
+   * 只给测试里"想单独验某个语义"的场合用，烧录流程本身不碰它。
+   */
+  runAlgoEntry(entryOffset, args = []){
+    for (let i = 0; i < args.length; i++) this.regs[10 + i] = args[i] >>> 0;
+    this.pc = entryOffset >>> 0;
+    this.halted = false;
+    this._onResume();
+    return this.halted;
+  }
+
+  /**
    * resume：看 pc 落在**入口表的哪一项**，就"执行"那个函数（模拟算法的效果）。
    * 入口表是**从 RAM 里现解析的**（flashloader 刚被 SBA 写进去），和真机"跑到那个地址"同构 ——
    * 所以主机侧改了入口偏移/顺序，这里立刻就不认（而不是靠测试代码自己告诉模拟器调哪个函数）。
@@ -273,6 +324,16 @@ export class SimTarget {
     const entry = ENTRY_ORDER[table.indexOf(hit)];
     const a0 = this.regs[10], a1 = this.regs[11], a2 = this.regs[12], a3 = this.regs[13], a4 = this.regs[14];
     void a4;
+    // 🚨 真机语义：算法末尾那条 ebreak **只有 dcsr.ebreakm 置起时**才进调试模式（= halt）。
+    //    没置的话它是普通断点异常 → 核跳进异常向量乱跑、dmstatus 永远 running
+    //    （我们就是这么在真机上卡了一轮）。这里照这个来，主机侧漏掉置位就能在自测里暴露。
+    if (!this.dcsrEbreakEnabled){
+      this.log.push(`resume pc=0x${this.pc.toString(16)}：dcsr.ebreak* 没置 → ebreak 变成异常，核跑飞（不 halt）`);
+      this.regs[10] = 0;                         // 返回码是垃圾（现实中读不到）
+      this.halted = false;
+      this.trapped = true;
+      return;
+    }
     let rc = STATUS.success;
     switch (entry){
       case 'init':  rc = this._flashInit(a0, a2, a3); break;
@@ -303,16 +364,24 @@ export class SimTarget {
     return STATUS.success;
   }
 
+  /**
+   * 🚨 **地址参数是"偏移"，不是绝对地址** —— 这是真机定标出来的语义（2026-10）：
+   *    algo 里 `flash_erase/program/read` 只在 ROM API 版本 ≥ 0x56010300（hybrid XPI）时
+   *    才 `address += flash_base`；HPM6800EVK 这版不是 hybrid，所以主机侧必须传偏移。
+   *    真机实测：传绝对地址 → rc=2（out of range）；传偏移 → 擦/写/读全 rc=0。
+   *    模拟器照这个来：`address` 超出 [0, flash.length) 一律 out_of_range ——
+   *    这样主机侧要是忘换算，"擦/写/读全挂在第一块"在离线自测里就会炸，而不是等到真机。
+   */
   _flashErase(flashBase, addr, size){
     if (!this.flashInited) return STATUS.noFlash;
-    const off = (addr >>> 0) - (flashBase >>> 0);
-    if (off < 0 || off + size > this.flash.length) return STATUS.outOfRange;
+    const off = addr >>> 0;
+    if (off + size > this.flash.length) return STATUS.outOfRange;
     // 真算法按扇区擦；这里按扇区把区间标成 0xFF
     const from = Math.floor(off / this.sectorSize) * this.sectorSize;
     const to = Math.ceil((off + size) / this.sectorSize) * this.sectorSize;
     this.flash.fill(0xff, from, Math.min(to, this.flash.length));
     this.eraseOps++;
-    this.log.push(`flash_erase(0x${addr.toString(16)}, ${size} B) → 擦 ${to - from} B`);
+    this.log.push(`flash_erase(offset=0x${off.toString(16)}, ${size} B) → 擦 ${to - from} B`);
     return STATUS.success;
   }
 
@@ -324,8 +393,8 @@ export class SimTarget {
 
   _flashProgram(flashBase, addr, bufAddr, size){
     if (!this.flashInited) return STATUS.noFlash;
-    const off = (addr >>> 0) - (flashBase >>> 0);
-    if (off < 0 || off + size > this.flash.length) return STATUS.outOfRange;
+    const off = addr >>> 0;
+    if (off + size > this.flash.length) return STATUS.outOfRange;
     if (bufAddr + size > this.ramSize) return STATUS.invalidArgument;
     const src = this.ram.subarray(bufAddr, bufAddr + size);
     /**
@@ -343,8 +412,8 @@ export class SimTarget {
   }
 
   _flashRead(flashBase, bufAddr, addr, size){
-    const off = (addr >>> 0) - (flashBase >>> 0);
-    if (off < 0 || off + size > this.flash.length) return STATUS.outOfRange;
+    const off = addr >>> 0;                                  // 同上：这里是**偏移**
+    if (off + size > this.flash.length) return STATUS.outOfRange;
     if (bufAddr + size > this.ramSize) return STATUS.invalidArgument;
     this.ram.set(this.flash.subarray(off, off + size), bufAddr);
     return STATUS.success;
@@ -367,15 +436,32 @@ export class SimTarget {
     const regno = command & 0xffff;
     const write = !!((command >>> 16) & 1);
     const transfer = !!((command >>> 17) & 1);
+    const postexec = !!((command >>> 18) & 1);
+    if (postexec){
+      // 执行 progbuf 里的程序：真机上这是"不进目标内存就能干活"的唯一手段（fence.i / 探 CSR）
+      const prog = this.progbuf.slice();
+      this.log.push(`progbuf 执行：${prog.map(w => '0x' + (w >>> 0).toString(16)).join(' ')}`);
+      this.progbufRuns++;
+      // 只认我们真正会发的那段（fence.i; fence rw,rw; ebreak）；别的一律 cmderr=1（不支持）
+      const isFence = prog[0] === 0x0000100f && prog[1] === 0x0330000f && prog[2] === 0x00100073;
+      if (!isFence) this.dm.abstractcs = ABSTRACT_NOERR | (1 << 8);
+      return;
+    }
     if (cmdtype === 0){                                  // Access Register
       if (!transfer) return;
-      const isPc = regno === 0x7c1;
+      // 🚨 dpc = 0x7b1（调试规范 §3.14）。历史上这里跟着主机侧一起写错过 0x7c1，
+      //    那样"写 pc"会静默落到别的寄存器上，主机侧 resume 永远跳不到算法入口。
+      const isPc = regno === REGNO.PC;
       const isX = regno >= 0x1000 && regno < 0x1020;
+      const isDcsr = regno === REGNO.DCSR;
       if (write){
         if (isPc) this.pc = this.dm.data0 >>> 0;
+        else if (isDcsr){ this.dcsr = this.dm.data0 >>> 0; this.dcsrEbreakEnabled = !!(this.dcsr & DCSR_EBREAK.m); }
         else if (isX) this.regs[regno - 0x1000] = this.dm.data0 >>> 0;
       } else {
-        this.dm.data0 = isPc ? this.pc >>> 0 : (isX ? this.regs[regno - 0x1000] : 0);
+        this.dm.data0 = isPc ? this.pc >>> 0
+                     : isDcsr ? this.dcsr >>> 0
+                     : (isX ? this.regs[regno - 0x1000] : 0);
       }
       return;
     }

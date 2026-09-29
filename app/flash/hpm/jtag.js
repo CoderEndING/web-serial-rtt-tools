@@ -143,6 +143,7 @@ export const DMI_OP = { NOP: 0, READ: 1, WRITE: 2 };
 export const DM = {
   DATA0: 0x04,
   DMCONTROL: 0x10, DMSTATUS: 0x11, HARTINFO: 0x12, ABSTRACTCS: 0x16, COMMAND: 0x17, ABSTRACTAUTO: 0x18,
+  PROGBUF0: 0x20,                                  // progbuf0..progbuf15 = 0x20..0x2f
   SBCS: 0x38, SBADDRESS0: 0x39, SBDATA0: 0x3c,
 };
 
@@ -157,10 +158,18 @@ export const SBCS = {
   SBERROR: 7 << 12,            // [14:12]，写 1 清零
 };
 
-/** 32 位块访问的 sbcs 初值：32 位访问 + 自增 + 写地址即读 + 读数据即续读 */
+/** 32 位**块读**的 sbcs 初值：32 位访问 + 自增 + 写地址即读 + 读数据即续读 */
 export const sbcsBlock = () => (SBCS.SBACCESS32 | SBCS.SBAUTOINC | SBCS.SBREADONADDR | SBCS.SBREADONDATA) >>> 0;
-/** 单字"抱住地址"用：不自增（J-Scope 的单变量快路径也是这套语义）*/
-export const sbcsHold = () => (SBCS.SBACCESS32 | SBCS.SBREADONADDR) >>> 0;
+/**
+ * 32 位**块写**的 sbcs：**绝不能带 sbreadonaddr**。
+ * 🚨 2026-10 真机踩到：带 readonaddr 时"写 sbaddress0"会先触发一次读，读完之后地址**自增 4**，
+ *    于是第一笔数据写到 addr+4 —— 现象是"写进去的 blob 整体错位一个字"（读回来 SRAM[4..] = blob[0..]），
+ *    接着 resume 跑的是垃圾指令、SoC 被看门狗复位、hart 报 allunavail。
+ *    探针固件 `riscv_jtag_write()` 用的就是 `sba_config(0)`（只留 32 位 + 自增）✓ 照它来。
+ */
+export const sbcsWrite = () => (SBCS.SBACCESS32 | SBCS.SBAUTOINC) >>> 0;
+/** 单字"抱住地址"用：不自增 + 读数据即续读（每次读同一个地址，J-Scope 的单变量快路径语义）*/
+export const sbcsHold = () => (SBCS.SBACCESS32 | SBCS.SBREADONADDR | SBCS.SBREADONDATA) >>> 0;
 
 /** DMI 响应里的 op 状态码 */
 export const DMI_STATUS = { SUCCESS: 0, BUSY: 1, ERROR: 2 };
@@ -170,10 +179,43 @@ export const DMCONTROL = {
   dmactive: 1 << 0, ndmreset: 1 << 1, ackhavereset: 1 << 28,
   hartsel: (h) => ((h & 0x3ff) << 16) >>> 0, haltreq: 1 << 31, resumereq: 1 << 30,
 };
-/** dmstatus 位域 */
+/**
+ * dmstatus 位域 —— **两套布局都要认**。
+ *
+ * 2026-10 HPM6800EVK 真机标定（`tmp/hpm-dm-bits.mjs`，做法：种 `jal x0,0` 死循环看"跑"的位、
+ * 再写 haltreq 看"停"的位，两组位刚好互补）：
+ *   · 停住：**bit8/9** 置起（allhalted/anyhalted），bit10/11 清零 → `dmstatus=0x…03a2`
+ *   · 运行：**bit10/11** 置起（allrunning/anyrunning），bit8/9 清零 → `dmstatus=0x…0ca2`
+ *   同时 resumeack 在 bit16/17、havereset 在 bit18/19 —— 这一整套是调试规范 **0.11 时代的排法**：
+ *   [9:8] halt、[11:10] run、[13:12] unavail、[15:14] nonexistent、[17:16] resumeack、[19:18] havereset。
+ *   0.13/1.0 把这几对整体挪到了高位（halt 在 [25:24]）。所以这里用 `detectLayout()` 实测一次再决定。
+ *
+ * 🚨 别把 [11:10] 当 unavail（我踩过）：那样会把"跑到飞起"误读成"核不可用"，
+ *    再顺手做一次 reset-halt，现象就变成"烧录算法永远不结束"。
+ */
+export const DMSTATUS_LAYOUT = {
+  legacy: { allhalted: 1 << 8, anyhalted: 1 << 9, allrunning: 1 << 10, anyrunning: 1 << 11,
+            allunavail: 1 << 12, anyunavail: 1 << 13 },
+  spec:   { allhalted: 1 << 24, anyhalted: 1 << 25, allrunning: 1 << 22, anyrunning: 1 << 23,
+            allunavail: 1 << 20, anyunavail: 1 << 21 },
+};
+/** 两套布局都成立的那些位 */
 export const DMSTATUS = {
-  version: (v) => (v >>> 0) & 0xf,
-  allhalted: 1 << 8, allrunning: 1 << 9, allhavereset: 1 << 18, anyhavereset: 1 << 19,
+  /** version 是 **bit[3:0]**（调试规范）；HPM6800EVK 实测读回 2 —— 但它的位排法仍是 0.11 那套，
+   *  所以版本号只能当参考，真正的判据是 `detectLayout()` 的实测结果。 */
+  version: (v) => ((v >>> 0) & 0xf),
+  /** 按实测布局取 unavail / havereset 掩码（两套布局位不同）*/
+  unavailMask: (layout) => {
+    const L = DMSTATUS_LAYOUT[layout] || DMSTATUS_LAYOUT.legacy;
+    return L.allunavail | L.anyunavail;
+  },
+  /** havereset：legacy 在 [19:18]、规范在 [15:14] */
+  haveresetMask: (layout) => (layout === 'spec' ? ((1 << 14) | (1 << 15)) : ((1 << 18) | (1 << 19))),
+  /** 按实测出来的布局取"已停"掩码 */
+  haltedMask: (layout) => {
+    const L = DMSTATUS_LAYOUT[layout] || DMSTATUS_LAYOUT.legacy;
+    return L.allhalted | L.anyhalted;
+  },
 };
 /** abstractcs 位域 */
 export const ABSTRACTCS = {
@@ -181,10 +223,30 @@ export const ABSTRACTCS = {
 };
 /** abstract command 的 cmdtype / 寄存器编号 */
 export const CMDTYPE = { ACCESS_REGISTER: 0, QUICK_ACCESS: 1, ACCESS_MEMORY: 2 };
-export const REGNO = { PC: 0x7c1 };
+/**
+ * hart 寄存器号（调试规范 §3.14 的抽象命令编号，**不是** CSR 编号本身）：
+ *   x0..x31 = 0x1000+n（a0 = x10 = 0x100a）、f0..f31 = 0x1020+n、
+ *   `dpc` = **0x7b1**（`dcsr`=0x7b0、`dscratch0/1`=0x7b2/0x7b3）。
+ *
+ * 🚨 2026-10 真机踩到：这里曾写成 `0x7c1`（既不合法也不是 dpc）。
+ *    后果极隐蔽 —— 写"pc"其实写进了某个自定义 CSR，**核仍然从 dpc 里的老地址（复位向量 0x80001）开始跑**，
+ *    于是现象是"resume 之后 dmstatus 永远报 running、烧录算法永远不结束、读 pc 永远 0x80001"。
+ *    OpenOCD 的 `riscv.h` 里就是 `#define DPC 0x7b1`，与规范一致。
+ */
+export const REGNO = { PC: 0x7b1, DCSR: 0x7b0 };
+/**
+ * `dcsr` 里"ebreak 进调试模式"的位。
+ *
+ * 🚨 不置这些位的话，算法末尾那条 `ebreak` 只会触发**断点异常**：固件里没有对应的
+ *    trap 处理，核会跳去异常向量一路乱跑 —— 表现为 dmstatus 永远报 running、烧录"永远不结束"。
+ *    OpenOCD 在跑算法前也是先 `dcsr |= ebreak*`（日志里 `set_dcsr_ebreak()`）。
+ */
+export const DCSR_EBREAK = { m: 1 << 15, s: 1 << 13, u: 1 << 12 };
+/** progbuf 里"刷指令缓存"那段（与 OpenOCD 的 autofence 相同）：fence.i; fence rw,rw; ebreak */
+export const PROGBUF_FENCE = [0x0000100f, 0x0330000f, 0x00100073];
 
 /** 抽象命令字：cmdtype[31:29] | aarsize[22:20] | postexec[18] | transfer[17] | write[16] | regno[15:0] + data
- *  ⚠️ regno 必须在 16 位内：x0..x31 = 0x1000+n（a0 = x10 = 0x100a）、dpc = 0x7c1。*/
+ *  ⚠️ regno 必须在 16 位内：x0..x31 = 0x1000+n（a0 = x10 = 0x100a）、dpc = 0x7b1。*/
 export function abstractCommand({ cmdtype = CMDTYPE.ACCESS_REGISTER, aarsize = 2, postexec = false,
                                   transfer = true, write = false, regno = 0, data = 0 } = {}){
   if (regno > 0xffff) throw new Error(`regno 0x${regno.toString(16)} 超出 16 位（x 寄存器从 0x1000 起）`);

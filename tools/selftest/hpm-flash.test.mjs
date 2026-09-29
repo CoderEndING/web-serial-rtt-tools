@@ -56,6 +56,18 @@ console.log('== 1. flashloader blob 与入口表 ==');
   // 解析器要能识别"不是表"的输入（别死循环/别乱报）
   ok(E.parseAlgoEntryTable(new Uint8Array(16).fill(0xff)).length === 0, '全 0xFF 的垃圾不进表（不会当成入口）');
   ok(E.parseAlgoEntryTable(new Uint8Array(0)).length === 0, '空 blob 返回空表');
+  // 🚨 c.jal 的立即数符号位是 bit11（0x800）：0x3fd5 应解出 -12（objdump 也是 -12）。
+  //    判据写成 `imm >= 0x1000` 的话永远不成立（12 位立即数最大 0xFFF），负偏移会被解成正的大数 —— 踩过。
+  ok(E.cjalOffset(0x3fd5) === -12, `c.jal 负偏移符号扩展正确：0x3fd5 → ${E.cjalOffset(0x3fd5)}（期望 -12）`);
+  ok(E.cjalOffset(0x2011) === 4, `c.jal 正偏移：0x2011 → ${E.cjalOffset(0x2011)}（期望 4）`);
+  // 🚨 机器码级结构自检：2026-10 真机 bring-up 的教训 —— memset.c 被 GCC 的循环识别
+  //    优化成"调自己"的无限递归，blob 大小/入口表/离线自测全正常，只有真机才表现为"烧录卡死"。
+  const chk = await import(url('tools/target-firmware/hpm_flash_algo/check-algo.mjs'));
+  const chkRes = chk.checkAlgo(bytes);
+  ok(chkRes.problems.length === 0, 'blob 机器码结构自检：无"无出口自循环/自递归"', chkRes.problems.join('; '));
+  const bug = new Uint8Array(bytes);
+  bug[0x544] = 0xd5; bug[0x545] = 0x3f; bug[0x538] = 0x41; bug[0x539] = 0x11;   // 手工造一个 c.jal 自己
+  ok(chk.findSuspiciousLoops(bug).length > 0, '自检能抓出"c.jal 跳回自己"这种死循环（拿旧 bug 的形状反验）');
 }
 
 // ------------------------------------------------------------------ 2
@@ -78,8 +90,9 @@ console.log('== 2. JTAG/DMI 编码（照探针固件 riscv_jtag.c 的位序）==
   ok(dr[3].captureBytes > 0 && dr[4].captureBytes > 0 && dr[0].captureBytes === 0,
      '只有移位段捕获 TDO（idle/状态迁移段不捕）');
   const cmd = J.abstractCommand({ write: true, regno: J.REGNO.PC, data: 0x50 });
-  ok(cmd.command === ((2 << 20) | (1 << 17) | (1 << 16) | 0x7c1) && cmd.data === 0x50,
-     `抽象命令：写 dpc = 0x${cmd.command.toString(16)}（aarsize=2 | transfer | write | regno=0x7c1）`);
+  ok(J.REGNO.PC === 0x7b1, `dpc 的抽象命令编号 = 0x${J.REGNO.PC.toString(16)}（规范 §3.14；写错就永远跳不到算法入口）`);
+  ok(cmd.command === ((2 << 20) | (1 << 17) | (1 << 16) | 0x7b1) && cmd.data === 0x50,
+     `抽象命令：写 dpc = 0x${cmd.command.toString(16)}（aarsize=2 | transfer | write | regno=0x7b1）`);
   let threw = false;
   try { J.abstractCommand({ regno: 0x10000 }); } catch { threw = true; }
   ok(threw, 'regno 超出 16 位会报错（x 寄存器只有 0x1000..0x101f）');
@@ -103,6 +116,19 @@ console.log('== 3. DM/SBA 跑在模拟 DTM 上（TAP 状态机真的按位解序
   ok((await dm.readReg(0x1000 + 10)) === 0xdeadbeef, '抽象命令写/读 a0（x10）往返一致');
   await dm.writeReg(J.REGNO.PC, 0x00000123);
   ok((await dm.readReg(J.REGNO.PC)) === 0x00000123, '抽象命令写/读 dpc 往返一致');
+  // 跑算法前的准备：dcsr.ebreak* + progbuf 里的 fence.i（真机上缺一步就"永远不结束"）
+  ok(sim.dcsrEbreakEnabled === false, '模拟目标初始 dcsr 没置 ebreak*（= 全新板子，不靠上次调试器留下的状态）');
+  await dm.prepareRun();
+  ok(sim.dcsrEbreakEnabled === true, `prepareRun 置上了 dcsr.ebreakm（dcsr=0x${sim.dcsr.toString(16)}）`);
+  ok(sim.progbufRuns >= 1 && sim.progbuf[0] === 0x0000100f && sim.progbuf[1] === 0x0330000f,
+     'fence.i; fence rw,rw 走 progbuf（postexec）执行，不是写进 SRAM 再跑');
+  // 算法末尾的 ebreak 只有 ebreak* 置起才 halt —— 反过来验一次模拟器是认真的
+  await dm.writeMem(HPM_ALGO.loadAddr, hpmAlgoBytes());     // 入口表要在 RAM 里，模拟器才认得 resume 目标
+  sim.dcsrEbreakEnabled = false;
+  sim.runAlgoEntry(0, [0x80000000, 0xfcf90001, 0, 0, 0xf3000000]);
+  ok(sim.trapped && !sim.halted, '模拟器照真机语义：dcsr 没置时 ebreak 变成异常 → 核不停（所以主机侧漏了就会挂）');
+  sim.dcsrEbreakEnabled = true;
+  sim.trapped = false;
   // SBA
   const data = new Uint8Array(64);
   for (let i = 0; i < data.length; i++) data[i] = (i * 7 + 3) & 0xff;

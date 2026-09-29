@@ -67,6 +67,13 @@ $incs = @(
 $args = @(
     '-march=rv32imac_zicsr_zifencei', '-mabi=ilp32', '-mcmodel=medlow',
     '-Os', '-fpic', '-ffunction-sections', '-fdata-sections',
+    # 🚨 这两个开关是**给 memset.c 保命的**（2026-10 真机 bring-up 挖出来的）：
+    #    GCC 的 loop idiom recognition（-ftree-loop-distribute-patterns）会把
+    #    `while (n--) *p++ = v;` 认成 memset 调用，而这个函数**就是** memset →
+    #    编出来的是「prologue → c.jal 自己 → epilogue」，一条 sb 都没有（无限递归）。
+    #    flash_init 第一步 memset(nor_config,0,256) 就转死，核再也不停、连 haltreq 都抓不住
+    #    （页面现象："烧录卡死/永远不结束"）。-fno-builtin 顺手挡掉同一类内建替换。
+    '-fno-tree-loop-distribute-patterns', '-fno-builtin',
     '-nostartfiles', '-nostdlib', '-Wl,--gc-sections',
     '-T', ((Join-Path $here 'linker.ld') -replace '\\', '/')
 )
@@ -98,6 +105,18 @@ if ($initAddr -ne 0){ throw "_init 不在偏移 0（实际 0x$($initAddr.ToStrin
 & $objcopy -O binary $elf $bin
 $blob = [System.IO.File]::ReadAllBytes($bin)
 Write-Host ("blob = {0} B (0x{0:x})" -f $blob.Length)
+
+# 🚨 机器码级结构自检：入口表 7 项 + 没有"无出口自循环/自递归"。
+#    这一步是 2026-10 真机 bring-up 之后加的 —— 当时 memset.c 被 GCC 优化成了递归调用，
+#    blob 大小、入口表、离线自测**全都正常**，只有真机上才表现为"烧录卡死"。
+Write-Host '== 结构自检（机器码级）=='
+$checker = Join-Path $here 'check-algo.mjs'
+if (Test-Path $checker){
+    & node $checker $bin
+    if ($LASTEXITCODE -ne 0){ throw "结构自检没过（见上面的原因）—— 别把这份 blob 烧到板子上" }
+} else {
+    Write-Warning "没找到 $checker，跳过结构自检"
+}
 
 # 🚨 表项步长**不是**固定 8 B：`ebreak` 被汇编成 2 字节的 c.ebreak（实测每项 = 4 B jal + 2 B = 6 B）。
 #    所以这里不猜步长：把符号地址写进生成的 algo.js，由网页侧的表解析器

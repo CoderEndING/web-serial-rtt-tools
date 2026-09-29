@@ -19,9 +19,9 @@
  *     （"搬了一块就再也搬不动"），这里照它的做法处理。
  */
 
-import { DM, DMI_OP, DMI_STATUS, SBCS, sbcsBlock, sbcsHold, dmiRequest, dmiResponse,
-         tapReset, tapLoadIR, drScan, gatherTDO, bitsToUint, abstractCommand, ABSTRACTCS, DMSTATUS,
-         DMCONTROL, CMDTYPE, REGNO } from './jtag.js';
+import { DM, DMI_OP, DMI_STATUS, SBCS, sbcsBlock, sbcsWrite, sbcsHold, dmiRequest, dmiResponse,
+         tapReset, tapLoadIR, drScan, bitsToUint, abstractCommand, ABSTRACTCS, DMSTATUS, DMSTATUS_LAYOUT,
+         DMCONTROL, CMDTYPE, REGNO, DCSR_EBREAK, PROGBUF_FENCE } from './jtag.js';
 
 /** IR 值（RISC-V DTM 规范：0x01 = IDCODE、0x10 = DTMCS、0x11 = DMI） */
 export const IR_IDCODE = 0x01;
@@ -49,18 +49,38 @@ export class RiscvTransport {
     this.sbaFailed = false;
     this._sbcsCfg = null;
     this._holdAddr = null;
+    this.dmLayout = null;      // dmstatus 的位布局（'legacy' = halted 在 bit8/9，'spec' = bit14/15），init 时实测
   }
 
-  /** 打开 TAP：复位 → 读 IDCODE（IR=0x01）→ 装 IR=DMI → 读 DTMCS/DMSTATUS 确认 DM 活着 */
+  /**
+   * 打开 TAP 并唤醒 DM —— 顺序**照探针固件 `riscv_jtag_open()`**（那份在 HPM6800EVK 上跑通过）：
+   *   ① TAP 复位 → IR=0x01 读 IDCODE（0 / 0xFFFFFFFF 视为没人）
+   *   ② IR=0x10 读 DTMCS
+   *   ③ 🚨 **再走一次 TAP 复位**：dtmcs/idcode 扫描之后 DTM 就不应答 DMI 了（固件实测记下的坑）
+   *   ④ 装 IR=0x11，先投两条 NOP 把 DMI 流水线排空
+   *   ⑤ 🚨 `dmcontrol` **写 0 再写 1**（不是只写 1）：写 0 会复位 DM、中止进行中的操作 ——
+   *      这是 SBA 卡死（读到没挂载的地址导致 sbbusy 永久挂起）之后唯一的解药
+   *   ⑥ 读 dmstatus 作为"DM 真的醒了吗"的判据
+   */
   async init(){
     await this.dap.connectJtag?.();
     await this.sequences(tapReset());
     await this.sequences(tapLoadIR(IR_IDCODE));
     this.idcode = Number((await this._scanDR(DR_IDCODE_BITS, 0n)) & 0xffffffffn) >>> 0;
-    // DTMCS 在 IR=0x10（不是 0x11！0x11 是 DMI）：写 0 = 不要求任何特性，读回 idle/版本等信息
+    if (!this.idcode || this.idcode === 0xffffffff) throw new Error('JTAG 链上没读到 IDCODE（0/全 1）——接线或供电？');
     await this.sequences(tapLoadIR(IR_DTMCS));
     this.lastDtmcs = Number((await this._scanDR(DR_DTMCS_BITS, 0n)) & 0xffffffffn) >>> 0;
+
+    // ③ dtmcs/idcode 扫描之后必须回 Test-Logic-Reset，否则 DMI 不应答
+    await this.sequences(tapReset());
     await this.sequences(tapLoadIR(IR_DMI));
+    // ④ 排空 DMI 流水线
+    await this.dmiPost(DMI_OP.NOP, 0, 0);
+    await this.dmiPost(DMI_OP.NOP, 0, 0);
+    // ⑤ DM 复位（0）再唤醒（1）
+    await this.dmiWrite(DM.DMCONTROL, 0);
+    await this.dmiWrite(DM.DMCONTROL, DMCONTROL.dmactive);
+    // ⑥ 判据
     this.lastDmstatus = (await this.dmiRead(DM.DMSTATUS)) >>> 0;
     this.open = true;
     this.log(`RISC-V DM：idcode=0x${this.idcode.toString(16)} dtmcs=0x${this.lastDtmcs.toString(16)} ` +
@@ -107,13 +127,23 @@ export class RiscvTransport {
     return dmiResponse(bits);
   }
 
-  /** 同步 DMI 读（两次扫描；DM busy 时重试）*/
-  async dmiRead(addr){
+  /**
+   * 同步 DMI 读（两次扫描；DM busy 时重试）。
+   * 🚨 整个重试循环有**墙钟上限**（默认 5 s）：探针固件在"目标总线被卡住的 SBA 读"之后
+   *    可能连 DMI 都不应答，没有上限的话这里会一轮轮重试到几分钟，界面看着就是"卡死"
+   *    （2026-10 真机踩到：SBA 读一个外设寄存器 → 之后整条链路都在等超时）。
+   */
+  async dmiRead(addr, timeoutMs = 5000){
+    const t0 = Date.now();
     for (let i = 0; i < 8; i++){
       await this.dmiPost(DMI_OP.READ, addr, 0);          // 冲掉上一条挂起的响应
       const r = await this.dmiPost(DMI_OP.NOP, 0, 0);    // 这条才是读的结果
       if (r.op === DMI_STATUS.SUCCESS) return r.data;
       if (r.op !== DMI_STATUS.BUSY) throw new Error(`DMI 读 0x${addr.toString(16)} 失败（op=${r.op}）`);
+      if (Date.now() - t0 > timeoutMs){
+        throw new Error(`DMI 读 0x${addr.toString(16)} 一直 BUSY（超过 ${timeoutMs} ms）——` +
+          ' 目标总线/外设不响应，或 DM 处于复位中');
+      }
     }
     throw new Error(`DMI 读 0x${addr.toString(16)} 一直 BUSY`);
   }
@@ -128,15 +158,42 @@ export class RiscvTransport {
   // ---------------------------------------------------------------- 目标控制
   /** 让 DM 上线（dmactive=1）并选 hart 0 */
   async activate(hart = 0){
-    await this.dmiWrite(DM.DMCONTROL, (DMCONTROL.dmactive | DMCONTROL.hartsel(hart)) >>> 0);
+    await this.dmiWrite(DM.DMCONTROL, this._ctl(hart));
     const st = await this.dmiRead(DM.DMSTATUS);
     return st;
   }
 
-  /** 请求 halt（写 haltreq 后轮询 allhalted）*/
-  async halt(hart = 0, timeoutMs = 2000){
-    await this.dmiWrite(DM.DMCONTROL, (DMCONTROL.dmactive | DMCONTROL.hartsel(hart) | DMCONTROL.haltreq) >>> 0);
+  /**
+   * 让 hart 停下来：**只写 haltreq**（与 OpenOCD 一致，2026-10 真机标定过）。
+   *
+   * 🚨 曾经的错误做法：`dmactive|ndmreset|haltreq` → 松 ndmreset（"reset halt"那套）。
+   *    那个写法**会顺手把整个 SoC 复位一次**，核被停在 boot ROM 的复位向量上；
+   *    之后如果 pc 又没写对（见 REGNO.PC 那个坑），核就从 ROM 一路跑回应用固件，
+   *    现象是"算法永远不结束"。真机标定结果：**plain haltreq 完全够用**，
+   *    dmstatus 的 [9:8]（halted）会立刻置起、[11:10]（running）清零。
+   *    只有在 haltreq 真的停不住时才退回 reset-halt（少数 DM 需要），见 `_haltByReset()`。
+   */
+  async halt(hart = 0, timeoutMs = 3000){
+    await this.dmiWrite(DM.DMCONTROL, this._ctl(hart, DMCONTROL.haltreq));
+    try {
+      return await this.waitHalted(timeoutMs);
+    } catch (e){
+      this.log(` haltreq 没能停住核（${e.message}）→ 退回 reset-halt`);
+      return await this._haltByReset(hart, timeoutMs);
+    }
+  }
+
+  /** reset-halt（兜底）：ndmreset 拉高带 haltreq → 松开 ndmreset（haltreq 保持）*/
+  async _haltByReset(hart = 0, timeoutMs = 3000){
+    await this.dmiWrite(DM.DMCONTROL, this._ctl(hart, DMCONTROL.ndmreset | DMCONTROL.haltreq));
+    await new Promise(r => setTimeout(r, 50));
+    await this.dmiWrite(DM.DMCONTROL, this._ctl(hart, DMCONTROL.haltreq));
     return await this.waitHalted(timeoutMs);
+  }
+
+  /** dmcontrol 的公共位：dmactive + hartsel(h) */
+  _ctl(hart, extra = 0){
+    return ((DMCONTROL.dmactive | DMCONTROL.hartsel(hart) | extra) >>> 0);
   }
 
   /**
@@ -145,38 +202,91 @@ export class RiscvTransport {
    *    会把还在擦/写的算法当场打断，返回码变成垃圾（而界面会显示"成功"或莫名其妙的错误）。
    */
   async waitHalted(timeoutMs = 20000){
+    const mask = DMSTATUS.haltedMask(this.dmLayout);
     const t0 = Date.now();
     for (;;){
       const st = await this.dmiRead(DM.DMSTATUS);
-      if (st & DMSTATUS.allhalted) return true;
+      if (st & mask) return true;
       if (Date.now() - t0 > timeoutMs) throw new Error(`等目标 halt 超时（${timeoutMs} ms，dmstatus=0x${st.toString(16)}）`);
     }
   }
 
-  /** 系统复位后运行（HPM 的 SoC 复位：RISC-V 的 ndmreset）—— 烧完让固件自己跑起来 */
+  /** 系统复位后运行（烧完让固件自己跑起来）：ndmreset 脉冲 + 不置 haltreq */
   async resetRun(hart = 0){
-    // ndmreset 是电平式：拉高 → 稍等 → 拉低（清 haltreq，让核从复位向量开始跑）
-    await this.dmiWrite(DM.DMCONTROL, (DMCONTROL.dmactive | DMCONTROL.hartsel(hart) | DMCONTROL.ndmreset) >>> 0);
+    await this.dmiWrite(DM.DMCONTROL, this._ctl(hart, DMCONTROL.ndmreset));
     await new Promise(r => setTimeout(r, 50));
-    await this.dmiWrite(DM.DMCONTROL, (DMCONTROL.dmactive | DMCONTROL.hartsel(hart)) >>> 0);
+    await this.dmiWrite(DM.DMCONTROL, this._ctl(hart));
     await new Promise(r => setTimeout(r, 10));
+  }
+
+  /**
+   * 实测这台 DM 用哪套 dmstatus 布局（halted 在 [9:8] 还是 [25:24]）。
+   * 做法：写一次 haltreq（**不复位**），再看两套布局里哪一对 halted 位被置起来。
+   * 真机标定结果（HPM6800EVK, 2026-10）：[9:8] → legacy（0.11 时代排法）。
+   */
+  async detectLayout(hart = 0){
+    await this.dmiWrite(DM.DMCONTROL, this._ctl(hart, DMCONTROL.haltreq));
+    const legacyMask = DMSTATUS_LAYOUT.legacy.allhalted | DMSTATUS_LAYOUT.legacy.anyhalted;
+    const specMask = DMSTATUS_LAYOUT.spec.allhalted | DMSTATUS_LAYOUT.spec.anyhalted;
+    let v = 0;
+    for (let i = 0; i < 20; i++){
+      v = await this.dmiRead(DM.DMSTATUS);
+      if (v & (legacyMask | specMask)) break;
+      await new Promise(r => setTimeout(r, 25));
+    }
+    // 两套布局的 halted 位互不相同：哪一对置起就用哪套（都没置起就按实测的 legacy 来）
+    this.dmLayout = (v & legacyMask) ? 'legacy' : (v & specMask) ? 'spec' : 'legacy';
+    this.lastDmstatus = v >>> 0;
+    this.log(` dmstatus=0x${(v >>> 0).toString(16)} → 用 ${this.dmLayout} 布局判 halt` +
+      (this.dmLayout === 'legacy' ? '（halted 在 bit8/9，与 HPM 实测一致）' : '（halted 在 bit24/25，规范布局）'));
+    return this.dmLayout;
   }
 
   /** 让目标跑起来（resumereq），可选先写 pc */
   async resume(pc = null, hart = 0){
     if (pc != null) await this.writeReg(REGNO.PC, pc >>> 0);
-    await this.dmiWrite(DM.DMCONTROL, (DMCONTROL.dmactive | DMCONTROL.hartsel(hart) | DMCONTROL.resumereq) >>> 0);
+    await this.dmiWrite(DM.DMCONTROL, this._ctl(hart, DMCONTROL.resumereq));
   }
 
-  /** 读一个 hart 寄存器（x0..x31 = 0x1000+n、dpc = 0x7c1）*/
+  /**
+   * 跑算法前的准备（**两步都不能省**，都是照 OpenOCD 的 `riscv_run_algorithm` 来的）：
+   *   ① `dcsr |= ebreak*`：让算法末尾那条 `ebreak` **进调试模式**而不是触发断点异常。
+   *      不置的话核会跳进异常向量乱跑，dmstatus 永远 running；
+   *   ② `fence.i`：算法是刚从 SBA 写进 SRAM 的，核的指令预取/缓存里可能是旧内容。
+   *      这段 fence 走 **progbuf**（抽象命令 postexec）执行 —— 不能在 SRAM 里跑，
+   *      因为"要刷缓存的那段代码"本身就在那儿（鸡生蛋问题）。
+   */
+  async prepareRun(){
+    const dcsr = (await this.readReg(REGNO.DCSR)) >>> 0;
+    const want = (dcsr | DCSR_EBREAK.m | DCSR_EBREAK.s | DCSR_EBREAK.u) >>> 0;
+    if (want !== dcsr){
+      await this.writeReg(REGNO.DCSR, want);
+      this.log(` dcsr: 0x${dcsr.toString(16)} → 0x${want.toString(16)}（置 ebreak*，算法收尾的 ebreak 才会停住核）`);
+    } else {
+      this.log(` dcsr = 0x${dcsr.toString(16)}（ebreak* 已置）`);
+    }
+    await this.execProgbuf(PROGBUF_FENCE);
+    this.log(' 已 fence.i（progbuf 执行，刷指令预取）');
+  }
+
+  /**
+   * 用 **progbuf** 跑一小段程序（抽象命令 postexec）。程序必须以 `ebreak` 收尾（规范要求）。
+   * 这是唯一能在"不执行目标内存里的代码"的前提下让核干点事的手段，用来刷缓存/探 CSR。
+   */
+  async execProgbuf(words){
+    if (!words.length) throw new Error('progbuf 程序不能为空');
+    for (let i = 0; i < words.length; i++) await this.dmiWrite(DM.PROGBUF0 + i, words[i] >>> 0);
+    const { command } = abstractCommand({ regno: 0x1000, transfer: false, postexec: true, aarsize: 2 });
+    await this.dmiWrite(DM.COMMAND, command);
+    await this._waitAbstract(3000);
+  }
+
+  /** 读一个 hart 寄存器（x0..x31 = 0x1000+n、dpc = 0x7b1）*/
   async readReg(regno){
     const { command } = abstractCommand({ regno, write: false, aarsize: 2 });
     await this.dmiWrite(DM.COMMAND, command);
     await this._waitAbstract();
-    if ((regno & 0xfff) >= 0x000 && regno < 0x1000 && regno !== REGNO.PC){
-      // 通用寄存器走 data0；CSR/dpc 走 data0 也成立（规范：除浮点外都在 data0）
-    }
-    return await this.dmiRead(DM.DATA0);
+    return await this.dmiRead(DM.DATA0);          // 通用寄存器、dpc、CSR 都从 data0 取
   }
 
   /** 写一个 hart 寄存器；返回写下去的 32 位值 */
@@ -220,8 +330,15 @@ export class RiscvTransport {
     this._sbcsCfg = null;                 // 清错之后配置要重写
   }
 
-  /** 块读：addr 可以不对齐；返回 length 字节 */
-  async readMem(addr, length){
+  /**
+   * 块读：addr 可以不对齐；返回 length 字节。
+   *
+   * 🚨 出错信息要给得"能直接定位"（2026-10 真机教训）：SBA 去读一个**没映射/没时钟**的
+   *    外设窗口时，总线事务可能永远不完成 —— 此时 `sbdata0` 读不出来、`sbbusy` 也一直不落。
+   *    这里对每个字都给了上限，并且明确告诉用户"这个地址不对/外设没时钟"，而不是干等。
+   *    （SBA 只适合 RAM/已配好的 flash 窗口；片内外设一律走算法/内核去读。）
+   */
+  async readMem(addr, length, perWordMs = 2000){
     if (length <= 0) return new Uint8Array(0);
     const out = new Uint8Array(length);
     const start = (addr >>> 0) & ~3;
@@ -231,11 +348,23 @@ export class RiscvTransport {
     this._holdAddr = null;
     await this.dmiWrite(DM.SBADDRESS0, start);
     for (let i = 0; i < words; i++){
-      const w = await this.dmiRead(DM.SBDATA0);
-      this.lastSbcs = await this.dmiRead(DM.SBCS);
+      const here = (start + i * 4) >>> 0;
+      let w;
+      try {
+        w = await this.dmiRead(DM.SBDATA0, perWordMs);
+      } catch (e){
+        this.sbaFailed = true;
+        throw new Error(`SBA 读 0x${here.toString(16)} 卡住了（${e.message}）——` +
+          ' 这个地址多半没映射，或所在外设的时钟被门控（片内外设请让内核去读）');
+      }
+      this.lastSbcs = await this.dmiRead(DM.SBCS, perWordMs);
       if (this.lastSbcs & (SBCS.SBBUSYERROR | SBCS.SBERROR)){
         this.sbaFailed = true;
-        throw new Error(`SBA 读 0x${(start + i * 4).toString(16)} 出错（sbcs=0x${this.lastSbcs.toString(16)}）`);
+        throw new Error(`SBA 读 0x${here.toString(16)} 出错（sbcs=0x${this.lastSbcs.toString(16)}）`);
+      }
+      if (this.lastSbcs & SBCS.SBBUSY){
+        this.sbaFailed = true;
+        throw new Error(`SBA 读 0x${here.toString(16)} 时 sbbusy 一直不落 —— 总线事务没完成（地址没映射 / 外设没时钟）`);
       }
       const b = [w & 0xff, (w >>> 8) & 0xff, (w >>> 16) & 0xff, (w >>> 24) & 0xff];
       for (let k = 0; k < 4; k++){
@@ -250,7 +379,9 @@ export class RiscvTransport {
   async writeMem(addr, bytes){
     if (bytes.length % 4) throw new Error(`SBA 写要求 4 字节对齐（长度 ${bytes.length}）`);
     if ((addr >>> 0) % 4) throw new Error(`SBA 写要求 4 字节对齐（地址 0x${(addr >>> 0).toString(16)}）`);
-    await this.sbaConfig();
+    // 🚨 写路径的 sbcs **不能带 sbreadonaddr**：否则写地址会先触发一次读、读完自增 4，
+    //    第一笔数据就落到 addr+4（真机上表现为"blob 整体错位一个字"，接下去 resume 跑垃圾指令）
+    await this.sbaConfig(sbcsWrite());
     this._holdAddr = null;
     await this.dmiWrite(DM.SBADDRESS0, addr >>> 0);
     const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);

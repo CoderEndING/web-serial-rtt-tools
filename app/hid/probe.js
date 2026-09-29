@@ -24,7 +24,17 @@ export const CMD = {
   MODEL: 0x10, SN: 0x11, HW_VER: 0x12, FW_VER: 0x13, BL_VER: 0x14,
   HW_DATE: 0x15, FW_DATE: 0x16, BL_DATE: 0x17,
   RTT: 0x31,
+  RISCV: 0x33,
   RESET: 0xfe, DFU: 0xff,
+};
+
+/**
+ * 0x33（探针侧 RISC-V 引擎）的动作码，照固件 `riscv_svc.h`。
+ * 烧录前**必须发一次 STOP**：那个引擎会一直占着 JTAG TAP，
+ * 不放开的话我们这边的 `DAP_Connect(2)` 拿不到口（他们的 README 里也写了这一步）。
+ */
+export const RISCV_ACT = {
+  STOP: 0, OPEN: 1, RBENCH: 2, WBENCH: 3, SBENCH: 4, RCHECK: 5, STATUS: 6, CONFIG: 7, DMIPROBE: 8,
 };
 
 /** 0x31 的动作码（api_param.c 的 RTT_ACT_*，与文档一致） */
@@ -351,4 +361,13 @@ export class AkaLinkHid {
   /** 切**全局目标类型**（HID 0x31 action 10）：false = SWD/ARM，true = RISC-V/JTAG。
    *  粘性：设一次一直有效，J-Scope 采样器的传输后端也跟着它走。 */
   setTargetType(riscv){ return this.rtt(RTT_ACT.TARGET, targetTypeData(!!riscv)); }
+
+  /**
+   * 让探针自己的 RISC-V 引擎**放掉 JTAG TAP**（HID 0x33 action 0）。
+   * 🚨 烧录前必发：那个引擎（做 RISC-V 内存读写/bench 用的）会一直占着 TAP，
+   *    不放开的话 WebUSB 这边 `DAP_Connect(2)` 拿不到口。发了没响应也无所谓（本来就空闲）。
+   */
+  riscvStop(){
+    return this.xfer(CMD.RISCV, Uint8Array.of(RISCV_ACT.STOP));
+  }
 }
