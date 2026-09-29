@@ -57,7 +57,17 @@ export class Rtt {
     const { addr = 0, ranges = [], chunk = 4096, onProgress } = o;
     if (addr){
       const v = await Rtt.validate(mem, addr);
-      if (!v.ok) throw new Error(`0x${addr.toString(16)} 处不是可用的 RTT 控制块：${v.reason}`);
+      /**
+       * 🚨 手填地址不成立时**必须提示"清空就会自动扫描"**（2026-10 真机走查踩到）：
+       *    那个输入框是 store 绑定的，换固件/换目标后它还是上一次的值（本机就残留着 RISC-V 那次的
+       *    0x2000000c），于是页面拿一个**过时地址**去校验、直接报"不是可用的 RTT 控制块" ——
+       *    看起来像"RTT 连不上"，其实把输入框清空、自动扫描就好了。
+       */
+      if (!v.ok){
+        throw new Error(`0x${addr.toString(16)} 处不是可用的 RTT 控制块：${v.reason}` +
+          '　—— 注意这个地址是**手填的**：如果它是上一次会话/别的芯片留下的，清空「控制块地址」' +
+          '让页面自动扫描（或在 RAM 范围里扫）就能连上');
+      }
       return addr;
     }
     let done = 0;

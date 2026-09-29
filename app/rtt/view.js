@@ -302,8 +302,17 @@ export class RttView {
       if ($('r-record-auto').checked && !this.rec.active) this._autoStartRecord();
       if (this.stream) this._stats(); else await this._startRtt();
     } catch (e){
+      /**
+       * 🚨 收尾时**要把错误留在状态栏上**（2026-10 真机走查踩到）：
+       *    `disconnect()` 最后一句是 `setStatus($('r-err'), '已断开')`，它会把 `_err(e)` 刚写上去的
+       *    真正原因**覆盖掉** —— 用户看到的是"已断开"，而实际原因是"没找到 RTT 控制块 / 读失败"，
+       *    等于把唯一的线索擦掉了（本机就因此白查了一轮：以为是探针没连上）。
+       *    这里在断开之后再补一句，把原因留在界面上。
+       */
+      const why = e?.message || String(e);
       this._err(e);
       await this.disconnect();
+      setStatus($('r-err'), '连接失败：' + why);
     }
   }
 

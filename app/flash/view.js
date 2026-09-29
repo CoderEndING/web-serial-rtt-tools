@@ -389,12 +389,48 @@ export class FlashView {
       this._status('复位运行…');
       try { await this.probe.sysReset(); }
       catch (e){ this._log('软复位失败，退回 nRESET 脉冲：' + (e?.message || e)); await this.probe.reset(); }
+      // 复位之后**必须让核真的跑起来**，并顺手看一眼它到底在哪儿取指
+      try { await this.probe.run(); } catch { /* 让它跑失败也不影响烧录结果 */ }
+      try { await this._bootCheck(regions, algo); } catch { /* 诊断失败绝不影响烧录结论 */ }
     }
     this._bar(100);
     this._log('── 完成 ──');
     setStatus($('f-result'),
       `✅ ${chip} · ${fBytes(total)}${verify ? ' · 校验通过' : ''}${doReset ? ' · 已复位运行' : ''}`, 'ok');
     toast('烧录成功', 'ok', 5000);
+  }
+
+  /**
+   * 复位之后核**到底在哪儿取指**？——把"烧完没反应"变成一句能照做的提示。
+   *
+   * 🚨 为什么值得单独看一眼（2026-10 真机走查，STM32F103ZE）：
+   *    那块板子的 **BOOT0 被拉高**（BOOT1=0），复位后内核进的是**系统存储区的 ROM bootloader**，
+   *    flash 里的固件根本不会被取指 —— 但烧录这边一切正常（擦写读回校验全过），
+   *    页面于是报告"✅ 已复位运行"，用户看到的是"烧成功了，板子一动不动"。
+   *    现场取证：`VTOR=0`（地址 0 别名到系统存储区，里面是 `200001fc 1ffff021` 那对 ROM 向量），
+   *    PC 停在 0x1ffff3xx 的 ROM 轮询循环里、PRIMASK=1 —— 连 SysTick 都进不去，
+   *    所以"RTT 不来、波形不动"这类现象都会跟着出现。
+   *    PC 落在哪一段就是**客观证据**，比让用户去猜"是不是固件没跑"强得多。
+   */
+  async _bootCheck(regions, algo){
+    // ⚠️ 读 PC 必须**先把核停住**：DCRSR/DCRDR 只对 halt 状态的核有效，
+    //    运行中读会一直等不到 S_REGRDY，最后拿到 0（本机实测：PC=0x0，等于什么也没说）。
+    await this.probe.halt();
+    const pc = (await this.probe.regRead(15)) >>> 0;
+    await this.probe.run();                       // 读完立刻放它跑
+    const inFlash = regions.some(s => pc >= (s.addr >>> 0) && pc < ((s.addr + s.data.length) >>> 0));
+    const sysMem = pc >= 0x1fff0000 && pc < 0x20000000;
+    this._log(`复位后 PC=0x${pc.toString(16)}` + (inFlash ? '（在刚烧进去的固件里 ✓）' : sysMem ? '（⚠ 在系统存储区）' : ''));
+    if (sysMem){
+      const vtor = await this.probe.readMem(0xE000ED08, 4).catch(() => null);
+      const v = vtor ? (vtor[0] | (vtor[1] << 8) | (vtor[2] << 16) | (vtor[3] << 24)) >>> 0 : null;
+      this._log('⚠⚠ 复位后内核跑的是**系统存储区的 ROM bootloader**，不是刚烧进去的固件 —— ' +
+        '现象就是"提示烧录成功、板子却一动不动"（RTT 不来、波形不动都是这么来的）。');
+      this._log('   原因：BOOT0 引脚被拉高（BOOT0=1 且 BOOT1=0 = 从系统存储器启动），' +
+        (v != null ? `现场证据 VTOR=0x${v.toString(16)}（应指向 flash 的 0x${(algo.flash_start >>> 0).toString(16)} 向量表）` : ''));
+      this._log('   怎么办：把板子上的 **BOOT0 跳到 0**（或把 BOOT0 接地）再上电/按复位，flash 里的固件就会跑；' +
+        '烧录本身没问题，无需重烧。若只想临时看一眼，也可以用调试器把 VTOR 指向 flash 并装载向量启动。');
+    }
   }
 
   /**
