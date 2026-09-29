@@ -104,7 +104,21 @@ export class WebUsbDapProbe {
     this.fast = false;
     this.clockHz = 1_000_000;          // 当前生效的 SWD 时钟（握手成功后 = 实际请求值）
     this.clockTried = [];              // 试过哪些档位（排障用）
+    /**
+     * 给上层（烧录器/波形页）看的"链路心跳"：
+     *   lastOkAt   = 最近一次**成功**的 USB 往返（毫秒时间戳），用来判断"通道安静了多久"
+     *   xferFails  = 传输超时次数；recoveries = 自动复位端口次数
+     * 为什么要有：一连串"超时 → 复位 → 重试"能安静地耗掉几十秒，界面看着就是"卡住"。
+     * 有了这几个数，界面就能把"卡在哪、是不是在自动恢复"写清楚。
+     */
+    this.lastOkAt = 0;
+    this.xferFails = 0;
+    this.recoveries = 0;
+    /** @type {((s:string)=>void)|null} 关键恢复动作的文字回执（页面日志用） */
+    this.onLog = null;
   }
+
+  _note(s){ try { this.onLog?.(s); } catch { /* 日志不该影响主流程 */ } }
 
   /**
    * SWD 时钟档位（kHz）：逐档试，第一个能读到合法 IDCODE 的就用。
@@ -157,7 +171,6 @@ export class WebUsbDapProbe {
      */
     this._framing = framing || FRAMING.get(this.device) || await this._detectFraming();
     if (this._framing === 'pad') console.warn('[dap] 这台探针认"补齐到整包"的写法（老固件）');
-
     // 先按"验证过能跑通"的裸客户端顺序把目标初始化好（tools\cmsis_dap_raw.py），
     // Info 查询放**后面**做 —— 那份脚本一个 Info 都没发，序列越接近它越稳。
     if (!skipTargetInit){
@@ -186,6 +199,7 @@ export class WebUsbDapProbe {
     //    getDevices()/open() 整条卡死。先做端口复位清掉（在 open 之前做最安全）。
     if (dirty.has(d)){
       console.warn('[dap] 这个探针上次有超时（挂起传输），先复位 USB 端口再认领');
+      this._note('上次会话有超时（可能还挂着传输）→ 先复位 USB 端口再认领');
       try { if (!d.opened) await withTimeout(d.open(), 5000, 'USB 打开'); } catch {}
       await resetDevice(d);
     }
@@ -210,24 +224,32 @@ export class WebUsbDapProbe {
       await withTimeout(d.claimInterface(this.iface), 5000, 'USB 认领接口');
     } catch (e){
       /**
-       * 🚨 认领失败先**端口复位再试一次**（2026-10 用户现场反复遇到）：
-       *    Windows 上"上一次会话没放干净"（页面被刷新掉、脚本中途退出、别的进程开过）
-       *    会让 claimInterface 一直报 `Unable to claim interface` —— 这是**残留占用**，
-       *    不是接线问题。`device.reset()` 会把接口状态清干净，之后通常一把就成。
-       *    再不成才报错，并且给出能照做的两步（关掉别的会话 / 拔插一次探针）。
+       * 🚨 认领失败基本只有一个原因：**接口还被上一次会话占着**（同源另一个页签、被刷掉的旧文档、
+       *    本机 OpenOCD/pyOCD…）。2026-10 真机复现 + 定点实验的结论，分两种情况：
+       *      · 占用方**还活着** → `device.reset()` 完全没用（实测直接回 "Unable to reset the device"），
+       *        必须先靠跨页签协调让它让出探针（见 core/probe-bus.js）；
+       *      · 占用方**已经死了**（文档被刷新掉、或被 reset 掉线）→ 更阴：它只是丢了 JS 引用、
+       *        **没调 `close()`**，于是接口认领在浏览器里"僵"住了，直到垃圾回收才散。
+       *        实验：在那个文档里补一次 `close()`（哪怕设备已 opened=false）→ 立刻就能认领；
+       *        不补的话要等几十秒才自己好。
+       *    所以这里是**有限次退避重试**（而不是一次就放弃），给"僵尸认领"留出散掉的时间。
        */
-      let retried = false;
-      try {
+      let ok = false, lastMsg = e.message;
+      for (let i = 1; i <= 3 && !ok; i++){
+        this._note(`认领接口失败（${lastMsg}）→ 复位端口后第 ${i}/3 次重试…`);
         await resetDevice(d);
-        await sleep(250);
-        await withTimeout(d.claimInterface(this.iface), 5000, 'USB 认领接口（复位后重试）');
-        retried = true;
-        console.warn('[dap] 认领接口失败 → 端口复位后重试成功');
-      } catch { /* 落到下面的报错 */ }
-      if (!retried){
-        throw new Error(`占用 USB 接口失败：${e.message} —— 探针接口还被上一次会话占着（刷新掉页面/脚本中途退出都会留下），` +
+        await sleep(300 * i);
+        try { await withTimeout(d.claimInterface(this.iface), 5000, 'USB 认领接口（重试）'); ok = true; }
+        catch (e2){ lastMsg = e2.message; }
+      }
+      if (ok){
+        console.warn('[dap] 认领接口失败 → 复位端口后重试成功');
+        this._note('复位后重试成功，接口已认领');
+      } else {
+        throw new Error(`占用 USB 接口失败：${lastMsg} —— 探针接口还被上一次会话占着（刷新掉页面/脚本中途退出都会留下），` +
           '试试：① 关掉其他用到探针的标签页（RTT 转发 / J-Scope / 烧录器）；' +
-          '② 拔插一次探针；③ 还不行就换 OpenOCD/pyOCD 有没有在后台跑');
+          '② 另一个页签刚断开的话，等两三秒再点一次「烧录」通常就好了（浏览器释放接口要一会儿）；' +
+          '③ 拔插一次探针；④ 还不行就查 OpenOCD/pyOCD 有没有在后台跑');
       }
     }
 
@@ -245,6 +267,7 @@ export class WebUsbDapProbe {
       catch (e){ console.warn(`clearHalt(${dir}) 失败：${e.message}`); }
     }
     await this.resync();
+    this._watchUsb();
     this._ready = true;
     this.maxWords = Math.max(1, Math.min(120, Math.floor((this.pkt - 8) / 4)));
     this.name = `${d.productName || 'CMSIS-DAP'} · ${this.pkt}B/包`;
@@ -384,8 +407,11 @@ export class WebUsbDapProbe {
         console.warn(`[dap] 丢弃陈旧响应包（回显 0x${res[0].toString(16)} ≠ 命令 0x${cmd.toString(16)}，第 ${this.stale} 个）`);
         continue;
       }
+      this.lastOkAt = Date.now();           // 链路心跳（见构造函数里的说明）
       return res.subarray(1);
     }
+    this.xferFails++;
+    this._note(`命令 0x${cmd.toString(16)} 连续 4 次没读到响应（探针掉线？）`);
     throw new Error(`CMSIS-DAP 连续 4 次都没读到命令 0x${cmd.toString(16)} 的响应（探针掉线？）`);
   }
 
@@ -400,10 +426,13 @@ export class WebUsbDapProbe {
    */
   async _onXferTimeout(what){
     dirty.add(this.device);
+    this.xferFails++;
     if (this._recovering) return;
     this._recovering = true;
+    this.recoveries++;
     try {
       console.warn(`[dap] ${what} 超时 → 自动复位 USB 端口并清队列`);
+      this._note(`${what} 超时 → 自动复位 USB 端口并清队列（第 ${this.recoveries} 次）`);
       await resetDevice(this.device);
       await sleep(150);
       await this._claim();
@@ -411,6 +440,7 @@ export class WebUsbDapProbe {
     } catch (e){
       this._recovering = false;
       console.warn('[dap] 超时后自动恢复失败：' + e.message + '（可能要拔插一次探针）');
+      this._note('超时后自动恢复失败：' + e.message + '（可能要拔插一次探针）');
     }
   }
 
@@ -434,20 +464,27 @@ export class WebUsbDapProbe {
   async resync(n = 8){
     const req = this._framing === 'pad' ? new Uint8Array(this.pkt) : new Uint8Array(1);
     req[0] = CMD.Disconnect;
+    /**
+     * 🚨 这里的超时**必须短**（2026-10 复核）：正常的探针一次往返 0.2~1 ms，
+     *    1500 ms 的超时只会在"探针真的不应答"时白白拖时间 —— 8 写 + 8 读最坏能安静地耗 24 s，
+     *    这段时间界面完全没动静，用户看到的就是"卡住"（而且几乎每次打开探针都会走一遍 resync）。
+     *    实测短超时不影响正常路径（响应来得远早于 600 ms），只把坏情况的死等砍掉 2/3。
+     */
     for (let i = 0; i < n; i++){
-      try { await withTimeout(this.device.transferOut(this.epOut, req), 1500, 'USB 同步写'); }
-      catch { dirty.add(this.device); return 0; }
+      try { await withTimeout(this.device.transferOut(this.epOut, req), 600, 'USB 同步写'); }
+      catch { dirty.add(this.device); this._note('清队列时 USB 写超时（探针不应答）'); return 0; }
     }
     let saw = 0;
     for (let i = 0; i < n; i++){
       let r;
-      try { r = await withTimeout(this.device.transferIn(this.epIn, this.pkt), 1500, 'USB 同步读'); }
-      catch { break; }
+      try { r = await withTimeout(this.device.transferIn(this.epIn, this.pkt), 600, 'USB 同步读'); }
+      catch { this._note(`清队列只吃掉 ${saw} 条陈旧响应就超时了（探针没在回包）`); break; }
       if (!r.data || !r.data.byteLength) break;
       const b = new Uint8Array(r.data.buffer, r.data.byteOffset, r.data.byteLength);
       if (b[0] === CMD.Disconnect) saw++;
     }
     if (saw) console.info(`[dap] 同步清队列：吃掉 ${saw} 条陈旧响应`);
+    if (saw) this._note(`清队列：吃掉 ${saw} 条上一次会话残留的响应包`);
     return saw;
   }
 
@@ -1218,7 +1255,35 @@ export class WebUsbDapProbe {
     //    留着它下一次会话（甚至烧录器的 getDevices()）就会被卡住。
     if (dirty.has(this.device)) await resetDevice(this.device);
     try { await this.device.close(); } catch {}
+    this._unwatchUsb();
     this._ready = false;
+  }
+
+  /**
+   * 盯着"探针掉线"（被复位/拔插/被别的页签 reset 掉）。
+   *
+   * 🚨 为什么必须**主动 close()** 而不是丢掉引用就算完（2026-10 定点实验）：
+   *    接口的认领是挂在**这个 USBDevice 对象所代表的连接**上的。文档只是把引用丢了、
+   *    没调 `close()`，浏览器就会一直认为接口被占着 —— 别的页签随后每一次 `claimInterface`
+   *    都报 `Unable to claim interface`（而且它那边 `device.reset()` 也修不好），
+   *    直到垃圾回收才莫名其妙地好，用户看到的就是"烧录有时候卡住/有时候又能用"。
+   *    实测：在那个文档里补一次 `close()`，接口立刻就能被别人认领。
+   */
+  _watchUsb(){
+    if (this._usbOff || !navigator?.usb?.addEventListener) return;
+    const dev = this.device;
+    this._usbOff = e => {
+      if (e.device !== dev) return;
+      try { dev.close(); } catch { /* 设备可能已经不在了 */ }
+      this._ready = false;
+      this._note('探针掉线（被复位/拔插）→ 已关闭本页签的句柄，接口认领随之释放');
+    };
+    try { navigator.usb.addEventListener('disconnect', this._usbOff); } catch {}
+  }
+  _unwatchUsb(){
+    if (!this._usbOff) return;
+    try { navigator.usb.removeEventListener('disconnect', this._usbOff); } catch {}
+    this._usbOff = null;
   }
 
   /**

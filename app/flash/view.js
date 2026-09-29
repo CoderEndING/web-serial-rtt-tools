@@ -22,6 +22,7 @@ import { BridgeClient } from '../rtt/bridge.js';
 import { WebUsbDapProbe, withTimeout } from '../rtt/dap-webusb.js';
 import { ALGOS, F1_DEV, checkFlashRange } from './algos.js';
 import { HPM_BOARDS, HPM_COMMON, hpmBoard, hpmCheckRange } from './hpm/chips.js';
+import { closeProbeUsbDevices } from '../core/probe-bus.js';
 import { DapJtagTransport, setOutputModeData, PROBE_OUTPUT_MODE } from './hpm/dap-transport.js';
 import { RiscvTransport } from './hpm/riscv-dm.js';
 import { HpmFlasher } from './hpm/flash.js';
@@ -37,6 +38,11 @@ export class FlashView {
     this.probe = null;
     this.file = null;          // { name, size, dataB64 } —— 「选择文件/拖拽」时有效
     this.busy = false;
+    this.bus = null;           // 跨页签探针协调（main.js 注入；见 core/probe-bus.js）
+    this._statusText = '';     // 心跳用：当前状态文字与它的起始时刻
+    this._statusKind = '';
+    this._statusT0 = Date.now();
+    this._hb = null;
   }
 
   init(){
@@ -122,6 +128,50 @@ export class FlashView {
     $('f-custom-speed-row').hidden = !custom;
   }
   // ================= 烧录 =================
+  /**
+   * 抢探针之前的**清场**。探针物理上只有一套调试引擎，谁先占着谁赢 —— 但"赢"的代价
+   * 常常是另一方报错或者两边都慢十倍，所以这里把已知的占用者都请走：
+   *   ① 本页签的 RTT 会话（先问一句，用户点了才算）；
+   *   ② 本页签的 J-Scope 会话（停采样 + 关数据端点；它一直占着 0x83 那条数据链路）；
+   *   ③ 本页签的「RTT 转发」探针桥（每 2 s 轮询目标内存）；
+   *   ④ **别的页签**：广播一句"让出探针"（见 core/probe-bus.js）——
+   *      这是唯一能跨标签页协调的手段。没有它时，另一个页签正连着探针会让这次烧录
+   *      直接死在 `Unable to claim interface`（2026-10 真机复现，reset 也救不回来）。
+   * @returns {Promise<boolean>} false = 用户点了"取消"
+   */
+  async _clearProbeUsers(name){
+    const rtt = window.__tools?.rtt;
+    if (rtt && (rtt.probe || rtt.bridge)){
+      if (!confirm('RTT 会话正占用探针，烧录需要先断开它。继续吗？')) return false;
+      await rtt.disconnect();
+    }
+    const sc = window.__tools?.scope;
+    if (sc && (sc.running || sc.transport || (sc.hid && sc.hid !== sc.mockProbe))){
+      try {
+        await sc.releaseProbe('烧录器要占用探针');
+        this._log('已让 J-Scope 让出探针（停采样 + 关数据端点）');
+      } catch (e){ this._log('J-Scope 让出探针失败（继续试）：' + (e?.message || e)); }
+    }
+    const fw = window.__tools?.hid;
+    if (fw?.last?.running){
+      try { await fw.stop(); this._log('已停掉「RTT 转发」的探针桥（它一直在轮询目标内存）'); }
+      catch (e){ this._log('停 RTT 转发失败（继续试）：' + (e?.message || e)); }
+    }
+    if (this.bus?.supported){
+      const r = await this.bus.requestRelease({ why: `烧录 ${name || ''}`.trim() });
+      if (r.asked) this._log(`跨页签协调：请 ${r.asked} 个其他页签让出探针，${r.acked} 个确认（等了 ${r.ms} ms）`);
+      else this._log('跨页签协调：没有其他页签在用探针');
+    }
+    /**
+     * 🚨 本页签自己有没有"僵尸连接"也要清：上一次烧录中途失败、RTT/J-Scope 会话被 reset 掉线……
+     *    这些情况下视图早就"断开"了，但那个 USBDevice 只是丢了引用、没 close()，
+     *    接口认领会僵在那儿（`Unable to claim interface`，reset 也没用）——实测补一次 close() 立刻就好。
+     */
+    const closed = await closeProbeUsbDevices();
+    if (closed) this._log(`已关掉本页签 ${closed} 个探针 USB 句柄（残留认领会挡住这次烧录）`);
+    return true;
+  }
+
   async flash(){
     if (this.busy) return;
     const pathText = String($('f-path').value || '').trim();
@@ -134,13 +184,10 @@ export class FlashView {
       this._log('只给了磁盘路径：零安装（WebUSB）在后端读不了本地文件 → 自动改用「本地桥 · OpenOCD」。' +
                 '想用零安装，请点「选择文件…」把固件选进来。');
     }
+    const name = this.file ? this.file.name : pathText;
 
-    // 探针互斥：RTT 会话在跑就先（经确认）断开
-    const rtt = window.__tools?.rtt;
-    if (rtt && (rtt.probe || rtt.bridge)){
-      if (!confirm('RTT 会话正占用探针，烧录需要先断开它。继续吗？')) return;
-      await rtt.disconnect();
-    }
+    // 探针互斥：同页签的 RTT / J-Scope 会话先断开，再请别的页签让出探针
+    if (!(await this._clearProbeUsers(name))) return;
 
     this.busy = true;
     $('f-flash').disabled = true;
@@ -148,8 +195,8 @@ export class FlashView {
     const timer = setInterval(() => {
       if ($('f-bar').hidden) this._status(`烧录中… 已耗时 ${((Date.now() - t0) / 1000) | 0}s`);
     }, 500);
+    this._hbStart();
     try {
-      const name = this.file ? this.file.name : pathText;
       if ($('f-backend').value === 'webusb'){
         await this._flashWebusb(name);
       } else {
@@ -166,6 +213,7 @@ export class FlashView {
       catch { try { if (this.probe) await this.probe.sysReset(); } catch {} }
       throw e;
     } finally {
+      this._hbStop();
       clearInterval(timer);
       this.busy = false;
       $('f-flash').disabled = false;
@@ -210,6 +258,8 @@ export class FlashView {
     this.probe = auth.length
       ? await withTimeout(WebUsbDapProbe.open(auth[0], { clockKhz: 1000 }), 15000, '连接探针（WebUSB）')
       : await withTimeout(WebUsbDapProbe.request(false, { clockKhz: 1000 }), 60000, '等你在浏览器里选探针');
+    // USB 层的每次"自救"（复位端口、清队列、丢陈旧包）都写进页面日志 —— 卡住时才有据可查
+    this.probe.onLog = s => this._log('   [usb] ' + s);
     // 烧录走**严格档**：flashloader 靠状态位判断算法是否跑完，读错=校验失败；
     // 每页写同一个 RAM 缓冲，写后必须回读把 posted 写逼落地（对照 rtt/view.js 的快速档）
     this.probe.fast = false;
@@ -475,6 +525,7 @@ export class FlashView {
       : await withTimeout(WebUsbDapProbe.request(false, openOpts), 60000, '等你在浏览器里选探针');
     this.probe = probe;
     probe.fast = false;
+    probe.onLog = s => this._log('   [usb] ' + s);
 
     const jtag = new DapJtagTransport(probe, { irLength: HPM_COMMON.irLength, log: l => this._log('   ' + l) });
     const dm = new RiscvTransport(jtag, { idle: 8, log: l => this._log('   ' + l) });
@@ -570,7 +621,57 @@ export class FlashView {
     bar.value = Math.max(0, Math.min(100, pct));
     if (pct >= 100) setTimeout(() => { bar.hidden = true; }, 1500);
   }
-  _status(s, kind){ setStatus($('f-status'), s, kind); }
+  _status(s, kind){
+    this._statusText = s; this._statusKind = kind; this._statusT0 = Date.now();
+    setStatus($('f-status'), s, kind);
+  }
+
+  /**
+   * 烧录期间的**心跳**：让"卡住"这件事自己说出来。
+   *
+   * 页面里每一处 USB/HID 调用都有超时（不会真死等），但"一连串超时 + 复位重试"能安静地
+   * 吃掉几十秒 —— 状态行一直停在同一句话上，用户看到的就是"卡住、没反应"，事后也说不清
+   * 卡在哪一步。这里每 400 ms 做三件事：
+   *   ① 状态行补一句「本步已 12s，USB 静默 8s」——一眼看出是在等什么；
+   *   ② **真的在重试**（这一窗口内出现过传输失败）就往日志写一行，把重试次数带上；
+   *   ③ 记下最长的"USB 静默"时长，收尾时写进日志，便于事后追。
+   *
+   * ⚠️ 只在"静默 + 有失败"时才告警：跑 erase 这类算法时本来就没有 USB 往返（几十秒也正常），
+   *    那时候不该误报成"探针没响应"。
+   */
+  _hbStart(){
+    this._hbStop();
+    const h = this._hb = { lastOk: Date.now(), quietWarned: 0, worst: 0, fails: 0, tick: null };
+    h.tick = setInterval(() => {
+      const now = Date.now();
+      const probe = this.probe;
+      const okAt = probe?.lastOkAt || 0;
+      const quiet = now - Math.max(okAt, h.lastOk);
+      if (quiet > h.worst) h.worst = quiet;
+      const fails = probe?.xferFails || 0;
+      const retrying = fails > h.fails || (probe?._recovering === true);
+      h.fails = fails;
+      const inStep = now - (this._statusT0 || now);
+      if (quiet > 6000 && retrying && now - h.quietWarned > 6000){
+        h.quietWarned = now;
+        this._log(`⚠ USB 通道已 ${(quiet / 1000).toFixed(0)} s 没有一次成功传输 —— 探针没回应，` +
+          `页面正在自动复位端口重试（已 ${probe?.recoveries || 0} 次）。别拔线，等它自己恢复；` +
+          '超过一两分钟还不动就拔插一次探针再重烧。');
+      }
+      if (inStep > 2500 && this._statusText){
+        setStatus($('f-status'), this._statusText +
+          `（本步已 ${(inStep / 1000).toFixed(0)}s` + (quiet > 3000 ? `，USB 静默 ${(quiet / 1000).toFixed(0)}s` : '') + '）',
+        this._statusKind || '');
+      }
+    }, 400);
+  }
+  _hbStop(){
+    if (this._hb?.tick) clearInterval(this._hb.tick);
+    if (this._hb && this._hb.worst > 5000){
+      this._log(`（本轮最长一次 USB 静默 ${(this._hb.worst / 1000).toFixed(1)} s）`);
+    }
+    this._hb = null;
+  }
   _log(s){
     const el = $('f-log');
     el.textContent += (el.textContent ? '\n' : '') + s;

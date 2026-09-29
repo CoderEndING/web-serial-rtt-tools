@@ -369,6 +369,29 @@ export class ScopeView {
     }
   }
 
+  /**
+   * **让出探针**：停采样 + 关数据端点 + 松掉 HID。
+   *
+   * 给「跨标签页协调」用的（见 app/core/probe-bus.js）：别的页签要烧录时会喊一嗓子，
+   * 本页收到就得把探针交出去 —— 一个 USB 接口同时只能被一个连接认领，
+   * 而且探针物理上只有一套调试引擎，两个页签一起用本来就是错的。
+   * 让出之后本页回到"未连接"状态，用户再点「连接探针」就能重新拿回来（不会自锁）。
+   */
+  async releaseProbe(reason = '别的页签要占用探针'){
+    if (this.running){ try { await this.stop(reason); } catch { /* 忽略 */ } }
+    const t = this.transport;
+    if (t){ this.transport = null; try { await t.close(); } catch { /* 忽略 */ } }
+    const h = this.hid;
+    if (h && h !== this.mockProbe){ this.hid = null; try { await h.close(); } catch { /* 忽略 */ } }
+    if (this.hid === null){
+      const info = $('sc-info'); if (info) info.textContent = '未连接（已让出探针：' + reason + '）';
+    }
+    const ui = $('sc-usbinfo'); if (ui) ui.textContent = '未连接数据端点';
+    this.setStatusText('已让出探针（' + reason + '）—— 需要时点「连接探针 / 数据端点」重新占用', 'warn');
+    this.syncButtons();
+    return true;
+  }
+
   setMock(on){
     this.usingMock = !!on;
     this.running = false;

@@ -25,7 +25,7 @@ FW_DIR   = tools/target-firmware/stm32f103
 LA       = tools/la/kingst_la.py
 
 .DEFAULT_GOAL := help
-.PHONY: help serve serve-stop browser open test test-ui test-gen test-gen-page test-hid test-dwarf test-scope test-scope-page test-hw test-bridge test-bridge-gate test-hpm test-image test-all \
+.PHONY: help serve serve-stop browser open test test-ui test-gen test-gen-page test-hid test-dwarf test-scope test-scope-page test-scope-render test-hw test-bridge test-bridge-gate test-hpm test-image test-all \
         bridge bridge-stop fw-build fw-flash fw-restore fw-h7-build fw-h7-slow fw-h7-flash \
         algo-check flash-plan la-info la-capture git-status git-log check clean
 
@@ -106,6 +106,11 @@ test-scope-page:
 	pwsh -NoProfile -Command "if (-not (Get-NetTCPConnection -State Listen -LocalPort $(PORT) -ErrorAction SilentlyContinue)) { Start-Process -FilePath '$(PY)' -ArgumentList '-m','http.server','$(PORT)','--bind','127.0.0.1' -WindowStyle Hidden; Start-Sleep -Seconds 1 }"
 	pwsh -NoProfile -Command "try { $$null = Invoke-WebRequest 'http://127.0.0.1:$(CDP)/json/version' -TimeoutSec 2 -UseBasicParsing } catch { & 'tools/selftest/launch-browser.ps1' -Port $(CDP) -Url '$(APP)'; Start-Sleep -Seconds 3 }"
 	$(NODE) tools/selftest/scope-page.test.mjs
+
+# 波形渲染的几何自测：数 canvas 路径，钉住"放大到亚像素不能再断线"这个回归
+test-scope-render:
+	pwsh -NoProfile -Command "if (-not (Get-NetTCPConnection -State Listen -LocalPort $(PORT) -ErrorAction SilentlyContinue)) { Start-Process -FilePath '$(PY)' -ArgumentList '-m','http.server','$(PORT)','--bind','127.0.0.1' -WindowStyle Hidden; Start-Sleep -Seconds 1 }"
+	$(NODE) tools/selftest/scope-render.test.mjs
 
 test-hw:
 	$(NODE) tools/selftest/browser-hw.test.mjs webusb

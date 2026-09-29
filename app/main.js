@@ -13,6 +13,8 @@ import { GenView } from './gen/view.js';
 import { RttCdcView } from './hid/view.js';
 import { RttCdcStreamView } from './hid/stream.js';
 import { ScopeView } from './scope/view.js';
+import { ProbeBus, closeProbeUsbDevices } from './core/probe-bus.js';
+import { toast } from './ui/toast.js';
 
 // ---------- 错误收集（自检/排障用；平时看不见） ----------
 const errors = [];
@@ -46,6 +48,37 @@ initTabs(name => {
   if (name === 'gen') requestAnimationFrame(() => gen.onShow());
 });
 
+/**
+ * 跨标签页的探针协调：别的页签要占用探针时，本页把会话收干净（详见 core/probe-bus.js）。
+ * 🚨 这是**必需**的一层，不是锦上添花：WebUSB 一个接口同时只能被一个连接认领，
+ *    两个页签一起用时第二个只会拿到 `Unable to claim interface`（实测 reset 也救不回来）。
+ *    以前只能让用户自己去关别的页签 —— 用户的原话是"有时候打开就卡住"。
+ */
+const probeBus = new ProbeBus('page');
+probeBus.onRelease = async why => {
+  const done = [];
+  try {
+    if (rtt.probe || rtt.bridge){ await rtt.disconnect(); done.push('RTT 会话'); }
+  } catch { /* 让出失败也要继续让别的 */ }
+  try {
+    if (scope.running || scope.transport || (scope.hid && scope.hid !== scope.mockProbe)){
+      await scope.releaseProbe(why || '别的页签要占用探针');
+      done.push('J-Scope 会话');
+    }
+  } catch { /* 同上 */ }
+  try {
+    if (hid.last?.running){ await hid.stop(); done.push('RTT 转发（探针桥）'); }
+  } catch { /* 同上 */ }
+  // 🚨 最后一步**必须**把本页签的探针 USB 句柄都关掉：视图那边可能早就"断开"了、
+  //    只是引用丢了没 close()，而浏览器仍然认为接口被这个页签占着 —— 不关的话
+  //    请求方那边怎么重试都认领不上（见 core/probe-bus.js 的 closeProbeUsbDevices）。
+  const closed = await closeProbeUsbDevices();
+  if (closed) done.push(`关闭 ${closed} 个残留 USB 句柄`);
+  if (done.length) console.info('[probe-bus] 已让出：' + done.join('、'));
+};
+/** 让出的记录也让用户看得见（页签之间的事不该神神秘秘的） */
+probeBus.log = s => { try { toast(s, 'warn', 4000); } catch {} };
+
 document.getElementById('btn-help').addEventListener('click', () => document.getElementById('help').showModal());
 
 // ---------- 自检摘要（无头验证 / 用户报障时可直接看） ----------
@@ -70,7 +103,10 @@ box.id = 'selftest';
 box.hidden = true;
 document.body.appendChild(box);
 
-window.__tools = { session, assistant, terminal, rtt, flash, gen, hid, stream, scope, summary, errors };
+// 烧录器抢探针前会通过它请别的页签让位（见上面的 probeBus）
+flash.bus = probeBus;
+
+window.__tools = { session, assistant, terminal, rtt, flash, gen, hid, stream, scope, probeBus, summary, errors };
 
 // ---------- 浏览器端端到端自检：?demo=serial&selftest=1 ----------
 const q = new URLSearchParams(location.search);
