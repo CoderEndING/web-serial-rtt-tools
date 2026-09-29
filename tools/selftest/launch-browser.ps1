@@ -15,7 +15,25 @@ param(
 )
 
 if (-not $Exe){
-  foreach ($c in @("$env:ProgramFiles\Google\Chrome\Application\chrome.exe",
+  <#
+    🚨 候选路径要包含**非标准安装位置**：本机 Chrome 装在
+       `%LOCALAPPDATA%\Google\Chrome\Bin\chrome.exe`（不是常见的 Application 目录），
+       于是这里一直悄悄回退到 Edge —— 而"授权 profile 只在 Chrome 里"这种事就全靠运气了。
+       注册表 App Paths 是权威来源，先查它，再退回固定路径。
+  #>
+  foreach ($k in @('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe',
+                   'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe',
+                   'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\msedge.exe')){
+    try {
+      $p = (Get-ItemProperty -Path $k -ErrorAction Stop).'(default)'
+      if ($p -and (Test-Path $p)){ $Exe = $p; break }
+    } catch { }
+  }
+}
+if (-not $Exe){
+  foreach ($c in @("$env:LOCALAPPDATA\Google\Chrome\Bin\chrome.exe",
+                   "$env:LOCALAPPDATA\Google\Chrome\Application\chrome.exe",
+                   "$env:ProgramFiles\Google\Chrome\Application\chrome.exe",
                    "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe",
                    "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe")){
     if (Test-Path $c){ $Exe = $c; break }
