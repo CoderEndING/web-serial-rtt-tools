@@ -209,7 +209,26 @@ export class WebUsbDapProbe {
     try {
       await withTimeout(d.claimInterface(this.iface), 5000, 'USB 认领接口');
     } catch (e){
-      throw new Error(`占用 USB 接口失败：${e.message}（OpenOCD/pyOCD/J-Link 是不是还开着？）`);
+      /**
+       * 🚨 认领失败先**端口复位再试一次**（2026-10 用户现场反复遇到）：
+       *    Windows 上"上一次会话没放干净"（页面被刷新掉、脚本中途退出、别的进程开过）
+       *    会让 claimInterface 一直报 `Unable to claim interface` —— 这是**残留占用**，
+       *    不是接线问题。`device.reset()` 会把接口状态清干净，之后通常一把就成。
+       *    再不成才报错，并且给出能照做的两步（关掉别的会话 / 拔插一次探针）。
+       */
+      let retried = false;
+      try {
+        await resetDevice(d);
+        await sleep(250);
+        await withTimeout(d.claimInterface(this.iface), 5000, 'USB 认领接口（复位后重试）');
+        retried = true;
+        console.warn('[dap] 认领接口失败 → 端口复位后重试成功');
+      } catch { /* 落到下面的报错 */ }
+      if (!retried){
+        throw new Error(`占用 USB 接口失败：${e.message} —— 探针接口还被上一次会话占着（刷新掉页面/脚本中途退出都会留下），` +
+          '试试：① 关掉其他用到探针的标签页（RTT 转发 / J-Scope / 烧录器）；' +
+          '② 拔插一次探针；③ 还不行就换 OpenOCD/pyOCD 有没有在后台跑');
+      }
     }
 
     /**

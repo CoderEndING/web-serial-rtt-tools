@@ -396,23 +396,17 @@ export class RiscvTransport {
     await this.dmiWrite(DM.SBADDRESS0, addr >>> 0);
     const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     /**
-     * 🚨 写是 **posted**（投出去就行），但每写一个字都收一次 NOP 会把写也放大一倍
-     *    （`dmiWrite` = 写 + NOP 两次扫描）。DMI 流水线只有一级深：投一条写、下一拍收状态，
-     *    所以这里**每 64 个字收一次**，其余只投 —— 出错时那一批的字都算在这批位置上，
-     *    报告位置够用了（2026-10 提速；探针固件 `riscv_jtag_write()` 也是 posted 写法）。
+     * 🚨 **每个字都要收一次状态，不许"投一批再收"**（2026-10 真机教训，我自己踩的）：
+     *    DMI 流水线只有一级深 —— 前一条请求还没处理完时投进去的那条，DM 会回 **BUSY 并把它丢掉**。
+     *    我为了省扫描，曾把这里改成"每 64 个字收一次 NOP"，结果用户板子上 blob 写进 SRAM 时丢了字，
+     *    `flash_init` 跑的是残缺代码 → **卡死**（我这边时序恰好没触发，所以自测没抓到）。
+     *    正确写法就是 `dmiWrite`（写 + NOP 收状态）逐个来；省下来的那点时间不值得拿正确性换。
+     *    （`setup()` 里另有一道"写完读回校验"，这类问题以后会当场报错而不是表现成卡死。）
      */
     for (let off = 0; off < bytes.length; off += 4){
-      await this.dmiPost(DMI_OP.WRITE, DM.SBDATA0, dv.getUint32(off, true));
-      if ((off % 256) === 252 || off + 4 >= bytes.length){
-        const r = await this.dmiPost(DMI_OP.NOP, 0, 0);
-        if (r.op !== DMI_STATUS.SUCCESS){
-          this.sbaFailed = true;
-          throw new Error(`SBA 写 0x${(addr + off).toString(16)} 附近失败（DMI op=${r.op}）`);
-        }
-      }
+      await this.dmiWrite(DM.SBDATA0, dv.getUint32(off, true));
     }
-    // 收尾：一次 NOP 扫描 + 读 sbcs 确认没有攒着的错误
-    await this.dmiPost(DMI_OP.NOP, 0, 0);
+    // 收尾：读一次 sbcs 确认没有攒着的错误
     this.lastSbcs = await this.dmiRead(DM.SBCS);
     if (this.lastSbcs & (SBCS.SBBUSYERROR | SBCS.SBERROR)){
       this.sbaFailed = true;

@@ -66,6 +66,21 @@ export class HpmFlasher {
       Object.entries(this.entries).map(([k, v]) => `${k}+0x${v.entryOffset.toString(16)}`).join(' ') + '）');
     await this.dm.writeMem(HPM_ALGO.loadAddr, bytes);
 
+    /**
+     * 🚨 **写完立刻读回校验**（2026-10 真机教训）：SBA 写丢字（例如 DMI 忙时被丢掉的那条写）
+     *    不会报错，只会让核跑一段残缺代码 —— 表现是"加载完 flashloader 就卡住"，
+     *    排查起来极费劲（用户看到的只是转圈）。1388 B 读回约 0.2 s，换一个**当场能看懂的报错**很值。
+     */
+    const back = await this.dm.readMem(HPM_ALGO.loadAddr, bytes.length);
+    let badAt = -1;
+    for (let i = 0; i < bytes.length; i++) if (back[i] !== bytes[i]){ badAt = i; break; }
+    if (badAt >= 0){
+      throw new Error(`flashloader 写进 SRAM 后读回不一致（第 ${badAt} 字节：写 0x${bytes[badAt].toString(16)}、` +
+        `读回 0x${back[badAt].toString(16)}）—— SBA 写丢了数据，别继续跑（会卡死）。` +
+        ' 常见原因：探针/目标被别的会话抢占（另一个标签页的 RTT 转发、RTT Viewer）、USB 线材或供电不稳。' +
+        ' 先关掉其他会话、拔插一次探针再试');
+    }
+
     const a = hpmInitArgs(this.board, { 0: HPM_ALGO.headerWords0, 1: HPM_ALGO.headerWords1, 2: HPM_ALGO.headerWords2 });
     let rc = await this.call('init', [a.flashBase, a.header, a.option0, a.option1, a.xpiBase]);
     if (rc) throw new Error(`flash_init 失败：${hpmStatusText(rc)}` +

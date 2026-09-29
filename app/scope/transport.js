@@ -88,17 +88,28 @@ export class VendorEpTransport {
     try { await d.claimInterface(this.iface); this.claimed = true; }
     catch (e){
       /**
-       * 🚨 一个 USB 接口同一时刻只能被一个"认领者"持有。最常见的冲突来源：
-       *    · 你在**另一个浏览器页签**里也连了这个数据端点（同一台机器上最常见）；
-       *    · 本仓库的 RTT Viewer 页 / 烧录器页正开着探针；
-       *    · OpenOCD / pyOCD / J-Link 那些本机程序还没退。
-       * 提示里要把这三条都点出来，不然用户只会看到一句"无法认领接口"。
+       * 🚨 **先端口复位再试一次**（2026-10 用户现场反复遇到）：
+       *    `Unable to claim interface` 绝大多数是**残留占用**（上一次会话没放干净、
+       *    页面被刷新掉、脚本中途退出、别的进程开过），不是接线问题。
+       *    `device.reset()` 能把接口状态清干净，之后通常一把就成 —— 用户点一次「连接数据端点」
+       *    就该连上，而不是被要求去排查一堆东西。
        */
-      throw new Error(`认领 USB 接口失败：${e.message}\n` +
-        '一个 USB 接口同时只能被一个程序/页签占用 —— 请检查：\n' +
-        '  · 是不是**另开了一个页签**连着同一个数据端点？\n' +
-        '  · 本工具的 RTT Viewer / 烧录器页还开着？\n' +
-        '  · OpenOCD / pyOCD / J-Link 之类的本机程序还没退出？');
+      let ok = false;
+      try {
+        await d.reset();
+        await sleep(250);
+        await d.claimInterface(this.iface);
+        ok = true; this.claimed = true;
+        console.warn('[scope] 认领接口失败 → 端口复位后重试成功');
+      } catch { /* 落到下面报错 */ }
+      if (!ok){
+        throw new Error(`认领 USB 接口失败：${e.message}\n` +
+          '一个 USB 接口同时只能被一个程序/页签占用 —— 请检查：\n' +
+          '  · 是不是**另开了一个页签**连着同一个数据端点？\n' +
+          '  · 本工具的 RTT Viewer / 烧录器页还开着？\n' +
+          '  · OpenOCD / pyOCD / J-Link 之类的本机程序还没退出？\n' +
+          '（已经试过自动端口复位重连；再不行就拔插一次探针）');
+      }
     }
     // 认领后清一次端点：上一场会话（或上一次断开）可能残留数据
     try { await d.clearHalt('in', this.ep); } catch { /* 有的设备不支持，忽略 */ }

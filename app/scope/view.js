@@ -290,7 +290,25 @@ export class ScopeView {
         $('sc-info').textContent = '探针已断开';
         if (this.running) this.stop().catch(() => {});
       };
-      if (request) await hid.request(); else await hid.reconnect();
+      /**
+       * 🚨 **先试"已授权直连"，连不上再弹选择框**（2026-10 用户诉求：「手动点连接一定要能成」）。
+       *    原来 `request=true` 就只走 `navigator.hid.requestDevice()` —— 每次都弹框，
+       *    弹框在某些情况下会空手而归（列表里没设备 / 系统占用 / 点快了），
+       *    用户看到的就是「没有选择设备」，很像"手动连接坏了"。
+       *    已授权过的探针用 `getDevices()` 直连**不需要任何弹框**，一次点击就成 —— 那才是默认该走的路。
+       */
+      let connected = false;
+      let lastErr = '';
+      try { await hid.reconnect(); connected = !!hid.connected; } catch (e){ lastErr = e?.message || String(e); }
+      if (!connected && request){
+        try { await hid.request(); connected = !!hid.connected; } catch (e){ lastErr = e?.message || String(e); }
+      }
+      if (!connected){
+        this.hid = null;
+        this.setStatusText('连接探针失败：' + (lastErr || '浏览器里没有已授权的探针') +
+          ' —— 点「连接探针」在弹出的列表里选 **akaLinkPro**（授权过一次以后就直连，不再弹框）', 'err');
+        return;
+      }
       this.hid = hid;
       let info = '';
       try { const i = await hid.info(); info = `${i.model || 'akaLinkPro'}${i.fw ? ' · FW ' + i.fw : ''}`; }
@@ -321,13 +339,26 @@ export class ScopeView {
   async connectUsb(request = true){
     if (this.usingMock){ this.setStatusText('假探针模式下不需要数据端点', 'warn'); return; }
     try {
-      if (request){
+      // 先关掉可能残留的旧对象（否则新的一次 claim 会被自己上一把占着而失败）
+      if (this.transport){ const old = this.transport; this.transport = null; try { await old.close(); } catch {} }
+      /**
+       * 🚨 和「连接探针」同一条原则：**先用已授权的设备直连**（不弹框），
+       *    只有浏览器里还没有授权记录时才弹选择框。用户点一次就该成。
+       */
+      const list = await VendorEpTransport.authorized();
+      if (list.length){
+        this.transport = new VendorEpTransport(list[0]);
+        try { await this.transport.open(); }
+        catch (e){
+          if (!request) throw e;
+          // 已授权设备认领失败（比如接口被别的会话占着）→ 让对方重新选一次设备，给一条出路
+          console.warn('[scope] 已授权设备认领失败，改用选择框：' + (e?.message || e));
+          this.transport = await VendorEpTransport.request();
+        }
+      } else if (request){
         this.transport = await VendorEpTransport.request();
       } else {
-        const list = await VendorEpTransport.authorized();
-        if (!list.length) throw new Error('浏览器里没有已授权的探针（先点「连接数据端点…」授权一次）');
-        this.transport = new VendorEpTransport(list[0]);
-        await this.transport.open();
+        throw new Error('浏览器里没有已授权的探针（点「连接数据端点…」授权一次）');
       }
       $('sc-usbinfo').textContent = this.transport.label;
       this.setStatusText('数据端点已就绪：' + this.transport.label, 'ok');
