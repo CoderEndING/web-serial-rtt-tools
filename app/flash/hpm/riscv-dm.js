@@ -48,6 +48,8 @@ export class RiscvTransport {
     this.scans = 0;
     this.sbaFailed = false;
     this._sbcsCfg = null;
+    this._burstOff = false;    // 批量读被真机拒绝过就关掉（见 readMem / sbaReadBurst）
+    this._burstMiss = 0;
     this._holdAddr = null;
     this.dmLayout = null;      // dmstatus 的位布局（'legacy' = halted 在 bit8/9，'spec' = bit14/15），init 时实测
   }
@@ -331,6 +333,93 @@ export class RiscvTransport {
   }
 
   /**
+   * 一条 USB 命令里塞多拍 DMI 扫描，返回**每条扫描**移出的位（BigInt，低位先出）。
+   *
+   * 为什么要这个：每拍扫描都是一次 USB 往返（实测 ~0.28 ms），而一次 CMSIS-DAP 的
+   * `DAP_JTAG_Sequence` 本来就能装几十拍 —— 逐拍发等于把 USB 延迟乘以拍数。
+   * 真机实测（HPM6800EVK）：逐字读 5.7 KB/s，与 TCK 1 MHz 还是 60 MHz 无关 → 瓶颈全在 USB。
+   */
+  async _scanDRMany(requests){
+    const groups = [];
+    const all = [];
+    for (const rq of requests){
+      const seqs = drScan(DR_DMI_BITS, rq, { idle: this.idle });
+      groups.push({ from: all.length, n: seqs.length });
+      for (const s of seqs) all.push(s);
+    }
+    const caps = await this.sequences(all);
+    const out = [];
+    let ci = 0;
+    for (const g of groups){
+      let v = 0n, bit = 0;
+      for (let k = 0; k < g.n && bit < DR_DMI_BITS; k++){
+        const s = all[g.from + k];
+        if (!s.captureBytes) continue;
+        const bytes = caps[ci++];
+        const clocks = s.clocks >= 64 ? 64 : s.clocks;
+        for (let i = 0; i < clocks && bit < DR_DMI_BITS; i++, bit++){
+          if ((bytes[i >> 3] >> (i & 7)) & 1) v |= (1n << BigInt(bit));
+        }
+      }
+      out.push(v);
+      this.scans++;
+    }
+    return out;
+  }
+
+  /**
+   * 一批 SBA 读：`READ, NOP, READ, NOP, …`（**每拍都收状态**，不是"投一批再收"）。
+   *
+   * 🚨 为什么不是"READ×N 再收 N 拍"（看着更省）：本文件 `writeMem` 的注释里记着那次教训 ——
+   *    DMI 流水线只有一级深，前一条没处理完时投进去的请求会被 DM 回 BSY 并**丢掉**。
+   *    读路径虽然丢的是"没读成"而不是"写错地方"，但一旦丢一拍，后面所有字都会**整体错位一个**
+   *    （自增是硬件推进的）—— 这种静默错位比慢一点坏得多。所以这里严格照已验证过的逐字时序
+   *    （READ 之后必有 NOP 收状态），只是把它们压进**同一条** DAP 命令里省 USB 往返。
+   *    任何一拍不是 SUCCESS 就返回 `badAt`，调用方从那里起退回逐字慢路径（并把地址写回去对齐）。
+   *
+   * @returns {{words:Uint32Array, ok:boolean, badAt:number}} badAt=-1 表示全成功
+   */
+  async sbaReadBurst(count, perWordMs = 2000){
+    const reqs = [];
+    for (let i = 0; i < count; i++){
+      reqs.push(dmiRequest(DMI_OP.READ, DM.SBDATA0, 0));
+      reqs.push(dmiRequest(DMI_OP.NOP, 0, 0));
+    }
+    const resps = await this._scanDRMany(reqs);
+    const words = new Uint32Array(count);
+    for (let i = 0; i < count; i++){
+      const r = dmiResponse(resps[i * 2 + 1]);          // 第 i 个字的结果在第 i 个 NOP 那拍
+      if (r.op !== DMI_STATUS.SUCCESS) return { words, ok: false, badAt: i };
+      words[i] = r.data >>> 0;
+    }
+    return { words, ok: true, badAt: -1 };
+  }
+
+  /**
+   * 一批能塞几个字？按 CMSIS-DAP 包长算：每拍请求 18 B（TDI 11 + 序列头 7）、响应 6 B，
+   * 一个字 = READ + NOP 两拍。留点余量（命令字节 + 固件自己的开销）。
+   */
+  _burstWords(){
+    const pkt = this.dap?.probe?.pkt || this.dap?.pkt || 512;
+    const byReq = Math.floor((pkt - 24) / 18 / 2);
+    const byResp = Math.floor((pkt - 8) / 6 / 2);
+    return Math.max(2, Math.min(12, byReq, byResp));
+  }
+
+  /** 查一次 sbcs：攒着的总线错误要当场报出来，别让它变成后一段的错位读 */
+  async _checkSbcsAt(here, perWordMs){
+    this.lastSbcs = await this.dmiRead(DM.SBCS, perWordMs);
+    if (this.lastSbcs & (SBCS.SBBUSYERROR | SBCS.SBERROR)){
+      this.sbaFailed = true;
+      throw new Error(`SBA 读 0x${(here >>> 0).toString(16)} 出错（sbcs=0x${this.lastSbcs.toString(16)}）`);
+    }
+    if (this.lastSbcs & SBCS.SBBUSY){
+      this.sbaFailed = true;
+      throw new Error(`SBA 读 0x${(here >>> 0).toString(16)} 时 sbbusy 一直不落 —— 总线事务没完成（地址没映射 / 外设没时钟）`);
+    }
+  }
+
+  /**
    * 块读：addr 可以不对齐；返回 length 字节。
    *
    * 🚨 出错信息要给得"能直接定位"（2026-10 真机教训）：SBA 去读一个**没映射/没时钟**的
@@ -347,14 +436,48 @@ export class RiscvTransport {
     await this.sbaConfig();
     this._holdAddr = null;
     await this.dmiWrite(DM.SBADDRESS0, start);
+    const put = (i, w) => {
+      const b = [w & 0xff, (w >>> 8) & 0xff, (w >>> 16) & 0xff, (w >>> 24) & 0xff];
+      for (let k = 0; k < 4; k++){
+        const pos = i * 4 + k - first;
+        if (pos >= 0 && pos < length) out[pos] = b[k];
+      }
+    };
+
     /**
-     * 🚨 **别每读一个字就查一次 `sbcs`**（2026-10 提速）：
-     *    查一次 = 两次 DMI 扫描，和"读一个字"本身一样贵 —— 逐字查等于把读放大一倍。
-     *    改成每 `pollEvery` 个字查一次（并保留逐字的墙钟上限），错误照样抓得住
-     *    （64 个字 = 256 B，出错时仍然报得出大致位置），真机实测读回快约一倍。
+     * 两条路：
+     *   · **批量**（默认）：一批十几个字压进**一条** DAP_JTAG_Sequence 命令；
+     *   · **逐字**（保底）：原来看过真机的那套写法 —— 批次出错、或目标就是批不动时退回来。
+     *
+     * 🚨 批量那条**每拍都验状态**（见 `sbaReadBurst`）：DMI 流水线只有一级深，丢一拍不会报错，
+     *    只会让后面所有字**整体错位一个**（自增在硬件里推进）。所以任何一拍不是 SUCCESS，
+     *    就从那个字起退回逐字，并且**把 sbaddress0 写回去对齐**（不重写就不知道自增停在哪）。
+     *    另外"批不动"不算错误（逐字照样读得全，只是慢）：连撞 3 次就整段不再批。
      */
-    const pollEvery = 64;
-    for (let i = 0; i < words; i++){
+    const BURST = this._burstWords();
+    let i = 0, slowLeft = 0;
+    while (i < words){
+      const want = Math.min(BURST, words - i);
+      if (!this._burstOff && slowLeft <= 0 && want >= 2){
+        const b = await this.sbaReadBurst(want, perWordMs);
+        const good = b.ok ? want : Math.max(0, b.badAt);
+        for (let k = 0; k < good; k++) put(i + k, b.words[k]);
+        i += good;
+        if (b.ok){
+          /**
+           * sbcs 检查**不必每批都做**：查一次 = 两次 DMI 扫描（= 两条 USB 命令），
+           * 每批都查会把命令数翻三倍（实测 512 个字 133 条 → 改成每 4 批查一次后 ~50 条）。
+           * 批次内部的"每拍验状态"已经能抓住丢拍，这里只是兜底看有没有攒着的总线错误。
+           */
+          if (i % (BURST * 4) === 0 || i === words) await this._checkSbcsAt(start + (i - 1) * 4, perWordMs);
+          continue;
+        }
+        this._burstMiss++;
+        if (this._burstMiss >= 3) this._burstOff = true;
+        await this.dmiWrite(DM.SBADDRESS0, (start + i * 4) >>> 0);
+        slowLeft = BURST;
+        continue;
+      }
       const here = (start + i * 4) >>> 0;
       let w;
       try {
@@ -364,23 +487,11 @@ export class RiscvTransport {
         throw new Error(`SBA 读 0x${here.toString(16)} 卡住了（${e.message}）——` +
           ' 这个地址多半没映射，或所在外设的时钟被门控（片内外设请让内核去读）');
       }
-      const last = (i === words - 1);
-      if (last || (i % pollEvery) === pollEvery - 1){
-        this.lastSbcs = await this.dmiRead(DM.SBCS, perWordMs);
-        if (this.lastSbcs & (SBCS.SBBUSYERROR | SBCS.SBERROR)){
-          this.sbaFailed = true;
-          throw new Error(`SBA 读 0x${here.toString(16)} 出错（sbcs=0x${this.lastSbcs.toString(16)}）`);
-        }
-        if (this.lastSbcs & SBCS.SBBUSY){
-          this.sbaFailed = true;
-          throw new Error(`SBA 读 0x${here.toString(16)} 时 sbbusy 一直不落 —— 总线事务没完成（地址没映射 / 外设没时钟）`);
-        }
-      }
-      const b = [w & 0xff, (w >>> 8) & 0xff, (w >>> 16) & 0xff, (w >>> 24) & 0xff];
-      for (let k = 0; k < 4; k++){
-        const pos = i * 4 + k - first;
-        if (pos >= 0 && pos < length) out[pos] = b[k];
-      }
+      put(i, w);
+      i++;
+      if (slowLeft > 0) slowLeft--;
+      // 逐字路径每 16 个字查一次 sbcs（真机实测：逐字查会把读放大一倍）
+      if (slowLeft <= 0 && (i % 16 === 0 || i === words)) await this._checkSbcsAt(here, perWordMs);
     }
     return out;
   }

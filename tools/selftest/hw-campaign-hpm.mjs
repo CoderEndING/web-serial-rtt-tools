@@ -380,6 +380,12 @@ async function rttViewerRiscv(secs, cbAddr){
       const b=document.getElementById('r-backend'); b.value='webusb'; b.dispatchEvent(new Event('change'));
       const t=document.getElementById('r-target'); t.value='riscv'; t.dispatchEvent(new Event('change'));
       document.getElementById('r-addr').value = '0x' + (${cbAddr}).toString(16);
+      /**
+       * JTAG TCK 留「自动」：真机实测 1/5/10/20/30/45/60 MHz 下**读取耗时几乎一样**
+       * （瓶颈是每条 DAP 命令的 USB 往返，不是 JTAG 时钟），内容也都对。
+       * 留着上一次会话的 60 MHz 反而不可复现（F103 那轮把 rtt.clockKhz 存成了 60000）。
+       */
+      const k=document.getElementById('r-usb-clock'); k.value='0'; k.dispatchEvent(new Event('change'));
     })()`);
   await nap(400);
   console.log(`   [RTT Viewer] RISC-V 通路：控制块 0x${cbAddr.toString(16)}（ELF 的 _SEGGER_RTT）`);

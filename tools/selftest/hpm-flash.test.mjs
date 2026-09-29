@@ -293,5 +293,68 @@ console.log('== 7. 出错路径要"说人话"（真机 bring-up 时靠这些定�
   ok(/flash 未初始化/.test(hpmStatusText(5)), '返回码 5 = flash 未初始化（XPI 没配起来时的典型值）');
 }
 
+// ------------------------------------------------------------------ 8
+console.log('== 8. SBA 批量读（一条 DAP 命令塞多拍：USB 往返从"每字两次"降到"每批一次"）==');
+{
+  const D = await import(url('app/flash/hpm/dap-transport.js'));
+  const sim = new SimTarget();
+  const dm = new RiscvTransport(sim, { idle: 7 });
+  await dm.init();
+  await dm.activate(0);
+
+  // 造 2 KB 花样数据，写进去（写路径不变，逐字 + 收状态）
+  const N = 2048;
+  const src = new Uint8Array(N);
+  for (let i = 0; i < N; i++) src[i] = (i * 31 + (i >> 3)) & 0xff;
+  await dm.writeMem(0x1000, src);
+
+  /**
+   * 🚨 计数用：批量读必须真的把多拍**合进一条** `jtagSequences`。
+   *    真机上每条命令 ~0.28 ms 的 USB 往返是唯一瓶颈（TCK 1 MHz 还是 60 MHz 一样快，实测）。
+   */
+  const real = sim.jtagSequences.bind(sim);
+  let calls = 0, scansPerCall = [];
+  let maxPacket = 0;
+  sim.jtagSequences = seqs => {
+    calls++;
+    scansPerCall.push(seqs.length);
+    maxPacket = Math.max(maxPacket, D.packJtagSequences(seqs).length);
+    return real(seqs);
+  };
+
+  const back = await dm.readMem(0x1000, N);
+  ok(back.every((b, i) => b === src[i]), `${N} B 批量读逐字节一致（位序/地址自增都对）`);
+
+  const words = N / 4;
+  ok(calls < words, `读 ${words} 个字只用了 ${calls} 次 JTAG 命令（逐字要 ≥${words} 次）`);
+  ok(maxPacket <= 512, `单条命令最大 ${maxPacket} B，没超 CMSIS-DAP 的 512 B/包`);
+  const big = scansPerCall.filter(n => n > 6).length;
+  ok(big >= Math.floor(words / 24) - 2, `有 ${big} 条命令是多拍批量的（批量确实生效，不是悄悄退回逐字）`);
+
+  // 非对齐 + 跨批次边界：头部补齐、批次接缝处不能错位
+  const mis = await dm.readMem(0x1003, 64);
+  ok(mis.every((b, i) => b === src[3 + i]), '非对齐（+3）跨批次读也对得上（批次接缝不错位）');
+  const across = await dm.readMem(0x1000 + 40, 256);        // 从第 10 个字起，跨多个批次
+  ok(across.every((b, i) => b === src[40 + i]), '跨多个批次的块读顺序正确');
+
+  // 批不动就退回逐字（这里模拟"每一拍都被拒"）：数据仍必须正确
+  const sim2 = new SimTarget();
+  const dm2 = new RiscvTransport(sim2, { idle: 7 });
+  await dm2.init();
+  await dm2.activate(0);
+  await dm2.writeMem(0x2000, src.subarray(0, 256));
+  const origBurst = dm2.sbaReadBurst.bind(dm2);
+  let burstTries = 0;
+  dm2.sbaReadBurst = async (count, ms) => { burstTries++; const r = await origBurst(count, ms); return { ...r, ok: false, badAt: 0 }; };
+  const fallback = await dm2.readMem(0x2000, 256);
+  ok(fallback.every((b, i) => b === src[i]), '批量被拒时退回逐字，数据依然逐字节正确');
+  ok(burstTries <= 3, `连撞 ${burstTries} 次之后就不批了（不每批都白花一次往返）`);
+  ok(dm2._burstOff === true, '撞够次数后 _burstOff 置起（后续直接走逐字）');
+
+  // 单字/两字这种小读也不该被批量拖累
+  const one = await dm.readMem(0x1004, 4);
+  ok(one[0] === src[4] && one[3] === src[7], '单字读走慢路径，值正确');
+}
+
 console.log(`\n${fail ? '❌' : '✅'} hpm-flash.test: ${pass} 通过 / ${fail} 失败`);
 process.exit(fail ? 1 : 0);
