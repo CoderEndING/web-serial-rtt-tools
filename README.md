@@ -56,6 +56,48 @@
 速度实测（同一探针同一条 SWD）：**WebUSB 单命令往返 0.34 ms、连续读 127 KB/s**；
 **OpenOCD Tcl RPC 只有 ~17 KB/s** —— 大流量 RTT 优先用 WebUSB。详见 [`docs/backends.md`](docs/backends.md)。
 
+## 真机场景验收（2026-10：STM32F103ZE + akaLinkPro，一条命令全跑完）
+
+"全流程能不能用"这件事现在有**可重复的自动化验收**了（跑一遍约 2 分钟，带判决，出错立刻停）：
+
+```powershell
+make hw-campaign                          # 2 轮全场景 + 狂发↔scope 交替烧录 5 遍
+make hw-campaign ARGS="--cycles=1 --alt=1"    # 冒烟
+make hw-campaign ARGS="--keep-going"          # 出错也跑完（长稳观察用）
+```
+
+它按固定口径跑四步并**当场判决**（脚本头写着完整口径）：
+
+| 步骤 | 判决 |
+|---|---|
+| ① 烧狂发固件 → 测 RTT Viewer | **> 300 KB/s** |
+| 　 同一条链 → 测 RTT 转发（60 MHz 档） | **> 2.5 MB/s** |
+| 　 转发 **10 s 存盘**（页面「记录到文件」） | 文件字节 = 同窗口收数（<2%）· 内容可读 · 无积压 |
+| ② 烧 scope 固件 → J-Scope 1 变量 / 3 变量（@2 µs 与 @20 µs） | 跑通；50 kHz 档**零丢样本** |
+| ③ ①②重复 2 遍　④ 狂发↔scope 交替烧录 5 遍 | 逐次计时 |
+
+**2026-10 基线（判决 20 通过 / 0 失败，原样可复现）**
+
+| 项目 | 实测 |
+|---|---|
+| 烧录 狂发（ZE 版 1.0 KB）/ scope（3.3 KB） | **0.73 s / 1.04 s**（交替 5 遍：0.7×5、1.0×5） |
+| RTT Viewer | **616 / 609 KB/s**（60 MHz 档） |
+| RTT 转发 | **2.90 / 2.90 MB/s**（探针侧自报 2.60 / 2.55） |
+| 转发 10.2 s 存盘 | **29.4 MB**，逐字节核对误差 0.2%，积压 ~200 KB |
+| J-Scope 1 变量 @2 µs | 436~441 kHz（1 span / 4 B） |
+| J-Scope 3 变量 @2 µs | 109 kHz（1 span / 10 B） |
+| J-Scope @20 µs（50 kHz 档） | 50.00 kHz，**探针丢 0 / USB 丢 0** |
+
+完整数据与读法见 [`docs/真机基准测试.md`](docs/真机基准测试.md)。跑之前要知道的三件事：
+
+1. **狂发固件要用 ZE 版**：`pwsh -File tools/target-firmware/stm32f103_rtt_speed/build.ps1 -Board ze`
+   → `build-ze/fw.elf`（96 MHz + RTT 32 KB 缓冲）。仓库里曾长期躺着一份**旧简化版**
+   （没有 PLL 设置、`SYST_RVR=8000`、缓冲 4 KB）—— 用它测转发只有 **0.45 MB/s**，
+   会被误判成"探针慢/工具坏了"，其实是目标喂不满。
+2. **串口授权只能人工点一次**（Web Serial 的浏览器规定）；之后用
+   `node tools/selftest/serial-grant.mjs` 可以把授权搬进测试 profile / 补"当前这个 USB 口"的实例 ID。
+3. 跑之前**别让别的浏览器/工具占着探针**（你自己那个浏览器里的 RTT Viewer、J-Scope 数据端点都算）。
+
 ## 快速开始
 
 1. 打开页面（Pages 地址或本机的 `http://127.0.0.1:17321/`）。
@@ -223,18 +265,25 @@ bridge/
   start-bridge.bat|sh   双击启动
 tools/
   selftest/             自测：Node 协议测试 / 工程生成对账 / HID 协议 / 页面端到端(CDP) / 桥端到端 / 浏览器真机(CDP) / LA 参考流量
+    hw-campaign.mjs     **真机场景验收**（烧录+Viewer+转发+10s存盘+J-Scope+交替烧录计时，带判决，`make hw-campaign`）
+    flash-timing.mjs    烧录耗时体检（`make flash-timing`，ARGS=--clamp 复现"后台页被限速"）
+    recorder-file.test.mjs  「记录到文件」落盘语义（`.crswap`/积压/落盘进度，OPFS 替身；`make test-record`）
+    serial-grant.mjs    Web Serial 授权的搬运/补当前口/清过期（CDP 管不了串口授权，只能这样自动化）
+    com-read.py         独立的主机侧 COM 读者（转发测速/存盘用，os.read 大块读）
   fixtures/gen/         对账基线：Python 工具（uvprojx2cmake.py）对真实工程的原始产物，逐字节比对用
   fixtures/dwarf/       DWARF 解析基线：两份**真 ELF**（scope 靶子固件 + RTT 吞吐固件）
   la/                   逻辑分析仪：kingst_la.py（KingstVIS Socket API 单文件工具）+ SWD 流量发生器
   dev/                  extract-algo.py（从 pyOCD 抽 flash 算法，别手抄 base64）、help.ps1
   target-firmware/
     stm32f103/          STM32F103 测试固件（UART + RTT，含 SEGGER RTT 源码）
-    stm32f103_rtt_speed/      F103 RTT 吞吐测试（死循环灌 hello world）
+    stm32f103_rtt_speed/      F103 RTT 吞吐测试（死循环灌 hello world）；
+                              **`-Board ze` 出 96 MHz + 32 KB 缓冲版**（本机板子用这份，见 README 的真机验收一节）
     stm32f103_scope/          **F103 J-Scope 靶子固件**：**96 MHz** 时基 + 契约已知的波形/变量，
                               `-Board ze|c8`（默认 ze）、check.py 客观验收（含 4 KB 地址空洞 → 两个 span 的读计划场景）；与探针仓库里那份逐字节同步
     stm32h7b0_rtt_speed/      **H7B0 RTT 吞吐测试**（HSI→PLL1 280MHz，DTCM 布局，见其 README）
 docs/                   后端配置与排障；逻辑分析仪攻略.md（含 LA 工具完整源码与踩坑）；
-                        scope-page.md（J-Scope 波形页方案：探针侧 HSS 采样，**尚未实现**）
+                        scope-page.md（J-Scope 波形页方案）；真机基准测试.md（**F103 全场景基线与前置**）；
+                        rtt-cdc.md（RTT 转发 + 4.5 节「.crswap 与落盘时机」）
 ```
 
 ## 自测（不需要硬件也能跑一部分）
@@ -271,6 +320,12 @@ node tools\selftest\bridge.test.mjs
 node tools\selftest\browser-hw.test.mjs webusb     # 零安装 RTT
 node tools\selftest\browser-hw.test.mjs bridge     # 桥 + OpenOCD
 node tools\selftest\browser-hw.test.mjs serial     # 串口助手
+
+# 5) 真机场景验收 / 体检（`make` 会自己起 8899 服务与 CDP 浏览器，页面类目标都依赖 page-prep）
+make hw-campaign                                   # ①烧狂发→Viewer/转发(判决+10s存盘) ②烧scope→J-Scope ③重复2轮 ④交替5遍
+make flash-timing                                  # 烧录耗时时间线（慢在哪一步）；ARGS=--clamp 模拟"后台页被限速"
+make test-record                                   # 「记录到文件」的落盘语义（.crswap / 积压 / 落盘进度），OPFS 替身，不需要硬件
+node tools\selftest\serial-grant.mjs --show        # 看测试 profile 里的 Web Serial 授权 / 默认=补当前口 / --clean 清过期
 ```
 
 ## 零安装烧录（WebUSB，2026-09-27 真机打通）
@@ -292,6 +347,36 @@ node tools\selftest\browser-hw.test.mjs serial     # 串口助手
 
 
 ## 踩过的坑（都写在代码注释里）
+
+> 📌 **2026-10 的两轮真机排查**（"烧录每一步都要好几秒" / "记录到文件后 .crswap 一直长" /
+> "转发页一打开就显示已连接" / "测试脚本跑到转发就说没有串口授权"）逐条根因与修法，
+> 见下面这几条 + [`docs/真机基准测试.md`](docs/真机基准测试.md) 与
+> [`docs/rtt-cdc.md`](docs/rtt-cdc.md) 的 4.5 节。
+
+- **短等待绝不能用 `setTimeout`**（2026-10 定因）：页面不可见（切走页签 / 窗口被盖住 / 最小化）时，
+  浏览器把 `<1 s` 的延时**钳到 ≥1 s**，而烧录里有几十处 2~60 ms 的轮询间隔（isHalted 5 ms、
+  S_REGRDY 2 ms、稳定读 20 ms…）→ 3.3 KB 固件从 **1.4 s 变 47 s**，现象就是"每一步都要好几秒"。
+  → 轮询一律用 `app/core/pace.js` 的 `yieldTask()`（MessageChannel 让一步，不受节流）/
+  `waitMs()`（短等待自旋）；硬件 settle 才用 `sleep()`。诊断：`make flash-timing ARGS=--clamp`。
+- **`.crswap` 是浏览器自己的临时文件**：File System Access 是"先写 `<名字>.crswap`、`close()` 才改名"。
+  记录中看到它**是正常的**，**点「停止记录」才落盘**；记录中关页面/刷新会让 Chrome **删掉**它
+  （实测丢过 11.4 MB，正式文件还是 0 B）。「停止转发」**不等于**停止记录（记录挂在 CDC 串口会话上）。
+  → 记录按钮现在实时显示"已写/待落盘"，停止时显示"正在落盘…"；切后台会提醒；
+  还有积压时 `beforeunload` 拦一下。自测：`make test-record`。
+- **Web Serial 的端口授权只能人工点一次**：CDP 的 `DeviceAccess` 域不管串口选择框，
+  `Browser.grantPermissions` 里也没有 `serial` 这个权限类型（实测 Unknown permission type）。
+  但授权记录存在 profile 的 `serial_chooser_data`（「来源 + **设备实例 ID**」，插到别的 USB 口 ID 就变）——
+  所以可以搬：`node tools/selftest/serial-grant.mjs`。
+  另外：真页面脚本要**认浏览器**——`make page-prep` 起的是 Edge（默认 profile，没有那些授权），
+  而授权在 Chrome 的那个 profile 里，认错了就会"页面没有已授权的串口"。
+- **跨页签的"鬼页签"**：BroadcastChannel **不会**在对端消失时通知这边，被关掉的页签会永远留在名单里，
+  每次烧录白等满 1.2 s（日志里的「请 1 个其他页签让出探针，0 个确认（等了 1236 ms）」）。
+  → 关页签时喊 `bye`，连续两轮不吭声的除名；没同伴时不再干等。
+- **下拉是 store 绑定的，测试脚本必须自己校准**：`f-chip` 会被上一次测试留在别的芯片上
+  （烧 STM32 报「地址低于 flash 基址 0x80000000」）；`#h-clock` 的值单位是 **Hz**（`60000000`）、
+  `#r-usb-clock` 是 **kHz**（`60000`）—— 填错单位不匹配任何 option，会"悄悄没设上"。
+- **Makefile 配方里别写中文**：本机 make 走 sh.exe，非 ASCII 经编码转换后**有的能跑（输出乱码）、
+  有的直接让这条配方 `Error 1` 且不给任何提示**（最小复现 `Write-Host '已在跑'`）。中文只放注释或 .ps1。
 
 > 📌 **2026-09-27 的大排查**（RTT 连不上 + WebUSB 烧录校验失败 + 吞吐回退）逐条根因、
 > 复现方法与更正过的旧结论，整理在 [`docs/backends.md`](docs/backends.md) 的
