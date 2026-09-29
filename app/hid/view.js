@@ -195,7 +195,38 @@ export class RttCdcView {
   }
 
   // ---------------------------------------------------------------- 启停
+  /**
+   * 用之前先确保 HID 探针是在线的（2026-10 用户现场）：
+   * 烧录器页/别的页面用探针时会重设 USB 端口，**其他页面已有的 WebHID 句柄会失效**
+   * （`dev.connected` 变 false）。用户"刚烧完固件切过来点启动"，撞到的就是一句
+   * "探针未连接"，完全看不出该干什么。所以这里静默重连一次（不弹框）。
+   */
+  async _ensure(){
+    if (this.mock || this.dev.connected) return true;
+    try {
+      await this.dev.reconnect();
+      this.info = await this.dev.info().catch(() => this.info);
+      /**
+       * 🚨 **重连之后要把"目标类型"补发一遍**：目标类型是探针侧的**粘性**状态，
+       *    但探针被复位/别的页面重设过之后就回到 SWD 了 —— 而界面上下拉仍然显示 RISC-V
+       *    （用户的意图），于是桥按 SWD 初始化 → 报"SWD 初始化失败"，看着像接线坏了。
+       *    RISC-V 下顺带把时钟字段清 0（见 applyTargetType 的说明）。
+       */
+      if (this.isRiscv){
+        try { await this.dev.setTargetType(true); } catch {}
+        try { await this.dev.configure({ clockHz: 0 }); } catch {}
+      }
+      this.render();
+      toast('探针已自动重连' + (this.isRiscv ? '（并补发了 RISC-V/JTAG 目标类型）' : ''), 'ok');
+      return this.dev.connected;
+    } catch (e){
+      toast('探针没连上：点「连接探针」授权一次（' + (e?.message || e) + '）', 'err', 6000);
+      return false;
+    }
+  }
+
   async start(){
+    if (!await this._ensure()) return;
     const p = this.params();
     try {
       // RISC-V 下也要发这条（发的是 clock=0）：把探针里可能残留的 SWD 时钟/DMI delay 清掉
@@ -211,6 +242,7 @@ export class RttCdcView {
   }
 
   async autostart(){
+    if (!await this._ensure()) return;
     try {
       const before = this.last?.startRc ?? 0;
       await this.dev.autostart();

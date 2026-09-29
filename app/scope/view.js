@@ -532,6 +532,35 @@ export class ScopeView {
      */
     const vars = [...pick].sort((a, b) => a.addr - b.addr);
     if (!vars.length){ this.setStatusText('先选变量（或用假探针自带的通道）', 'warn'); return; }
+    /**
+     * 🚨 **没连上就自动连一次，别甩一句"探针没连上"**（2026-10 用户现场）：
+     *    烧录页/RTT 页的探针会话**不会带给波形页**（每页各连各的），而且烧录会重设 USB 端口，
+     *    别处已有的 WebHID/WebUSB 句柄会失效。用户刚烧完固件、切过来点「开始采样」，
+     *    撞到的就是 `hidXfer` 抛的「探针没连上」—— 完全看不出该干什么。
+     *    这里先用**已授权设备**静默重连（不弹框），失败了再给出可执行的提示。
+     */
+    if (!this.usingMock && (!this.hid || !this.transport)){
+      this.setStatusText('探针还没连上，正在自动重连…', 'warn');
+      if (!this.hid) await this.connectHid(false);
+      if (!this.transport){
+        try { await this.connectUsb(false); } catch (e){ /* 下面统一报错 */ }
+      }
+      if (!this.hid || !this.transport){
+        this.setStatusText(!this.hid
+          ? '探针没连上：点左边「连接探针」授权一次（烧录/别的页面用过的探针要在这里重连一下）'
+          : '数据端点没连上：点「连接数据端点…」授权一次（采样数据走 EP 0x83，必须有它）', 'err');
+        return;
+      }
+      /**
+       * 🚨 重连后补发**目标类型**：探针侧是粘性状态，但探针被复位/别的页面重设过就回 SWD 了，
+       *    而界面下拉还显示 RISC-V —— 不补发的话采样会按 SWD 去握，报一些看不懂的错。
+       *    （start() 的 config 报文里也带 SCOPE_FLAG.RISCV，那是第二道保险。）
+       */
+      if (this.targetRiscv){
+        try { await this.hidXfer(P.HID_CMD_RTT, P.targetTypeData(true)); } catch { /* 交给 start() 的 flags */ }
+      }
+      this.setStatusText('探针已自动重连，开始采样', 'ok');
+    }
     if (!this.transport || !this.hid){ this.setStatusText(this.usingMock ? '假探针还没准备好' : '先连探针 + 数据端点', 'warn'); return; }
     if (this.isReal() && !this.transport?.device){ this.setStatusText('真机模式要先点「连接数据端点…」', 'warn'); return; }
 
@@ -881,7 +910,7 @@ export class ScopeView {
   isReal(){ return !this.usingMock; }
   signed(v){ const x = (v ?? 0) & 0xff; return x > 127 ? x - 256 : x; }
   async hidXfer(cmd, data, timeout){
-    if (!this.hid) throw new Error('探针没连上');
+    if (!this.hid) throw new Error('探针没连上：点左边「连接探针」授权一次（或点「重连」）');
     if (this.usingMock) return await this.hid.xfer(cmd, data);
     return await this.hid.xfer(cmd, data, timeout);
   }
