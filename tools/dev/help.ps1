@@ -23,6 +23,7 @@ $lines = @(
   '  make hw-campaign   真机场景基准 · STM32F103ZE（烧录 / RTT Viewer / RTT 转发 / J-Scope，全跑一遍并判决）'
   '  make hw-campaign-hpm  真机场景基准 · HPM6800EVK（RISC-V/JTAG，含 RTT Viewer 的 RISC-V 通路）'
   '                     ARGS=--record 只记录并给出 spec 建议；ARGS="--cycles=1 --alt=1" 冒烟'
+  '  make campaign-summary  把基准结果打成小结表（跑完会自动打；也可指定历史 JSON，不碰硬件）'
   '  make test-bridge   桥端到端（OpenOCD + 探针 + 目标板）'
   '  make test-all      上面全跑一遍'
   ''

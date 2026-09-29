@@ -23,6 +23,7 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { findSymbol } from '../../app/rtt/elf.js';
+import { printSummary } from './campaign-summary.mjs';
 
 const arg = k => process.argv.find(a => a.startsWith(`--${k}=`));
 const has = k => process.argv.includes(`--${k}`);
@@ -720,6 +721,11 @@ try {
 }
 
 /* ================================================================== 汇总 */
+/**
+ * 先逐轮列明细，最后打一张**小结表**（与 F103 那份口径一致的表格，方便直接贴进 issue/README）。
+ * 表格实现在 `campaign-summary.mjs`：事后也能对着 `tmp/hpm-campaign-result.json` 单独重打，
+ * 不用再跑一遍硬件。
+ */
 console.log('\n================ 汇总 ================');
 for (const r of report.cycles){
   console.log(`第 ${r.cycle} 轮：烧 flood ${(r.flashFlood.ms / 1000).toFixed(1)}s → RTT Viewer ${(r.viewer?.kbps ?? 0).toFixed(1)} KB/s`
@@ -770,6 +776,7 @@ if (RECORD_ONLY || SPEC.fwdMBps == null || SPEC.viewerKBps == null){
   console.log('（把这几行抄回 tools/selftest/hw-campaign-hpm.mjs 的 SPEC 表，再跑一遍就是正式判决）');
 }
 dump();
+printSummary({ ...report, boardLabel: 'HPM6800EVK（HPM6880 / RISC-V + JTAG）' });
 console.log(`\n判决：${pass} 通过 / ${fail} 失败`);
 if (report.errors.length) console.log('错误：' + JSON.stringify(report.errors));
 console.log('结果已写 tmp/hpm-campaign-result.json');

@@ -29,7 +29,7 @@ FW_DIR   = tools/target-firmware/stm32f103
 LA       = tools/la/kingst_la.py
 
 .DEFAULT_GOAL := help
-.PHONY: help serve serve-stop browser open page-prep test test-ui test-gen test-gen-page test-hid test-dwarf test-scope test-scope-page test-scope-render test-hw test-record test-bridge test-bridge-gate test-hpm test-image test-all flash-timing hw-campaign hw-campaign-hpm \
+.PHONY: help serve serve-stop browser open page-prep test test-ui test-gen test-gen-page test-hid test-dwarf test-scope test-scope-page test-scope-render test-hw test-record test-bridge test-bridge-gate test-hpm test-image test-all flash-timing hw-campaign hw-campaign-hpm campaign-summary \
         bridge bridge-stop fw-build fw-flash fw-restore fw-h7-build fw-h7-slow fw-h7-flash \
         algo-check flash-plan la-info la-capture git-status git-log check clean
 
@@ -155,6 +155,12 @@ hw-campaign: page-prep
 #   make hw-campaign-hpm ARGS="--cycles=1 --alt=1"   # 只冒烟一遍
 hw-campaign-hpm: page-prep
 	$(NODE) tools/selftest/hw-campaign-hpm.mjs $(ARGS)
+
+# 把基准结果打成小结表（跑完会自动打；这里是对着历史 JSON 重打，不用碰硬件）
+#   make campaign-summary                                   # 默认读 HPM 那份
+#   make campaign-summary ARGS=tmp/campaign-result.json     # 读 F103 那份
+campaign-summary:
+	$(NODE) tools/selftest/campaign-summary.mjs $(ARGS)
 
 test-bridge:
 	$(NODE) tools/selftest/bridge.test.mjs

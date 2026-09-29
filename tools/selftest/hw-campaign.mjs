@@ -36,6 +36,7 @@
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { printSummary } from './campaign-summary.mjs';
 
 const arg = k => process.argv.find(a => a.startsWith(`--${k}=`));
 const has = k => process.argv.includes(`--${k}`);
@@ -683,6 +684,18 @@ if (report.alt.length){
   console.log(`交替烧录：狂发 ${spam.map(x => x.toFixed(1)).join('/')}s（均 ${avg(spam)}s）· scope ${scope.map(x => x.toFixed(1)).join('/')}s（均 ${avg(scope)}s）`);
 }
 dump();
+/**
+ * 小结表（与 HPM 那份 `hw-campaign-hpm.mjs` 共用同一份实现）：
+ * 表格口径 = spec 那一列由脚本的判决常量给（这份基准只对速率与 50 kHz 档设线，
+ * 烧录耗时与 J-Scope 上限只记录不判决 —— 与文件头的口径一致）。
+ */
+printSummary({
+  ...report,
+  boardLabel: 'STM32F103ZE + akaLinkPro（SWD/ARM）',
+  floodLabel: '烧录 狂发固件',
+  viewerLabel: '（WebUSB · 60 MHz）',
+  spec: { viewerKBps: J_VIEWER / 1024, fwdMBps: J_FWD / 1048576, recordBytesRatio: 0.98 },
+});
 console.log(`\n判决：${pass} 通过 / ${fail} 失败`);
 if (report.errors.length) console.log('错误：' + JSON.stringify(report.errors));
 console.log('结果已写 tmp/campaign-result.json');

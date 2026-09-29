@@ -12,6 +12,8 @@ make hw-campaign-hpm ARGS=--keep-going              # 出错也跑完（长稳�
 
 脚本：`tools/selftest/hw-campaign-hpm.mjs`。原始数据落 `tmp/hpm-campaign-result.json`，
 每轮的 10 s 录音导出到 `tmp/hpm-forward-<时间戳>.bin`。
+跑完屏幕上会自动打一张**小结表**（`tools/selftest/campaign-summary.mjs`，F103 那份基准共用同一实现）；
+事后想重看不用碰硬件：`make campaign-summary`（默认读 HPM 那份，`ARGS=tmp/campaign-result.json` 读 F103 那份）。
 
 | 步骤 | 判决（spec） |
 |---|---|
