@@ -19,14 +19,58 @@
  *
  * ⚠️ 写入是**批量异步**的（默认攒 256 KB 或 300 ms 写一次），push 本身不做 I/O，
  *    不会拖慢接收回路；停止时等最后一批写完再 close。
+ *
+ * 🚨 **`.crswap` 与"什么时候才真的落盘"（2026-10 用户现场，必须让用户看得见）**
+ *    File System Access 的写法是"**先写临时文件，close 时才改名**"：
+ *    你选了 `rtt-xxx.txt`，磁盘上先出现的是 **`rtt-xxx.txt.crswap`**（字节全在它里面），
+ *    只有 `stop()` → `w.close()` 之后 Chrome 才把它改名成 `rtt-xxx.txt`。由此三条后果：
+ *      · 记录中看到 .crswap **是正常的**，别删它（那就是你的数据）；
+ *      · **记录中千万别关页面/刷新/让浏览器把标签页回收** —— 写句柄被销毁时 Chrome 会
+ *        把 swap 文件**删掉**，那些字节直接没了。实测现场：11.4 MB 的 .crswap 在页面
+ *        消失后不见了，而目标文件还是 **0 B**；
+ *      · "停止转发"**不等于**停止记录（记录挂在 CDC 串口会话上）—— 想落盘就点「停止记录」。
+ *    所以本类把 `pushed / written / backlog()` 三个数交给界面显示：
+ *    🚨 页面被切到后台时浏览器会限速整个页面，写盘可能远远跟不上输入
+ *    （实测 3 MB/s 的转发流落到文件只有 ~50 KB/s），积压全在内存里 —— 用户必须能看见，
+ *    而不是对着一个永远写着 "0 B" 的按钮猜。
+ *    为此还挂了两道保护：记录期间 `beforeunload` 拦一下（未落盘就别走），
+ *    切到后台时通过 `onNote` 提醒一句。
  */
-import { stamp as stampOf, fileStamp, download } from './format.js';
+import { stamp as stampOf, fileStamp, download, bytes as fBytes } from './format.js';
 
 const FLUSH_BYTES = 256 * 1024;
 const FLUSH_MS = 300;
 const MEM_CAP = 64 * 1024 * 1024;
+/** 积压超过这个数就认为"写盘跟不上"，界面要明确告警 */
+const BACKLOG_WARN = 4 * 1024 * 1024;
 
 const enc = new TextEncoder();
+
+/**
+ * 记录按钮的文字/提示 —— 串口助手 / 终端 / RTT Viewer / RTT 转发四个页面共用一套说法。
+ * 🚨 为什么要由这里统一给：以前各页面都是 `■ 停止记录 · ${fBytes(rec.bytes)}`，
+ *    而 `rec.bytes` 只在 `onChange`（开始/停止）时才刷到按钮上 —— 记录中按钮**永远显示 0 B**，
+ *    用户根本看不出写了多少、更看不出写盘有没有跟上（真机现场就是这个坑）。
+ * @returns {{text:string, title:string, primary:boolean}}
+ */
+export function recordButtonState(rec){
+  const back = rec.backlog();
+  if (rec.draining) return {
+    text: `■ 正在落盘… ${fBytes(rec.written)} / ${fBytes(rec.pushed)}`,
+    title: `正在把积压写进文件（已写 ${fBytes(rec.written)}，共 ${fBytes(rec.pushed)}）。写完 Chrome 才会把 ${rec.name}.crswap 改名成正式文件。`,
+    primary: true,
+  };
+  if (rec.active) return {
+    text: `■ 停止记录 · ${fBytes(rec.bytes)}` + (back > 1024 * 1024 ? `（待落盘 ${fBytes(back)}）` : ''),
+    title: `正在写入 ${rec.name}（${fBytes(rec.bytes)} / ${rec.frames} 段）。\n`
+      + `Chrome 先写成 ${rec.name}.crswap，点「停止记录」才改名成正式文件 —— 记录中别关页面/刷新，否则未落盘的数据会丢。\n`
+      + (rec.lagging()
+          ? `⚠ 写盘跟不上输入：还有 ${fBytes(back)} 积压在内存里。本页切到后台会被浏览器限速（实测 3 MB/s 的流转发进文件只剩 ~50 KB/s），请让本页留在前台，或把速率降下来。`
+          : ''),
+    primary: true,
+  };
+  return { text: '● 记录到文件', title: '把收到的字节直接写进本地文件（不走接收区 2MB 上限），高速采集用', primary: false };
+}
 
 export class FileRecorder {
   static supported(){
@@ -35,14 +79,18 @@ export class FileRecorder {
 
   constructor(){
     this.active = false;
+    this.draining = false;          // 已停止接收，但还在把积压写进文件
     this.name = '';                 // 文件名（没有 API 时是建议名）
     this.timestamps = false;
-    this.bytes = 0;                 // 已记账的原始字节数（不含时间戳前缀）
+    this.bytes = 0;                 // 已记账的**原始**字节数（不含时间戳前缀）
+    this.pushed = 0;                // 交给写口的全部字节（含时间戳前缀）
+    this.written = 0;               // **已经写进文件**的字节（进度用）
     this.frames = 0;
     this.t0 = 0;
     this.overflow = false;          // 内存兜底模式攒爆了
     this.error = null;
-    this.onChange = null;           // 供界面刷新按钮文字
+    this.onChange = null;           // 供界面刷新按钮文字（写盘进度也会触发）
+    this.onNote = null;             // 给用户的一句提醒（toast）
     this._w = null;                 // FileSystemWritableFileStream
     this._wq = Promise.resolve();   // 写队列（保证顺序、终止时可等）
     this._chunks = [];
@@ -50,7 +98,14 @@ export class FileRecorder {
     this._mem = [];
     this._memBytes = 0;
     this._timer = null;
+    this._progTimer = null;
+    this._notifiedAt = 0;
   }
+
+  /** 还没落盘的字节：内存里排着队的那些（越接近 0 越安全） */
+  backlog(){ return Math.max(0, this.pushed - this.written); }
+  /** 积压是否已经大到该告警（界面据此在按钮上加"待落盘 X"） */
+  lagging(){ return this.backlog() > BACKLOG_WARN; }
 
   /**
    * 开始记录。**必须在用户手势里调用**（showSaveFilePicker 的硬要求）。
@@ -74,15 +129,18 @@ export class FileRecorder {
     } else {
       this.name = `${name}-${fileStamp()}.${timestamps ? 'txt' : 'bin'}`;
     }
-    this.bytes = 0; this.frames = 0; this.overflow = false; this.error = null;
+    this.bytes = 0; this.frames = 0; this.pushed = 0; this.written = 0;
+    this.overflow = false; this.error = null; this.draining = false;
     this.t0 = Date.now();
     if (timestamps){
       const head = enc.encode(`[${stampOf()}]\n`);
       this._chunks.push(head);
       this._pend += head.length;            // 文件头不计入 bytes（那是原始字节数）
+      this.pushed += head.length;
     }
     this.active = true;
     this._timer = setInterval(() => this._flush(), FLUSH_MS);
+    this._armGuards();
     this.onChange?.();
     return this.name;
   }
@@ -93,6 +151,7 @@ export class FileRecorder {
     this._chunks.push(bytes);
     this._pend += bytes.length;
     this.bytes += bytes.length;
+    this.pushed += bytes.length;
     this.frames++;
     if (this._pend >= FLUSH_BYTES) this._flush();
   }
@@ -102,22 +161,77 @@ export class FileRecorder {
     const chunks = this._chunks;
     this._chunks = [];
     this._pend = 0;
+    const total = chunks.reduce((s, c) => s + c.length, 0);
     if (this._w){
       const w = this._w;
-      this._wq = this._wq.then(async () => { for (const c of chunks) await w.write(c); }).catch(e => this._fail(e));
+      /**
+       * 🚨 **一次 flush 合成一次 write**：每个 `w.write()` 都是一次跨进程（Mojo）往返 +
+       *    文件系统调用，逐块写会把自己排成一条长队（3 MB/s 的输入下尤其明显）。
+       *    合成之后同样的字节数只需要 1/几十 次调用。
+       */
+      this._wq = this._wq.then(async () => {
+        if (chunks.length === 1) await w.write(chunks[0]);
+        else {
+          const buf = new Uint8Array(total);
+          let off = 0;
+          for (const c of chunks){ buf.set(c, off); off += c.length; }
+          await w.write(buf);
+        }
+        this.written += total;
+        this._notify(true);
+      }).catch(e => this._fail(e));
     } else {
       for (const c of chunks){
         if (this._memBytes + c.length > MEM_CAP){ this.overflow = true; return; }
         this._mem.push(c); this._memBytes += c.length;
       }
+      this.written += total;
     }
+  }
+
+  /** 限频地通知界面（写盘是成批的，天然不会太频；再兜一道 150 ms） */
+  _notify(force = false){
+    const now = Date.now();
+    if (!force && now - this._notifiedAt < 150) return;
+    this._notifiedAt = now;
+    try { this.onChange?.(); } catch { /* 界面的事不影响记录 */ }
   }
 
   _fail(e){
     this.error = e;
     this.active = false;
+    this.draining = false;
     clearInterval(this._timer); this._timer = null;
+    clearInterval(this._progTimer); this._progTimer = null;
+    this._disarmGuards();
     this.onChange?.();
+  }
+
+  // ---------------- 两道"别把数据弄丢"的保护 ----------------
+  _armGuards(){
+    if (typeof addEventListener !== 'function') return;
+    /**
+     * 记录中离开页面要拦一下：写句柄被销毁 = .crswap 被 Chrome 删掉 = 未落盘的字节全丢
+     * （真机现场就是这么丢的 11.4 MB）。只有"还有积压"时才拦，落完盘就不打扰。
+     */
+    this._bye = e => {
+      if (!this.active || this.backlog() <= 0) return;
+      e.preventDefault();
+      e.returnValue = '';
+      return '';
+    };
+    this._vis = () => {
+      if (document.hidden && this.active){
+        this.onNote?.('本页切到后台了：浏览器会限速这个页面，写盘可能跟不上（看「停止记录」按钮上的"待落盘"）—— 高速记录时请让本页留在前台');
+      }
+    };
+    try { addEventListener('beforeunload', this._bye); } catch {}
+    try { document.addEventListener('visibilitychange', this._vis); } catch {}
+  }
+  _disarmGuards(){
+    if (typeof removeEventListener !== 'function') return;
+    try { removeEventListener('beforeunload', this._bye); } catch {}
+    try { document.removeEventListener('visibilitychange', this._vis); } catch {}
   }
 
   /** 停止并落盘；@returns {{name,bytes,frames,seconds,overflow,error}} */
@@ -125,16 +239,27 @@ export class FileRecorder {
     if (!this.active && !this._w) return null;
     const info = { name: this.name, bytes: this.bytes, frames: this.frames, seconds: (Date.now() - this.t0) / 1000, overflow: this.overflow, error: this.error };
     this.active = false;
+    this.draining = true;
     clearInterval(this._timer); this._timer = null;
     this._flush();
-    await this._wq;
+    /**
+     * 落盘可能要等一会儿（积压多 / 页面被限速时尤其久）—— 期间每 300 ms 报一次进度，
+     * 让界面显示「正在落盘 12.3 / 45.6 MB」而不是像卡住了。
+     */
+    this._progTimer = setInterval(() => this._notify(true), 300);
+    this._notify(true);
+    try { await this._wq; } catch { /* _fail 里已记 */ }
+    clearInterval(this._progTimer); this._progTimer = null;
+    this.draining = false;
     if (this._w){
       try { await this._w.close(); } catch (e){ info.error = info.error || e; }
       this._w = null;
     } else if (this._mem.length){
       download(this.name, new Blob(this._mem, { type: 'application/octet-stream' }));
     }
+    info.pushed = this.pushed;
     this._mem = []; this._memBytes = 0;
+    this._disarmGuards();
     this.onChange?.();
     return info;
   }

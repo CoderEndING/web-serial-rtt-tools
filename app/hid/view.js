@@ -11,6 +11,7 @@
 import { $, setStatus, debounce } from '../ui/dom.js';
 import { toast } from '../ui/toast.js';
 import { store } from '../core/store.js';
+import { bytes as fBytes } from '../core/format.js';
 import { findSymbol } from '../rtt/elf.js';
 import { AkaLinkHid, startRcText, START_PENDING } from './probe.js';
 import { MockAkaLinkHid } from './mock.js';
@@ -261,6 +262,17 @@ export class RttCdcView {
       clearInterval(this._timer);
       this.render();
       toast('已停止转发（CDC 口切回 UART）', 'ok');
+      /**
+       * 🚨 停止转发 ≠ 停止记录：记录挂在**串口会话**上（见 hid/stream.js 的 s.on('close')），
+       *    这里停了探针桥，串口还开着、文件句柄也还开着 —— 磁盘上那个 .crswap 不会因此变成
+       *    正式文件（真机现场：用户以为停了转发就完事了，结果文件一直到不了手）。
+       *    这里只提醒一句，不替他停（CDC 上可能还有 UART 数据要记）。
+       */
+      const st = window.__tools?.stream;
+      if (st?.rec?.active){
+        toast(`注意：「记录到文件」还在进行（已收 ${fBytes(st.rec.bytes)}，待落盘 ${fBytes(st.rec.backlog())}）—— ` +
+          '点 RTT 转发页里那个「停止记录」才会把 .crswap 改名成正式文件', 'warn', 10000);
+      }
     } catch (e){
       this.render({ error: e?.message || String(e) });
     }

@@ -7,7 +7,7 @@ import { $, seg, setFlag, setStatus, mhzLabel, ensureSelectOption } from '../ui/
 import { toast } from '../ui/toast.js';
 import { store } from '../core/store.js';
 import { RxBuffer } from '../core/rxview.js';
-import { FileRecorder } from '../core/recorder.js';
+import { FileRecorder, recordButtonState } from '../core/recorder.js';
 import { Rtt } from './protocol.js';
 import { WebUsbDapProbe, withTimeout } from './dap-webusb.js';
 import { MockProbe } from './mock.js';
@@ -163,6 +163,8 @@ export class RttView {
       if (this.suppressed){ this.suppManual = true; this._setSuppressed(false); }
     });
     this.rec.onChange = () => this._recordBtn();
+    // 记录期间"本页被切到后台"这类提醒（见 core/recorder.js 里的说明）
+    this.rec.onNote = s => toast(s, 'warn', 8000);
     this._recordBtn();
     $('r-send').addEventListener('click', () => this._sendInput());
 
@@ -681,7 +683,8 @@ export class RttView {
       '（主机读速受调试器限制：OpenOCD RPC 实测约 17 KB/s，WebUSB 会快得多）';
     if (peak >= 75) $('r-full').classList.add('err');
     if (this.paused) $('r-pause').title = '暂停中（数据仍在收，继续后补上）';
-    if (this.rec.active) this._recordBtn();
+    // 记录/落盘期间按钮要一直刷：字节数与"待落盘"量都得看得见（见 recorder.js 的说明）
+    if (this.rec.active || this.rec.draining) this._recordBtn();
     if (!this.stream && !this.rtt && this.probe) $('r-cb').textContent = '查找中…';
   }
 
@@ -752,14 +755,14 @@ export class RttView {
     if (this.rec.active){
       const info = await this.rec.stop();
       this._recordBtn();
-      if (info?.error) toast('记录出错：' + (info.error.message || info.error), 'err', 6000);
-      else if (info) toast(`已保存 ${info.name}：${fBytes(info.bytes)} / ${info.frames} 段 / ${info.seconds.toFixed(1)} s`, 'ok', 6000);
+      if (info?.error) toast('记录落盘出错：' + (info.error.message || info.error), 'err', 8000);
+      else if (info) toast(`已落盘 ${info.name}：${fBytes(info.bytes)} / ${info.frames} 段 / ${info.seconds.toFixed(1)} s —— .crswap 已改名成正式文件`, 'ok', 7000);
       return;
     }
     try {
       const name = await this.rec.start({ name: 'rtt', timestamps: $('r-record-ts').checked });
       this._recordBtn();
-      toast(`记录中 → ${name}（停止时写盘）`, 'ok', 5000);
+      toast(`记录中 → ${name}：Chrome 先写成 ${name}.crswap，点「停止记录」才改名成正式文件（记录中别关页面/刷新）`, 'ok', 8000);
     } catch (e){
       if (e?.name !== 'AbortError') toast('开始记录失败：' + (e?.message || e), 'err', 6000);
     }
@@ -768,12 +771,10 @@ export class RttView {
   _recordBtn(){
     const b = $('r-record');
     if (!b) return;
-    const on = this.rec.active;
-    b.textContent = on ? `■ 停止记录 · ${fBytes(this.rec.bytes)}` : '● 记录到文件';
-    b.classList.toggle('primary', on);
-    b.title = on
-      ? `正在写入 ${this.rec.name}（${fBytes(this.rec.bytes)} / ${this.rec.frames} 段）。界面卡就先「暂停」——只停显示，不停记录。`
-      : '把读到的 RTT 上行字节直接写进本地文件（不走接收区的 2MB 上限），高速采集用';
+    const s = recordButtonState(this.rec);
+    b.textContent = s.text;
+    b.title = s.title.replace('收到的字节', '读到的 RTT 上行字节');
+    b.classList.toggle('primary', s.primary);
   }
 
   save(){

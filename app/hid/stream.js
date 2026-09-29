@@ -15,7 +15,7 @@ import { toast } from '../ui/toast.js';
 import { store } from '../core/store.js';
 import { RxBuffer } from '../core/rxview.js';
 import { Counter } from '../core/stats.js';
-import { FileRecorder } from '../core/recorder.js';
+import { FileRecorder, recordButtonState } from '../core/recorder.js';
 import { SerialSession } from '../serial/session.js';
 import { DemoPort, demoEnabled } from '../serial/demo.js';
 import { bytes as fBytes, rate as fRate, fileStamp, download, stamp as stampOf } from '../core/format.js';
@@ -86,6 +86,8 @@ export class RttCdcStreamView {
     });
 
     this.rec.onChange = () => this._recordBtn();
+    // 记录期间"本页被切到后台"这类提醒（见 core/recorder.js 里的说明）
+    this.rec.onNote = s => toast(s, 'warn', 8000);
     this._recordBtn();
 
     // ---------------- 会话事件（与助手/终端共用同一个会话） ----------------
@@ -190,6 +192,8 @@ export class RttCdcStreamView {
     $('c-rxrate').textContent = fRate(r);
     $('c-buf').textContent = fBytes(this.rx?.bytes ?? 0);
     this._highspeedGate(r);
+    // 记录/落盘期间按钮要一直刷：字节数、待落盘量都得看得见（见 recorder.js 的说明）
+    if (this.rec.active || this.rec.draining) this._recordBtn();
     if (this.rx?.paused) $('c-pause').title = `暂停中，已缓存 ${fBytes(this.rx.bytes)}`;
   }
 
@@ -253,7 +257,7 @@ export class RttCdcStreamView {
     try {
       const name = await this.rec.start({ name: 'rtt', timestamps: $('c-record-ts').checked });
       this._recordBtn();
-      toast(`记录中 → ${name}（停止时写盘）`, 'ok', 5000);
+      toast(`记录中 → ${name}：Chrome 先写成 ${name}.crswap，点「停止记录」才改名成正式文件（记录中别关页面/刷新）`, 'ok', 8000);
     } catch (e){
       if (e?.name !== 'AbortError') toast('开始记录失败：' + (e?.message || e), 'err', 6000);
     }
@@ -263,18 +267,17 @@ export class RttCdcStreamView {
     if (!this.rec.active) return;
     const info = await this.rec.stop();
     this._recordBtn();
-    if (info) toast(`记录已停止并保存：${info.name}（${fBytes(info.bytes)}）`, 'ok', 6000);
+    if (info?.error) toast('记录落盘出错：' + (info.error.message || info.error), 'err', 8000);
+    else if (info) toast(`已落盘：${info.name}（${fBytes(info.bytes)}）—— .crswap 已改名成正式文件`, 'ok', 7000);
   }
 
   _recordBtn(){
     const b = $('c-record');
     if (!b) return;
-    const on = this.rec.active;
-    b.textContent = on ? `■ 停止记录 · ${fBytes(this.rec.bytes)}` : '● 记录到文件';
-    b.classList.toggle('primary', on);
-    b.title = on
-      ? `正在写入 ${this.rec.name}（${fBytes(this.rec.bytes)} / ${this.rec.frames} 段）`
-      : '把收到的字节直接写进本地文件（不走接收区 2MB 上限），高速采集用';
+    const s = recordButtonState(this.rec);
+    b.textContent = s.text;
+    b.title = s.title;
+    b.classList.toggle('primary', s.primary);
   }
 
   // ---------------- ANSI（和串口助手同一套） ----------------

@@ -17,6 +17,7 @@ $lines = @(
   '  make test-hid      只跑探针自定义 HID（RTT→CDC 转发）协议自测'
   '  make test-ui       页面端到端（演示串口 + 假探针，不需要硬件）'
   '  make test-gen-page 「工程生成」页真页面验收（需要 make open 起的浏览器）'
+  '  make test-record    记录到文件的落盘语义（.crswap / 积压 / 落盘进度；OPFS 替身，不需硬件）'
   '  make test-hw       真机 WebUSB RTT 验收（探针 + 目标板）'
   '  make flash-timing  烧录耗时体检（真机：慢在哪一步、是不是探针的锅；ARGS=--clamp 模拟后台节流）'
   '  make hw-campaign   真机场景基准（烧录 / RTT Viewer / RTT 转发 / J-Scope 采样率，全跑一遍并记时）'
@@ -46,3 +47,4 @@ $lines = @(
   '  make clean         清掉临时采集/构建杂物'
 )
 $lines | ForEach-Object { Write-Host $_ }
+

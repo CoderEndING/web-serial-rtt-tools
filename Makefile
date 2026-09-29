@@ -25,7 +25,7 @@ FW_DIR   = tools/target-firmware/stm32f103
 LA       = tools/la/kingst_la.py
 
 .DEFAULT_GOAL := help
-.PHONY: help serve serve-stop browser open test test-ui test-gen test-gen-page test-hid test-dwarf test-scope test-scope-page test-scope-render test-hw test-bridge test-bridge-gate test-hpm test-image test-all flash-timing hw-campaign \
+.PHONY: help serve serve-stop browser open test test-ui test-gen test-gen-page test-hid test-dwarf test-scope test-scope-page test-scope-render test-hw test-record test-bridge test-bridge-gate test-hpm test-image test-all flash-timing hw-campaign \
         bridge bridge-stop fw-build fw-flash fw-restore fw-h7-build fw-h7-slow fw-h7-flash \
         algo-check flash-plan la-info la-capture git-status git-log check clean
 
@@ -121,6 +121,11 @@ test-hw:
 #   make flash-timing ARGS=--clamp             # 确定性模拟"每个短等待都被钳成 1 s"
 flash-timing:
 	$(NODE) tools/selftest/flash-timing.mjs $(ARGS)
+
+# 「记录到文件」实测（OPFS 当 showSaveFilePicker 替身；createWritable/write/close 都是真的）
+# 含"把 write 拖慢"的积压用例与逐字节校验 —— 钉住 .crswap 那套落盘语义
+test-record:
+	$(NODE) tools/selftest/recorder-file.test.mjs
 
 # 真机场景基准（探针 + 目标板）:烧录 / RTT Viewer / RTT 转发 / J-Scope 全场景跑一遍并记时
 #   make hw-campaign                        # 3 轮全场景 + 狂发↔scope 交替烧录 5 遍

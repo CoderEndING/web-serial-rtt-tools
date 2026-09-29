@@ -8,7 +8,7 @@ import { toast } from '../ui/toast.js';
 import { store } from '../core/store.js';
 import { RxBuffer } from '../core/rxview.js';
 import { Counter } from '../core/stats.js';
-import { FileRecorder } from '../core/recorder.js';
+import { FileRecorder, recordButtonState } from '../core/recorder.js';
 import { SerialSession } from './session.js';
 import { parseHex, textToBytes, EOL_LABEL } from '../core/hex.js';
 import { bytes as fBytes, rate as fRate, fileStamp, download, stamp as stampOf } from '../core/format.js';
@@ -87,6 +87,8 @@ export class Assistant {
       if (this.suppressed){ this.suppManual = true; this._setSuppressed(false); }
     });
     this.rec.onChange = () => this._recordBtn();
+    // 记录期间"本页被切到后台"这类提醒（见 core/recorder.js 里的说明）
+    this.rec.onNote = s => toast(s, 'warn', 8000);
     this._recordBtn();
     $('s-statclear').addEventListener('click', () => { this.rxc.reset(); this.txc.reset(); this._stats(); });
     $('s-pause').addEventListener('click', () => {
@@ -333,7 +335,8 @@ export class Assistant {
     $('s-txrate').textContent = fRate(this.txc.rate(now));
     this._highspeedGate(this.rxc.rate(now));
     if (this.rx?.paused) $('s-pause').title = `暂停中，已缓存 ${fBytes(this.rx.bytes)}`;
-    if (this.rec.active) this._recordBtn();
+    // 记录/落盘期间按钮要一直刷：字节数与"待落盘"量都得看得见（见 recorder.js 的说明）
+    if (this.rec.active || this.rec.draining) this._recordBtn();
   }
 
   // ================= 高速自动关显示 =================
@@ -385,7 +388,7 @@ export class Assistant {
     try {
       const name = await this.rec.start({ name: 'serial', timestamps: $('s-record-ts').checked });
       this._recordBtn();
-      toast(`已自动开始记录 → ${name}`, 'ok', 5000);
+      toast(`已自动开始记录 → ${name}（Chrome 先写成 .crswap，点「停止记录」才改名）`, 'ok', 6000);
     } catch (e){
       const why = e?.name === 'NotAllowedError' ? '浏览器要求弹保存框时页面正在响应用户点击' : (e?.message || e);
       toast(`自动记录没启动（${why}）。手动点「记录到文件」即可`, 'warn', 6000);
@@ -402,13 +405,13 @@ export class Assistant {
       const info = await this.rec.stop();
       this._recordBtn();
       if (info?.error) toast('记录出错：' + (info.error.message || info.error), 'err', 6000);
-      else if (info) toast(`已保存 ${info.name}：${fBytes(info.bytes)} / ${info.frames} 段 / ${info.seconds.toFixed(1)} s`, 'ok', 6000);
+      else if (info) toast(`已落盘 ${info.name}：${fBytes(info.bytes)} / ${info.frames} 段 / ${info.seconds.toFixed(1)} s —— .crswap 已改名成正式文件`, 'ok', 7000);
       return;
     }
     try {
       const name = await this.rec.start({ name: 'serial', timestamps: $('s-record-ts').checked });
       this._recordBtn();
-      toast(`记录中 → ${name}（停止时写盘）`, 'ok', 5000);
+      toast(`记录中 → ${name}：Chrome 先写成 ${name}.crswap，点「停止记录」才改名成正式文件（记录中别关页面/刷新）`, 'ok', 8000);
     } catch (e){
       if (e?.name !== 'AbortError') toast('开始记录失败：' + (e?.message || e), 'err', 6000);
     }
@@ -418,18 +421,17 @@ export class Assistant {
     if (!this.rec.active) return;
     const info = await this.rec.stop();
     this._recordBtn();
-    if (info) toast(`记录已停止并保存：${info.name}（${fBytes(info.bytes)}）`, 'ok', 6000);
+    if (info?.error) toast('记录落盘出错：' + (info.error.message || info.error), 'err', 8000);
+    else if (info) toast(`已落盘：${info.name}（${fBytes(info.bytes)}）—— .crswap 已改名成正式文件`, 'ok', 7000);
   }
 
   _recordBtn(){
     const b = $('s-record');
     if (!b) return;
-    const on = this.rec.active;
-    b.textContent = on ? `■ 停止记录 · ${fBytes(this.rec.bytes)}` : '● 记录到文件';
-    b.classList.toggle('primary', on);
-    b.title = on
-      ? `正在写入 ${this.rec.name}（${fBytes(this.rec.bytes)} / ${this.rec.frames} 段）。界面卡就先「暂停」——只停显示，不停记录。`
-      : '把收到的字节直接写进本地文件（不走接收区的 2MB 上限），高速采集用';
+    const s = recordButtonState(this.rec);
+    b.textContent = s.text;
+    b.title = s.title + '　界面卡就先「暂停」——只停显示，不停记录。';
+    b.classList.toggle('primary', s.primary);
   }
 
   // ================= ANSI 彩色模式 =================
