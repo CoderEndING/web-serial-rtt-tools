@@ -296,17 +296,29 @@ export class ScopeRenderer {
        *    可信号慢的时候（每列几十上百个样本）每列就退化成**一个孤立的点** ——
        *    用户看到的就是"一堆连不起来的点"（实测反馈："都没有连成线"）。
        * 现在两种画法按"每列多少样本"切换：
-       *   · 每列 < 1.5 个样本 → **折线连点**（放大看原始采样点，就是一条干净的线）；
+       *   · 每列 < 1.5 个样本 → **逐样本连线**（放大看原始采样点，每个样本用自己的索引定位）；
        *   · 否则 → **上下包络 + 中间填充**（示波器的包络显示，慢信号自然连成一条线，
        *     快信号显示为一条实心带，且**绝不漏尖峰**）。
        */
       if (per < 1.5){
+        /**
+         * 🚨 **每列不足 1.5 个样本时必须逐样本连线，不能按列取点**（2026-10 用户实测反馈：
+         *    「波形放大后线不连续了」）。原因是 `columns()` 在 `per < 1` 时会出现
+         *    "这一列一个样本都没有"的情况（样本比像素还稀），那种列被写成 `Infinity`；
+         *    而这里的折线把非有限值当成"此处没数据"，于是 `started = false` **断线** ——
+         *    放大到亚像素级，正弦就变成一段一段的斜线（用户的截图就是每两三列断一次）。
+         *    那不是数据缺口，是**栅格化假象**：样本稀到每列摊不上一个，本来就该直接连采样点。
+         *    代价可忽略：`per < 1.5` 意味着可见样本数 < 1.5 × 列数（约 1500 个），一帧扫这么多不叫事。
+         *    每个样本的 x 用它自己的索引算（`(i - a) / per`），与列位置 `l + 列号` 同一套坐标，
+         *    所以放到别的缩放下位置也连续。
+         */
+        const d = ch.data;                        // 原始缓冲（与 columns() 同源；scale/offset 仍不参与画线）
         ctx.beginPath();
         let started = false;
-        for (let i = 0; i < cols; i++){
-          const v = buf.min[i];
-          if (!Number.isFinite(v)){ started = false; continue; }
-          const x = l + i + px / 2, y = yOf(v, k);
+        for (let i = a; i < z; i++){
+          const v = d[i];
+          if (!Number.isFinite(v)){ started = false; continue; }   // 数据里真的没值（NaN）→ 这里该断
+          const x = l + (i - a) / per + px / 2, y = yOf(v, k);
           if (started) ctx.lineTo(x, y); else { ctx.moveTo(x, y); started = true; }
         }
         ctx.stroke();
