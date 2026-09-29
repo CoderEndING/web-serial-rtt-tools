@@ -232,8 +232,9 @@ export class WebUsbDapProbe {
       } catch (e){
         last = e;
         console.warn(`[dap] ${khz} kHz 不通：${e.message}`);
-        // 每档失败后把 USB 会话重开一遍：拉过/折腾过的 SWD 引擎往往要重开会话才肯恢复
-        try { await this.reopen({ negotiate: false }); } catch {}
+        // 每档失败后把 USB 会话重开一遍：拉过/折腾过的 SWD 引擎往往要重开会话才肯恢复。
+        // `targetInit: false` = 只重开会话，别拿**旧时钟**再协商一次（马上要用新档试）
+        try { await this.reopen({ targetInit: false }); } catch {}
       }
     }
     throw new Error(`所有 SWD 时钟档位都连不上目标（最后：${last?.message}）——查接线 / 复位 / 供电`);
@@ -719,10 +720,17 @@ export class WebUsbDapProbe {
    *      A 写了 TAR=X → B 写 TAR=Y → A 的读落到 Y 上 → A 拿到垃圾（读出的 WrOff/size 是假的）
    *      → 命令写丢（实测：页面"发送成功"、固件一个字节都没收到）。
    *    早期之所以"偶尔好偶尔坏"，就是因为交错窗口时大时小。
-   *    这里用一条 promise 链互斥，保证一次内存访问序列跑完再让下一个进来（可重入，内部调用不卡死）。
+   *    这里用一条 promise 链互斥，保证一次内存访问序列跑完再让下一个进来。
+   *
+   * 🚨 **不要给这个锁加"可重入快路径"**（曾经有：`if (this._locked) return await fn();`）。
+   *    锁分不清"内部重入"和"外部并发"：A 在锁内 await USB 期间，用户点下行发送 / 复位 / 看门狗
+   *    调进来的 B 会看到 `_locked === true` 而**直接执行** —— TAR、AP 挂起读流水线、posted 写
+   *    照样交错，正好是上面那段注释描述的"命令写丢"。
+   *    内部需要嵌套的地方（写后回读、非对齐读-改-写）直接调 `_readMemLocked` / `_writeMemLocked`，
+   *    让这个锁只服务外部入口（`readMem` / `writeMem`）。
+   *    回归测试：`tools/selftest/rtt.test.mjs`「并发调用必须排队」那一节用挂起的 A + 外部 B 钉住。
    */
   async _withLock(fn){
-    if (this._locked){ return await fn(); }          // 可重入：writeMem 内部会调 readMem
     let release;
     const prev = this._lockChain || Promise.resolve();
     this._lockChain = new Promise(r => { release = r; });
@@ -737,15 +745,15 @@ export class WebUsbDapProbe {
   }
 
   /**
-   * 读目标内存。
+   * 读目标内存（按数据量分级决定"要不要防一手"）。
    *
-   * 抗「挂起读」的策略**按数据量分级**（2026-09-27 调过两轮：
-   * 早先不分大小一律读两遍，大流量读取成本直接翻倍 —— 8MHz 下 330 KB/s 掉到 154 KB/s）：
-   *   · 大块（RTT 缓冲、flash 校验……）：读一遍，但写完 TAR 后**先读两个字丢掉**（prime），
-   *     把流水线里上一笔事务的残渣顶出去。只多一次往返。
-   *   · 小块（≤ 64 字节）：也读一遍；**结构校验不通过时由上层重读**
-   *     （Rtt._entry 会校验 size/pbuf/wr/rd 是否合理，不合理就重读一次——
-   *     实测残留数据几乎都过不了这层校验，所以"按需重读"够用，省掉无脑双读）。
+   * 2026-09-27 调过两轮：早先不分大小一律读两遍，大流量读取成本直接翻倍
+   * （8MHz 下 330 KB/s 掉到 154 KB/s）。现在的策略：
+   *   · 小块（≤ 64B）且是 PPB 或非快速档 → **双读比对**（状态位读错会误判 halt/REGRDY）。
+   *   · 其余（含大块）→ 单读；脏数据由上层结构校验兜（Rtt._entry 会校验 size/pbuf/wr/rd）。
+   * 🚨 曾经想给大块读加"prime 读两个字顶掉流水线残渣"，**这是错的**：prime 会让 TAR 自增 8 字节，
+   *    紧接着的正式读从 start+8 开始，整段错位（实测烧录校验报"0x8000000 处读到 0xb9，期望 0x0"，
+   *    0xb9 正是偏移 8 处的字节）。所以 `_readMemOnce` 里**没有** prime 参数，别再把它加回来。
    * 另外地址必须先 `>>> 0` 归一化：JS 位运算（`& ~3`）是 32 位有符号的，
    * 地址 ≥ 0x80000000（PPB 区，如 DHCSR=0xE000EDF0）会变负数 → subarray 越界 → 返回空数组。
    */
@@ -763,20 +771,20 @@ export class WebUsbDapProbe {
      * 不合理才重读；这一档省下的往返直接变成 RTT 吞吐。
      */
     if (small && (ppb || !this.fast)){
-      const first = await this._readMemOnce(addr, len, apIndex, false);
-      const second = await this._readMemOnce(addr, len, apIndex, false);
+      const first = await this._readMemOnce(addr, len, apIndex);
+      const second = await this._readMemOnce(addr, len, apIndex);
       if (first.length === second.length){
         let same = true;
         for (let i = 0; i < first.length; i++){ if (first[i] !== second[i]){ same = false; break; } }
         if (same) return second;
       }
-      return await this._readMemOnce(addr, len, apIndex, false);   // 不一致：再读一遍取最新
+      return await this._readMemOnce(addr, len, apIndex);   // 不一致：再读一遍取最新
     }
-    // 大块读：单读 + prime（写完 TAR 先读两个字丢掉，顶掉流水线残渣）
-    return await this._readMemOnce(addr, len, apIndex, len > 64);
+    // 大块读（>64B）：单读就够 —— 见 _readMemOnce 里"不要加 prime"的实测记录
+    return await this._readMemOnce(addr, len, apIndex);
   }
 
-  async _readMemOnce(addr, len, apIndex = 0, prime = false){
+  async _readMemOnce(addr, len, apIndex = 0){
     addr = addr >>> 0;
     if (len <= 0) return new Uint8Array(0);
     if (len > (1 << 20)) throw new Error(`一次要读 ${len} 字节（>1MB），地址参数大概是错了`);
@@ -867,7 +875,8 @@ export class WebUsbDapProbe {
     if (this.fast && addr === this._lastWriteAddr) { this._lastWriteAt = Date.now(); return; }
     this._lastWriteAddr = addr; this._lastWriteAt = Date.now();
     try {
-      const back = await this.readMem(addr, data.length, apIndex);
+      // 私有版本：这条路已经在锁里了，再走 public readMem() 会自锁死（锁不再可重入）
+      const back = await this._readMemLocked(addr, data.length, apIndex);
       let same = back.length === data.length;
       if (same) for (let i = 0; i < data.length; i++){ if (back[i] !== data[i]){ same = false; break; } }
       if (!same){
@@ -894,7 +903,7 @@ export class WebUsbDapProbe {
     // 非对齐 → 读-改-写（RTT 下行缓冲的写指针可能不是 4 的倍数）
     const start = (addr & ~3) >>> 0;
     const end = ((addr + data.length + 3) & ~3) >>> 0;
-    const cur = await this.readMem(start, end - start, apIndex);
+    const cur = await this._readMemLocked(start, end - start, apIndex);   // 同上：用私有版本（已在锁内）
     cur.set(data, addr - start);
     const words = new Uint32Array(cur.buffer, cur.byteOffset, cur.length >> 2);
     let i = 0;
@@ -1063,12 +1072,15 @@ export class WebUsbDapProbe {
   }
 
   /** 释放接口再认领、按**当前时钟**重跑一遍初始化 —— 比让用户拔插 USB 体面 */
-  async reopen(){
+  /** 重开一次 USB 会话（释放接口 → 等一下 → 重新认领）。
+   *  `targetInit: false` 用于"马上就换时钟档重试"的场合：只重开会话，不按旧时钟再协商一遍。
+   *  （这里原来忽略入参，调用方传了 `{negotiate:false}` 等于白传 —— 代码审查抓到的。）*/
+  async reopen({ targetInit = true } = {}){
     try { await this.device.releaseInterface(this.iface); } catch {}
     this._ready = false;
     await sleep(120);
     await this._claim();
-    await this._targetInit({ clock: this.clockHz });
+    if (targetInit) await this._targetInit({ clock: this.clockHz });
     return true;
   }
 

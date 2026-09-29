@@ -3,7 +3,7 @@
  * 不连硬件 —— 专门用来在没有板子的时候把"参数级"错误挑出来。
  * 用法：node tools/dev/check-flash-plan.mjs [firmware.elf|.hex|.bin ...]
  */
-import { ALGOS } from '../../app/flash/algos.js';
+import { ALGOS, SERIES_MAX_KB, F1_DEV, checkFlashRange } from '../../app/flash/algos.js';
 import { FlashRunner } from '../../app/flash/runner.js';
 import { parseFirmware } from '../../app/flash/image.js';
 import fs from 'node:fs';
@@ -56,6 +56,37 @@ for (const file of process.argv.slice(2)){
   console.log(`  校验    : 读回 ${total} B 逐字节比对`);
   console.log(`  范围    : ${inRange ? '✅ 全在 flash 范围内' : '❌ 有段越界'}`);
   if (!inRange) bad++;
+}
+
+console.log('\n=== 烧录范围检查（代码审查：flash_length 是算法标称区间，不是芯片上限）===');
+{
+  // 老实现拿 pyOCD 的 `flash_length` 当硬上限，而它常按系列**最小**成员填（F4 = 64KB），
+  // 于是 512KB 的 F407 固件会被拒，还提示"芯片选对了吗？"。现在硬上限用系列最大值，
+  // 越过标称区间只提示；F1 有 DEV_ID 时按密度档判。
+  const seg = (bytes, addr = 0x08000000) => ({ addr, data: { length: bytes } });
+  for (const [name, algo] of Object.entries(ALGOS)){
+    const maxKb = SERIES_MAX_KB[name] || 0;
+    const maxB = maxKb * 1024;
+    const okBig = checkFlashRange(algo, seg(maxB), { series: name });
+    const over = checkFlashRange(algo, seg(maxB + 4), { series: name });
+    const nominal = checkFlashRange(algo, seg(algo.flash_length), { series: name });
+    const below = checkFlashRange(algo, seg(1024, 0x07000000), { series: name });
+    const good = maxKb > 0 && okBig.ok && !over.ok && below.ok === false;
+    console.log(`  ${name.padEnd(11)} 标称 ${String(Math.round(algo.flash_length / 1024)).padStart(4)} KB · ` +
+      `系列上限 ${String(maxKb).padStart(4)} KB → 打满上限${okBig.ok ? '✅收' : '❌拒'} · ` +
+      `超一点${over.ok ? '❌收' : '✅拒'} · 低于 flash 起址${below.ok ? '❌收' : '✅拒'}` +
+      ` · 越标称${nominal.beyondNominal ? '(会提示)' : ''}${good ? '' : '  ❌'}`);
+    if (!good) bad++;
+  }
+  // F1：DEV_ID 决定容量档（0x410 中容量只有 128KB —— 拿它烧 256KB 必须拒，且提示指向芯片）
+  const f1 = ALGOS.stm32f103;
+  const mid = checkFlashRange(f1, seg(256 * 1024), { series: 'stm32f103', devId: 0x410 });
+  const high = checkFlashRange(f1, seg(512 * 1024), { series: 'stm32f103', devId: 0x414 });
+  const midOk = !mid.ok && high.ok && high.limitBytes === 512 * 1024;
+  console.log(`  STM32F1 DEV_ID 判定：0x410 中容量上限 ${mid.limitBytes / 1024} KB（256KB 固件${mid.ok ? '❌收' : '✅拒'}）· ` +
+    `0x414 大容量上限 ${high.limitBytes / 1024} KB（512KB 固件${high.ok ? '✅收' : '❌拒'}）${midOk ? '' : '  ❌'}`);
+  if (!midOk) bad++;
+  if (!F1_DEV[0x414] || F1_DEV[0x414].page !== 2048 || F1_DEV[0x410].page !== 1024){ console.log('  ❌ F1_DEV 页粒度表被改坏了'); bad++; }
 }
 
 console.log(bad ? `\n结论：有 ${bad} 处问题 ❌` : '\n结论：全部自洽 ✅');

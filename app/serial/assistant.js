@@ -361,11 +361,16 @@ export class Assistant {
   _setSuppressed(on, r = 0){
     if (this.suppressed === on) return;
     this.suppressed = on;
-    this.rx.setDisplayOff(on);
     if (on){
+      this.rx.setDisplayOff(true);
       setStatus($('s-err'), `高速 ${fRate(r)}：渲染已停（收数/记录不受影响）· 点此恢复显示`, 'err');
       $('s-err').title = '点击恢复显示。若速率仍高于阈值会再次自动关闭';
     } else {
+      /**
+       * 🚨 **先取计数再关抑制**：`setDisplayOff(false)` 内部会把 `suppressedBytes` 清零，
+       *    老代码是先关再读 → 恒为 0 → 这句"省略了多少"的提示**永远不显示**。
+       *    （`app/rtt/view.js` 里那份用自己的 suppBytes 记账，是对的；这里对齐它。）
+       */
       const skipped = this.rx.suppressedBytes;
       this.rx.setDisplayOff(false);
       if (this.ansiOn && this.term && skipped > 0){

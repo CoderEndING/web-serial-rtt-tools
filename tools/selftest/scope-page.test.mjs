@@ -573,6 +573,41 @@ console.log('== 12. 标定值必须跟着变量/时钟失效（否则一个过�
             document.getElementById('sc-mock').dispatchEvent(new Event('change')); return true;`);
 }
 
+console.log('== 13. 起跑阶段的新数据要收下；收工之后一律不收 ==');
+{
+  // 代码审查抓到：DATA 分支用 `!this.running` 当闸门时，会把"DEF 已到、START 的 STATUS 轮询
+  // （120~240 ms）还没 resolve"这段窗口里的**新一轮真实数据**整包丢掉（起跑段缺样本、触发晚布防）。
+  // 现在闸门是 `_capturing`（start 里打开、stop 里关掉），这里把两个方向都钉住。
+  const r = await ev(`
+    const P = await import('/app/scope/protocol.js');
+    const S = await import('/app/scope/store.js');
+    const sc = window.__tools.scope;
+    document.getElementById('sc-mock').checked = true;
+    document.getElementById('sc-mock').dispatchEvent(new Event('change'));
+    const vars = sc.mockVars();
+    sc.store = new S.SampleStore(vars, 2000);
+    sc.renderer.setStore(sc.store);
+    sc.seqT = new P.SeqTracker(); sc.stream = new P.PacketStream();
+    sc._awaitDef = true; sc.defVars = null; sc.defMismatch = null;
+    sc.running = false; sc._capturing = true;               // ← 起跑中（START 还没 resolve）
+    sc.onChunk(P.buildDef({ seq: 1, swdHz: 60000000, periodUs: 100, flags: 0, vars, spans: 1 }));
+    const afterDef = sc.store.count;
+    const mkData = (seq, t, n) => {
+      const payload = new Uint8Array(496);
+      for (let i = 0; i < n; i++) P.packSamples(vars, vars.map((v, k) => i + k), payload.subarray(i * sc.plan.frameBytes));
+      return P.buildData({ seq, tUs: t, n, payload });
+    };
+    sc.onChunk(mkData(2, 1000, 5));
+    const duringStart = sc.store.count;                     // 起跑窗口里应该收下 5 个
+    sc._capturing = false;                                  // ← 收工（stop 之后）
+    sc.onChunk(mkData(3, 2000, 5));
+    const afterStop = sc.store.count;                       // 收工之后一个都不许进
+    return { nvars: vars.length, frameBytes: sc.plan.frameBytes, afterDef, duringStart, afterStop };`);
+  ok(r.afterDef === 0, `DEF 只是起跑线，不产生样本（count=${r.afterDef}）`);
+  ok(r.duringStart === 5 && r.afterStop === 5,
+     `起跑窗口收下 5 个样本、收工后再喂 5 个一个都不进（${r.duringStart} → ${r.afterStop}）`);
+}
+
 console.log(`\n${fail ? '❌' : '✅'} scope-page.test: ${pass} 通过 / ${fail} 失败`);
 ws.close();
 process.exit(fail ? 1 : 0);

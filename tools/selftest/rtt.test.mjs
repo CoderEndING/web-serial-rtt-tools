@@ -85,6 +85,51 @@ console.log('== 3. 环形缓冲绕回（一次读要跨过缓冲末尾）==');
   ok(/^#\d+\.+$/.test(lines[lines.length - 1]), '最后一条格式正确', lines[lines.length - 1]);
 }
 
+console.log('== 3.5 错位读的"立刻重读"也必须按同样两段走（审查：老代码会读越界）==');
+{
+  // 老代码里正常路径绕回时分两段读，可 corrupt 重试是单段 `readMem(pbuf + rd, n)` ——
+  // 绕回时那会跨过缓冲末端去读相邻内存；只要重试内容里恰好没有 "SEGGER RTT" 签名，
+  // 就被当成正常数据用掉并推进 RdOff（**静默数据损坏**）。
+  const probe = new MockProbe();
+  const rtt = new Rtt(probe, { addr: probe.cbAddr });
+  await rtt.init();
+  const e0 = await rtt._entry(rtt.upBase, 0);
+  rtt.up[0] = e0;
+  const size = e0.size;
+  // 先把写指针推到接近末尾并读空（rd 前进到 1000），再灌 200B → 必然绕回
+  for (let i = 0; i < 100; i++) probe._pushUp('A'.repeat(9) + '\n');       // 1000 B
+  await rtt.readUp(0);
+  for (let i = 0; i < 20; i++) probe._pushUp(`#${i}`.padEnd(9, '.') + '\n'); // 200 B → wr 绕回
+  const e = await rtt._entry(rtt.upBase, 0);
+  rtt.up[0] = e;
+  const n = (e.wr - e.rd + size) % size;
+  const wrapped = e.rd + n > size;
+  const calls = [];
+  const orig = probe.readMem.bind(probe);
+  let dataCalls = 0;
+  probe.readMem = async (addr, len) => {
+    const inBuf = addr >= e.pbuf && addr < e.pbuf + size;
+    if (inBuf) calls.push({ addr, len });
+    const out = await orig(addr, len);
+    // 只污染**第一遍**的读（绕回时两段），重试那遍必须干净 → 触发并验证重读路径
+    if (inBuf && ++dataCalls <= (wrapped ? 2 : 1)){
+      const sig = new TextEncoder().encode('SEGGER RTT');
+      out.set(sig.subarray(0, Math.min(sig.length, out.length)), 0);
+    }
+    return out;
+  };
+  const r = await rtt.readUp(0);
+  probe.readMem = orig;
+  const overrun = calls.filter(c => c.addr + c.len > e.pbuf + size);
+  const text = dec(r.bytes);
+  ok(wrapped && n > 0 && e.rd > 0, `构造出绕回读：rd=${e.rd} +n=${n} > size=${size}`);
+  ok(calls.length >= 4 - (wrapped ? 0 : 1) && !r.corrupt, `触发了重读（数据区共 ${calls.length} 次读，corrupt=${!!r.corrupt}）`);
+  ok(overrun.length === 0,
+     `所有读都没跨过缓冲末端（越界读 ${overrun.length} 次${overrun.length ? '：' + JSON.stringify(overrun[0]) : ''}）`);
+  ok(!text.includes('SEGGER') && text.length > 0, '没把控制块签名当数据用掉');
+  ok(/^#\d+\.+/.test(text), `重读回来的就是真实数据：${JSON.stringify(text.slice(0, 12))}`);
+}
+
 console.log('== 4. 过载/丢包的可观测信号 ==');
 {
   // (a) 缓冲读满 = 最可靠的过载信号
@@ -175,6 +220,41 @@ console.log('== 7. HEX 解析 ==');
   ok(parseHex('01 0G').error !== null, '非法字符报错');
   ok(parseHex('01 3').error !== null, '奇数位报错');
   ok(parseHex('01-03').bytes.length === 2, '连字符分隔');
+}
+
+console.log('== 8. 内存访问锁：外部并发调用必须排队（审查：可重入快路径让互斥失效）==');
+{
+  // WebUSB 那条路有两条并发来源：RTT 轮询循环 + 用户下行发送（还有看门狗/复位）。
+  // 老代码 `if (this._locked) return await fn();` 让**外部**并发调用直接插进锁内 ——
+  // TAR / AP 挂起读流水线 / posted 写照样交错，正是"命令写丢（页面发送成功、固件没收到）"的成因。
+  const { WebUsbDapProbe } = await import('file://' + join(app, 'rtt', 'dap-webusb.js').replace(/\\/g, '/'));
+  const p = new WebUsbDapProbe();
+  const order = [];
+  let releaseA = null;
+  const gateA = new Promise(r => { releaseA = r; });
+  const a = p._withLock(async () => { order.push('A-start'); await gateA; order.push('A-end'); return 'A'; });
+  await new Promise(r => setTimeout(r, 20));
+  ok(p._locked === true, 'A 持锁期间 _locked = true');
+  const b = p._withLock(async () => { order.push('B-start'); await new Promise(r => setTimeout(r, 5)); order.push('B-end'); return 'B'; });
+  await new Promise(r => setTimeout(r, 20));
+  releaseA();
+  const [ra, rb] = await Promise.all([a, b]);
+  ok(order.join(',') === 'A-start,A-end,B-start,B-end',
+     `并发调用排队而不交错（实际 ${order.join(',')}）`);
+  ok(ra === 'A' && rb === 'B', '两条都拿到自己的返回值');
+  ok(p._locked === false, '结束后锁已释放');
+
+  // 写路径内部的"回读校验"必须走私有版本，否则会在锁里再抢锁 → 自锁死
+  const calls = [];
+  p._readMemLocked = async (addr, len) => { calls.push({ addr, len }); return new Uint8Array(len).fill(0xaa); };
+  p._writeMemOnce = async () => { calls.push({ write: true }); };
+  p.fast = false; p.verifyWrites = true;
+  const done = await Promise.race([
+    p.writeMem(0x20000000, new Uint8Array([0, 1, 2, 3])).then(() => 'ok'),
+    new Promise(r => setTimeout(() => r('DEADLOCK'), 1500)),
+  ]);
+  ok(done === 'ok', `写路径里的回读校验没自锁死（${done}）`);
+  ok(calls.some(c => c.write) && calls.some(c => c.len === 4), '写后确实回读校验了（回读走了私有版本）');
 }
 
 console.log(`\n结果：${pass} 通过 / ${fail} 失败`);

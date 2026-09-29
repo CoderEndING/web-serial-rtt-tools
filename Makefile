@@ -25,7 +25,7 @@ FW_DIR   = tools/target-firmware/stm32f103
 LA       = tools/la/kingst_la.py
 
 .DEFAULT_GOAL := help
-.PHONY: help serve serve-stop browser open test test-ui test-gen test-gen-page test-hid test-dwarf test-scope test-scope-page test-hw test-bridge test-all \
+.PHONY: help serve serve-stop browser open test test-ui test-gen test-gen-page test-hid test-dwarf test-scope test-scope-page test-hw test-bridge test-bridge-gate test-all \
         bridge bridge-stop fw-build fw-flash fw-restore fw-h7-build fw-h7-slow fw-h7-flash \
         algo-check flash-plan la-info la-capture git-status git-log check clean
 
@@ -54,6 +54,11 @@ test:
 	$(NODE) tools/selftest/hid-proto.test.mjs
 	$(NODE) tools/selftest/dwarf.test.mjs
 	$(NODE) tools/selftest/scope-proto.test.mjs
+	$(NODE) tools/selftest/bridge-origin.test.mjs
+
+# 桥的 WebSocket 准入（Origin 白名单 + 口令）：纯离线，自己拉一个桥实例只做握手
+test-bridge-gate:
+	$(NODE) tools/selftest/bridge-origin.test.mjs
 
 # ELF/DWARF 变量提取（scope 页的变量浏览器底座）—— 基线是真 ELF 快照
 test-dwarf:

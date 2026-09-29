@@ -138,6 +138,7 @@ export class AkaLinkHid {
   constructor(){
     this.device = null;
     this._pending = null;
+    this._reqSeq = 0;                    // 请求身份序号（超时回调按它匹配，不按 cmd —— 见 _settle）
     this.onDisconnect = null;
     this._onInput = this._handleInput.bind(this);
     this._onDisc = this._handleDisconnect.bind(this);
@@ -226,7 +227,18 @@ export class AkaLinkHid {
     // info() 并发发了 3 条，结果后面那条 AUTOSTART 收到了型号回包，状态字全是垃圾）
     if (res[1] !== p.cmd) return;
     this._pending = null;
+    this._settle(p);                      // 清掉这条请求的超时定时器，再放行
     p.resolve(res);
+  }
+
+  /** 收尾一条在飞请求：**必须**清掉它的超时定时器。
+   *  🚨 不清的后果不是"误报超时"那么轻：早先请求的残雷在 timeout 后触发时，
+   *     reject 落在早已 settle 的旧 promise 上（无效），但它会把 `this._pending = null`
+   *     一起打掉 —— **当前在飞的那条请求就永久挂起了**（既不 resolve 也不 reject，
+   *     迟到的真回包也因 `_pending` 为空被丢弃）。表现是"点按钮没反应、也不报错"，只能刷新页面。
+   *     高频同命令轮询（RTT 转发每 2 s 的 status()、J-Scope 启动时每 120 ms 的轮询）撞上就是它。*/
+  _settle(p){
+    if (p && p.timer != null){ clearTimeout(p.timer); p.timer = null; }
   }
 
   _handleDisconnect(e){
@@ -261,13 +273,23 @@ export class AkaLinkHid {
     if (this._pending) throw new Error('上一条请求还没回来');
     const pkt = buildRequest(cmd, data);
     const once = async () => {
+      let req = null;
       const wait = new Promise((resolve, reject) => {
-        this._pending = { cmd, resolve, reject };
-        setTimeout(() => {
-          if (this._pending && this._pending.cmd === cmd){ this._pending = null; reject(new Error(`探针 ${timeout}ms 没响应`)); }
+        // 超时回调**按请求身份**（自增序号）匹配，不按 cmd：同一命令高频轮询时，
+        // 按 cmd 匹配会让旧请求的残雷打掉新请求（见 _settle 的说明）
+        req = { cmd, resolve, reject, seq: ++this._reqSeq, timer: null };
+        this._pending = req;
+        req.timer = setTimeout(() => {
+          if (this._pending === req){ this._pending = null; req.timer = null; reject(new Error(`探针 ${timeout}ms 没响应`)); }
         }, timeout);
       });
-      await this.device.sendReport(1, pkt);
+      try {
+        await this.device.sendReport(1, pkt);
+      } catch (e){
+        this._settle(req);                  // 写失败：别把定时器留着
+        if (this._pending === req) this._pending = null;
+        throw e;
+      }
       return await wait;
     };
     try {

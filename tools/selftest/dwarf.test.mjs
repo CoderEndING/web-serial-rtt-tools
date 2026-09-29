@@ -168,5 +168,38 @@ console.log('== 5. 稳健性：不崩、不乱、原因可读 ==');
      'RAM 窗口可配置（收窄后全部剔除并说明原因）');
 }
 
+// ------------------------------------------------------------------ 6
+console.log('== 6. 表单解析不能调不存在的方法（审查：DW_FORM_ref_sig8 → r.skip 崩溃）==');
+{
+  // DWARF4 的 type unit 表单（GCC -fdebug-types-section 会出现）：解析不了没关系，
+  // 但**必须把 8 字节跳过**，不能抛 "r.skip is not a function" 把整个解析带崩。
+  const fakeElf = { data: n => (n === '.debug_info' ? new Uint8Array([0]) : new Uint8Array(0)) };
+  const d = new Dwarf(fakeElf);
+  let bytesArg = 0, advanced = 0;
+  const reader = { o: 0, bytes(n){ bytesArg = n; this.o += n; return new Uint8Array(n); },
+                   u8(){ this.o += 1; return 0; }, u16(){ this.o += 2; return 0; },
+                   u32(){ this.o += 4; return 0; }, u64(){ this.o += 8; return 0; },
+                   uleb(){ this.o += 1; return 0; }, sleb(){ this.o += 1; return 0; } };
+  let threw = null, res = null;
+  try { res = d._value(reader, 0x20 /* DW_FORM_ref_sig8 */, 0, { offset: 0, addrSize: 4 }); }
+  catch (e){ threw = e; }
+  advanced = reader.o;
+  ok(!threw, 'DW_FORM_ref_sig8 不抛异常', threw ? String(threw.message) : '');
+  ok(bytesArg === 8 && advanced === 8, `正好跳过 8 字节（bytes(${bytesArg})，游标前进 ${advanced}）`);
+  ok(res && res.value === null, '返回"解析不出值"而不是垃圾值');
+
+  // 静态兜底：`_value` 里用到的每个 reader 方法都必须在 R 类里真的存在
+  // （这条能抓住"改了方法名/写了个不存在的方法"这一类，正是这次那个 bug 的形状）
+  const src = readFileSync(join(app, 'elf', 'dwarf.js'), 'utf8');
+  const rBody = /class R \{([\s\S]*?)\n\}/.exec(src);
+  const methods = new Set([...rBody[1].matchAll(/^\s{2}([a-zA-Z_]\w*)\s*\(/gm)].map(m => m[1]));
+  const valueBody = /_value\(r, form, ic, cu\)\{([\s\S]*?)\n  \}/.exec(src)[1]
+    .replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');   // 去掉注释（注释里提到过 r.skip 这个坑）
+  const used = new Set([...valueBody.matchAll(/\br\.([a-zA-Z_]\w*)\(/g)].map(m => m[1]));
+  const missing = [...used].filter(n => !methods.has(n));
+  ok(missing.length === 0, `_value 用到的 reader 方法都存在（用了 ${[...used].join('/')}）`,
+     missing.length ? '缺：' + missing.join(', ') : '');
+}
+
 console.log(`\n${fail ? '❌' : '✅'} dwarf.test: ${pass} 通过 / ${fail} 失败`);
 process.exit(fail ? 1 : 0);

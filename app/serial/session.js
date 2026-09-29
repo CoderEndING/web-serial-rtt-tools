@@ -100,12 +100,18 @@ export class SerialSession extends Bus {
   write(bytes){
     if (!this.isOpen || !this.port) return Promise.reject(new Error('串口未打开'));
     const data = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+    /**
+     * 🚨 catch 里**不要 rethrow**：那会把 `_wq` 这条链永久留在 rejected 状态 ——
+     *    之后每次 write() 的 then 体都被跳过（一个字节都写不出去），却对着同一个
+     *    **旧**错误重复 emit('error')，直到重开串口。错误已经走过 'error' 事件了，
+     *    这里把链恢复成 resolved，让后面的写继续。
+     */
     this._wq = this._wq.then(async () => {
       if (!this.isOpen) throw new Error('串口已关闭');
       if (!this.writer) this.writer = this.port.writable.getWriter();
       await this.writer.write(data);
       this.emit('tx', data);
-    }).catch(e => { this.emit('error', e); throw e; });
+    }).catch(e => { this.emit('error', e); });
     return this._wq.catch(() => {});
   }
 

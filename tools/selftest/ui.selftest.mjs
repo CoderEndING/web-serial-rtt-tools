@@ -90,11 +90,16 @@ export async function runUiSelfTest(tools){
   });
 
   await step('时间戳开关', async () => {
+    // 默认（未勾「绝对时间」）= 自页面打开起的**相对**时间；勾上 = 当天钟点。
+    // 🚨 以前两个分支一模一样（等于那个复选框是摆设，代码审查 item 10）—— 这里两个都验。
     assistant.rx.setTimestamps(true, false);
-    const t = $('s-rx').textContent;
-    if (!/\[\d\d:\d\d:\d\d\.\d{3}\]/.test(t)) throw new Error('没看到时间戳');
+    const rel = $('s-rx').textContent;
+    if (!/\[\+\d\d:\d\d\.\d{3}\]/.test(rel)) throw new Error('没看到相对时间戳：' + rel.slice(-60));
+    assistant.rx.setTimestamps(true, true);
+    const abs = $('s-rx').textContent;
+    if (!/\[\d\d:\d\d:\d\d\.\d{3}\]/.test(abs)) throw new Error('没看到绝对时间戳：' + abs.slice(-60));
     assistant.rx.setTimestamps(false, false);
-    return 'OK';
+    return '相对 + 绝对都对';
   });
 
   await step('暂停/继续不丢数据', async () => {

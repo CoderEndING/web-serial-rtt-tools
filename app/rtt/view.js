@@ -442,6 +442,11 @@ export class RttView {
           this._corruptRun = 0;
         }
       } catch (e){
+        /**
+         * 🚨 手动断开时，在飞的 readUp 稍后会抛"探针未连接" —— 不在这儿让路的话，
+         *    `_fail()` 会把状态栏从"已断开"覆盖成"读取失败"（看起来像出了故障，其实是我们自己停的）。
+         */
+        if (!this.running) return;
         const msg = String(e?.message || e);
         // SWD 访问出错 / 控制块内容不可信 → 先自愈（重新初始化调试口），别立刻放弃
         if (/FAULT|NO ACK|不可信|不合理|没在运行/.test(msg)){

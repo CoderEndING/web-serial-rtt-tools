@@ -145,5 +145,48 @@ console.log('== 6. 已授权设备里挑探针（别挑到触摸板）==');
   ok(p.isProbe === false, 'isProbe：触摸板 → false（上层据此发警告）');
 }
 
+console.log('== 7. xfer 超时定时器：旧请求的残雷不许打掉在飞的新请求 ==');
+{
+  // 代码审查复现过的 bug：响应到达后 setTimeout 不清、超时回调又按 cmd 匹配 ——
+  // 早先那条请求的残雷触发时 reject 落在旧 promise 上（无效），却把 this._pending 一起打掉，
+  // **当前在飞的那条请求就永久挂起**（既不 resolve 也不 reject，迟到真回包也被丢）。
+  // 高频同命令轮询（RTT 转发每 2 s 的 status、J-Scope 启动每 120 ms）撞上就是"点按钮没反应也不报错"。
+  const hid = new AkaLinkHid();
+  const listeners = {};
+  const fake = {
+    opened: true,
+    addEventListener: (ev, fn) => { (listeners[ev] ||= []).push(fn); },
+    removeEventListener: () => {},
+    sendReport: async () => {},
+  };
+  // 不走 open()：它要 navigator.hid 的 disconnect 监听（Node 里没有）。这里只挂 inputreport。
+  hid.device = fake;
+  fake.addEventListener('inputreport', hid._onInput);
+  const input = payload => { for (const fn of listeners.inputreport || []) fn({ device: fake, data: { buffer: payload.buffer } }); };
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const reply = Uint8Array.of(0, 0x32, 0, 0);          // payload[1] = cmd 0x32
+
+  const r1 = hid.xfer(0x32, Uint8Array.of(0), 100).then(() => 'ok1', e => 'err1:' + e.message);
+  await sleep(10);
+  input(reply);                                         // 第一条 10 ms 就正常回包（它的定时器必须被清掉）
+  const out1 = await r1;
+  await sleep(20);
+  const r2 = hid.xfer(0x32, Uint8Array.of(0), 5000).then(() => 'ok2', e => 'err2:' + e.message);
+  const t = setTimeout(() => input(reply), 250);         // 第二条要 250 ms 才回（比第一条的 100 ms 残雷晚）
+  const out2 = await Promise.race([r2, sleep(3000).then(() => 'HANG')]);
+  clearTimeout(t);
+  ok(out1 === 'ok1', `第一条正常返回（${out1}）`);
+  ok(out2 === 'ok2', `第二条没被旧请求的超时残雷误杀（${out2}）`);
+  ok(hid._pending === null, '请求结束后 _pending 已清空');
+  // 反向：真超时仍然要报错，并且把在飞状态清干净（不能卡住后续请求）
+  const r3 = hid.xfer(0x32, Uint8Array.of(0), 60).then(() => 'ok3', e => 'err3');
+  const out3 = await r3;
+  ok(out3 === 'err3', `真超时仍会报错（${out3}）`);
+  ok(hid._pending === null, '超时后 _pending 清空，下一条请求能正常发（不永久卡死）');
+  const r4 = hid.xfer(0x32, Uint8Array.of(0), 1000).then(() => 'ok4', e => 'err4:' + e.message);
+  setTimeout(() => input(reply), 10);
+  ok(await r4 === 'ok4', '超时之后还能继续正常请求');
+}
+
 console.log(`\n${fail ? 'FAIL' : 'OK'}  ${pass} 通过 / ${fail} 失败`);
 process.exit(fail ? 1 : 0);

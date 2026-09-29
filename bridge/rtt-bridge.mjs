@@ -35,7 +35,7 @@ const VERSION = '1.0';
 function parseArgs(argv){
   const a = { port: 17321, host: '127.0.0.1', root: path.join(__dirname, '..'), target: '', attach: false,
               openocd: '', scripts: '', tclPort: 6666, jlinkAttach: false, jlinkPort: 19021,
-              jlinkLogger: '', jlinkDevice: '', jlinkChannel: 0, token: '' };
+              jlinkLogger: '', jlinkDevice: '', jlinkChannel: 0, token: '', allowOrigin: [] };
   for (let i = 0; i < argv.length; i++){
     const k = argv[i];
     const next = () => argv[++i];
@@ -54,6 +54,7 @@ function parseArgs(argv){
       case '--jlink-device': a.jlinkDevice = next(); break;
       case '--jlink-channel': a.jlinkChannel = Number(next()); break;
       case '--token': a.token = next(); break;
+      case '--allow-origin': a.allowOrigin.push(...String(next() || '').split(',').map(s => s.trim()).filter(Boolean)); break;
       case '-h': case '--help': a.help = true; break;
       default: console.warn('忽略未知参数：' + k);
     }
@@ -78,7 +79,13 @@ if (args.help){
   --jlink-port <n>      J-Link RTT telnet 端口
   --jlink-logger <exe>  JLinkRTTLogger.exe 路径：自己拉一个只读的 RTT 日志流
   --jlink-device <名>   配合 --jlink-logger 用（如 STM32F103C8）
-  --token <串>          WebSocket 简单口令（默认不校验；只监听本机）
+  --token <串>          WebSocket 口令（默认空 = 不校验；填了就要求 ?token=… 或
+                        Sec-WebSocket-Protocol: bearer.<token>）
+  --allow-origin <o>    额外允许的 Origin（逗号分隔，可重复）。默认只允许：
+                        http://127.0.0.1:* / http://localhost:* / file://（Origin: null）
+                        / https://minichao9901.github.io
+                        这是防 CSWSH：任何网页都能向 ws://127.0.0.1 发跨源 WebSocket，
+                        不拦的话任意网页都能借这座桥驱动本机 OpenOCD/J-Link 读内存甚至烧固件。
 `);
   process.exit(0);
 }
@@ -358,7 +365,13 @@ class OpenOcdBackend {
 
   /** 发一条 Tcl RPC 命令：以 0x1A 结尾，读到 0x1A 结束 */
   rpc(line, timeout = 30000){
-    return new Promise((res, rej) => {
+    /**
+     * 🚨 **必须串行化**：一次只允许一条命令在飞。
+     *    每条调用各自挂一个 `data` 监听、共享同一个 socket 和 `this.buf`，两条并发时
+     *    同一段回包会被双方各读一次 → 命令与响应错配（RTT 轮询的 mem.read 撞上用户点复位就是）。
+     *    OpenOCD 的 Tcl RPC 本来就是"一问一答、0x1A 收尾"，排队既安全又不会拖慢什么。
+     */
+    const run = () => new Promise((res, rej) => {
       if (!this.sock) return rej(new Error('OpenOCD 未连接'));
       let done = false;
       const t = setTimeout(() => { if (!done){ done = true; cleanup(); rej(new Error(`OpenOCD 命令超时：${line}`)); } }, timeout);
@@ -377,6 +390,9 @@ class OpenOcdBackend {
       this.sock.on('error', onErr);
       this.sock.write(line + '\n\x1a');
     });
+    const p = (this._rpcChain || Promise.resolve()).then(run, run);   // 前一条失败也要继续跑下一条
+    this._rpcChain = p.catch(() => {});                              // 链尾永远 resolved（不留未处理拒绝）
+    return p;
   }
 
   static _words(text){
@@ -846,7 +862,9 @@ const server = http.createServer((req, res) => {
   let p = decodeURIComponent((req.url || '/').split('?')[0]);
   if (p === '/' || p.endsWith('/')) p += 'index.html';
   const full = path.join(args.root, p);
-  if (!full.startsWith(path.resolve(args.root))){
+  // 前缀比较要带路径分隔符：否则 `E:\root-evil` 也能通过 startsWith（本地服务影响有限，顺手补上）
+  const rootAbs = path.resolve(args.root);
+  if (full !== rootAbs && !full.startsWith(rootAbs + path.sep)){
     res.writeHead(403).end('forbidden');
     return;
   }
@@ -863,8 +881,49 @@ const server = http.createServer((req, res) => {
 let backend = null;      // 当前后端（OpenOCD 或 J-Link）
 let client = null;       // 当前 WS 连接（单客户端足够）
 
+/* ============================ WebSocket 准入 ============================ */
+/** 默认放行的 Origin。**这不是可选项**：桥只监听 127.0.0.1 挡不住浏览器 ——
+ *  任意网页都能向 ws://127.0.0.1:17321/ws 发起跨源 WebSocket（CSWSH），
+ *  而这座桥能读目标内存、**还能烧固件**，等于把本机 OpenOCD/J-Link 借给随便哪个网页。 */
+const DEFAULT_ORIGINS = ['http://127.0.0.1', 'http://localhost', 'https://minichao9901.github.io'];
+function originAllowed(origin){
+  if (!origin) return true;                       // 非浏览器（curl/node 脚本）不带 Origin：本机工具，放行
+  if (origin === 'null') return true;             // file:// 打开的页面（Origin: null）
+  if (args.allowOrigin.includes(origin)) return true;
+  for (const base of [...DEFAULT_ORIGINS, ...args.allowOrigin]){
+    if (origin === base) return true;
+    // 端口不定：同一个主机名换端口也算同一个页面（本地起静态服务器时常见）
+    try { if (new URL(origin).hostname === new URL(base).hostname && base.startsWith('http://')) return true; } catch {}
+  }
+  return false;
+}
+
+/** 口令：默认不校验；给了 --token 就必须带对（query 或子协议都行）。
+ *  为什么两种都收：浏览器 `new WebSocket(url, protocols)` 能带子协议但页面改起来麻烦，
+ *  query 更顺手；两种都在 upgrade 阶段校验，不进来任何业务逻辑。 */
+function tokenOk(req){
+  if (!args.token) return true;
+  const u = new URL(req.url || '/', 'http://127.0.0.1');
+  if (u.searchParams.get('token') === args.token) return true;
+  const proto = String(req.headers['sec-websocket-protocol'] || '');
+  return proto.split(',').map(s => s.trim()).includes('bearer.' + args.token);
+}
+
 server.on('upgrade', (req, socket) => {
   if (!(req.url || '').startsWith('/ws')){ socket.destroy(); return; }
+  const origin = req.headers.origin;
+  if (!originAllowed(origin)){
+    console.warn(`[ws] 拒绝跨源连接：Origin=${origin}（要放行就加 --allow-origin ${origin}）`);
+    socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
+    socket.destroy();
+    return;
+  }
+  if (!tokenOk(req)){
+    console.warn('[ws] 拒绝连接：口令不对（--token 已启用；页面地址里加 ?token=…）');
+    socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
+    socket.destroy();
+    return;
+  }
   const key = req.headers['sec-websocket-key'];
   if (!key){ socket.destroy(); return; }
   const accept = crypto.createHash('sha1').update(key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64');

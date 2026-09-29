@@ -17,7 +17,57 @@
  *     尾块必须补 0xFF 到 32 字节的倍数，否则写不进去（F1/F4 那些 4 字节就够，别混）。
  *   · `flash_length` 取 128KB（H7B0 value line）。若你手上是 H7B3/H7A3（更大 flash），
  *     把这里改成 0x200000，并把 ld/ 里的 FLASH LENGTH 一起放大。
+ *
+ * 🚨 **`flash_length` 是算法自带的"标称区间"（来自 pyOCD 的 FlashRegion），不是芯片上限。**
+ *    pyOCD 里这一栏常常填的是该系列**最小**成员的大小（F4 只有 64KB、F7 128KB、L4 256KB），
+ *    拿它当范围检查的硬上限会把合法固件拒之门外，还给出"芯片选对了吗？"这种误导提示
+ *    （代码审查抓到）。所以：硬上限用下面的 `SERIES_MAX_KB`（该系列最大成员），
+ *    超过 `flash_length` 只是**提示**（真超了芯片会在编程时报错）。能读到 DEV_ID 的系列更准（见 F1）。
  */
+/** 各系列最大 flash（KB）—— 官方数据手册里的最大成员；用来兜底范围检查 */
+export const SERIES_MAX_KB = {
+  stm32f103: 1024,   // F103xG（XL 密度）
+  stm32f0: 256,
+  stm32f4: 2048,
+  stm32f7: 2048,
+  stm32h7: 2048,
+  stm32h7b0: 128,    // value line 就是 128KB
+  stm32l0: 192,
+  stm32l4: 1024,
+};
+
+/**
+ * 这段固件能不能烧进这个系列 —— 纯函数（不碰 DOM / 探针），Node 自测里钉住。
+ * @param {{flash_start:number, flash_length:number}} algo
+ * @param {{addr:number, data:{length:number}}} seg
+ * @param {{series?:string, devId?:number}} [opts] devId 只对 STM32F1 有意义（DEV_ID → 密度上限）
+ * @returns {{ok:boolean, limitBytes:number, beyondNominal:boolean, why?:string}}
+ */
+export function checkFlashRange(algo, seg, opts = {}){
+  const f1 = opts.series === 'stm32f103' && opts.devId != null ? F1_DEV[opts.devId & 0xfff] : null;
+  const limitKb = f1 ? f1.kb : (SERIES_MAX_KB[opts.series] || 0);
+  const limitBytes = limitKb > 0 ? limitKb * 1024 : algo.flash_length;
+  const end = seg.addr + (seg.data?.length || 0);
+  if (seg.addr < algo.flash_start){
+    return { ok: false, limitBytes, beyondNominal: false, why: 'below' };
+  }
+  if (end > algo.flash_start + limitBytes){
+    return { ok: false, limitBytes, beyondNominal: true, why: 'over' };
+  }
+  return { ok: true, limitBytes, beyondNominal: end > algo.flash_start + algo.flash_length };
+}
+
+/** STM32F1 的 DEV_ID → 擦除粒度 + flash 容量上限（与 OpenOCD 的 stm32f1x 同款做法）。
+ *  `kb` 是该密度档的最大容量 —— 读了 DEV_ID 就不再靠系列最大值猜。 */
+export const F1_DEV = {
+  0x410: { page: 1024, kb: 128, name: '中容量 64~128KB' },
+  0x412: { page: 1024, kb: 32,  name: '小容量 16~32KB' },
+  0x414: { page: 2048, kb: 512, name: '大容量 256~512KB' },
+  0x418: { page: 2048, kb: 256, name: '互联型 64~256KB' },
+  0x420: { page: 1024, kb: 128, name: '超值型 低/中容量' },
+  0x422: { page: 2048, kb: 512, name: '超值型 高容量' },
+  0x428: { page: 2048, kb: 1024, name: '超值型 XL 1MB' },
+};
 export const ALGOS = {
   "stm32f103": {
     "code": "AL4K4A14LQZoQAgkQAAA01hAZB760UkcUh4AKvLRcEc5SDhJQWA5SUFgACBwRzZJNCDIYAAgcEcAIHBHMkoAtRBpAAYB1f/36//QaMAH/NEQaUDwBAAQYRBpQPBAABBh0GjAB/zREGkg8AQAEGEAIAC9JUoAtQNGEGkABgHV//fP/9FoyQf80RBpQPACABBhU2EQaUDwQAAQYdBowAf80RBpIPACABBhACAAvXC1Fk0DRg5GKGkAJAAGAdX/97D/6GjAB/zRFOBA8AEAKGEQiBiA6GjAB/zREIgZiIhCBdAoaSDwAQAoYQEgcL2SHJscZBwoabTrVg/m0yDwAQAoYQAgcL0jAWdFACACQKuJ780AAAAA",

@@ -20,7 +20,7 @@ import { store } from '../core/store.js';
 import { CHIPS, fillChipSelect } from '../core/chips.js';
 import { BridgeClient } from '../rtt/bridge.js';
 import { WebUsbDapProbe, withTimeout } from '../rtt/dap-webusb.js';
-import { ALGOS } from './algos.js';
+import { ALGOS, F1_DEV, checkFlashRange } from './algos.js';
 import { FlashRunner } from './runner.js';
 import { parseFirmware } from './image.js';
 import { bytes as fBytes } from '../core/format.js';
@@ -233,22 +233,16 @@ export class FlashView {
      *    只对认得出的 STM32F1 生效，其它芯片一律按算法表来（不动）。
      */
     let pageSize = algo.page_size;
+    this._devId = null;
     try {
       const idb = await this.probe.readMem(0xE0042000, 4);
       const devId = (idb[0] | (idb[1] << 8)) & 0xfff;
-      const f1Page = {
-        0x410: 1024,   // 中容量 64~128KB  → 1KB/页
-        0x412: 1024,   // 小容量 16~32KB   → 1KB/页
-        0x414: 2048,   // 大容量 256~512KB → 2KB/页
-        0x418: 2048,   // 互联型
-        0x420: 1024,   // 超值型 低/中容量
-        0x422: 2048,   // 超值型 高容量
-        0x428: 2048,   // 超值型 XL
-      }[devId];
-      if (f1Page){
-        pageSize = f1Page;
-        if (f1Page !== algo.page_size){
-          this._log(`芯片 DEV_ID=0x${devId.toString(16)}（STM32F1）→ 擦除粒度按 ${f1Page}B/页，`
+      const info = F1_DEV[devId];
+      if (info){
+        pageSize = info.page;
+        this._devId = devId;                // 顺带把容量上限也定下来（比系列最大值准）
+        if (info.page !== algo.page_size){
+          this._log(`芯片 DEV_ID=0x${devId.toString(16)}（STM32F1 ${info.name}）→ 擦除粒度按 ${info.page}B/页，`
             + `不是算法表里的 ${algo.page_size}B（差这一档会让没擦到的页编程失败）`);
         }
       }
@@ -363,8 +357,22 @@ export class FlashView {
     return prev;
   }
 
-  _checkRange(seg, algo){    if (seg.addr < algo.flash_start || seg.addr + seg.data.length > algo.flash_start + algo.flash_length){
-      throw new Error(`固件地址 0x${seg.addr.toString(16)}… 超出 ${$('f-chip').value} 的 flash 范围（0x${algo.flash_start.toString(16)} 起 ${fBytes(algo.flash_length)}）—— 芯片选对了吗？`);
+  _checkRange(seg, algo){
+    const series = $('f-chip').value;
+    const r = checkFlashRange(algo, seg, { series, devId: this._devId });
+    if (!r.ok){
+      const lim = r.limitBytes;
+      throw new Error(`固件地址 0x${seg.addr.toString(16)}…0x${(seg.addr + seg.data.length).toString(16)} 超出 `
+        + `${series} 的 flash 范围（0x${algo.flash_start.toString(16)} 起 ${fBytes(lim)}`
+        + `${this._devId ? `，按芯片 DEV_ID=0x${this._devId.toString(16)} 判的` : ''}）—— 芯片选对了吗？`
+        + `（要放宽就选对芯片型号，或改 algos.js 里的 SERIES_MAX_KB）`);
+    }
+    // 越过算法自带标称区间只是**提示**：pyOCD 那份常按系列最小成员填（F4 = 64KB），
+    // 硬拦会拒掉合法固件；真超了芯片自己会在编程时报错。
+    if (r.beyondNominal){
+      this._log(`提示：固件末端 0x${(seg.addr + seg.data.length).toString(16)} 越过算法表标称的 `
+        + `${fBytes(algo.flash_length)}（算法自带区间，常按系列最小成员填）—— 只要芯片真有这么大就能烧，`
+        + `小容量型号会在编程时报错`);
     }
   }
 

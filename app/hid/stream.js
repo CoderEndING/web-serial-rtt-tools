@@ -206,11 +206,13 @@ export class RttCdcStreamView {
   _setSuppressed(on, r = 0){
     if (this.suppressed === on) return;
     this.suppressed = on;
-    this.rx.setDisplayOff(on);
     if (on){
+      this.rx.setDisplayOff(true);
       setStatus($('c-err'), `高速 ${fRate(r)}：渲染已停（收数/记录不受影响）· 点此恢复显示`, 'err');
       $('c-err').title = '点击恢复显示。速率仍高于阈值时会再次自动关闭';
     } else {
+      // 🚨 先取计数再关抑制：setDisplayOff(false) 会把 suppressedBytes 清零，
+      //    先关再读恒为 0 → 这句提示永远不显示（代码审查抓到的，串口助手那边同款）
       const skipped = this.rx.suppressedBytes;
       this.rx.setDisplayOff(false);
       if (this.ansiOn && this.term && skipped > 0){

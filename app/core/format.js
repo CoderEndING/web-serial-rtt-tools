@@ -2,12 +2,26 @@
 
 export function pad(n, w = 2){ return String(n).padStart(w, '0'); }
 
-/** 相对时间 hh:mm:ss.mmm（从页面打开算起也够用，这里给的是当天时间） */
+/** 页面打开时刻（本模块加载 ≈ 页面打开）：相对时间戳的零点 */
+const T0 = Date.now();
+
+/**
+ * 时间戳。
+ *   `absolute = false`（默认）→ **自页面打开起**的累计时间：`+mm:ss.mmm`（超一小时 `+hh:mm:ss.mmm`）
+ *   `absolute = true`          → 当天钟点（绝对时间）：`hh:mm:ss.mmm`
+ *
+ * 🚨 早先这两个分支**一模一样**（都返回钟点），等于页面上那个「绝对时间」复选框是个摆设
+ *    （代码审查抓到的："勾了没有任何效果"）。既然控件在，就把语义做实：
+ *    默认给相对时间（排查时序时"这条比上一条晚多久"比钟点有用），勾上给当天钟点。
+ */
 export function stamp(d = new Date(), absolute = false){
-  const t = absolute
-    ? `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
-    : `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
-  return `${t}.${pad(d.getMilliseconds(), 3)}`;
+  const hhmmss = `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  if (absolute) return `${hhmmss}.${pad(d.getMilliseconds(), 3)}`;
+  const el = Math.max(0, d.getTime() - T0);
+  const ms = el % 1000;
+  const sec = Math.floor(el / 1000);
+  const h = Math.floor(sec / 3600), m = Math.floor(sec / 60) % 60, s = sec % 60;
+  return `+${h > 0 ? pad(h) + ':' : ''}${pad(m)}:${pad(s)}.${pad(ms, 3)}`;
 }
 
 export function bytes(n){

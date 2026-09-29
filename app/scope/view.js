@@ -63,6 +63,7 @@ export class ScopeView {
     this._needDraw = true;
     this._lastPktT = null;      // 上一包的起始时刻 / 帧数（用来估包内真实间隔，见 DATA 分支）
     this._lastPktN = 0;
+    this._capturing = false;    // 本轮采集还开着吗（DATA 分支据此决定入不入缓冲，见 start/stop）
   }
 
   // ================================================================= 初始化
@@ -272,6 +273,13 @@ export class ScopeView {
     if (this.usingMock){ this.setStatusText('假探针模式下不需要连真探针', 'warn'); return; }
     try {
       if (!AkaLinkHid.supported()) throw new Error('这个浏览器没有 WebHID（桌面版 Chrome / Edge 才有）');
+      /**
+       * 🚨 每次都 new 一个 `AkaLinkHid`，**旧的要先 close()**：老代码不关，
+       *    旧 device 的 `inputreport` 监听和 `navigator.hid` 的 disconnect 监听会一直留着
+       *    （代码审查抓到的）。用户反复点「重连」就会叠一层，旧句柄的回包还会去动 `_pending`。
+       */
+      const old = this.hid;
+      if (old && old !== this.mockProbe){ try { await old.close(); } catch {} this.hid = null; }
       const hid = new AkaLinkHid();
       // 探针被复位/拔插 → 浏览器会发 disconnect：立刻把状态写清楚，别等用户点开始采样才报一句英文错
       hid.onDisconnect = () => {
@@ -330,7 +338,13 @@ export class ScopeView {
   setMock(on){
     this.usingMock = !!on;
     this.running = false;
+    this._capturing = false;
+    // 换模式先把旧的链路收干净（代码审查：切来切去会漏监听器/漏定时器）
+    const oldT = this.transport;
+    if (oldT) { this.transport = null; oldT.stop?.().catch?.(() => {}); }
     if (on){
+      // 真实 HID 句柄要让位：它的 inputreport / disconnect 监听不能一直挂着（切回真机时重连即可）
+      if (this.hid && this.hid !== this.mockProbe){ const old = this.hid; this.hid = null; old.close?.().catch?.(() => {}); }
       this.mockProbe = this.mockProbe || this.mockFactory({ periodUs: this.periodUs(), startDelayPolls: 1 });
       this.hid = this.mockProbe;
       this.transport = new MockTransport({ probe: this.mockProbe });
@@ -338,8 +352,7 @@ export class ScopeView {
       $('sc-usbinfo').textContent = '假探针模式：数据由页面生成';
       this.setStatusText('已切到假探针：选变量 → 开始采样 即可看到波形', 'ok');
     } else {
-      this.hid = null;
-      this.transport = null;
+      if (this.hid === this.mockProbe) this.hid = null;
       $('sc-info').textContent = '未连接';
       $('sc-usbinfo').textContent = '未连接数据端点（假探针模式不需要）';
       this.setStatusText('已切回真机模式：先连探针，再连数据端点', '');
@@ -568,6 +581,14 @@ export class ScopeView {
        */
       await this.transport.start(chunk => this.onChunk(chunk));
       this._awaitDefSince = performance.now();
+      /**
+       * 「本轮采集还开着」的开关（DATA 分支据此决定要不要入缓冲）。
+       * 🚨 不能用 `this.running` 当这个开关：DEF 到了之后、START 的 STATUS 轮询（120~240 ms）
+       *    还没 resolve 的这段时间里 running 仍是 false —— 那批**新一轮的真实数据**会被整包丢掉
+       *    （起跑段样本缺失、触发也晚布防）。丢掉上一轮残留的职责已经由 `_awaitDef` 承担。
+       *    而收工后（stop 里把 _capturing 置 false）又必须真的不入缓冲 —— 见 DATA 分支。
+       */
+      this._capturing = true;
 
       let rc = P.START_PENDING;
       await this.hidXfer(P.HID_CMD, P.flagsData(P.ACT.START));
@@ -577,6 +598,7 @@ export class ScopeView {
         rc = this.signed(res?.[2]);
       }
       if (rc < 0 && rc !== P.START_PENDING){
+        this._capturing = false;
         await this.transport.stop().catch(() => {});
         this.setStatusText('探针启动失败：' + P.scopeRcText(rc), 'err');
         return;
@@ -605,6 +627,7 @@ export class ScopeView {
   async stop(reason){
     if (!this.running && !this.transport?.running) return;
     this.running = false;
+    this._capturing = false;                 // DATA 分支据此停止入缓冲（见那里的说明）
     // 先给个即时反馈：后面两个 await（排空 + HID STOP）要几十毫秒，这期间界面上不该还写着"采样中"
     this.setStatusText('正在停止…', '');
     try { await this.transport.stop(); } catch { /* 忽略 */ }
@@ -801,9 +824,10 @@ export class ScopeView {
            * 🚨 收工之后**不再往缓冲里塞**。stop() 是异步的（要等 transport.stop() 排空、还要发 HID STOP），
            *    这期间设备和已排队的分片还在送包 —— 实测"时长到 5.001 s"之后又灌进来 1612 个样本，
            *    还把缓冲挤满（界面显示 100% + 溢出计数），停下来那一刻的数字全不可信。
-           *    起跑阶段（running=false）本来也只吃 DEF 当起跑线，DATA 丢掉正是要的行为。
+           *    注意用 `_capturing` 而不是 `running`：起跑阶段（DEF 已到、START 还没 resolve）的新数据要收，
+           *    但收工之后一律不收（`_capturing` 在 start 里打开、stop 里关掉）。
            */
-          if (!this.running) break;
+          if (!this._capturing) break;
           if (this.defMismatch) break;              // 变量表对不上：不解码（见 DEF 分支的说明）
           const vars = this.defVars || this.store?.vars;
           if (!vars?.length) break;

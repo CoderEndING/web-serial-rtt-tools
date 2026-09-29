@@ -224,6 +224,9 @@ node tools\selftest\gen-parity.mjs
 # 1c) akaLinkPro 自定义 HID 协议（RTT→CDC 转发）：组包 / 状态字 / 假探针流程
 node tools\selftest\hid-proto.test.mjs
 
+# 1d) 桥的 WebSocket 准入（Origin 白名单 + 口令）：自己拉一个桥实例只做握手，不碰硬件
+node tools\selftest\bridge-origin.test.mjs
+
 # 2) 页面端到端（内置演示串口，无需硬件）
 python -m http.server 8899 --bind 127.0.0.1        # 仓库根
 pwsh -File tools\selftest\launch-browser.ps1

@@ -194,21 +194,29 @@ export class Rtt {
     if (n === 0) return empty;
 
     let data;
-    if (e.rd + n <= e.size){
-      data = await this.mem.readMem(e.pbuf + e.rd, n);
-    } else {                                                 // 绕回：分两段读
+    /**
+     * 读一段上行数据：**绕回时必须分两段读**（缓冲末端 + 开头）。
+     * 抽成函数是因为下面的"错位读重试"也得走同一条路 —— 老代码重试只读了
+     * `readMem(pbuf + rd, n)` 单段，绕回时那会跨过缓冲末端去读相邻内存：
+     * 只要重试回来的内容里恰好没有 "SEGGER RTT" 签名，就被当成正常数据用掉并推进 RdOff，
+     * 于是**未绕回的错误数据静默进了日志**（代码审查抓到的）。
+     */
+    const readSpan = async () => {
+      if (e.rd + n <= e.size) return await this.mem.readMem(e.pbuf + e.rd, n);
       const n1 = e.size - e.rd;
       const a = await this.mem.readMem(e.pbuf + e.rd, n1);
       const b = await this.mem.readMem(e.pbuf, n - n1);
-      data = new Uint8Array(a.length + b.length);
-      data.set(a); data.set(b, a.length);
-    }
+      const out = new Uint8Array(a.length + b.length);
+      out.set(a); out.set(b, a.length);
+      return out;
+    };
+    data = await readSpan();
 
     // 错位读防护：高速下 SWD 偶发把别的地址内容读回来，最明显的指纹是数据里混进了
     // 控制块签名 "SEGGER RTT"（真实日志里极少出现这个字符串）。整段丢弃、**不推进 RdOff**
     // —— 下一轮会原样重读，数据不丢；若时钟太高持续出错，表现为 corrupt 一直涨，提示降时钟。
     if (Rtt._looksCorrupt(data)){
-      const retry = await this.mem.readMem(e.pbuf + e.rd, n);   // 先立即重读一次
+      const retry = await readSpan();                          // 先立即重读一次（同样两段逻辑）
       if (Rtt._looksCorrupt(retry)){
         return { ...empty, corrupt: true };
       }

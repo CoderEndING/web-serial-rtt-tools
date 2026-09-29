@@ -243,7 +243,11 @@ export class Dwarf {
       case FORM.ref8: return { form, value: cu.offset + r.u64() };
       case FORM.ref_udata: return { form, value: cu.offset + r.uleb() };
       case FORM.ref_addr: return { form, value: r.u32(), unresolved: true };
-      case FORM.ref_sig8: r.skip(8); return { form, value: null };
+      // DWARF4 的 type unit 签名（GCC -fdebug-types-section 会出现）：
+      // 8 字节签名我们不解析类型，但**必须把游标跳过**，否则后面全乱。
+      // 🚨 这里原来写的是 `r.skip(8)` —— R 类根本没这个方法，遇到它就 TypeError
+      //    把"支持的表单"变成解析崩溃（代码审查抓到的）。
+      case FORM.ref_sig8: r.bytes(8); return { form, value: null };
       case FORM.implicit_const: return { form, value: ic };
       case FORM.indirect: { const f2 = r.uleb(); return this._value(r, f2, ic, cu); }
       default:
