@@ -25,7 +25,7 @@ FW_DIR   = tools/target-firmware/stm32f103
 LA       = tools/la/kingst_la.py
 
 .DEFAULT_GOAL := help
-.PHONY: help serve serve-stop browser open test test-ui test-gen test-gen-page test-hid test-dwarf test-scope test-scope-page test-hw test-bridge test-bridge-gate test-all \
+.PHONY: help serve serve-stop browser open test test-ui test-gen test-gen-page test-hid test-dwarf test-scope test-scope-page test-hw test-bridge test-bridge-gate test-hpm test-all \
         bridge bridge-stop fw-build fw-flash fw-restore fw-h7-build fw-h7-slow fw-h7-flash \
         algo-check flash-plan la-info la-capture git-status git-log check clean
 
@@ -55,6 +55,15 @@ test:
 	$(NODE) tools/selftest/dwarf.test.mjs
 	$(NODE) tools/selftest/scope-proto.test.mjs
 	$(NODE) tools/selftest/bridge-origin.test.mjs
+	$(NODE) tools/selftest/hpm-flash.test.mjs
+
+# HPM（RISC-V）零安装烧录：跑在模拟 DTM + 模拟 XPI flash 上（不需要探针/板子）
+test-hpm:
+	$(NODE) tools/selftest/hpm-flash.test.mjs
+
+# 重新构建 HPM flashloader（需要 HPM SDK + RISC-V 工具链），并刷新 app/flash/hpm/algo.js
+hpm-algo:
+	pwsh -NoProfile -File tools/target-firmware/hpm_flash_algo/build.ps1
 
 # 桥的 WebSocket 准入（Origin 白名单 + 口令）：纯离线，自己拉一个桥实例只做握手
 test-bridge-gate:

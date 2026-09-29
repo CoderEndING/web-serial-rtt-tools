@@ -59,6 +59,24 @@ console.log('== 1. 采样计划（读计划 = 速率的最大杠杆）==');
   ok(P.planHash(pack) === P.planHash([...pack].reverse()), '计划指纹与变量顺序无关');
   ok(P.planHash(pack) !== P.planHash(mixed), '不同计划指纹不同');
 
+  // ---- RISC-V/JTAG 目标（web-handoff-riscv-scope.md）----
+  ok(P.SCOPE_FLAG.RISCV === 0x40, 'action 7 flags bit6 = 强制 RISC-V/JTAG');
+  ok(P.SCOPE_FLAG.DISCARD === 0x02 && P.SCOPE_FLAG.CDC_OFF === 0x20, 'DISCARD/CDC_OFF 位与固件一致');
+  const rvDef = P.parseDef(P.buildDef({ seq: 1, periodUs: 100, flags: P.SCOPE_FLAG.RISCV, vars: pack.slice(0, 2), spans: 1 }).subarray(16));
+  ok(rvDef.riscv === true, 'DEF flags bit6 → **生效**后端 = RISC-V（不是你下发的那个）');
+  const swdDef = P.parseDef(P.buildDef({ seq: 1, swdHz: 6e7, periodUs: 100, flags: 0, vars: pack.slice(0, 2), spans: 1 }).subarray(16));
+  ok(swdDef.riscv === false, 'DEF flags bit6 = 0 → SWD/ARM');
+  ok(Array.from(P.targetTypeData(true)).join(',') === '10,1' &&
+     Array.from(P.targetTypeData(false)).join(',') === '10,0' &&
+     P.HID_CMD_RTT === 0x31,
+     '目标类型切换走 HID **0x31** action 10（不是 0x32），Byte[3]=10 / Byte[4]=0|1');
+  // RISC-V 的实测分档必须比 SWD 慢得多（拿 SWD 的数去建议周期会大面积丢拍）
+  ok(P.BACKEND_COST.riscv.single > P.BACKEND_COST.swd.single * 1.5 &&
+     P.BACKEND_COST.riscv.pack8 > P.BACKEND_COST.swd.pack8 * 3,
+     `后端分档：SWD ${P.BACKEND_COST.swd.single}/${P.BACKEND_COST.swd.pack8} µs vs ` +
+     `RISC-V ${P.BACKEND_COST.riscv.single}/${P.BACKEND_COST.riscv.pack8} µs`);
+  ok(P.backendName('riscv') === 'RISC-V/JTAG' && P.backendName('swd') === 'SWD/ARM', '后端显示名');
+
   // 单字流水读快路径：模型按"3 次传输"算 6.7 µs，实测只要 1.53 µs —— 计划行必须用后者，
   // 否则一个能跑的周期会被说成跑不动（用户被"建议周期 ≥ 11 µs"挡在 3 µs 门外，而他实测零丢）
   const one4 = P.planReads([{ name: 'f_sin', addr: 0x20001014, size: 4, scalar: 'f32' }]);
@@ -225,6 +243,14 @@ console.log('== 5. HID 0x32 控制面 ==');
     return b;
   })());
   ok(st2.nspans === 2 && st2.nvars === 7, 'w0 的位域：nspans 与 nvars（与固件 scope_sampler_status 一致）');
+  ok(st2.riscv === false, 'w0 bit1 = 0 → SWD/ARM 后端');
+  const st3 = P.parseScopeStatus((() => {
+    const b = new Uint8Array(48);
+    new DataView(b.buffer).setUint32(0, 1 | 2, true);  // running + bit1 = RISC-V
+    return b;
+  })());
+  ok(st3.riscv === true && st3.running === true,
+     'w0 bit1 = 1 → 生效后端是 RISC-V/JTAG（web-handoff-riscv-scope.md 第 1 条）');
   ok(P.scopeRcText(-100).includes('启动中'), '-100 = "启动中"而不是错误');
   ok(P.scopeRcText(-3).includes('变量表'), '-3 的文案指向"变量表为空"');
   ok(P.scopeRcText(0) === '正常', 'rc=0 正常');

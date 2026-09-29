@@ -64,6 +64,8 @@ export class ScopeView {
     this._lastPktT = null;      // 上一包的起始时刻 / 帧数（用来估包内真实间隔，见 DATA 分支）
     this._lastPktN = 0;
     this._capturing = false;    // 本轮采集还开着吗（DATA 分支据此决定入不入缓冲，见 start/stop）
+    this.backend = null;        // **生效**后端：swd | riscv（只认探针回报的 DEF flags bit6 / 状态字 0 bit1）
+    this.targetRiscv = null;    // 我们**请求**的目标类型（用于发现"请求 ≠ 生效"）
   }
 
   // ================================================================= 初始化
@@ -101,6 +103,7 @@ export class ScopeView {
     $('sc-search').addEventListener('input', () => this.renderVars());
     $('sc-start').addEventListener('click', () => this.start());
     $('sc-stop').addEventListener('click', () => this.stop());
+    $('sc-target').addEventListener('change', () => this.applyTargetType());
     $('sc-bench').addEventListener('click', () => this.bench());
     $('sc-recc').addEventListener('click', () => this.applyRecPeriod());
     $('sc-clear').addEventListener('click', () => this.clear());
@@ -441,6 +444,7 @@ export class ScopeView {
      */
     const useFast = plan.fastPath;
     const headlineUs = plan.bestUs, headlineHz = plan.bestHz;
+    const riscv = this.backend === P.BACKEND.RISCV;
     /**
      * 周期比"读一次"还短 ⇒ 探针必然跳拍，时间轴上会留空洞（主机看到的是洞，不是被压缩）。
      * 用户实测就是踩在这里：周期填 5 µs 想要 200 kHz，实得 112.9 kHz，
@@ -448,7 +452,7 @@ export class ScopeView {
      */
     const wantHz = 1e6 / this.periodUs();
     // 🚨 标定值只在"测的就是当前这套变量 + 时钟"时才算数（见 benchFresh）
-    const fresh = this.benchFresh();
+    const fresh = this.benchFresh() && !riscv;    // RISC-V 下标定走的是 SWD 路径，直接不用
     const estUs = (fresh && this.benchUs) || plan.bestUs;
     const srcName = (fresh && this.benchUs) ? '标定值' : (useFast ? '单字快路径实测' : '模型估算');
     const slow = wantHz > 1e6 / estUs
@@ -456,23 +460,40 @@ export class ScopeView {
         `探针会跳拍，实得约 ${(1e6 / estUs / 1000).toFixed(1)} kHz（时长仍按真实时间轴算，不会拖长）`
       : '';
     const benchTxt = this.benchUs
-      ? (fresh
-          ? ` · <b>已标定：读一次 ${this.benchUs.toFixed(3)} µs</b>（上限 ${Math.round(1e3 / this.benchUs)} kHz，建议周期 ≥ ${this.recPeriodUsFor(estUs)} µs）`
-          : ` · <s>已标定 ${this.benchUs.toFixed(3)} µs</s> <b>已失效</b>（那是「${(this._benchKey || {}).vars} @${(this._benchKey || {}).clock} kHz」测的，${this.benchKeyWhy()} —— 重新点「标定真实速率」）`)
+      ? (riscv
+          ? ` · <s>已标定 ${this.benchUs.toFixed(3)} µs</s>（那是 **SWD** 路径的数字，RISC-V 下不适用）`
+          : fresh
+            ? ` · <b>已标定：读一次 ${this.benchUs.toFixed(3)} µs</b>（上限 ${Math.round(1e3 / this.benchUs)} kHz，建议周期 ≥ ${this.recPeriodUsFor(estUs)} µs）`
+            : ` · <s>已标定 ${this.benchUs.toFixed(3)} µs</s> <b>已失效</b>（那是「${(this._benchKey || {}).vars} @${(this._benchKey || {}).clock} kHz」测的，${this.benchKeyWhy()} —— 重新点「标定真实速率」）`)
       : '';
-    $('sc-plan').innerHTML = vars.length
-      ? `读计划：${plan.spans.length} 个 span / 帧 ${plan.frameBytes} B · ` +
-        (useFast
+    /**
+     * RISC-V/JTAG 下计划行的写法：
+     *   · 没有 SWD 那套"3 次传输"模型，也没有 SWD 时钟档 —— 直接给**实测分档**
+     *     （单字 2.94 µs / 8 通道 45.6 µs），并说明零丢建议取 ≥1.5×；
+     *   · 顺带把"周期下限 2 µs"（SWD 流水读的下限）换成 JTAG 的说法，否则用户会照着 2 µs 填然后大面积丢拍。
+     */
+    const rv = P.BACKEND_COST.riscv;
+    const planTxt = riscv
+      ? (plan.fastPath
+          ? `单字 span：RISC-V/JTAG 实测 ≈${rv.single} µs/样本 → ≈${Math.round(1e6 / rv.single / 1000)} kHz`
+          : `RISC-V/JTAG 实测分档：单变量 ≈${rv.single} µs（≈${Math.round(1e6 / rv.single / 1000)} kHz）· `
+            + `8 通道同结构体 ≈${rv.pack8} µs（≈${(1e6 / rv.pack8 / 1000).toFixed(1)} kHz）`) +
+        '（零丢建议周期 ≥ 1.5× 这个值）'
+      : (useFast
           ? `单字 span 走固件**流水快路径**：实测 ≈${headlineUs.toFixed(2)} µs/样本 → ≈${Math.round(headlineHz / 1000)} kHz` +
             `（保守模型算 ${plan.estUs.toFixed(1)} µs，那是按 3 次传输估的）`
           : `模型估算 ≈${plan.estUs.toFixed(1)} µs/样本 → ≈${khz} kHz` +
             (plan.spans.length === 1 && plan.frameBytes <= 4
               ? '（快路径要求整段正好 4 字节且 4 字节对齐，这个计划用不上）'
-              : '（模型按 3 次传输估，偏保守；真值以「标定真实速率」为准）')) +
-        (plan.saved > 0.15 ? `（合并省了 ${(plan.saved * 100).toFixed(0)}%）` : '') +
+              : '（模型按 3 次传输估，偏保守；真值以「标定真实速率」为准）'));
+    $('sc-plan').innerHTML = vars.length
+      ? `读计划：${plan.spans.length} 个 span / 帧 ${plan.frameBytes} B · ` + planTxt +
+        (!riscv && plan.saved > 0.15 ? `（合并省了 ${(plan.saved * 100).toFixed(0)}%）` : '') +
         benchTxt +
         '<br>时长 = **目标侧真实时间**，到点自动停（缓冲只是内存上限）' +
-        (slow || '（周期下限 2 µs；周期 < 读一次的耗时就会跳拍丢样本）')
+        (slow || (riscv
+          ? `（JTAG 下没有"2 µs 下限"那回事：单字实测 ${rv.single} µs，填得比它短就是跳拍丢样本）`
+          : '（周期下限 2 µs；周期 < 读一次的耗时就会跳拍丢样本）'))
       : '选好变量后会显示读计划与预计上限';
     // 触发通道下拉跟着变量走
     const sel = $('sc-trig-ch');
@@ -567,9 +588,16 @@ export class ScopeView {
 
     try {
       const clockKhz = Number($('sc-clock').value) || 0;
-      // flags：bit0 允许 60 MHz；bit5 采样期间自动暂停 CDC/串口桥（探针主循环那几百周期）
-      const flags = (clockKhz >= 60000 ? 1 : 0) | ($('sc-cdcoff')?.checked ? 0x20 : 0);
-      if (clockKhz > 0) await this.hidXfer(P.HID_CMD, P.clockData(clockKhz * 1000));
+      /**
+       * flags：bit0 允许 60 MHz；bit4 SWD 空闲拍压 0；bit5 采样时暂停 CDC/串口桥；
+       *        **bit6 强制本次会话走 RISC-V/JTAG**（不带就跟随全局目标类型）。
+       * 带上 bit6 是"双保险"：万一全局类型还是 SWD，这一条也能把它拧到 RISC-V；探针拉不起来时
+       * 会自己换另一条路重试，所以我们只把**请求**发下去，显示一律用探针回报的生效值。
+       */
+      const flags = (clockKhz >= 60000 ? P.SCOPE_FLAG.ALLOW_60M : 0)
+        | ($('sc-cdcoff')?.checked ? P.SCOPE_FLAG.CDC_OFF : 0)
+        | (this.targetRiscv ? P.SCOPE_FLAG.RISCV : 0);
+      if (clockKhz > 0 && this.backend !== P.BACKEND.RISCV) await this.hidXfer(P.HID_CMD, P.clockData(clockKhz * 1000));
       await this.hidXfer(P.HID_CMD, P.configData({ periodUs, flags, vars }));
 
       /**
@@ -596,6 +624,7 @@ export class ScopeView {
         await sleep(120);
         const res = await this.hidXfer(P.HID_CMD, P.flagsData(P.ACT.STATUS));
         rc = this.signed(res?.[2]);
+        this._absorbeStatusBackend(res);        // 状态字 0 bit1 = 生效后端（丢弃模式没有 DEF，就靠它）
       }
       if (rc < 0 && rc !== P.START_PENDING){
         this._capturing = false;
@@ -644,10 +673,79 @@ export class ScopeView {
     this._needDraw = true;
   }
 
-  /** 标定的"身份"：测的是哪套变量 + 哪个时钟档。变了就不算数（见 benchFresh）。*/
+  /**
+   * 切换探针的**全局目标类型**（HID 0x31 action 10，与 RTT-over-JTAG 共用同一个开关）。
+   * 采样器（0x32）的传输后端 = 这个全局值，所以波形页也得能切 —— 否则用户只能去 RTT 页切。
+   * ⚠️ 粘性 + "请求 ≠ 生效"：切完只记下**请求**，显示仍等探针回报（DEF flags bit6 / 状态字 0 bit1）。
+   */
+  async applyTargetType(){
+    const sel = $('sc-target');
+    const riscv = sel.value === 'riscv';
+    this.targetRiscv = riscv;
+    if (!this.hid){ this.setStatusText(`已记为「${P.backendName(riscv ? P.BACKEND.RISCV : P.BACKEND.SWD)}」，但探针没连上——连上后再切一次`, 'warn'); return; }
+    if (this.running){ this.setStatusText('采样中不能切目标类型：先停采样', 'warn'); }
+    try {
+      await this.hidXfer(P.HID_CMD_RTT, P.targetTypeData(riscv));
+      this.setStatusText(`已请求切到 ${P.backendName(riscv ? P.BACKEND.RISCV : P.BACKEND.SWD)}（HID 0x31 action 10）——`
+        + ' 探针侧目标类型是粘的；下次采样时看「生效后端」是否跟上了', 'ok');
+    } catch (e){
+      this.setStatusText('切目标类型失败：' + (e?.message || e), 'err');
+    }
+    this._applyBackendUi();
+  }
+
+  /** HID 0x32 状态回包 → 生效后端（状态字 0 的 bit1）。
+   *  为什么两条路都要：DEF 只在正常采样时发；**丢弃模式没有 DEF 包**，那时只能看状态字。*/
+  _absorbeStatusBackend(res){
+    try {
+      if (!res || res.length < 3 + 4) return;
+      const w0 = new DataView(res.buffer, res.byteOffset + 3, 4).getUint32(0, true);
+      this.setBackend((w0 & 2) ? P.BACKEND.RISCV : P.BACKEND.SWD, '状态字 0');
+    } catch { /* 回包形状不对就当没看见 */ }
+  }
+
+  /** 生效后端（SWD/ARM 或 RISC-V/JTAG）——只认探针回报的值，不拿自己下发的 flags 反推。
+   *  来源两处：DEF 的 flags bit6、HID 状态字 0 的 bit1（丢弃模式没有 DEF，就靠后者）。*/
+  setBackend(b, source = ''){
+    if (!b || this.backend === b) return;
+    const first = this.backend === null;
+    this.backend = b;
+    this._applyBackendUi();
+    if (!first){
+      this.setStatusText(`⚠ 后端变成了 ${P.backendName(b)}（${source || '探针回报'}）—— `
+        + `目标类型是**粘的**，探针拉不起来时会自己换另一条路重试`, 'warn');
+    }
+  }
+
+  /** 后端相关的界面联动：显示、SWD 专属控件置灰、速率/建议周期提示 */
+  _applyBackendUi(){
+    const riscv = this.backend === P.BACKEND.RISCV;
+    const el = $('sc-backend');
+    if (el){
+      const asked = this.targetRiscv == null ? null : (this.targetRiscv ? P.BACKEND.RISCV : P.BACKEND.SWD);
+      const mismatch = asked && this.backend && asked !== this.backend;
+      el.textContent = this.backend
+        ? `生效后端：${P.backendName(this.backend)}` + (mismatch ? `　⚠ 你选的是 ${P.backendName(asked)}，探针换了一条路` : '')
+        : '生效后端：未开始（采样后由探针回报）';
+      el.className = 'hint' + (mismatch ? ' err' : '');
+    }
+    // SWD 专属：SWD 时钟档在 JTAG 下无效（探针忽略），置灰并说明；采样时暂停串口桥那个 checkbox 仍有效
+    const clk = $('sc-clock');
+    if (clk){
+      clk.disabled = riscv;
+      clk.title = riscv
+        ? 'RISC-V/JTAG 下无意义：JTAG 时序由 DMI 汇编旋钮 + delay 决定，探针会忽略这个档位'
+        : '与 RTT Viewer 同款档位；固件自带失败自动降档';
+    }
+    const clkRow = $('sc-clock-row');
+    if (clkRow) clkRow.classList.toggle('off', riscv);
+    this.updatePlan();                      // 计划行的速率/建议周期按后端分档
+  }
   benchKeyOf(){
     const vars = (this.selected.length ? this.selected : this.mockVars()).map(v => v.name).sort().join('+');
-    return { vars: vars || '（空）', clock: Number($('sc-clock').value) || 0 };
+    // 后端也算"身份"的一部分：SWD 与 RISC-V 的每样本耗时差好几倍（1.53 vs 2.94 µs），
+    // 换了后端还沿用旧标定值，就会给出错误的建议周期
+    return { vars: vars || '（空）', clock: Number($('sc-clock').value) || 0, backend: this.backend || 'swd' };
   }
 
   /**
@@ -658,23 +756,30 @@ export class ScopeView {
   benchFresh(){
     const k = this.benchKeyOf();
     return !!(this.benchUs && this._benchKey &&
-              this._benchKey.vars === k.vars && this._benchKey.clock === k.clock);
+              this._benchKey.vars === k.vars && this._benchKey.clock === k.clock &&
+              (this._benchKey.backend || 'swd') === k.backend);
   }
 
   benchKeyWhy(){
-    const k = this.benchKeyOf(), o = this._benchKey || { vars: '?', clock: 0 };
+    const k = this.benchKeyOf(), o = this._benchKey || { vars: '?', clock: 0, backend: 'swd' };
     const parts = [];
     if (o.vars !== k.vars) parts.push(`变量从「${o.vars}」变成「${k.vars}」`);
     if (o.clock !== k.clock) parts.push(`时钟从 ${o.clock} kHz 变成 ${k.clock} kHz`);
+    if ((o.backend || 'swd') !== k.backend) parts.push(`后端从 ${P.backendName(o.backend || 'swd')} 变成 ${P.backendName(k.backend)}`);
     return parts.join('、') || '条件变了';
   }
 
   /**
-   * 单字流水读路径的成本（µs）随 SWD 时钟走。真机两点实测：60 MHz → 1.533 µs、45 MHz → 1.758 µs，
-   * 按 `a + b/f` 拟合（a = 0.86 µs 固定开销、b = 40.5 µs·MHz ≈ 一次 AP 读 + 收尾的时钟数）。
-   * 没显式选档（"自动"）就用最近一次探针回报的实际 MHz，再退到 60 MHz 档。
+   * 单字流水读路径的成本（µs）。
+   *   · SWD：随时钟档走。真机两点实测 60 MHz → 1.533 µs、45 MHz → 1.758 µs，
+   *     按 `a + b/f` 拟合（a = 0.86 µs 固定开销、b = 40.5 µs·MHz ≈ 一次 AP 读 + 收尾的时钟数）；
+   *     没显式选档（"自动"）就用最近一次探针回报的实际 MHz，再退到 60 MHz 档。
+   *   · RISC-V/JTAG：单字流水读实测 **2.937 µs**（HPM6800EVK），与 SWD 时钟档无关
+   *     （JTAG 时序由 DMI 汇编旋钮定），所以直接用常数 —— 拿 SWD 的 1.5 µs 去建议周期
+   *     会让用户看到大面积丢拍（handoff 文档第 2 条明确提过）。
    */
   fastWordUs(){
+    if (this.backend === P.BACKEND.RISCV) return P.BACKEND_COST.riscv.single;
     const sel = Number($('sc-clock').value) || 0;
     const mhz = sel > 0 ? sel / 1000 : (this.swdMhz || 60);
     return mhz > 0 ? +(0.858 + 40.5 / mhz).toFixed(3) : 1.55;
@@ -683,7 +788,8 @@ export class ScopeView {
   /** 建议周期 = 单次采样耗时 × 1.15 + 1 µs（留余量给探针主循环的 USB/HID/按键那些活）。
    *  为什么要"+1"而不是纯比例：周期贴着耗时跑，主循环里一有别的活儿就跳拍丢样本；
    *  实测单变量 1.54 µs 时 2 µs 档会丢 ~11%，而 3 µs 档是零丢 —— 所以给一个绝对余量。
-   *  下限 3 µs（固件钳位是 2 µs，但 2 µs 只建议在"就想要最高速率、接受丢样本"时用）。*/
+   *  下限 3 µs（固件钳位是 2 µs，但 2 µs 只建议在"就想要最高速率、接受丢样本"时用）。
+   *  RISC-V 下 ≥1.5× 就够（handoff 文档的建议），这里同一个公式给到 2.94×1.15+1 ≈ 5 µs，合适。*/
   recPeriodUsFor(us){ return us > 0 ? Math.max(3, Math.ceil(us * 1.15) + 1) : null; }
 
   /** 自动收尾：谁来喊停（时长到 / 缓冲满）都走这里，保证"说停了就真停"。
@@ -706,8 +812,12 @@ export class ScopeView {
       const vars = (this.selected.length ? this.selected : (this.usingMock ? this.mockVars() : []));
       if (!vars.length){ this.setStatusText('先选变量再标定（标定用的是当前计划）', 'warn'); return; }
       const clockKhz = Number($('sc-clock').value) || 0;
-      const flags = (clockKhz >= 60000 ? 1 : 0) | ($('sc-cdcoff')?.checked ? 0x20 : 0);
-      if (clockKhz > 0) await this.hidXfer(P.HID_CMD, P.clockData(clockKhz * 1000));
+      const riscv = this.backend === P.BACKEND.RISCV;
+      const flags = (clockKhz >= 60000 ? P.SCOPE_FLAG.ALLOW_60M : 0)
+        | ($('sc-cdcoff')?.checked ? P.SCOPE_FLAG.CDC_OFF : 0)
+        | (this.targetRiscv ? P.SCOPE_FLAG.RISCV : 0);
+      // JTAG 下 action 3（SWD 时钟）无效，别发
+      if (clockKhz > 0 && !riscv) await this.hidXfer(P.HID_CMD, P.clockData(clockKhz * 1000));
       await this.hidXfer(P.HID_CMD, P.configData({ periodUs: this.periodUs(), flags, vars }));
       this.plan = this.updatePlan();
       await this.hidXfer(P.HID_CMD, P.benchData({ iters: 2000 }));
@@ -723,12 +833,16 @@ export class ScopeView {
       const blobName = { 0x53c: '60M(6 指令/bit)', 0x60c: '45M(8)', 0x6e0: '36M(10)', 0x7c4: '30M(12)',
                          0xa54: '20M(18)', 0x620: 'SLOW', 0xffffffff: '还没装载' }[blob] || `0x${blob.toString(16)}`;
       this.blob = { offset: blob, name: blobName, delay };
-      // 计划行里那个"保守模型"和实测差多少，当场说清楚（单字 span 实测 1.53 µs，模型算 6.74）
+      // 计划行里那个"保守模型"和实测差多少，当场说清楚（单字 span 实测 1.53 µs，模型算 6.74）。
+      // RISC-V 下没有 blob/clock_delay 这些 SWD 专属字段，别把无意义的数摆给用户看。
       const modelUs = this.plan?.estUs || 0;
-      const vsModel = (modelUs && Math.abs(modelUs - usPerSample) / usPerSample > 0.25)
+      const vsModel = (!riscv && modelUs && Math.abs(modelUs - usPerSample) / usPerSample > 0.25)
         ? `（模型估 ${modelUs.toFixed(2)} µs，${modelUs > usPerSample ? '偏保守' : '偏乐观'} ${(modelUs / usPerSample).toFixed(1)}×）` : '';
+      const extra = riscv
+        ? `（RISC-V/JTAG 路径；blob / clock_delay 是 SWD 专属，这里没有意义${err ? `，err=${err}` : ''}）`
+        : `（blob ${blobName}${err ? `，err=${err}` : ''}）`;
       this.setStatusText(`标定：读一次 ${usPerSample.toFixed(3)} µs → 上限 ≈${Math.round(1e3 / usPerSample)} kHz${vsModel}` +
-        `（blob ${blobName}，对于「${this._benchKey}」${err ? `，err=${err}` : ''}）；` +
+        `${extra}，对「${this._benchKey.vars} @${P.backendName(this._benchKey.backend)}」有效；` +
         `**建议周期 ≥ ${this.recPeriodUs} µs**（≈${Math.round(1e3 / this.recPeriodUs)} kHz，零丢档）`, 'ok');
       this.updatePlan();
     } catch (e){
@@ -799,6 +913,9 @@ export class ScopeView {
           this.defVars = d.vars;
           this.periodActualUs = d.periodUs;
           this.swdMhz = d.swdHz ? Math.round(d.swdHz / 1e6) : this.swdMhz;
+          // **生效**后端（DEF flags bit6）：你下发的 flags 只是请求，后端拉不起来时探针会换一条路重试，
+          // 所以界面一律用生效值显示（见 web-handoff-riscv-scope.md）
+          this.setBackend(d.riscv ? P.BACKEND.RISCV : P.BACKEND.SWD, 'def');
           // 探针回报的 span 数 vs 本地计划：不一致就说明两边的合并规则不一样了（改一边忘了另一边）
           if (d.spans && this.plan && d.spans !== this.plan.spans.length){
             this.planMismatch = `探针算出 ${d.spans} 个 span，本地计划是 ${this.plan.spans.length} 个`;
@@ -876,6 +993,8 @@ export class ScopeView {
           this.probeYield = 0;
           this.swdMhz = s.swdMhz;
           if (s.periodUs) this.periodActualUs = s.periodUs;
+          // STAT 里没有后端位，但 RISC-V 下探针不上报 SWD 时钟（swdMhz=0）—— 只在 DEF 还没到时用它兜底，
+          // 避免把"还没收到 DEF"误判成后端变了
           break;
         }
         default: break;
@@ -1059,7 +1178,10 @@ export class ScopeView {
     if ($('sc-over')) $('sc-over').textContent = String(st?.overrun || 0);
     $('sc-buf').textContent = st ? `${Math.round(st.count / st.capacity * 100)}%` : '0%';
     $('sc-mem').textContent = st ? fmtBytes(st.bytes()) : '0 B';
-    $('sc-mhz').textContent = this.swdMhz ? `${this.swdMhz} MHz` : '—';
+    // 这一格在 RISC-V 下显示后端（SWD 时钟在 JTAG 下无意义），不再只写 "SWD —"
+    $('sc-mhz').textContent = this.backend === P.BACKEND.RISCV
+      ? 'RISC-V/JTAG'
+      : (this.swdMhz ? `SWD ${this.swdMhz} MHz` : 'SWD —');
     const err = $('sc-err');
     if (err){
       err.textContent = this.planMismatch ? `⚠ ${this.planMismatch}`

@@ -142,8 +142,15 @@
 页面上「读计划」那行会直接告诉你当前选择的 span 数与预计上限。
 原理、协议、速率模型、踩坑记录都在 [`docs/scope-page.md`](docs/scope-page.md)。
 
-自测：`make test-scope`（引擎层 103 项，含 8 通道 × 10000 样本逐点对账）+
-`make test-dwarf`（ELF/DWARF 61 项）+ `make test-scope-page`（真页面 CDP 37 项）。
+自测：`make test-scope`（引擎层 124 项，含 8 通道 × 10000 样本逐点对账）+
+`make test-dwarf`（ELF/DWARF 65 项）+ `make test-scope-page`（真页面 CDP 88 项）。
+
+**目标类型（SWD/ARM ↔ RISC-V/JTAG）**：探针的目标类型是**全局且粘性**的（HID `0x31` action 10），
+波形页和 RTT 转发页都能切。页面显示的是**探针回报的生效后端**（DEF 的 `flags bit6` / 状态字 0 的 `bit1`），
+不是"你下发的那个" —— 后端拉不起来时探针会自己换一条路重试，所以要以生效值为准。
+切到 RISC-V 后：SWD 时钟档自动置灰（JTAG 忽略它）、计划行的速率提示换成实测分档
+（单变量 ≈2.94 µs / 8 通道 ≈45.6 µs，零丢建议周期 ≥1.5×）、标定里的 blob/clock_delay 不再显示。
+依据：akaLinkPro 的 [`web-handoff-riscv-scope.md`](https://github.com/minichao9901/akaLinkPro)。
 
 真机还差探针固件那一步：补丁草稿在 [`tools/probe-firmware/`](tools/probe-firmware/) ——
 `scope_sampler.c/.h`（采样器本体）+ `patch-notes.md`（6 处集成改动，逐段可粘贴）+ 验收清单
@@ -176,6 +183,25 @@
 
 `WebUSB` 不支持 J-Link 探针（协议不开放）；反过来 J-Link 后端也不需要 WebUSB。
 
+## 零安装烧录
+
+| 目标 | 后端 | 算法 | 进度 |
+|---|---|---|---|
+| **STM32** F0/F1/F4/F7/H7/L0/L4 | WebUSB · CMSIS-DAP | ARM flashloader（pyOCD 的算法块，见 `app/flash/algos.js`） | 真机打通（F103 实测逐字节一致） |
+| **HPM 系列**（RISC-V）5300/5E00/6200/6300/6700/6800/6E00/6P00 | WebUSB · CMSIS-DAP **JTAG** | 自制 RV32 flashloader（HPM SDK 的 `openocd_algo`，1.4 KB，**一份通吃全系**） | ⚠️ **离线全通、待真机 bring-up** |
+
+HPM 那条路的要点：探针切 SWD+JTAG 输出模式 → `DAP_Connect(JTAG)` → 用 `DAP_JTAG_Sequence`
+驱动 RISC-V 的 DMI（IR=0x11）→ Debug Module + SBA 把 flashloader 写进 SRAM → 调它的
+`flash_init/erase/program/read`（算法自己调芯片 ROM 里的 XPI NOR 驱动去擦写外部 flash）。
+板级参数直接取自 HPM SDK 的 `boards/openocd/boards/*.cfg`。
+
+为什么能"一份 blob 通吃 HPM 全系"：所有 HPM 系列的 ROM API 表地址都是 `0x2001FF00`，
+差异只在运行时参数（`flash_base` / `xpi_base` / `option0/1`）。
+
+自测：`make test-hpm`（60 项，**纯离线**：把真实代码跑在模拟 TAP+DTM+Debug Module+SBA+XPI flash 上，
+包括"擦→写→校验"端到端与 NOR 的按位与语义）；重建算法：`make hpm-algo`。
+设计、证据链、以及**真机 bring-up 的 6 步检查表**见 [`docs/hpm-riscv-flash.md`](docs/hpm-riscv-flash.md)。
+
 ## 目录
 
 ```
@@ -186,6 +212,9 @@ app/
   rtt/                  protocol(RTT 协议) / dap-webusb(CMSIS-DAP) / bridge / elf / mock / view
   gen/                  工程生成：templates(模板移植自 uvprojx2cmake.py) / fixes(固定 4 项修正) / model(参数+器件表+uvprojx 解析) / zip(零依赖打包) / view
   hid/                  akaLinkPro 自定义 HID：probe(协议 + WebHID 客户端) / mock(假探针) / view(桥的面板) / stream(RTT 转发页，纯输出接收)
+  flash/                烧录器：image(固件解析) / algos+runner(ARM flashloader) / view
+    hpm/                HPM 系列（RISC-V）：jtag(TAP/DMI 编码) / riscv-dm(DM+SBA) / dap-transport(WebUSB) /
+                        flash(擦写流程) / chips(板级参数，来自 SDK cfg) / algo(自动生成的 blob) / entry(入口表解析)
   vendor/xterm/         xterm.js 本地副本（离线可用，MIT）
   ui/                   tabs / toast / dom 小工具
 bridge/

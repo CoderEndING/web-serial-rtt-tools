@@ -608,6 +608,55 @@ console.log('== 13. 起跑阶段的新数据要收下；收工之后一律不收
      `起跑窗口收下 5 个样本、收工后再喂 5 个一个都不进（${r.duringStart} → ${r.afterStop}）`);
 }
 
+console.log('== 14. RISC-V/JTAG 目标：显示生效后端、置灰 SWD 控件、按后端给建议 ==');
+{
+  const r = await ev(`
+    const sc = window.__tools.scope;
+    const P = await import('/app/scope/protocol.js');
+    document.getElementById('sc-mock').checked = true;
+    document.getElementById('sc-mock').dispatchEvent(new Event('change'));
+    sc.mockProbe.riscv = false;
+    const before = { backend: sc.backend, mhz: document.getElementById('sc-mhz').textContent,
+                     plan: document.getElementById('sc-plan').innerText.replace(/\\s+/g, ' ').slice(0, 90) };
+    // ① 假探针装成 RISC-V 后端，采一小段：DEF 的 flags bit6 会带过来
+    sc.mockProbe.riscv = true;
+    document.getElementById('sc-period').value = '10';
+    document.getElementById('sc-seconds').value = '1';
+    await sc.start();
+    await new Promise(r2 => setTimeout(r2, 700));
+    await sc.stop();
+    const after = { backend: sc.backend, shown: document.getElementById('sc-backend').textContent,
+                    mhz: document.getElementById('sc-mhz').textContent,
+                    clockDisabled: document.getElementById('sc-clock').disabled,
+                    plan: document.getElementById('sc-plan').innerText.replace(/\\s+/g, ' ') };
+    // ② 状态字 0 bit1 这条独立通路（丢弃模式没有 DEF）：直接喂一个假回包
+    sc.backend = null;
+    sc._absorbeStatusBackend(Uint8Array.of(0x33, 0x32, 0, 2, 0, 0, 0));
+    const viaStatus = sc.backend;
+    // ③ 目标类型选择器 → HID 0x31 action 10
+    let sent = null;
+    const origXfer = sc.hidXfer.bind(sc);
+    sc.hidXfer = async (cmd, data) => { sent = { cmd, data: Array.from(data) }; return Uint8Array.of(0x33, 0x31, 0, 0); };
+    document.getElementById('sc-target').value = 'riscv';
+    await sc.applyTargetType();
+    sc.hidXfer = origXfer;
+    const st = document.getElementById('sc-state').textContent;
+    sc.mockProbe.riscv = false;
+    sc.backend = null;
+    sc._applyBackendUi();
+    return { before, after, viaStatus, sent, st, names: [P.backendName('swd'), P.backendName('riscv')] };`);
+  ok(r.after.backend === 'riscv', `DEF flags bit6 → 页面认到 RISC-V 后端（${r.after.shown}）`);
+  ok(/RISC-V\/JTAG/.test(r.after.mhz), `状态栏显示后端而不是 SWD 时钟：${r.after.mhz}`);
+  ok(r.after.clockDisabled === true, 'SWD 时钟档在 RISC-V 下被置灰（JTAG 忽略它）');
+  ok(/RISC-V\/JTAG 实测/.test(r.after.plan) && !/周期下限 2 µs/.test(r.after.plan),
+     `计划行改成 JTAG 的说法：${r.after.plan.slice(0, 78)}…`);
+  ok(/1\.5×/.test(r.after.plan), '并给出"零丢建议周期 ≥ 1.5×"的提示');
+  ok(r.viaStatus === 'riscv', '状态字 0 的 bit1 也能定后端（丢弃模式没有 DEF 包时的唯一来源）');
+  ok(r.sent && r.sent.cmd === 0x31 && r.sent.data.join(',') === '10,1',
+     `目标类型切换发的是 HID 0x31 action 10（实际 cmd=0x${(r.sent?.cmd ?? 0).toString(16)} data=${r.sent?.data}`)
+  ok(/RISC-V\/JTAG/.test(r.st), `切完给了明确回执：${r.st.slice(0, 60)}`);
+}
+
 console.log(`\n${fail ? '❌' : '✅'} scope-page.test: ${pass} 通过 / ${fail} 失败`);
 ws.close();
 process.exit(fail ? 1 : 0);

@@ -30,8 +30,12 @@ export const CMD = {
 /** 0x31 的动作码（api_param.c 的 RTT_ACT_*，与文档一致） */
 export const RTT_ACT = {
   STOP: 0, START: 1, STATUS: 2, AUTOSTART: 3, RAW_DAP: 4, PEEK: 5,
-  RAW_RESULT: 6, CONFIG: 7, BENCH: 8, BENCH_RESULT: 9,
+  RAW_RESULT: 6, CONFIG: 7, BENCH: 8, BENCH_RESULT: 9, TARGET: 10,
 };
+
+/** action 10：切全局目标类型。Byte[0]=10（action）、Byte[1]=0 SWD/ARM | 1 RISC-V/JTAG。
+ *  ⚠️ 这是**0x31** 的动作，不是 0x32 —— J-Scope 那边要发它得用 HID_CMD_RTT（见 scope/protocol.js）。*/
+export function targetTypeData(riscv){ return Uint8Array.of(RTT_ACT.TARGET, riscv ? 1 : 0); }
 
 // ============================================================================
 // 组包 / 解析（导出成纯函数，Node 自测直接测）
@@ -343,4 +347,8 @@ export class AkaLinkHid {
   stop(){ return this.rtt(RTT_ACT.STOP, rttData(RTT_ACT.STOP)); }
   status(){ return this.rtt(RTT_ACT.STATUS, rttData(RTT_ACT.STATUS)); }
   configure(o){ return this.rtt(RTT_ACT.CONFIG, rttConfigData(o)); }
+
+  /** 切**全局目标类型**（HID 0x31 action 10）：false = SWD/ARM，true = RISC-V/JTAG。
+   *  粘性：设一次一直有效，J-Scope 采样器的传输后端也跟着它走。 */
+  setTargetType(riscv){ return this.rtt(RTT_ACT.TARGET, targetTypeData(!!riscv)); }
 }

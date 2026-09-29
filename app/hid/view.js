@@ -52,6 +52,10 @@ export class RttCdcView {
     store.bind($('h-size'), 'hid.size');
     store.bind($('h-chan'), 'hid.chan');
     store.bind($('h-clock'), 'hid.clock');
+    store.bind($('h-target'), 'hid.target');
+    // 目标类型是**全局**的（粘性）：RISC-V/JTAG 下 SWD 时钟档无意义（探针忽略 action 7 的 Hz，
+    // 只有 <256 的值会被当成 DMI 的 idle 周期数），所以直接置灰并说明
+    $('h-target').addEventListener('change', () => this.applyTargetType());
 
     $('h-connect').addEventListener('click', () => this.connect());
     $('h-reconnect').addEventListener('click', () => this.reconnect());
@@ -138,6 +142,26 @@ export class RttCdcView {
       toast(`探针 SWD 时钟已设为 ${clockHz / 1e6} MHz`, 'ok');
       await this.refresh();
     } catch (e){ toast('调时钟失败：' + (e?.message || e), 'err'); }
+  }
+
+  /**
+   * 切换探针的**全局目标类型**（HID 0x31 action 10）：0 = SWD/ARM，1 = RISC-V/JTAG。
+   * RTT 桥自身的逻辑（找控制块 / 搬环形缓冲 / 回写 RdOff）两边完全一样，只有底下的读/RdOff 写
+   * 与初始化分派不同（SWD 走 DAPLink 的 swd_host，RISC-V 走 DMI+SBA）。**粘性**：设一次一直有效。
+   * JTAG 下 SWD 时钟档没有意义（只有 <256 的值会被当成 DMI idle 周期数），所以顺手置灰。
+   */
+  async applyTargetType(){
+    const riscv = $('h-target').value === 'riscv';
+    $('h-clock').disabled = riscv;
+    $('h-clock').title = riscv
+      ? 'RISC-V/JTAG 下无意义：JTAG 时序由 DMI 汇编旋钮 + delay 决定（<256 的值会被当成 idle 周期数）'
+      : '运行时调参（HID 0x31 action 7），改完立刻生效';
+    if (!this.dev.connected){ toast(`已记为 ${riscv ? 'RISC-V/JTAG' : 'SWD/ARM'}，连上探针后再切一次`, 'warn'); return; }
+    try {
+      await this.dev.setTargetType(riscv);
+      toast(`探针目标类型已切到 ${riscv ? 'RISC-V/JTAG' : 'SWD/ARM'}（粘性，采样器也跟着走）`, 'ok');
+      await this.refresh();
+    } catch (e){ toast('切目标类型失败：' + (e?.message || e), 'err'); }
   }
 
   // ---------------------------------------------------------------- 启停

@@ -231,11 +231,41 @@ export async function runUiSelfTest(tools){
     if (!/不涨|抢/.test($('h-state').textContent)) throw new Error('状态行没提示：' + $('h-state').textContent);
     tools.hid.mock.stall = false;
 
+    // ⑤ 目标类型切换（HID 0x31 action 10）：切到 RISC-V/JTAG 后 SWD 时钟档要置灰
+    //    （RTT-over-JTAG 就是靠这个全局开关；J-Scope 采样器的后端也跟着它走）
+    $('h-target').value = 'riscv';
+    await tools.hid.applyTargetType();
+    if (!tools.hid.mock.riscv) throw new Error('没把目标类型发下去（mock.riscv 还是 false）');
+    if (!$('h-clock').disabled) throw new Error('RISC-V 下 SWD 时钟档应该置灰');
+    $('h-target').value = 'swd';
+    await tools.hid.applyTargetType();
+    if (tools.hid.mock.riscv) throw new Error('切回 SWD 没生效');
+    if ($('h-clock').disabled) throw new Error('切回 SWD 后时钟档该恢复可用');
+
     $('h-stop').click();
     await until(() => !tools.hid.summary().running, 100, '转发停掉');
 
     await session.close();
     return `收到 ${got} B · 本页共 ${tools.stream.summary().bytes} B`;
+  });
+
+  await step('烧录器页：HPM（RISC-V）零安装选项就位', async () => {
+    document.querySelector('#tabs .tab[data-tab=flash]').click();
+    await new Promise(r => setTimeout(r, 60));
+    const sel = $('f-chip');
+    if (!sel) throw new Error('没有芯片下拉 #f-chip');
+    const hpm = [...sel.options].filter(o => o.value.startsWith('hpm'));
+    if (hpm.length < 8) throw new Error(`芯片下拉里只有 ${hpm.length} 个 HPM 项（应为 10）`);
+    sel.value = 'hpm6800evk';
+    sel.dispatchEvent(new Event('change'));
+    await new Promise(r => setTimeout(r, 60));
+    const f = tools.flash;
+    if (!f) throw new Error('没有 flash 视图对象');
+    if (typeof f._flashHpmRiscv !== 'function') throw new Error('烧录页没有 RISC-V 那条链路（_flashHpmRiscv）');
+    const chips = await import('/app/flash/hpm/chips.js');
+    const b = chips.hpmBoard('hpm6800evk');
+    if (!b || b.flashBase !== 0x80000000 || b.xpiBase !== 0xF3000000) throw new Error('HPM6800EVK 的板级参数不对');
+    return `HPM 选项 ${hpm.length} 个 · ${b.name}`;
   });
 
   return out;

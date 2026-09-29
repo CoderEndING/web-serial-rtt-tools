@@ -15,6 +15,7 @@ export class MockAkaLinkHid {
   constructor(){
     this.device = { productName: 'akaLinkPro (mock)', serialNumber: 'MOCK-0001', opened: true };
     this.running = false;
+    this.riscv = false;              // 全局目标类型（HID 0x31 action 10，粘性）
     this.cbAddr = 0;
     this.upAddr = 0;
     this.moved = 0;
@@ -90,6 +91,13 @@ export class MockAkaLinkHid {
     if (chunkBytes) this.chunkBytes = chunkBytes;
     this.discard = !!discard;
     this.calls.push(`config:${clockHz}/${chunkBytes}/${discard ? 1 : 0}`);
+    return { rc: 0, status: this.statusObj() };
+  }
+
+  /** HID 0x31 action 10：切全局目标类型（粘性）。假探针照实记下来，供页面自测断言。 */
+  async setTargetType(riscv){
+    this.riscv = !!riscv;
+    this.calls.push(`target:${riscv ? 'riscv' : 'swd'}`);
     return { rc: 0, status: this.statusObj() };
   }
 

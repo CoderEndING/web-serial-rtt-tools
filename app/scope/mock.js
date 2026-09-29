@@ -9,7 +9,7 @@
  * 波形是**按类型+通道号确定性生成**的（和靶子固件一样"契约已知"）：
  * 所以自测可以逐点断言"画出来的值应当是什么"，而不是"看着像正弦"。
  */
-import { HID_CMD, ACT, KIND, TYPES, buildDef, buildData, buildStat, buildEvt, packSamples,
+import { HID_CMD, ACT, KIND, TYPES, SCOPE_FLAG, buildDef, buildData, buildStat, buildEvt, packSamples,
          samplesPerPacket, START_PENDING } from './protocol.js';
 
 /** 类型 → 波形（i = 样本序号，k = 通道序号）。返回"原始整数值"（f32/f64 返浮点，其余按类型含义）*/
@@ -62,6 +62,8 @@ export class MockScopeProbe {
     this._n = 0;              // 已经产出到第几个样本
     this._lastPollUs = null;
     this._discarding = false;
+    this.riscv = !!opts.riscv;      // 生效后端（假探针也能装成 RISC-V，供页面自测用）
+    this.nspans = 1;
     this._sentDef = false;
     this._statEvery = 64;
     this._packetAccum = [];   // 累计到整包才发（模拟固件的组包）
@@ -122,8 +124,11 @@ export class MockScopeProbe {
     p[0] = 51; p[1] = cmd; p[2] = rc & 0xff;
     const dv = new DataView(p.buffer);
     const running = this.running ? 1 : 0;
-    dv.setUint32(3, running | (this.vars.length << 8) | (1 << 16), true);
-    dv.setUint32(7, Math.round(this.swdMhz * 1e6), true);
+    // 状态字 0：bit0 运行中 / bit1 **生效后端是 RISC-V** / bit8-15 span 数 / bit16 SWD 已就绪 / bit24-31 变量数
+    // （RISC-V 模式下探针不上报 SWD 时钟，bit16 也置 0 —— 与真固件一致）
+    dv.setUint32(3, running | (this.riscv ? 2 : 0) | (this.nspans << 8) |
+                    ((this.riscv ? 0 : 1) << 16) | (this.vars.length << 24), true);
+    dv.setUint32(7, this.riscv ? 0 : Math.round(this.swdMhz * 1e6), true);
     dv.setUint32(11, this.produced >>> 0, true);
     dv.setUint32(15, this.dropped >>> 0, true);
     dv.setUint32(19, (this.pkts & 0xffff) | (this.usbErr << 16), true);
@@ -157,7 +162,10 @@ export class MockScopeProbe {
                     .sort((a, b) => a.addr - b.addr);
     this.periodUs = Math.max(1, periodUs | 0);
     this.periodUsActual = this.periodUs;
-    this._discarding = !!(flags & 1);
+    // flags：bit0 = 允许 60 MHz，bit1 = 丢弃模式，bit5 = 采样时暂停 CDC 桥，bit6 = 强制 RISC-V
+    // 🚨 老写法 `!!(flags & 1)` 把"允许 60 MHz"当成了丢弃模式（位搞错了）—— 顺手对齐协议。
+    this._discarding = !!(flags & SCOPE_FLAG.DISCARD);
+    if (flags & SCOPE_FLAG.RISCV) this.riscv = true;    // 强制 RISC-V：粘住（真固件里全局目标类型也是粘的）
     this._sentDef = false;
   }
 
@@ -196,7 +204,8 @@ export class MockScopeProbe {
     this._lastPollUs += want * perEff;
     const out = [];
     if (!this._sentDef){ out.push(buildDef({ seq: this.seq++, swdHz: Math.round(this.swdMhz * 1e6),
-                                             periodUs: this.periodUs, flags: this._discarding ? 1 : 0,
+                                             periodUs: this.periodUs,
+                                             flags: (this._discarding ? SCOPE_FLAG.DISCARD : 0) | (this.riscv ? SCOPE_FLAG.RISCV : 0),
                                              vars: this.vars }));
       this._sentDef = true; this.pkts++; }
     for (let i = 0; i < want; i++) this._emit(out, perEff);

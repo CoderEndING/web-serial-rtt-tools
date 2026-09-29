@@ -21,6 +21,11 @@ import { CHIPS, fillChipSelect } from '../core/chips.js';
 import { BridgeClient } from '../rtt/bridge.js';
 import { WebUsbDapProbe, withTimeout } from '../rtt/dap-webusb.js';
 import { ALGOS, F1_DEV, checkFlashRange } from './algos.js';
+import { HPM_BOARDS, HPM_COMMON, hpmBoard, hpmCheckRange } from './hpm/chips.js';
+import { DapJtagTransport, setOutputModeData, PROBE_OUTPUT_MODE } from './hpm/dap-transport.js';
+import { RiscvTransport } from './hpm/riscv-dm.js';
+import { HpmFlasher } from './hpm/flash.js';
+import { AkaLinkHid } from '../hid/probe.js';
 import { FlashRunner } from './runner.js';
 import { parseFirmware } from './image.js';
 import { bytes as fBytes } from '../core/format.js';
@@ -174,8 +179,10 @@ export class FlashView {
   // ---------- 主通道：WebUSB 零安装 ----------
   async _flashWebusb(name){
     const chip = $('f-chip').value;
+    // RISC-V（HPM 系列）走另一条路：目标核不是 Cortex-M，烧录算法也不是 ARM 的 flashloader
+    if (HPM_BOARDS.some(b => b.id === chip)) return await this._flashHpmRiscv(name);
     const algo = ALGOS[chip];
-    if (!algo) throw new Error(`「${chip}」暂未内置零安装烧录算法（现覆盖 F0/F1/F4/F7/H7/L0/L4）：请换「本地桥 · OpenOCD」后端`);
+    if (!algo) throw new Error(`「${chip}」暂未内置零安装烧录算法（现覆盖 F0/F1/F4/F7/H7/L0/L4 与 HPM 系列 RISC-V）：请换「本地桥 · OpenOCD」后端`);
 
     // 解析固件（webusb 只吃页面里选的文件）
     const raw = Uint8Array.from(atob(this.file.dataB64), c => c.charCodeAt(0));
@@ -377,6 +384,108 @@ export class FlashView {
   }
 
   // ---------- 备用：本地桥（OpenOCD 或 J-Link） ----------
+  /**
+   * HPM 系列（RISC-V/JTAG）的零安装烧录。
+   *
+   * 与 ARM 那条路的差别（都是"把算法搬进 RAM 再驱动它"，但驱动方式不同）：
+   *   · 探针要切到 **SWD+JTAG** output_mode（HID CMD_SET_CONFIG，RAM-only），DAP 口选 JTAG；
+   *   · 目标核是 RISC-V：停核/传参/取返回码走 Debug Module（抽象命令 + dpc），不是 DHCSR/DCRSR；
+   *   · 算法是 RV32 的（`tools/target-firmware/hpm_flash_algo/`，一份 blob 通吃 HPM 全系），
+   *     它自己调芯片 ROM 里的 XPI NOR 驱动去擦写外部 flash。
+   *
+   * ⚠️ **本轮没能在真机上验证**（探针被占用）：协议层、封包、流程都有离线自测（含模拟 DTM/模拟 flash），
+   *    但真实 JTAG 时序、ROM API 行为、output_mode 切换后的枚举都要等 bring-up。界面会明说这一点。
+   */
+  async _flashHpmRiscv(name){
+    const board = hpmBoard($('f-chip').value);
+    if (!board) throw new Error(`不认识的 HPM 板子：${$('f-chip').value}`);
+
+    const raw = Uint8Array.from(atob(this.file.dataB64), c => c.charCodeAt(0));
+    const base = Number($('f-base').value) || board.flashBase;
+    const regions = parseFirmware(name, raw, base);
+    for (const seg of regions){
+      const chk = hpmCheckRange(board, seg.addr, seg.data.length);
+      if (!chk.ok) throw new Error(`固件段 0x${seg.addr.toString(16)} 不合法：${chk.why}`);
+    }
+    const total = regions.reduce((s, r) => s + r.data.length, 0);
+    this._log(`── RISC-V 零安装烧录：${name}（${fBytes(total)}）→ ${board.name} ──`);
+    this._log(`   板级参数来自 SDK 的 boards/openocd/boards/${board.id}.cfg：flash 基址 0x${board.flashBase.toString(16)}、` +
+      `XPI 0x${board.xpiBase.toString(16)}、option0 0x${(board.option0 ?? 0).toString(16)}` + (board.option1 != null ? `、option1 0x${board.option1.toString(16)}` : ''));
+    this._bar(1);
+
+    // ① 探针：HID 切 output_mode，再走 WebUSB 认领 interface 0 并切 JTAG
+    this._status('准备探针：切 SWD+JTAG 输出模式…');
+    const hid = new AkaLinkHid();
+    try {
+      await withTimeout(hid.reconnect(), 8000, '连探针 HID');
+      await withTimeout(hid.xfer(0x02 /* CMD_SET_CONFIG */, setOutputModeData(PROBE_OUTPUT_MODE.SWD_JTAG)), 3000, '切输出模式');
+      this._log('已把探针 output_mode 设为 SWD+JTAG（RAM-only：掉电即失，重启后要重设）');
+    } catch (e){
+      this._log('⚠ 切 output_mode 失败（继续试 JTAG，可能本来就是 JTAG 模式）：' + (e?.message || e));
+    } finally {
+      try { await hid.close(); } catch {}
+    }
+
+    this._status('连接数据端点（WebUSB）…');
+    const auth = await withTimeout(WebUsbDapProbe.authorized(), 5000, '枚举已授权探针');
+    const probe = auth.length
+      ? await withTimeout(WebUsbDapProbe.open(auth[0]), 15000, '连接探针（WebUSB）')
+      : await withTimeout(WebUsbDapProbe.request(false), 60000, '等你在浏览器里选探针');
+    this.probe = probe;
+    probe.fast = false;
+
+    const jtag = new DapJtagTransport(probe, { irLength: HPM_COMMON.irLength, log: l => this._log('   ' + l) });
+    const dm = new RiscvTransport(jtag, { idle: 8, log: l => this._log('   ' + l) });
+    this._status('打开 JTAG TAP / 唤醒调试模块…');
+    const info = await dm.init();
+    this._log(`   IDCODE=0x${info.idcode.toString(16)}（HPM 全系 0x1000563D）· dmstatus=0x${info.dmstatus.toString(16)}`);
+    if (info.idcode !== HPM_COMMON.tapIdcode){
+      throw new Error(`TAP IDCODE 是 0x${info.idcode.toString(16)}，不是 HPM 的 0x${HPM_COMMON.tapIdcode.toString(16)} —— ` +
+        '检查：JTAG 接线（TCK/TMS/TDI/TDO/GND）、板子上电、探针 output_mode 是否切到 SWD+JTAG');
+    }
+    await dm.activate(0);
+    await dm.halt(0, 3000);
+    this._log('   目标已 halt，开始加载 flashloader');
+
+    // ② flashloader + 参数探测
+    const flasher = new HpmFlasher(dm, {
+      board, log: l => this._log('   ' + l),
+      onProgress: (frac, done, tot2, verifying) => {
+        const pct = Math.round(frac * 100);
+        this._bar(verifying ? 60 + pct * 0.4 : 5 + pct * 0.55);
+        this._status((verifying ? '校验' : '烧写') + ` ${done} / ${tot2} B（${pct}%）`);
+      },
+    });
+    this._status('加载 flashloader 到 SRAM（0x00000000）…');
+    const chipInfo = await flasher.setup();
+    this._log(`   flashloader 就绪：容量 ${(chipInfo.totalBytes / 1048576).toFixed(2)} MB · 扇区 ${chipInfo.sectorBytes} B`);
+
+    // ③ 擦 → 写 → 校验
+    const verify = $('f-verify').checked;
+    let done = 0;
+    for (const seg of regions){
+      this._status(`擦除 0x${seg.addr.toString(16)} 起 ${fBytes(seg.data.length)}…`);
+      await flasher.erase(seg.addr, seg.data.length);
+      this._log(`擦除 OK：0x${seg.addr.toString(16)} + ${seg.data.length} B`);
+      await flasher.program(seg.addr, seg.data);
+      this._log(`烧写 OK：0x${seg.addr.toString(16)} + ${seg.data.length} B`);
+      if (verify){
+        this._status('校验（读回 flash 逐字节比）…');
+        await flasher.verify(seg.addr, seg.data);
+        this._log(`校验 OK：0x${seg.addr.toString(16)} + ${seg.data.length} B`);
+      }
+      done += seg.data.length;
+    }
+    this._bar(100);
+    const doReset = $('f-reset').checked;
+    await flasher.finish({ run: doReset });
+    if (doReset) this._log('已发系统复位（ndmreset），目标从 flash 启动');
+    this._status(`烧录完成：${fBytes(done)} → ${board.name}（RISC-V/JTAG）`, 'ok');
+    this._log(`小结：${fBytes(done)} · 校验${verify ? '开' : '关'} · 复位${doReset ? '开' : '关'} · ` +
+      `JTAG 批次 ${jtag.summary().batches} 次 / ${jtag.summary().bytes} B · ` +
+      `flash ${(chipInfo.totalBytes / 1048576).toFixed(2)} MB / 扇区 ${chipInfo.sectorBytes} B`);
+  }
+
   async _flashBridge(name, pathText){
     const useJlink = $('f-backend').value === 'jlink';
     this._bar(50);   // 桥烧录拿不到流式进度，只能示意
@@ -419,7 +528,7 @@ export class FlashView {
     bar.value = Math.max(0, Math.min(100, pct));
     if (pct >= 100) setTimeout(() => { bar.hidden = true; }, 1500);
   }
-  _status(s){ setStatus($('f-status'), s); }
+  _status(s, kind){ setStatus($('f-status'), s, kind); }
   _log(s){
     const el = $('f-log');
     el.textContent += (el.textContent ? '\n' : '') + s;

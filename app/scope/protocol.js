@@ -136,6 +136,8 @@ export function parseDef(payload){
   const dv = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
   const out = { swdHz: dv.getUint32(0, true), periodUs: dv.getUint32(4, true),
                 flags: dv.getUint16(8, true), nvars: payload[10], spans: payload[11], vars: [] };
+  // **生效**后端：DEF flags bit6 = 这次真的在走 RISC-V/JTAG（不是你下发的那个）
+  out.riscv = !!(out.flags & SCOPE_FLAG.RISCV);
   let o = 12;
   for (let i = 0; i < out.nvars; i++){
     out.vars.push({ addr: dv.getUint32(o, true), size: payload[o + 4], type: payload[o + 5],
@@ -312,6 +314,38 @@ export const HID_CMD = 0x32;
 export const ACT = { STOP: 0, START: 1, STATUS: 2, CLOCK: 3, TRIGGER: 4, CONFIG: 7, BENCH: 8, BENCH_RESULT: 9 };
 export const ACT_NAME = { 0: '停止', 1: '启动', 2: '查状态', 3: '设 SWD 时钟', 4: '触发配置', 7: '配置', 8: '标定', 9: '取标定结果' };
 
+/**
+ * action 7 的 flags 位（固件 `api_param.c` / `Custom HID Protocol.md` 第 16 条）。
+ * `RISCV` 是这一版新加的：**强制**本次会话走 RISC-V/JTAG；不带就跟随全局目标类型。
+ * ⚠️ 但"你设的"和"生效的"可能不同（后端拉不起来会自动换另一条路重试一次，目标类型还是**粘的**），
+ *    所以界面显示一律用**生效值**：DEF 的 `flags bit6` 或状态字 0 的 `bit1`。
+ */
+export const SCOPE_FLAG = { ALLOW_60M: 0x01, DISCARD: 0x02, TRIGGER: 0x04, NO_YIELD: 0x08,
+                            DELAY0: 0x10, CDC_OFF: 0x20, RISCV: 0x40 };
+
+/** 后端（生效值）。JTAG 下 action 3 / flags bit4 / swdHz / blob+clock_delay 都无意义。 */
+export const BACKEND = { SWD: 'swd', RISCV: 'riscv' };
+export const backendName = b => (b === BACKEND.RISCV ? 'RISC-V/JTAG' : b === BACKEND.SWD ? 'SWD/ARM' : '未知');
+
+/**
+ * 每样本耗时的**实测**基线（µs，来自 web-handoff-riscv-scope.md 与本站实测）：
+ *   · `single` = 单变量 u32 走流水快路径；
+ *   · `pack8`  = 8 个同结构体成员（32 B 一个 span）。
+ * 零丢拍的周期建议取 **≥ 1.5×** 这个值（探针侧还有组帧与 USB 的开销）。
+ */
+export const BACKEND_COST = {
+  swd:   { single: 1.588, pack8: 11.19, clock: '60 MHz' },
+  riscv: { single: 2.937, pack8: 45.64, clock: 'JTAG（时钟由 DMI 旋钮定）' },
+};
+
+/** 全局目标类型切换（HID **0x31** action 10，不是 0x32！）——与 RTT-over-JTAG 共用同一个开关。
+ *  Byte[0x04]：0 = SWD/ARM，1 = RISC-V/JTAG。粘性：设了就一直有效，直到下次改。 */
+export const HID_CMD_RTT = 0x31;
+export const RTT_ACT_TARGET = 10;
+export function targetTypeData(riscv){
+  return Uint8Array.of(RTT_ACT_TARGET, riscv ? 1 : 0);
+}
+
 /** 单条 HID 报文的 data 上限：63 - 2（长度 + 命令） = 61 */
 export const HID_DATA_MAX = 61;
 export const MAX_VARS = 8;
@@ -377,6 +411,7 @@ export function parseScopeStatus(bytes){
     [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11].map(w);
   return {
     running: !!(w0 & 1),
+    riscv: !!(w0 & 2),               // **生效**后端：bit1 = 这次会话真的在走 RISC-V/JTAG
     nspans: (w0 >>> 8) & 0xff,       // 探针自己算出来的 span 数（与本地计划对账用）
     swdReady: !!(w0 & (1 << 16)),
     nvars: (w0 >>> 24) & 0xff,       // 探针收到的变量数（配置到底生效没有）
