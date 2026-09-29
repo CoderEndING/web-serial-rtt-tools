@@ -16,10 +16,14 @@
  *   🚨 这里**千万别写通配路径** `…​/*​/build/…` —— 注释里出现 `*​/` 会当场把块注释截断，
  *      后面几行就变成代码了。真实症状极具误导性：报错指向**几十行之后**的一个模板字符串
  *      （"Unexpected identifier '里没有'"），而真凶在第 15 行。本项目 2026-09-29 踩过。
- *   版本 = DWARF 4；用到的 form 很窄：name=strp|string、type=ref4、location=exprloc|sec_offset、
- *   data_member_location=data1|data2、upper_bound=data1|data2。
- *   → 所以这里**只实现 DWARF4**；遇到 DWARF5（strx/addrx/line_strp…）直接明确报错，
- *     而不是猜着解析出一堆错地址（`-gdwarf-4` 就能回去，见 stm32f103_scope/build.ps1）。
+ *   版本 = **DWARF 4 与 5 都支持**。
+ *   · DWARF 4：name=strp|string、type=ref4、location=exprloc|sec_offset、
+ *     data_member_location=data1|data2、upper_bound=data1|data2（STM32 那两份快照就是这种）。
+ *   · DWARF 5（GCC 11+ 默认，HPM SDK 也是）：CU 头多一个 unit_type 字节；
+ *     `strx*`/`addrx*` 是**间接表下标**（要查 `.debug_str_offsets` / `.debug_addr`，
+ *     基址来自 CU 的 `DW_AT_str_offsets_base` / `DW_AT_addr_base`，缺省 8）；
+ *     名字可能走 `line_strp`（`.debug_line_str`）；全局变量的位置可能是 `DW_OP_addrx`。
+ *   → 遇到**没实现的 form** 时 `listSampleable()` 会退回符号表并说明原因，不会整盘失败。
  *
  * 结构：一次遍历建**索引**（按 offset 升序的记录数组），之后所有查询都是 O(log n)/O(1)。
  * 🚨 不要写成"每次要类型的就去全量扫一遍 DIE"—— 那是 O(n²)，小固件看不出、
@@ -55,11 +59,19 @@ const FORM = {
   string: 0x08, block: 0x09, block1: 0x0a, data1: 0x0b, flag: 0x0c, sdata: 0x0d,
   strp: 0x0e, udata: 0x0f, ref_addr: 0x10, ref1: 0x11, ref2: 0x12, ref4: 0x13,
   ref8: 0x14, ref_udata: 0x15, indirect: 0x16, sec_offset: 0x17, exprloc: 0x18,
-  flag_present: 0x19, data16: 0x1b, ref_sig8: 0x20, implicit_const: 0x21,
+  flag_present: 0x19,
+  // ---- DWARF 5 新增/改号（🚨 0x1b 是 addrx 不是 data16！之前那张表把 0x1b 当 data16，会读错长度）----
+  strx: 0x1a, addrx: 0x1b, ref_sup4: 0x1c, strp_sup: 0x1d,
+  data16: 0x1e, line_strp: 0x1f, ref_sig8: 0x20, implicit_const: 0x21,
+  loclistx: 0x22, rnglistx: 0x23, ref_sup8: 0x24,
+  strx1: 0x25, strx2: 0x26, strx3: 0x27, strx4: 0x28,
+  addrx1: 0x29, addrx2: 0x2a, addrx3: 0x2b, addrx4: 0x2c,
 };
+/** DW_AT 里跟 v5 间接表有关的两个基址（缺省 = 8，即 32 位 DWARF 头之后的第一个表项）*/
+const AT_STR_OFFSETS_BASE = 0x72, AT_ADDR_BASE = 0x73;
 const DW_ATE = { address: 0x01, boolean: 0x02, complex_float: 0x03, float: 0x04,
   signed: 0x05, signed_char: 0x06, unsigned: 0x07, unsigned_char: 0x08 };
-const DW_OP_addr = 0x03, DW_OP_plus_uconst = 0x23;
+const DW_OP_addr = 0x03, DW_OP_plus_uconst = 0x23, DW_OP_addrx = 0xa1;
 
 /** 采样支持的类型表（编码与 HID 0x32 的 type 字节一致，见 docs/scope-page.md §7.1） */
 export const SCALARS = {
@@ -116,6 +128,10 @@ export class Dwarf {
     this.info = elf.data('.debug_info');
     this.abbrevRaw = elf.data('.debug_abbrev');
     this.str = elf.data('.debug_str');
+    // DWARF 5 的两张"间接表"（`strx*` / `addrx*` 表单要用；没有就是没用到）
+    this.lineStr = elf.data('.debug_line_str');
+    this.strOffsets = elf.data('.debug_str_offsets');
+    this.addr = elf.data('.debug_addr');
     if (!this.info.length) throw new Error('这个 ELF 没有 .debug_info —— 不是 -g 构建，或者被 strip 过');
     this._abbrCache = null;       // abbrev 表缓存：**按 offset 分表**（key = DW_AT_abbrev_offset）
     this._types = new Map();      // DIE offset → 类型对象（记忆化）
@@ -126,7 +142,7 @@ export class Dwarf {
 
   static available(elf){ return !!(elf.section('.debug_info')?.size); }
 
-  /** 各 CU 的版本号（用来给出"请用 -gdwarf-4"这种可执行的建议）*/
+  /** 各 CU 的版本号（界面上标出"这份固件的调试信息是 DWARF x"）*/
   versions(){
     const out = [];
     for (const cu of this.cus()) out.push(cu.version);
@@ -191,16 +207,16 @@ export class Dwarf {
       if (!len) break;
       const end = r.o + len;
       const version = r.u16();
-      let abbrevOff, addrSize;
+      let abbrevOff, addrSize, unitType = 0;
       if (version >= 5){
-        r.u8();                                  // unit_type
+        unitType = r.u8();                       // DW_UT_compile / partial / …
         addrSize = r.u8();
         abbrevOff = r.u32();
       } else {
         abbrevOff = r.u32();
         addrSize = r.u8();
       }
-      yield { offset: o, version, abbrevOff, addrSize, dieOff: r.o, end: Math.min(end, b.length) };
+      yield { offset: o, version, abbrevOff, addrSize, unitType, dieOff: r.o, end: Math.min(end, b.length) };
       o = end;
     }
   }
@@ -230,6 +246,30 @@ export class Dwarf {
       case FORM.string: { const s = r.o; while (!r.eof && r.b[r.o]) r.o++;
         const v = cstrAt(r.b, s); r.u8(); return { form, value: v }; }
       case FORM.strp: { const off = r.u32(); return { form, value: cstrAt(this.str, off) }; }
+      // DWARF 5：名字/路径也可以指向 .debug_line_str
+      case FORM.line_strp: { const off = r.u32(); return { form, value: cstrAt(this.lineStr, off) }; }
+      /**
+       * DWARF 5 的"间接字符串"：`strx*` 给的是 **.debug_str_offsets 里的下标**，
+       * 表项才是 .debug_str 的偏移。基址来自 CU 的 `DW_AT_str_offsets_base`（缺省 8）。
+       */
+      case FORM.strx: case FORM.strx1: case FORM.strx2: case FORM.strx3: case FORM.strx4: {
+        const idx = this._idxOf(r, form, FORM.strx, FORM.strx1, FORM.strx2, FORM.strx3);
+        const base = cu.strOffsetsBase ?? 8;
+        const at = base + idx * 4;
+        const off = (at + 4 <= this.strOffsets.length)
+          ? (this.strOffsets[at] | (this.strOffsets[at + 1] << 8) | (this.strOffsets[at + 2] << 16) | (this.strOffsets[at + 3] << 24)) >>> 0
+          : 0;
+        return { form, value: cstrAt(this.str, off) };
+      }
+      /**
+       * DWARF 5 的"间接地址"：`addrx*` 给的是 **.debug_addr 里的下标**（按地址宽度取）。
+       * 用在 `DW_AT_low_pc` 与 `DW_OP_addrx` 的位置表达式里。基址缺省 8。
+       */
+      case FORM.addrx: case FORM.addrx1: case FORM.addrx2: case FORM.addrx3: case FORM.addrx4: {
+        const idx = this._idxOf(r, form, FORM.addrx, FORM.addrx1, FORM.addrx2, FORM.addrx3);
+        return { form, value: this._addrAtIndex(cu, idx) };
+      }
+      case FORM.data16: return { form, value: r.bytes(16) };
       case FORM.block1: { const n = r.u8(); return { form, value: r.bytes(n) }; }
       case FORM.block2: { const n = r.u16(); return { form, value: r.bytes(n) }; }
       case FORM.block4: { const n = r.u32(); return { form, value: r.bytes(n) }; }
@@ -248,12 +288,37 @@ export class Dwarf {
       // 🚨 这里原来写的是 `r.skip(8)` —— R 类根本没这个方法，遇到它就 TypeError
       //    把"支持的表单"变成解析崩溃（代码审查抓到的）。
       case FORM.ref_sig8: r.bytes(8); return { form, value: null };
+      // v5 里这两族是"列表下标"，我们不做列表解析，但**必须把操作数读掉**，否则游标错位
+      case FORM.loclistx: return { form, value: r.uleb(), listIndex: true };
+      case FORM.rnglistx: return { form, value: r.uleb(), listIndex: true };
+      case FORM.ref_sup4: case FORM.strp_sup: return { form, value: r.u32(), unresolved: true };
+      case FORM.ref_sup8: return { form, value: r.u64(), unresolved: true };
       case FORM.implicit_const: return { form, value: ic };
       case FORM.indirect: { const f2 = r.uleb(); return this._value(r, f2, ic, cu); }
       default:
-        throw new Error(`不支持的 DWARF form 0x${form.toString(16)}` +
-          (form >= 0x1a && form <= 0x2c ? '（这是 DWARF 5 的表单：请用 -gdwarf-4 重新编译目标固件）' : ''));
+        throw new Error(`不支持的 DWARF form 0x${form.toString(16)}`);
     }
+  }
+
+  /** `strx`/`addrx` 这一族的"下标"读取：无后缀 = ULEB，带数字后缀 = 固定 1/2/3/4 字节 */
+  _idxOf(r, form, base, f1, f2, f3){
+    if (form === base) return r.uleb();
+    if (form === f1) return r.u8();
+    if (form === f2) return r.u16();
+    if (form === f3) return r.u8() | (r.u8() << 8) | (r.u8() << 16);
+    return r.u32();
+  }
+
+  /** 取 `.debug_addr` 里第 idx 个地址（按 CU 的地址宽度）*/
+  _addrAtIndex(cu, idx){
+    const base = cu.addrBase ?? 8;
+    const w = cu.addrSize === 8 ? 8 : 4;
+    const at = base + idx * w;
+    if (at + w > this.addr.length) return 0;
+    if (w === 4) return (this.addr[at] | (this.addr[at + 1] << 8) | (this.addr[at + 2] << 16) | (this.addr[at + 3] << 24)) >>> 0;
+    const lo = (this.addr[at] | (this.addr[at + 1] << 8) | (this.addr[at + 2] << 16) | (this.addr[at + 3] << 24)) >>> 0;
+    const hi = (this.addr[at + 4] | (this.addr[at + 5] << 8) | (this.addr[at + 6] << 16) | (this.addr[at + 7] << 24)) >>> 0;
+    return hi * 4294967296 + lo;
   }
 
   /** 一次遍历建索引（O(n)）。记录：{offset, end, tag, attrs, parent, depth, cu} */
@@ -274,6 +339,15 @@ export class Dwarf {
         }
         this.stats.dies++;
         if (this.stats.dies > 4_000_000) throw new Error('DIE 数量异常（>400 万）：调试信息有问题');
+        /**
+         * DWARF 5：`strx*`/`addrx*` 两族表单要拿 CU 的 `DW_AT_str_offsets_base` /
+         * `DW_AT_addr_base` 才能定位。这两个属性一般出现在**头一个 DIE**（CU DIE）上，
+         * 而子 DIE 在其后 —— 所以在这里见到就记到 cu 上，后面的 DIE 自动用得上。
+         * 没有这个属性时按规范缺省 8（32 位 DWARF 头之后的第一项）。
+         */
+        const sb = die.attrs.get(AT_STR_OFFSETS_BASE), ab = die.attrs.get(AT_ADDR_BASE);
+        if (sb && typeof sb.value === 'number') cu.strOffsetsBase = sb.value;
+        if (ab && typeof ab.value === 'number') cu.addrBase = ab.value;
         const rec = { offset: die.offset, end: cu.end, tag: die.tag, attrs: die.attrs,
                       parent: stack.length ? stack[stack.length - 1].offset : -1,
                       depth: stack.length, cu, children: die.hasChildren };
@@ -436,15 +510,26 @@ export class Dwarf {
     return null;
   }
 
-  /** 从 DW_AT_location 的 exprloc 里取固定地址（`DW_OP_addr <addr>`）*/
+  /** 从 DW_AT_location 的 exprloc 里取固定地址（`DW_OP_addr <addr>`；v5 也常见 `DW_OP_addrx <idx>`）*/
   fixedAddr(rec){
     const loc = rec.attrs.get(AT.location);
     if (!loc) return { addr: null, reason: '没有 DW_AT_location（只是声明 / 被优化掉）' };
     if (loc.form === FORM.sec_offset) return { addr: null, reason: '位置列表（被优化进寄存器/栈，没有固定地址）' };
     const e = loc.value;
     const as = rec.cu.addrSize;
-    if (!(e instanceof Uint8Array) || e.length < 1 + as) return { addr: null, reason: '位置表达式看不懂' };
+    if (!(e instanceof Uint8Array) || e.length < 1) return { addr: null, reason: '位置表达式看不懂' };
+    /**
+     * DWARF 5 的 `DW_OP_addrx`(0xa1)：操作数是 **.debug_addr 里的下标**（ULEB128），
+     * 地址本身要按 CU 的 `DW_AT_addr_base` 去查表。GCC 在 `-gdwarf-5` 下常这么发全局变量，
+     * 只认 `DW_OP_addr` 的话会把它们全判成"没有固定地址"（看着像变量凭空消失）。
+     */
+    if (e[0] === DW_OP_addrx){
+      let idx = 0, s = 0, i = 1, x;
+      do { x = e[i++]; idx += (x & 0x7f) * Math.pow(2, s); s += 7; } while (x & 0x80);
+      return { addr: this._addrAtIndex(rec.cu, idx) >>> 0, tail: e.length > i, via: 'addrx' };
+    }
     if (e[0] !== DW_OP_addr) return { addr: null, reason: locOpReason(e[0]) };
+    if (e.length < 1 + as) return { addr: null, reason: '位置表达式看不懂' };
     let addr = 0;
     for (let i = as - 1; i >= 0; i--) addr = addr * 256 + e[1 + i];
     return { addr: addr >>> 0, tail: e.length > 1 + as };
@@ -557,11 +642,14 @@ export function ramWindowsOf(elf){
  * 一步到位：给一个 ELF，拿到"能采样的通道 + 采不了的原因"。
  * 没有 DWARF 时**退化**到符号表（有地址有大小，但没有类型 —— 界面必须让用户手选类型）。
  *
- * 🚨 **DWARF 5 也要退到符号表，不能整盘失败**（2026-10 真机验收踩到）：
- *    GCC 11+ 默认就是 `-gdwarf-5`（HPM SDK 的工程也是），用户随手编译出来的 ELF
- *    在我们这儿会直接"解析失败、一个变量都没有"，看起来像页面坏了。
- *    现在的做法：解析不了就把原因写进 `note`，然后**照样列出符号表里的全局变量**
- *    （能采样，只是类型要手选）—— 用户至少能立刻用起来，也能看到该怎么重编译。
+ * 版本支持：**DWARF 4 与 5**（GCC 11+ 默认就是 5，HPM SDK 也是）。
+ * v5 的关键增量：CU 头多了 unit_type、`strx*`/`addrx*` 两族间接表单（要查 .debug_str_offsets /
+ * .debug_addr，基址来自 `DW_AT_str_offsets_base`/`DW_AT_addr_base`，缺省 8）、`line_strp`、
+ * 位置表达式里的 `DW_OP_addrx`。这些都在 `_value()` / `fixedAddr()` 里实现。
+ *
+ * 🚨 真解析不了时（遇到没实现的 form / 文件坏了）**不能整盘失败**：
+ *    退回符号表并把原因写进 `note`（`listSampleable` 的调用方负责显示）。
+ *    否则用户看到的是"解析失败 + 一个变量都没有"，像页面坏了。
  */
 export function listSampleable(elf, opts = {}){
   const ram = opts.ram || ramWindowsOf(elf);
@@ -570,16 +658,10 @@ export function listSampleable(elf, opts = {}){
     try {
       const dw = new Dwarf(elf);
       const versions = [...new Set(dw.versions())];
-      const bad = versions.filter(v => v >= 5);
-      if (bad.length){
-        note = `调试信息是 DWARF ${bad.join('/')}（本页只支持 4）：已退回符号表 —— ` +
-          '想要类型/结构体成员，请在工程里加 -gdwarf-4 重新编译';
-      } else {
-        const r = dw.listVariables({ ...opts, ram });
-        return { ...r, source: 'dwarf', versions, note, ram };
-      }
+      const r = dw.listVariables({ ...opts, ram });
+      return { ...r, source: 'dwarf', versions, note, ram };
     } catch (e){
-      note = `DWARF 解析失败（${e?.message || e}）：已退回符号表`;
+      note = `DWARF 解析失败（${e?.message || e}）：已退回符号表（类型要手选）`;
     }
     const r = listFromSymtab(elf, { ...opts, ram });
     return { ...r, note, ram };

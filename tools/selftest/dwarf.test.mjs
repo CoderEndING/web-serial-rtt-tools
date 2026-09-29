@@ -128,27 +128,44 @@ console.log('== 3. 没有 DWARF 时的退化路径（符号表）==');
 }
 
 // ------------------------------------------------------------------ 3.5
-console.log('== 3.5. DWARF 5 的 ELF：退到符号表而不是整盘失败 ==');
+console.log('== 3.5. DWARF 5（GCC 11+ 默认）：间接表单 strx/addrx/line_strp ==');
 {
-  // 拿现成的 DWARF4 快照，把 .debug_info 的版本字段改成 5 —— GCC 11+ 默认就是 5，
-  // 真机验收时用 HPM SDK 编出来的 demo.elf 就是这种情况：原来会直接"解析失败、0 个变量"，
-  // 看起来像页面坏了。现在应该退回符号表并带一句可执行的提示。
-  const raw = new Uint8Array(readFileSync(fix('stm32f103_scope.elf')));
-  const elf0 = new Elf(raw);
-  const sec = elf0.section('.debug_info');
-  ok(!!sec && sec.size > 8, '.debug_info 节存在（拿它做版本伪造）');
-  const dv = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
-  ok(dv.getUint16(sec.off + 4, true) === 4, `原快照的 DWARF 版本 = ${dv.getUint16(sec.off + 4, true)}（期望 4）`);
-  dv.setUint16(sec.off + 4, 5, true);                       // 伪造成 DWARF 5
-  const r = listSampleable(new Elf(raw));
-  ok(r.source === 'symtab', `DWARF 5 → 退回符号表（source=${r.source}）`);
-  ok(/DWARF 5/.test(r.note || '') && /gdwarf-4/.test(r.note || ''), '提示里说清了原因与改法：' + (r.note || '（没有 note）'));
-  ok(r.sampleable.length > 0, `退回后照样列得出变量（${r.sampleable.length} 个）`);
-  ok(r.sampleable.every(v => v.scalar === null), '符号表路径下类型未知（界面提示用户手选）');
+  // 夹具是**真 ELF**（riscv32 gcc 13.2 -gdwarf-5，见 fixtures/dwarf/README.md）：
+  // 结构体 g_v 展开成 6 个带类型的成员、g_updates/g_flag 是标量、g_tri_buf 是数组（剔除）。
+  const elf = load('riscv_dwarf5.elf');
+  const r = listSampleable(elf);
+  ok(r.source === 'dwarf' && r.note === '', `DWARF 5 直接解析成功（source=${r.source}${r.note ? ' note=' + r.note : ''}）`);
+  ok(r.versions.length === 1 && r.versions[0] === 5, `版本识别为 ${JSON.stringify(r.versions)}`);
+  const names = r.sampleable.map(v => v.name);
+  ok(names.includes('g_v.f_sin') && names.includes('g_v.i_sq1k') && names.includes('g_v.ramp'),
+     '结构体成员展开出来了：' + names.filter(n => n.startsWith('g_v.')).join(', '));
+  const fs2 = r.sampleable.find(v => v.name === 'g_v.f_sin');
+  ok(fs2 && fs2.scalar === 'f32' && fs2.size === 4, `g_v.f_sin 类型正确（${fs2?.scalar} ${fs2?.size} B）`);
+  const i32v = r.sampleable.find(v => v.name === 'g_v.i_sq1k');
+  ok(i32v && i32v.scalar === 'i32', `g_v.i_sq1k 有符号类型正确（${i32v?.scalar}）`);
+  ok(r.sampleable.some(v => v.name === 'g_updates') && r.sampleable.some(v => v.name === 'g_flag'),
+     '普通全局标量也在列表里（g_updates / g_flag）');
+  ok(r.skipped.some(s => s.name === 'g_tri_buf' && /数组/.test(s.reason)), '数组 g_tri_buf 被剔除并说明原因');
+  // RAM 窗口是"问 ELF 自己的可写节"得来的（这份夹具的数据段就在 0x8000xxxx，不是 0x2xxxxxxx）
+  ok(Array.isArray(r.ram) && r.ram.some(([lo]) => lo <= 0x80001000), '可写节给出的窗口覆盖了夹具里的变量地址');
 }
 
 // ------------------------------------------------------------------ 3.6
-console.log('== 3.6. RAM 窗口按 ELF 可写节自动识别（RISC-V 的 ILM/SRAM 不在 0x2xxxxxxx）==');
+console.log('== 3.6. 解析不了时必须退回符号表（别整盘失败）==');
+{
+  // 故意把 CU 头的 debug_abbrev_offset 指到 .debug_abbrev 之外 → 解析必炸
+  const raw = new Uint8Array(readFileSync(fix('riscv_dwarf5.elf')));
+  const dv = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
+  const info = new Elf(raw).section('.debug_info');
+  dv.setUint32(info.off + 8, 0x00ffffff, true);          // length(4)|version(2)|unit_type(1)|addr_size(1) → 8
+  const r = listSampleable(new Elf(raw));
+  ok(r.source === 'symtab', `坏文件 → 退回符号表（source=${r.source}）`);
+  ok(/DWARF 解析失败/.test(r.note || ''), '退回时给出原因：' + (r.note || '（没有 note）'));
+  ok(r.sampleable.length > 0, `退回后照样列得出符号（${r.sampleable.length} 个）`);
+}
+
+// ------------------------------------------------------------------ 3.7
+console.log('== 3.7. RAM 窗口按 ELF 可写节自动识别（RISC-V 的 ILM/SRAM 不在 0x2xxxxxxx）==');
 {
   const w = ramWindowsOf(new Elf(new Uint8Array(readFileSync(fix('stm32f103_scope.elf')))));
   ok(w.some(([lo, hi]) => lo <= 0x20000000 && hi > 0x20000000) || w.some(([lo]) => lo === DEFAULT_RAM[0]),
