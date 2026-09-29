@@ -104,6 +104,22 @@ export class RttCdcView {
       this.info = await this.dev.info();
       this.render();
       if (!silent) toast(`已重连：${this.dev.label}`, 'ok');
+      /**
+       * 🚨 顺手把**探针侧状态**也查一次（2026-10 用户现场：一打开页面就看到"已连接：akaLinkPro…"，
+       *    于是搞不清转发到底在不在跑、会不会影响 RTT Viewer）。
+       *    桥是**探针侧**的状态 —— 上次没停的话，重新打开页面它照样在跑，而只查型号（info）是看不出来的：
+       *    面板上会显示"已连接"却不说在不在搬数据。这里查一次 status，面板那行才说实话。
+       */
+      try {
+        const r = await this.dev.status();
+        this._noteProgress(r.status);
+        this.last = r.status;
+        this.render();
+        if (r.status?.running){
+          toast('探针侧的 RTT 桥**仍在运行**（上一次没停）：它会一直读目标内存占着 RTT 环。' +
+            '不用了就去点「停止」；要测 RTT Viewer 也建议先停 —— 两边读的是同一个 RTT 环。', 'warn', 10000);
+        }
+      } catch { /* 查不到状态不影响"连上了"这件事本身 */ }
     } catch (e){
       if (!silent) toast('重连失败：' + (e?.message || e), 'err');
       else this.render();

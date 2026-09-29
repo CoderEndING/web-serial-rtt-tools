@@ -236,6 +236,20 @@ export class RttView {
     const b = $('r-backend').value;
     try {
       if (b === 'webusb'){
+        /**
+         * 🚨 先把同页「RTT 转发」的探针桥停掉（2026-10 用户现场：转发页一打开就显示"已连接"，
+         *    用户不确定它会不会影响 RTT Viewer）。
+         *    桥是**探针侧**在搬 RTT 上行缓冲，和本页读的是**同一个 RTT 环** —— 两个读者会互相抢
+         *    数据（谁快谁拿走）。实测：桥跑着时 Viewer 仍能拿到 486~549 KB/s（探针固件会在 DAP
+         *    活动时给 DAP 让路），但抢是双向的，先停更干净 —— 与烧录页 `_clearProbeUsers` 同一个规矩。
+         */
+        const fw = window.__tools?.hid;
+        if (fw?.last?.running){
+          try {
+            await fw.stop();
+            toast('已停掉「RTT 转发」的探针桥（它和本页读同一个 RTT 环，两个读者会互相抢数据）', 'warn', 7000);
+          } catch (e){ /* 停不掉也继续连，最多就是两边抢数据 */ }
+        }
         // 已经授权过的探针**不用再弹选择框**（用户体验也好得多）；想换设备点「换设备…」
         // 🚨 全部加超时：USB 服务被挂起传输搞脏时，getDevices()/open() 会永远不返回，
         //    界面看着像"点了一下就没反应"（实测卡过 90 秒）。宁可 5 秒报错并给出自救提示。
@@ -404,6 +418,7 @@ export class RttView {
     if (this.probe && typeof this.probe.fast === 'boolean') this.probe.fast = true;
     this.stats.polls = 0; this.stats.bytes = 0; this.stats.lost = 0;
     this.fullPolls = 0; this.highPolls = 0; this.peak = 0; this._faults = 0;
+    this._pollT0 = Date.now(); this._zeroHinted = false; this._zeroHintSet = false;   // 见 _stats 里的"零速率"诊断
     /**
      * 轮询间隔下限：走桥（OpenOCD Tcl RPC）时不能按 WebUSB 那种节奏猛刷 ——
      * 一轮 readUp 是 3 条 RPC，190 Hz 就是 ~570 条/秒，OpenOCD 的 Tcl 口扛不住，
@@ -685,6 +700,24 @@ export class RttView {
     if (this.paused) $('r-pause').title = '暂停中（数据仍在收，继续后补上）';
     // 记录/落盘期间按钮要一直刷：字节数与"待落盘"量都得看得见（见 recorder.js 的说明）
     if (this.rec.active || this.rec.draining) this._recordBtn();
+    /**
+     * **零速率诊断**（2026-10 用户现场：报"我测 RTT Viewer，没有速率" —— 界面上只有 0 B/s，
+     * 看不出该去查哪儿）。控制块找到了、轮询也在跑，却连着 4 秒一个字节都没有时，把可能的原因写出来；
+     * 后来读到数据就自动把这句话收掉（只清自己写的那条，不覆盖别的错误）。
+     */
+    if (this.running && this.rtt && s.bytes === 0 && !this._zeroHinted && Date.now() - (this._pollT0 || 0) > 4000){
+      this._zeroHinted = true;
+      const errEl = $('r-err');
+      if (errEl && !errEl.textContent){
+        setStatus(errEl, '控制块在、轮询也在跑，但 4 秒没读到任何字节：' +
+          '① 目标固件没在写 RTT（或没在跑）；② 同一个 RTT 环被别的读者拿走了 —— 本页「RTT 转发」的探针桥在跑就先停它；' +
+          '③ 地址是手填的话清空它重扫一次', 'warn');
+        this._zeroHintSet = true;
+      }
+    } else if (this._zeroHintSet && s.bytes > 0){
+      this._zeroHintSet = false;
+      setStatus($('r-err'), '', null);
+    }
     if (!this.stream && !this.rtt && this.probe) $('r-cb').textContent = '查找中…';
   }
 
