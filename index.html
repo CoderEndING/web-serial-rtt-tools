@@ -567,10 +567,10 @@
       <fieldset>
         <legend>烧录设置</legend>
         <label class="row"><span>后端</span>
-          <select id="f-backend" title="本地桥：走 OpenOCD，兼容性最好（推荐）。零安装：与 RTT 共用探针直接烧，目前覆盖 F0/F1/F4/F7/H7/L0/L4；部分探针固件存在 PPB 访问兼容问题，失败时请换本地桥">
-            <option value="openocd">本地桥 · OpenOCD（推荐）</option>
+          <select id="f-backend" title="零安装（默认）：与 RTT 共用探针，直接在浏览器里烧，覆盖 STM32 F0/F1/F4/F7/H7/L0/L4 与 HPM 全系 RISC-V。个别探针固件在 PPB 访问上有兼容问题、或你只想给磁盘路径（不给文件）时，换「本地桥」即可。">
+            <option value="webusb">WebUSB · 零安装（默认）</option>
+            <option value="openocd">本地桥 · OpenOCD</option>
             <option value="jlink">本地桥 · J-Link</option>
-            <option value="webusb">WebUSB · 零安装（实验性）</option>
           </select>
         </label>
         <label class="row"><span>桥地址</span><input id="f-bridge-url" value="ws://127.0.0.1:17321"></label>

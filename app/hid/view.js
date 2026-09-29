@@ -110,6 +110,9 @@ export class RttCdcView {
   }
 
   // ---------------------------------------------------------------- 参数
+  /** 目标类型是 RISC-V/JTAG 吗？（探针侧粘性标志，界面下拉是唯一真相）*/
+  get isRiscv(){ return $('h-target').value === 'riscv'; }
+
   params(){
     const num = (id, dflt) => {
       const v = $(id).value.trim();
@@ -120,7 +123,13 @@ export class RttCdcView {
       addr: num('h-addr', 0),
       size: num('h-size', 0),
       channel: num('h-chan', 0),
-      clockHz: Number($('h-clock').value) || 0,
+      /**
+       * 🚨 RISC-V/JTAG 下**必须发 0**（2026-10 真机踩到，见 `applyTargetType` 的说明）：
+       *    这个字段在 JTAG 下是 DMI 的 idle/delay 覆盖值，把 45 MHz 这种数字塞进去，
+       *    探针的 RISC-V 引擎就再也读不出目标内存 —— 现象是"桥一直找不到 RTT 控制块、
+       *    读错数一直涨"，而同一个探针用 `hpm6800_rtt_loss.py`（clock 传 0）1.39 MB/s 跑得好好的。
+       */
+      clockHz: this.isRiscv ? 0 : (Number($('h-clock').value) || 0),
     };
   }
 
@@ -135,6 +144,7 @@ export class RttCdcView {
   async applyClock(){
     this.persist();
     if (this.mock) return;
+    if (this.isRiscv){ toast('RISC-V/JTAG 下不用 SWD 时钟档（这个字段在 JTAG 下是 DMI idle，必须留 0）', 'warn'); return; }
     const { clockHz } = this.params();
     if (!this.dev.connected || !clockHz) return;
     try {
@@ -148,17 +158,37 @@ export class RttCdcView {
    * 切换探针的**全局目标类型**（HID 0x31 action 10）：0 = SWD/ARM，1 = RISC-V/JTAG。
    * RTT 桥自身的逻辑（找控制块 / 搬环形缓冲 / 回写 RdOff）两边完全一样，只有底下的读/RdOff 写
    * 与初始化分派不同（SWD 走 DAPLink 的 swd_host，RISC-V 走 DMI+SBA）。**粘性**：设一次一直有效。
-   * JTAG 下 SWD 时钟档没有意义（只有 <256 的值会被当成 DMI idle 周期数），所以顺手置灰。
+   *
+   * 🚨 **切 RISC-V 时要把 SWD 时钟清成 0，否则桥读不到目标内存**（2026-10 真机定位）：
+   *    action 7 的 clock 字段在 JTAG 下是 DMI 的 idle/delay 覆盖值，45 MHz 这种数字塞进去，
+   *    探针的 RISC-V 引擎就再也不应答 —— 现象是"控制块找不到、读错数一直涨、swdReady=false"，
+   *    而同一块板同一个探针，用参考脚本 `hpm6800_rtt_loss.py`（clock 传 0）能跑 1.39 MB/s、rderr=0。
    */
   async applyTargetType(){
-    const riscv = $('h-target').value === 'riscv';
+    const riscv = this.isRiscv;
     $('h-clock').disabled = riscv;
     $('h-clock').title = riscv
-      ? 'RISC-V/JTAG 下无意义：JTAG 时序由 DMI 汇编旋钮 + delay 决定（<256 的值会被当成 idle 周期数）'
+      ? 'RISC-V/JTAG 下必须留 0：这个字段在 JTAG 下是 DMI idle/delay 覆盖值，给成大数字会让探针读不到目标内存'
       : '运行时调参（HID 0x31 action 7），改完立刻生效';
+    /**
+     * 切到 RISC-V 时别自作聪明改地址：**HPM 上"盲目大范围搜控制块"不可靠**
+     * （2026-10 真机实测：窗口给 0x01200000 + 256 KB 时读错数一直涨、就是搜不到；
+     *   给准地址 0x01240000 立刻找到）。所以只提示用户走「载入 ELF…」那条确定的路。
+     */
+    if (riscv){
+      const a = String($('h-addr').value || '').trim().toLowerCase();
+      if (!a || a === '0x20000000' || a === '0x24000000'){
+        toast('切到 RISC-V 了：HPM 的控制块地址请点「载入 ELF…」自动填（_SEGGER_RTT），' +
+              '或在 0x01240000 一带手填 —— 对着 STM32 的默认窗口搜是搜不到的', 'warn', 8000);
+      }
+    }
     if (!this.dev.connected){ toast(`已记为 ${riscv ? 'RISC-V/JTAG' : 'SWD/ARM'}，连上探针后再切一次`, 'warn'); return; }
     try {
       await this.dev.setTargetType(riscv);
+      // 🚨 顺手把时钟字段清成 0（粘性状态里可能还留着上一次 SWD 的 45 MHz）
+      if (riscv && !this.mock){
+        try { await this.dev.configure({ clockHz: 0 }); } catch { /* 清不掉也不致命，start() 里还会再发一次 0 */ }
+      }
       toast(`探针目标类型已切到 ${riscv ? 'RISC-V/JTAG' : 'SWD/ARM'}（粘性，采样器也跟着走）`, 'ok');
       await this.refresh();
     } catch (e){ toast('切目标类型失败：' + (e?.message || e), 'err'); }
@@ -168,7 +198,8 @@ export class RttCdcView {
   async start(){
     const p = this.params();
     try {
-      if (p.clockHz && !this.mock) await this.dev.configure({ clockHz: p.clockHz });
+      // RISC-V 下也要发这条（发的是 clock=0）：把探针里可能残留的 SWD 时钟/DMI delay 清掉
+      if ((p.clockHz || this.isRiscv) && !this.mock) await this.dev.configure({ clockHz: p.clockHz });
       const before = this.last?.startRc ?? 0;
       await this.dev.start(p);
       this.persist();
@@ -303,22 +334,41 @@ export class RttCdcView {
     if (error && dev.connected) setStatus(el, error, 'err');
     else if (!st) setStatus(el, dev.connected ? '未启动' : '—', '');
     else if (st.running && !st.cbAddr){
-      // 桥跑起来了但还没找到控制块：三种常见原因按概率排 —— 主机侧 DAP 在抢 SWD、地址窗口不对、目标没在跑/接线
+      /**
+       * 桥跑起来了但还没找到控制块。原因按概率排，而且**RISC-V 与 SWD 的排查项不一样**：
+       *   · RISC-V：时钟字段必须是 0（页面已自动处理）、窗口要给 HPM 的 SRAM、探针得在 SWD+JTAG 模式
+       *   · SWD：主机侧 DAP 在抢线、窗口要给对（Cortex-M7 是 AXI SRAM）、接线/供电
+       */
+      const riscv = this.isRiscv;
+      const why = riscv
+        ? ' —— ① 探针是不是在 SWD+JTAG 输出模式（烧录器页会自动切，也可 HID SET_CONFIG=1）；'
+          + '② 地址窗口给对了吗（HPM 的控制块一般在 0x01240000 一带的 SRAM，或点「载入 ELF…」自动填）；'
+          + '③ 目标在跑吗 / 查 JTAG 接线与供电'
+        : ' —— ① 是不是同时开着 RTT Viewer 的 WebUSB（它在抢同一根 SWD，先断开）；'
+          + '② 地址窗口给对了吗（Cortex-M7 要给 AXI SRAM）；③ 目标在跑吗 / 查 SWD 接线与供电';
       setStatus(el, `运行中 · 还没找到 RTT 控制块（读错 ${st.rdErr} / RdOff 错 ${st.wrErr}`
-        + ` · 档位 ${st.swdMhz} MHz${st.dapYield ? ` · 给 DAP 让路 ${st.dapYield} 次` : ''}）`
-        + ' —— ① 是不是同时开着 RTT Viewer 的 WebUSB（它在抢同一根 SWD，先断开）'
-        + '；② 地址窗口给对了吗（Cortex-M7 要给 AXI SRAM）；③ 目标在跑吗 / 查 SWD 接线与供电', 'err');
+        + ` · 档位 ${st.swdMhz} MHz${st.dapYield ? ` · 给 DAP 让路 ${st.dapYield} 次` : ''}）` + why, 'err');
     }
     else if (st.running){
+      /**
+       * 「已搬运」不涨有两种完全不同的原因，别一律甩给"抢缓冲"：
+       *   · **CDC 端口没打开** → 数据没地方去，探针的 CDC 缓冲满了自然就停了（这是最常见的）
+       *   · 打开了还被抢 → RTT Viewer / 桥的另一个会话在搬同一个上行缓冲
+       */
+      // CDC 转发流的打开状态在另一个视图里（app/hid/stream.js，同面板「端口」那一栏）
+      const sv = (typeof window !== 'undefined' && window.__tools && window.__tools.stream) || null;
+      const portOpen = !!(sv && sv.s && (sv.s.port || sv.s.reader));
       const stall = (this._stall || 0) >= 2
-        ? ' ⚠ 桥在跑但「已搬运」不涨 —— 多半是另一路在抢同一个 RTT 缓冲（RTT Viewer 的 WebUSB / 桥的 RTT 会话），'
-          + '或者目标根本没在写。把那边断开再试'
+        ? (portOpen
+            ? ' ⚠ 桥在跑但「已搬运」不涨 —— 多半是另一路在抢同一个 RTT 缓冲（RTT Viewer 的 WebUSB / 桥的 RTT 会话），或者目标根本没在写'
+            : ' ⚠ 桥在跑但「已搬运」不涨 —— **CDC 端口还没打开**：转发出来的数据要从探针的 CDC 串口读（右侧「端口」那一栏选 COM 口并打开），'
+              + '没人收它就会把探针的环形缓冲写满然后停下')
         : '';
       setStatus(el, `运行中 · 控制块 ${hex(st.cbAddr)} · 上行缓冲 ${hex(st.upAddr)} · 通道 ${st.channel}`
         + ` · 已搬运 ${kb(st.moved)}（${st.transfers} 次）· 轮询 ${st.polls}`
         + ` · 读错 ${st.rdErr} / RdOff 错 ${st.wrErr} · 档位 ${st.swdMhz} MHz`
         + (st.dapYield ? ` · 给 DAP 让路 ${st.dapYield} 次` : '')
-        + (st.discard ? ' · 丢弃模式' : '') + stall, stall ? 'err' : 'ok');
+        + (st.discard ? ' · 丢弃模式' : '') + stall, stall ? 'warn' : 'ok');
     } else if (st.startRc === START_PENDING){
       setStatus(el, '正在启动…（探针还在排队搜控制块）', '');
     } else if (st.startRc){

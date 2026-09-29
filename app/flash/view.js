@@ -127,8 +127,12 @@ export class FlashView {
     const pathText = String($('f-path').value || '').trim();
     const usePath = !this.file && !!pathText;
     if (!this.file && !pathText){ toast('先指定固件：点「选择文件…」或填路径', 'warn'); return; }
+    // 零安装模式读不了磁盘路径（浏览器安全限制）——但别直接报错挡住用户：
+    // 只给了路径时**自动改用本地桥**，并明确写一行日志说明为什么换了后端。
     if (usePath && $('f-backend').value === 'webusb'){
-      throw new Error('零安装模式读不了磁盘路径（浏览器安全限制）：点「选择文件…」选文件，或换「本地桥」后端');
+      $('f-backend').value = 'openocd';
+      this._log('只给了磁盘路径：零安装（WebUSB）在后端读不了本地文件 → 自动改用「本地桥 · OpenOCD」。' +
+                '想用零安装，请点「选择文件…」把固件选进来。');
     }
 
     // 探针互斥：RTT 会话在跑就先（经确认）断开
