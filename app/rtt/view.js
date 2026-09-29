@@ -54,15 +54,33 @@ const OCD_RAM = {
 };
 
 /**
- * RISC-V 目标的默认扫描范围。
+ * RISC-V 目标的默认扫描范围（按芯片）。
  *
- * 🚨 **别照搬 ARM 的 0x20000000**：HPM 这类 RISC-V 片子的 RTT 控制块一般被固件放在
- *    **AXI SRAM 的非缓存别名区**（HPM6800 是 `0x01240000` 起）—— 必须是非缓存区，
- *    因为探针的 SBA（系统总线）读**不旁路 D-cache**，放可缓存区读到的是陈旧值
- *    （scope 那份固件故意放了 `g_v` / `g_v_cached` 两份做对照，实测就是这样）。
- * 窗口给 16 KB：SBA 是一个字一个字搬的，扫太大就是干等（要更大就手改这一格）。
+ * 🚨 **别照搬 ARM 的 0x20000000**：RTT 控制块必须放在**非缓存**内存里 —— 探针的 SBA（系统总线）
+ *    读**不旁路 D-cache**，放可缓存区读到的是陈旧值（scope 那份固件故意放了 `g_v` / `g_v_cached`
+ *    两份做对照，实测就是这样）。
+ * 这里的窗口是**从各系列 SDK 链接脚本推出来的**（`hpm_sdk/soc/<系列>/toolchains/gcc/flash_xip.ld`）：
+ *    AXI_SRAM_NONCACHEABLE 的起点 = 该系列 AXI SRAM 顶端往下 `_noncacheable_size`（常见 256 KB）。
+ *    例：HPM6800 → `ORIGIN = 0x01280000 - _noncacheable_size` = **0x01240000**（本机 HPM6800EVK
+ *    固件的 `_SEGGER_RTT` 实测就在这儿 ✓）；HPM6200/HPM6P00 的非缓存区在 AXI SRAM **开头**。
+ *    窗口取 64 KB（扫一遍 ~0.5 s：SBA 是"每批 12 个字一条 USB 命令"，64 KB ≈ 1400 条）。
+ * ⚠️ `_noncacheable_size` 是工程自己的宏，**以你的链接脚本为准**；最稳的是点「载入 ELF…」
+ *    直接用 `_SEGGER_RTT` 把地址填死（那时这格只当兜底）。
  */
-const RISCV_RAM_DEFAULT = '0x01240000-0x01244000';
+const RISCV_RAM = {
+  hpm6800evk:    '0x01240000-0x01250000',
+  hpm6750evk2:   '0x01100000-0x01110000',
+  hpm6750evkmini:'0x01100000-0x01110000',
+  hpm6300evk:    '0x010C0000-0x010D0000',
+  hpm6200evk:    '0x01080000-0x01090000',
+  hpm6e00evk:    '0x01280000-0x01290000',
+  hpm6p00evk:    '0x01200000-0x01210000',
+  hpm5e00evk:    '0x01200000-0x01210000',
+  hpm5300evk:    '0x00080000-0x00090000',   // 5300 没有 AXI SRAM：DLM
+  hpm5301evklite:'0x00080000-0x00090000',
+};
+/** 选「其它 RISC-V」时的兜底窗口（HPM 最常见的非缓存区起点） */
+const RISCV_RAM_FALLBACK = '0x01240000-0x01250000';
 
 export class RttView {
   constructor(){
@@ -173,11 +191,22 @@ export class RttView {
       $('r-reset').title = rv
         ? 'RISC-V 下没有 Cortex-M 的 DHCSR/AIRCR 复位语义（探针的 RISC-V 引擎只管 halt/resume）—— 要复位就按板子上的复位键'
         : '复位目标（AIRCR.SYSRESETREQ；探针没接 NRST 时靠软复位）';
-      $('r-range').value = rv ? RISCV_RAM_DEFAULT : (OCD_RAM[$('r-ocd-target').value] || $('r-range').value);
+      /**
+       * 芯片那两格**按目标类型换一个**：STM32 那份同时是「本地桥 · OpenOCD」的目标 cfg，
+       * RISC-V 那份只用来带出 RAM 范围（HPM 的控制块在 AXI SRAM，不在 0x20000000）。
+       * 分成两个下拉而不是塞进一个列表：桥后端送出去的 target 名字不能被 RISC-V 的 id 污染。
+       */
+      $('r-ocd-chip-row').hidden = rv;
+      $('r-rv-chip-row').hidden = !rv;
+      $('r-range').value = rv ? (RISCV_RAM[$('r-rv-chip').value] || RISCV_RAM_FALLBACK)
+                              : (OCD_RAM[$('r-ocd-target').value] || $('r-range').value);
     };
     applyTarget();
     store.bind($('r-target'), 'rtt.target');
     $('r-target').addEventListener('change', () => { applyTarget(); if (this.probe || this.bridge) this.disconnect(); });
+    store.bind($('r-rv-chip'), 'rtt.rvChip');
+    $('r-rv-chip').addEventListener('change', () => { $('r-range').value = RISCV_RAM[$('r-rv-chip').value] || RISCV_RAM_FALLBACK; });
+    if (!$('r-rv-chip').value) $('r-rv-chip').value = 'hpm6800evk';    // 没存过就给 HPM6800EVK（本机那块）
 
     // ---------- 连接按钮 ----------
     $('r-usb-connect').addEventListener('click', () => this.connectProbe());
@@ -268,7 +297,7 @@ export class RttView {
     $('r-ocd-custom-cfgs-row').hidden = !custom;
     $('r-ocd-cfgs-hint').hidden = !custom;
     $('r-ocd-custom-speed-row').hidden = !custom;
-    if (applyRange && OCD_RAM[t]) $('r-range').value = OCD_RAM[t];
+    if (applyRange && $('r-target').value !== 'riscv' && OCD_RAM[t]) $('r-range').value = OCD_RAM[t];
   }
 
   // ================= 连接 =================

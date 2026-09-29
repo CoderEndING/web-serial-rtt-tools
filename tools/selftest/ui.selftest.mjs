@@ -299,6 +299,22 @@ export async function runUiSelfTest(tools){
     if (!$('r-reset').disabled) throw new Error('RISC-V 下「复位目标」应该置灰（没有 DHCSR/AIRCR 语义）');
     if (!$('r-range').value.includes('0x01240000')) throw new Error('RISC-V 下 RAM 范围没换成 AXI SRAM：' + $('r-range').value);
     if (!/JTAG|TCK/i.test($('r-usb-clock').closest('label').textContent)) throw new Error('时钟那格的标签没改成 JTAG TCK');
+    // 芯片那两格要按目标类型换一个：ARM 那份是 OpenOCD 的 target cfg，不能被 RISC-V 的 id 污染
+    if (!$('r-ocd-chip-row').hidden) throw new Error('RISC-V 下 STM32 芯片那行该收起来');
+    if ($('r-rv-chip-row').hidden) throw new Error('RISC-V 下该出现 RISC-V 芯片那行');
+    const rv = $('r-rv-chip');
+    const hpmIds = [...rv.options].map(o => o.value);
+    for (const id of ['hpm6800evk', 'hpm6750evk2', 'hpm6300evk', 'hpm6200evk', 'hpm6e00evk', 'hpm5300evk', 'riscv-other'])
+      if (!hpmIds.includes(id)) throw new Error(`RISC-V 芯片下拉少了 ${id}（现有 ${hpmIds.join('/')}）`);
+    const keepRv = rv.value;
+    rv.value = 'hpm6300evk';
+    rv.dispatchEvent(new Event('change'));
+    await new Promise(r => setTimeout(r, 40));
+    if (!$('r-range').value.startsWith('0x010C0000')) throw new Error('换 HPM6300EVK 后 RAM 范围没跟着变：' + $('r-range').value);
+    rv.value = 'hpm6800evk';
+    rv.dispatchEvent(new Event('change'));
+    await new Promise(r => setTimeout(r, 40));
+    if (!$('r-range').value.startsWith('0x01240000')) throw new Error('换回 HPM6800EVK 后范围不对：' + $('r-range').value);
     const mod = await import('/app/rtt/riscv-mem.js');
     if (typeof mod.openRiscvMem !== 'function') throw new Error('riscv-mem.js 没导出 openRiscvMem');
 
@@ -306,8 +322,9 @@ export async function runUiSelfTest(tools){
     sel.dispatchEvent(new Event('change'));
     $('r-range').value = keepRange;
     $('r-ocd-target').value = keepChip;
+    rv.value = keepRv;
     if ($('r-reset').disabled && keepTarget === 'swd') throw new Error('切回 SWD 后「复位目标」该恢复可用');
-    return `下拉 ${vals.join('/')} · RISC-V 下关复位、范围换 AXI SRAM、标签改 JTAG TCK`;
+    return `下拉 ${vals.join('/')} · RISC-V 下关复位、芯片换 HPM 列表（${hpmIds.length} 项）、范围随芯片走`;
   });
 
   return out;

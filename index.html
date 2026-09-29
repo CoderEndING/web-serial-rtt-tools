@@ -287,7 +287,7 @@
 
       <fieldset>
         <legend>RTT 控制块</legend>
-        <label class="row"><span>芯片</span>
+        <label class="row" id="r-ocd-chip-row"><span>芯片</span>
           <select id="r-ocd-target" title="换芯片在这里选：RAM 扫描范围自动带出（可手改）。走「本地桥 · OpenOCD」时它同时是 OpenOCD 的目标 cfg；零安装 WebUSB 模式只用到 RAM 范围。列表外的芯片选「自定义 cfg…」">
             <option value="stm32f103">STM32F1（F103 等）</option>
             <option value="stm32f0">STM32F0</option>
@@ -313,6 +313,21 @@
             <option value="esp32s31">ESP32-S31（板载 USB-JTAG）</option>
             <option value="esp32">ESP32（Wrover Kit）</option>
             <option value="custom">自定义 cfg…</option>
+          </select>
+        </label>
+        <label class="row" id="r-rv-chip-row" hidden><span>芯片</span>
+          <select id="r-rv-chip" title="RISC-V 目标（HPM 全系）。它的作用是给出**默认的 RAM 扫描范围** —— RTT 控制块要放在**非缓存**内存里（探针的 SBA 读不旁路 D-Cache，放可缓存区会读到陈旧值），HPM 上就是 SDK 链接脚本里的 AXI_SRAM_NONCACHEABLE 那段。窗口按各系列推导（HPM6800EVK 实测控制块在 0x01240000），**以你的链接脚本为准**；最稳的是点「载入 ELF…」用 _SEGGER_RTT 直接定地址">
+            <option value="hpm6800evk">HPM6800EVK（HPM6880）· AXI SRAM 0x01240000</option>
+            <option value="hpm6750evk2">HPM6750EVK2 · AXI SRAM 0x01100000</option>
+            <option value="hpm6750evkmini">HPM6750EVKMINI · AXI SRAM 0x01100000</option>
+            <option value="hpm6300evk">HPM6300EVK · AXI SRAM 0x010C0000</option>
+            <option value="hpm6200evk">HPM6200EVK · AXI SRAM 0x01080000</option>
+            <option value="hpm6e00evk">HPM6E00EVK · AXI SRAM 0x01280000</option>
+            <option value="hpm6p00evk">HPM6P00EVK · AXI SRAM 0x01200000</option>
+            <option value="hpm5e00evk">HPM5E00EVK · AXI SRAM 0x01200000</option>
+            <option value="hpm5300evk">HPM5300EVK · DLM 0x00080000（没有 AXI SRAM）</option>
+            <option value="hpm5301evklite">HPM5301EVKLite · DLM 0x00080000</option>
+            <option value="riscv-other">其它 RISC-V（自己填 RAM 范围）</option>
           </select>
         </label>
         <label class="row"><span>RAM 范围</span><input id="r-range" value="0x20000000-0x20020000"></label>

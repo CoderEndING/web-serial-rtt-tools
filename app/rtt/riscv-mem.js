@@ -30,11 +30,12 @@ import { HPM_COMMON } from '../flash/hpm/chips.js';
  * 不提供 `run/isHalted/reset`（那是 Cortex-M 的 DHCSR 语义），界面据此把按钮关掉。
  */
 export class RiscvMem {
-  constructor({ probe, jtag, dm, clockKhz = 0, log = () => {} }){
+  constructor({ probe, jtag, dm, clockKhz = 0, log = () => {}, perWordMs = 700 }){
     this.probe = probe;
     this.jtag = jtag;
     this.dm = dm;
     this.clockKhz = clockKhz;
+    this.perWordMs = perWordMs;      // 单字读的墙钟上限（正常 ~0.2 ms；给 700 ms 已经很宽松）
     this.log = log;
     this.name = `RISC-V/JTAG · SBA ${clockKhz ? clockKhz / 1000 + 'MHz' : ''}`.trim();
     /** 不是 Cortex-M：没有 halt/run/DHCSR，"快速档"也不适用（保持 false，界面不会去切它）*/
@@ -42,8 +43,34 @@ export class RiscvMem {
     this.isRiscv = true;
   }
 
-  readMem(addr, len){ return this.dm.readMem(addr, len); }
+  readMem(addr, len){ return this._read(addr, len); }
   writeMem(addr, bytes){ return this.dm.writeMem(addr, bytes); }
+
+  /**
+   * 读内存（带"一次恢复 + 重试"）。
+   *
+   * 🚨 真机踩到（2026-10，HPM6800EVK）：**SBA 去读某些窗口会永久挂起**（事务不完成、sbbusy 不落），
+   *    而且挂起之后**整条链路都不应答** —— 表现出来不是"这个地址读不到"，而是"Viewer 连上以后
+   *    一个字节都不来"。本例的具体触发点是 RTT 通道的 `sName` 指向 **XIP flash**（0x8000cf1c）：
+   *    控制块在 SRAM 里读得好好的，一读那个字符串就整条链路卡住（`Rtt.name()` 于是永远不返回）。
+   *    解药在 `riscv-dm.js` 里写着：把 `dmcontrol` 先写 0 再写 1（DM 复位）能中止挂起的 SBA 事务。
+   *    所以这里：**单字超时压短**（正常一个字 ~0.2 ms，700 ms 足够），失败就复位 DM 重试一次。
+   */
+  async _read(addr, len){
+    try {
+      return await this.dm.readMem(addr, len, this.perWordMs);
+    } catch (e){
+      if (this._recovering) throw e;
+      this._recovering = true;
+      try {
+        this.log(`读 0x${(addr >>> 0).toString(16)}（${len} B）失败：${e.message} —— 复位 DM 后重试一次`);
+        await this.dm.init();
+        return await this.dm.readMem(addr, len, this.perWordMs);
+      } finally {
+        this._recovering = false;
+      }
+    }
+  }
 
   /** 错位读/卡住时的自救：重新把链路开一遍（TAP 复位 + DM 唤醒），不重开 USB */
   async recover(){

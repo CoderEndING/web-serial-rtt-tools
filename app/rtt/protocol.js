@@ -175,14 +175,27 @@ export class Rtt {
     return e;
   }
 
-  /** 通道名（存在目标内存里，按需读一次） */
+  /**
+   * 通道名（存在目标内存里，按需读一次）。
+   *
+   * 🚨 **必须带超时**（2026-10 真机踩到，HPM6800EVK/RISC-V）：通道名是个**目标内存里的指针**，
+   *    固件把它放在哪不受我们控制 —— 本例里 `sName = 0x8000cf1c` 落在 XIP flash 窗口，
+   *    探针的 SBA 读那个窗口会**永久挂起**（而且挂起后整条链路都不应答）。
+   *    名字只是显示用的锦上添花，绝不能让"连上 RTT"这一步被它拖死 —— 读不到就当没有名字。
+   */
   async name(dir, ch){
     const e = (dir === 'up' ? this.up : this.down)[ch];
     if (!e || !e.sName) return '';
     const k = `${dir}${ch}`;
     if (!this._names.has(k)){
       let nm = '';
-      try { nm = latin1((await this.mem.readMem(e.sName, 16)).subarray(0, 16)).replace(/\0.*$/, ''); } catch {}
+      try {
+        const buf = await Promise.race([
+          this.mem.readMem(e.sName, 16),
+          new Promise(res => setTimeout(() => res(null), 1200)),
+        ]);
+        if (buf) nm = latin1(buf.subarray(0, 16)).replace(/\0.*$/, '');
+      } catch {}
       this._names.set(k, nm);
     }
     return this._names.get(k);
