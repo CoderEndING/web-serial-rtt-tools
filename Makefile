@@ -29,7 +29,7 @@ FW_DIR   = tools/target-firmware/stm32f103
 LA       = tools/la/kingst_la.py
 
 .DEFAULT_GOAL := help
-.PHONY: help serve serve-stop browser open page-prep test test-ui test-gen test-gen-page test-hid test-dwarf test-scope test-scope-page test-scope-render test-hw test-record test-bridge test-bridge-gate test-hpm test-image test-all flash-timing hw-campaign \
+.PHONY: help serve serve-stop browser open page-prep test test-ui test-gen test-gen-page test-hid test-dwarf test-scope test-scope-page test-scope-render test-hw test-record test-bridge test-bridge-gate test-hpm test-image test-all flash-timing hw-campaign hw-campaign-hpm \
         bridge bridge-stop fw-build fw-flash fw-restore fw-h7-build fw-h7-slow fw-h7-flash \
         algo-check flash-plan la-info la-capture git-status git-log check clean
 
@@ -146,6 +146,15 @@ test-record: page-prep
 #   make hw-campaign ARGS="--cycles=1 --alt=1"   # 只冒烟一遍
 hw-campaign: page-prep
 	$(NODE) tools/selftest/hw-campaign.mjs $(ARGS)
+
+# 真机场景基准 · HPM6800EVK（HPM6880 / RISC-V + JTAG，akaLinkPro 探针）
+# 与上面那份同一套编排，差别：目标类型 RISC-V、RTT 控制块地址取自 ELF（AXI SRAM 0x01240000）、
+# 不做 ARM-only 的 RTT Viewer 判决、速度线是 HPM 自己那套（见脚本里的 SPEC）。
+#   make hw-campaign-hpm ARGS=--record          # 第一遍：只记录 + 打印"实测 × 80%"的 spec 建议
+#   make hw-campaign-hpm                        # 之后：按 SPEC 判决（2 轮 + 交替 5 遍，约 7 分钟）
+#   make hw-campaign-hpm ARGS="--cycles=1 --alt=1"   # 只冒烟一遍
+hw-campaign-hpm: page-prep
+	$(NODE) tools/selftest/hw-campaign-hpm.mjs $(ARGS)
 
 test-bridge:
 	$(NODE) tools/selftest/bridge.test.mjs
