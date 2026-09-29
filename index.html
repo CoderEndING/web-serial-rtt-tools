@@ -824,7 +824,12 @@
           <label class="chk"><input type="checkbox" id="sp-al-bl"> BL 低有效</label>
         </div>
         <div class="row btnrow"><button id="sp-pin-apply">应用引脚</button></div>
-        <p class="hint">TE 撕裂信号暂不暴露（TBD）。开了 qspi 档之后 PA30/PA31 不能再当辅助脚，固件会拒。</p>
+        <div class="row btnrow">
+          <button id="sp-bl-on" title="把 BL 脚置成「有效」电平（按上面的「BL 低有效」自动决定物理高低，固件负责取反）">背光开</button>
+          <button id="sp-bl-off" title="把 BL 脚置成「无效」电平 = 关背光">背光关</button>
+        </div>
+        <div class="row"><span>RST 脉冲</span><input id="sp-pin-rst-low" class="num" value="10" inputmode="numeric" title="把 RST 脚拉低几毫秒"><input id="sp-pin-rst-post" class="num" value="120" inputmode="numeric" title="释放后再等几毫秒"><button id="sp-pin-rst-send" class="mini">发</button></div>
+        <p class="hint" id="sp-pad-note">TE 撕裂信号暂不暴露（TBD）。灰掉的脚固件会拒：PY00/PY01 在 v1 不支持；qspi 档下 PA30/PA31 是 IO2/IO3。</p>
       </fieldset>
 
       <fieldset>
@@ -846,85 +851,121 @@
     </aside>
 
     <section class="main">
-      <div class="toolbar">
-        <span class="hint" style="margin:0">通用帧：bulk OUT <code>0x0B</code> 发 → IN <code>0x8B</code> 收（顺序性只由这条流保证）</span>
-        <span class="spacer"></span>
-        <button id="sp-log-clear" class="mini">清空日志</button>
-      </div>
-
-      <div class="spcols">
-        <fieldset>
-          <legend>XFER（一次 SPI 事务 = 一个 CS 窗口）</legend>
-          <div class="framegrid">
-            <label class="row"><span>cmd</span><input id="sp-x-cmd" value="0x00"></label>
-            <label class="row"><span>线数</span><select id="sp-x-lines"><option>1</option><option>2</option><option>4</option></select></label>
-            <label class="row"><span>addr_len</span><input id="sp-x-addrlen" class="num" value="0" inputmode="numeric"></label>
-            <label class="row"><span>addr</span><input id="sp-x-addr" value="0"></label>
-            <label class="row"><span>dummy</span><input id="sp-x-dummy" class="num" value="0" inputmode="numeric"></label>
-            <label class="row"><span>rx_len</span><input id="sp-x-rx" class="num" value="0" inputmode="numeric"></label>
-          </div>
-          <label class="row"><span>tx 数据</span><textarea id="sp-x-tx" class="tx" placeholder="十六进制，如 12 34 AB（单帧最多 492 B）"></textarea></label>
-          <div class="row">
-            <label class="chk"><input type="checkbox" id="sp-x-cmden"> 发 cmd</label>
-            <label class="chk"><input type="checkbox" id="sp-x-addren"> 发地址</label>
-            <label class="chk"><input type="checkbox" id="sp-x-addrquad"> 地址四线</label>
-            <label class="chk"><input type="checkbox" id="sp-x-token"> 0x69 token</label>
-          </div>
-          <div class="row">
-            <label class="chk"><input type="checkbox" id="sp-x-dcen"> 设 DC</label>
-            <label class="chk"><input type="checkbox" id="sp-x-dclevel" checked> DC=1（数据）</label>
-          </div>
-          <div class="row">
-            <label class="chk"><input type="checkbox" id="sp-x-rsp" checked> 要应答</label>
-            <label class="chk"><input type="checkbox" id="sp-x-cshold"> CS_HOLD</label>
-            <label class="chk"><input type="checkbox" id="sp-x-csoff"> CS_OFF</label>
-            <label class="chk"><input type="checkbox" id="sp-x-csaux"> 用辅助 CS</label>
-          </div>
-          <div class="row">
-            <label class="chk"><input type="checkbox" id="sp-x-nodma"> 强制轮询</label>
-            <label class="chk"><input type="checkbox" id="sp-x-forcedma"> 强制 DMA</label>
+      <div class="busstack">
+        <fieldset id="sp-cmd-card">
+          <legend>通用命令（一条命令一行 · 最多 10 条）<button class="mini foldbtn" data-fold="sp-cmd-card">收起</button></legend>
+          <div class="toolrow">
+            <label class="chk" title="整段用同一个 CS 窗口（发给需要连续时序的器件）；不勾则每行自成一次 CS"><input type="checkbox" id="sp-cmd-cshold"> 整段保持 CS（末条释放）</label>
+            <span>速率路径</span>
+            <select id="sp-cmd-path" title="数据相位走轮询还是 DMA。自动 = 按 tx 长度与「DMA 阈值」比">
+              <option value="auto">自动（按长度）</option>
+              <option value="poll">强制轮询</option>
+              <option value="dma">强制 DMA</option>
+            </select>
             <span class="spacer"></span>
-            <button id="sp-x-send" class="primary">发送 XFER</button>
+            <button id="sp-cmd-clear" class="mini">清空结果</button>
+            <button id="sp-cmd-send" class="primary mini">发送全部</button>
           </div>
+          <div class="scroll cmdscroll">
+            <table class="sp cmdtab">
+              <thead><tr><th>#</th><th>cmd</th><th>线数</th><th>addr_len</th><th>addr</th><th>dummy</th><th>rx_len</th><th>tx 数据（十六进制）</th><th>结果</th></tr></thead>
+              <tbody id="sp-cmd-body"></tbody>
+            </table>
+          </div>
+          <p class="hint">每行一条 <code>XFER</code>（一次 CS 窗口）：命令 → 地址 → dummy → 数据；留空的行不发，<b>每行都回应答</b>，成没成看「结果」列。</p>
         </fieldset>
 
-        <div>
-          <fieldset>
-            <legend>简单帧 / 引脚</legend>
-            <div class="row btnrow">
-              <button id="sp-f-ping">PING</button>
-              <button id="sp-f-auxin" title="读一次辅助输入（TE）电平。TE 同步刷屏是 TBD，这里只是读">读 AUX_IN</button>
-              <button id="sp-f-cs-low">CS↓</button>
-              <button id="sp-f-cs-high">CS↑</button>
-            </div>
-            <div class="row">
-              <span>GPIO</span>
-              <select id="sp-f-gpio-line"><option value="0">DC</option><option value="1">RST</option><option value="2">CS 辅助</option><option value="3">BL</option></select>
-              <select id="sp-f-gpio-level"><option value="1">置 1</option><option value="0">置 0</option></select>
-              <button id="sp-f-gpio" class="mini">发</button>
-            </div>
-            <div class="row"><span>延时 µs</span><input id="sp-f-delay" class="num" value="1000" inputmode="numeric"><button id="sp-f-delay-send" class="mini">发</button></div>
-            <div class="row"><span>RST 脉冲</span><input id="sp-f-reset-low" class="num" value="10" inputmode="numeric"><input id="sp-f-reset-post" class="num" value="120" inputmode="numeric"><button id="sp-f-reset-send" class="mini">发</button></div>
-            <p class="hint">延时 / RST 都是<b>非阻塞</b>的：探针只登记「下一个允许时刻」，期间 DAP / RTT 照常。</p>
-          </fieldset>
+        <fieldset id="sp-dsl-card">
+          <legend>通用命令（贴 C 表 / 脚本 · 载入与导出）<button class="mini foldbtn" data-fold="sp-dsl-card">收起</button></legend>
+          <div class="toolrow">
+            <span>示例</span>
+            <select id="sp-dsl-preset"></select>
+            <button id="sp-dsl-load" class="mini">载入</button>
+            <button id="sp-dsl-file" class="mini" title="读 .c / .h / .txt / .json：C 表行能直接解析，JSON 若是本站导出的形状会自动转回可读文本">读文件…</button>
+            <input type="file" id="sp-dsl-file-input" accept=".c,.h,.txt,.json" hidden>
+            <span class="spacer"></span>
+            <button id="sp-dsl-parse" class="mini" title="只解析、不发：先把语法和字段核一遍">只看解析</button>
+            <button id="sp-dsl-send" class="primary mini" title="解析整段后一次性发出去（自动打包、按需等应答）">解析并发送</button>
+          </div>
+          <textarea id="sp-dsl-text" class="code" spellcheck="false" placeholder="一行一条命令，`#` 注释。例：&#10;&#10;0x9F rx=3                                   读 RDID（裸字节 = 一条 cmd 帧）&#10;{0x5A, 1, 3, 0x000000, 1, 8, NULL},         C 表行：cmd, lines, addr_len, addr, dummy, rx_len, tx&#10;{0x02, 1, 3, 0x001000, 0, 0, (uint8_t[]){0xAA, 0xBB}},&#10;delay 120ms&#10;gpio DC 1"></textarea>
+          <div class="toolrow nw">
+            <span class="hint" id="sp-dsl-sum" style="margin:0">一行一条命令 · 空行与 # 注释忽略</span>
+            <span class="spacer"></span>
+            <button id="sp-dsl-out-c" class="mini" title="导出成 C 表：列序与上面那张命令表一致，能直接贴回来">导出 C 表</button>
+            <button id="sp-dsl-out-json" class="mini">导出 JSON</button>
+            <button id="sp-dsl-out-text" class="mini">导出文本</button>
+            <button id="sp-dsl-clear" class="mini">清空</button>
+          </div>
+          <div class="scroll" id="sp-dsl-errwrap" style="display:none">
+            <table class="sp"><thead><tr><th>行</th><th>内容</th><th>问题</th></tr></thead><tbody id="sp-dsl-err"></tbody></table>
+          </div>
+          <details class="dslhelp">
+            <summary>语法速查</summary>
+            <div class="hint" id="sp-dsl-help"></div>
+          </details>
+        </fieldset>
 
-          <fieldset>
-            <legend>回环自检（MOSI↔MISO 跳线）</legend>
+          <fieldset id="sp-flash-card">
+            <legend>SPI / NOR Flash 测试（外接）<button class="mini foldbtn" data-fold="sp-flash-card">收起</button></legend>
+            <div class="toolrow">
+              <button id="sp-fl-readid" class="primary mini" title="读 JEDEC ID（0x9F）：厂商 / 类型 / 容量">读 ID</button>
+              <button id="sp-fl-sfdp" class="mini" title="读 SFDP（0x5A）：签名 / 版本 / 参数表头；dummy 不对会读不出签名，会自动试 0~4">读 SFDP</button>
+              <button id="sp-fl-sr" class="mini" title="读状态寄存器 SR1(0x05) + SR2(0x35)：BUSY / WEL / QE">读状态</button>
+              <span class="spacer"></span>
+              <button id="sp-fl-wiring" class="mini" title="显示外接 flash 的接线">接线</button>
+            </div>
+            <div class="framegrid">
+              <label class="row"><span>读模式</span><select id="sp-fl-mode"></select></label>
+              <label class="row"><span>dummy</span><input id="sp-fl-dummy" class="num" value="1" inputmode="numeric" title="协议里的 dummy 字段（0~4）。SFDP 与四线读一般要 8 拍；读不出签名就用「读 SFDP」自动标定"></label>
+              <label class="row"><span>地址</span><input id="sp-fl-addr" value="0x000000"></label>
+              <label class="row"><span>长度</span><input id="sp-fl-len" class="num" value="256" inputmode="numeric"></label>
+            </div>
+            <div class="row btnrow">
+              <button id="sp-fl-read">读一段</button>
+              <button id="sp-fl-bench" title="连续读 N KB 计速（首帧发命令+地址、后续帧 CS_HOLD 续读）"><b>读测速</b></button>
+              <label class="row" style="margin-left:auto"><span style="width:auto">测速量</span><input id="sp-fl-benchkb" class="num" value="64" inputmode="numeric"><span>KB</span></label>
+            </div>
+            <div class="log" id="sp-fl-out" style="height:auto;min-height:52px;max-height:150px">（还没测过）</div>
+
+            <div class="row" style="margin-top:7px">
+              <label class="chk" title="擦写是破坏性的：先解锁，再点下面的按钮。地址 / 数据都在上面或下面填"><input type="checkbox" id="sp-fl-armed"> 我确认要擦写这颗 flash</label>
+            </div>
+            <div class="row btnrow">
+              <select id="sp-fl-erase-mode"></select>
+              <button id="sp-fl-erase" disabled>擦除</button>
+              <button id="sp-fl-write" disabled title="按页编程 + 页间自动等 tPP + 写完自动回读校验">写 + 校验</button>
+              <button id="sp-fl-writebench" disabled title="擦掉目标区 → 按页写满 → 计速 → 回读校验">写测速</button>
+            </div>
+            <label class="row"><span>写数据</span><textarea id="sp-fl-data" class="tx" spellcheck="false" placeholder="十六进制，如 00 01 02 …（一次最多 4 KB；留空 = 用递增图案）"></textarea></label>
+            <div class="row btnrow">
+              <button id="sp-fl-fill" class="mini">填递增图案</button>
+              <label class="row" style="margin-left:auto"><span style="width:auto">页间等 tPP</span><input id="sp-fl-tpp" class="num" value="3" inputmode="numeric"><span>ms</span></label>
+            </div>
+            <p class="hint">外接 flash 接在 J3：<code>CS=J3[24]</code> <code>SCLK=J3[23]</code> <code>IO0=J3[19]</code> <code>IO1=J3[21]</code>，四线再加 <code>IO2=J3[37]</code> <code>IO3=J3[11]</code>。板上那颗 NOR 在 XPI0 的 PX 专用脚上，桥够不着。</p>
+        </fieldset>
+
+        <fieldset id="sp-loop-card">
+          <legend>回环自检（MOSI↔MISO 跳线）<button class="mini foldbtn" data-fold="sp-loop-card">收起</button></legend>
+          <div class="framegrid">
             <label class="row"><span>长度</span><input id="sp-lb-lens" value="1,2,32,99,100,101,256,492" title="逗号分隔；单帧发送上限 492 B"></label>
             <label class="row"><span>线数</span><select id="sp-lb-lines"><option>1</option><option>2</option><option>4</option></select></label>
+          </div>
+          <div class="row">
             <label class="chk"><input type="checkbox" id="sp-lb-dma"> 同时对照 FORCE_DMA 那一档</label>
-            <div class="row btnrow">
-              <button id="sp-lb-run" class="primary">跑回环</button>
-              <button id="sp-lb-cancel">中止</button>
-            </div>
-            <p class="hint">每个长度原样发出去、再原样读回来逐字节比对。真机没接 J3[19]↔J3[21] 跳线时会 FAIL —— 那正是它的用处。</p>
-            <p class="hint" id="sp-lb-sum">未跑</p>
-            <div class="scroll"><table class="sp"><thead><tr><th>长度</th><th>路径</th><th>结果</th><th>说明</th></tr></thead><tbody id="sp-lb-body"></tbody></table></div>
-          </fieldset>
-        </div>
+            <span class="spacer"></span>
+            <button id="sp-lb-run" class="primary mini">跑回环</button>
+            <button id="sp-lb-cancel" class="mini">中止</button>
+            <span class="hint" id="sp-lb-sum" style="margin:0">未跑</span>
+          </div>
+          <p class="hint">每个长度原样发出去、再原样读回来逐字节比对（真机要 J3[19]↔J3[21] 跳线；没接就会 FAIL —— 那正是它的用处）。</p>
+          <div class="scroll"><table class="sp"><thead><tr><th>长度</th><th>路径</th><th>结果</th><th>说明</th></tr></thead><tbody id="sp-lb-body"></tbody></table></div>
+        </fieldset>
       </div>
 
-      <div id="sp-log" class="log"></div>
+      <div class="logbox" id="sp-logbox">
+        <button id="sp-log-clear" class="mini logclear" title="只清屏上的日志（记录仍保留在会话里，展开/切页回来会重放）">清空</button>
+        <div id="sp-log" class="log"></div>
+      </div>
 
       <div class="stats">
         <span>协议：<code>HID 0x35</code> 控制面 + <code>bulk 0x0B/0x8B</code> 帧流</span>
@@ -950,7 +991,7 @@
         <div class="row btnrow">
           <button id="pn-usb" title="授权 WebUSB 并认领 SPI 桥接口（刷图/发帧的数据走这条）。⚠️ 第一次点会弹出**浏览器的设备选择框**（HID 与 WebUSB 要各授权一次）">连接数据端点…（授权）</button>
         </div>
-        <label class="row"><span>在飞读</span><input id="pn-inflight" class="num" value="4" inputmode="numeric"></label>
+        <label class="row"><span>在飞读</span><input id="pn-inflight" class="num" value="4" inputmode="numeric" title="同时在飞的 IN 读条数（连接数据端点时生效）"></label>
         <p class="hint" id="pn-usbinfo">未连接数据端点</p>
         <p class="hint" id="pn-state">未连接</p>
       </fieldset>

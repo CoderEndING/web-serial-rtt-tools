@@ -217,18 +217,28 @@ export class MockSpiTransport {
   async start(onRsp){
     if (this.running) return;
     this.running = true;
+    this.onRsp = onRsp;
     const pump = async () => {
       if (!this.running) return;
       this.probe.tick();
-      let rsp;
-      while ((rsp = this.probe.takeRsp())){
-        if (this._delay) await sleep(this._delay);
-        this.reads++; this.readBytes += rsp.length;
-        onRsp(rsp);
-      }
+      await this._drain();
       this.timer = setTimeout(pump, this.tickMs);
     };
     pump();
+  }
+  /**
+   * 把假探针里攒着的应答交给上层。
+   * 🚨 **每写一个包就排空一次**：真设备那边是"一边写 OUT、一边有几条 IN 读在飞"，
+   * 应答是边走边取的；只在定时器里排的话，一个 34 帧的批量读会瞬间灌满假探针的
+   * 16 槽 IN 环、把先到的应答挤掉 —— 于是"读测速"在假探针上假失败（真机上不会）。
+   */
+  async _drain(){
+    let rsp;
+    while ((rsp = this.probe.takeRsp())){
+      if (this._delay) await sleep(this._delay);
+      this.reads++; this.readBytes += rsp.length;
+      this.onRsp?.(rsp);
+    }
   }
   async send(pack){
     const data = pack instanceof Uint8Array ? pack : new Uint8Array(pack);
@@ -236,6 +246,7 @@ export class MockSpiTransport {
     this.writes++; this.writeBytes += data.length;
     const r = this.probe.write(data);
     if (!r.accepted){ this.errors++; this.lastError = '桥没使能（真固件这里会 NAK）'; throw new Error(this.lastError); }
+    await this._drain();
     return data.length;
   }
   async sendPacks(packs, opts = {}){

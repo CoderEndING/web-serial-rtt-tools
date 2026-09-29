@@ -232,16 +232,69 @@ dialog form{margin-top:16px;text-align:right}
    日志框是"帧流水"（每帧一行 + 应答一行），所以用等宽 + 预换行；颜色只分四档。 */
 #tab-spi .side .row>span:first-child,#tab-panel .side .row>span:first-child{width:74px}
 #tab-spi .row>span:first-child,#tab-panel .row>span:first-child{width:74px}
-#tab-spi .main .spcols,#tab-panel .main .spcols{
+#tab-panel .main .spcols{
   display:grid;grid-template-columns:minmax(330px,1.05fr) minmax(300px,1fr);
   gap:10px;align-items:start;max-height:62%;overflow:auto;padding-right:2px;
 }
 @media (max-width:1180px){
-  #tab-spi .main .spcols,#tab-panel .main .spcols{grid-template-columns:1fr;max-height:none}
+  #tab-panel .main .spcols{grid-template-columns:1fr;max-height:none}
 }
 #tab-spi .framegrid,#tab-panel .framegrid{display:grid;grid-template-columns:1fr 1fr;gap:0 8px}
 #tab-spi .framegrid .row>span:first-child,#tab-panel .framegrid .row>span:first-child{width:62px}
 #tab-spi .tx,#tab-panel .tx{min-height:44px}
+/* ---- 桥页右区：**单列 4 块**（命令表 / 命令文本 / flash / 回环），整体滚动，日志钉在下面 ----
+   两列那版在 1078px 窗口下会塌成一列 + 卡片互相挤（用户："右边面板区这个布局好丑啊"）。 */
+#tab-spi .busstack{display:flex;flex-direction:column;gap:9px;overflow:auto;flex:1 1 auto;min-height:0;padding-right:2px}
+#tab-spi .busstack>fieldset{min-width:0}
+#tab-spi .toolrow{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:0 0 6px}
+#tab-spi .toolrow.nw{flex-wrap:nowrap;overflow:hidden}
+#tab-spi .toolrow>span:first-child{color:var(--fg2);font-size:12px;flex:none}
+#tab-spi .toolrow select{max-width:340px}
+#tab-spi .toolrow.nw #sp-dsl-sum{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#tab-spi .toolrow.nw button{flex:none}
+/* 命令表：行高压紧（10 行 + 表头，矮窗口下这是最大的一块）
+   🚨 表格自己限高 + 滚动：不限的话这一块就有 310px 高，在 580px 高的窗口里
+   会把中列可视区（~287px）**整个占满**，刷新后另外三块完全看不见（用户："页面一刷新变成这样？"）。
+   限到 158px（约 7 行、表头吸顶）后下一块的标题会露出来，一眼就知道下面还有东西。
+   ⚠️ 这里必须写 `.scroll.cmdscroll`（两个类）：`.scroll{max-height:200px}` 在本文件里**排在后面**，
+   同优先级会反过来盖掉单类的 `.cmdscroll` —— 上一版就是这么静默失效的（量出来还是 200px）。 */
+#tab-spi .scroll.cmdscroll{max-height:146px;overflow:auto;margin-top:2px}
+#tab-spi table.cmdtab{font-size:11.5px}
+#tab-spi table.cmdtab th{padding:1px 4px;white-space:nowrap;position:sticky;top:0;background:var(--bg2);z-index:1}
+#tab-spi table.cmdtab td{padding:0 3px}
+#tab-spi table.cmdtab td.idx{color:var(--fg2);width:18px;text-align:right;padding-right:5px}
+#tab-spi table.cmdtab td.res{font-size:11px;white-space:nowrap;max-width:none;overflow:hidden;text-overflow:ellipsis}
+#tab-spi table.cmdtab td.res.ok{color:var(--ok)}
+#tab-spi table.cmdtab td.res.bad{color:var(--err)}
+#tab-spi input.cell,#tab-spi select.cell{
+  width:100%;padding:0 4px;height:20px;font-family:var(--mono);font-size:11.5px;background:var(--bg3);
+  border:1px solid var(--line);border-radius:5px;color:var(--fg);
+}
+#tab-spi input.cell:focus{outline:1px solid var(--acc);border-color:var(--acc)}
+#tab-spi table.cmdtab th:nth-child(2){width:56px}
+#tab-spi table.cmdtab th:nth-child(3){width:52px}
+#tab-spi table.cmdtab th:nth-child(4){width:62px}
+#tab-spi table.cmdtab th:nth-child(5){width:82px}
+#tab-spi table.cmdtab th:nth-child(6){width:56px}
+#tab-spi table.cmdtab th:nth-child(7){width:56px}
+/* tx 让它跟着窗口伸缩、结果列固定 180px：只固定一边的话，宽窗口下另一边会失控
+   （用户："数据区域太短了，结果区域太宽了"—— 那是 tx 固定 148 + 结果自动 的锅） */
+#tab-spi table.cmdtab th:nth-child(8){width:auto}
+#tab-spi table.cmdtab th:nth-child(9){width:180px}
+/* 🚨 `.tx` 是 `width:100%;flex:none`：放在 flex 行里会**比容器宽出一个 label 的宽度**，
+   于是 .busstack 冒出一条"拖了也没用"的横向滑条（用户现场：滑条能左右拖但什么也不动）。
+   在行内让它参与收缩即可。 */
+#tab-spi .row>.tx{width:auto;flex:1 1 auto;min-width:0}
+#sp-dsl-text{
+  width:100%;min-height:92px;max-height:220px;font-family:var(--mono);font-size:12px;line-height:1.45;
+  resize:vertical;white-space:pre-wrap;overflow-wrap:anywhere;overflow-x:hidden;overflow-y:auto;
+}
+#sp-flash-card #sp-fl-out{margin-top:4px}
+#sp-flash-card .framegrid .row>span:first-child{width:56px}
+/* 语法速查：折叠块里是**预排文本**（等宽 + 保留换行），别被挤成一坨 */
+#tab-spi .dslhelp{margin-top:5px}
+#tab-spi .dslhelp summary{color:var(--fg2);font-size:12px;cursor:pointer}
+#tab-spi .dslhelp .hint{white-space:pre-wrap;font-family:var(--mono);font-size:11.5px;line-height:1.5;margin:5px 0 0}
 .log{
   flex:0 0 auto;height:30%;min-height:126px;overflow:auto;background:#010409;border:1px solid var(--line);
   border-radius:9px;padding:6px 8px;font-family:var(--mono);font-size:12px;line-height:1.5;
@@ -305,8 +358,12 @@ fieldset[disabled] legend::after{content:' · 未实现';color:var(--warn)}
 #tab-panel .imginfo .row{margin:3px 0}
 #tab-panel .imgrow{gap:10px}
 /* 日志：折叠卡片里的一块滚动区 + 右上角浮动"清空"（不占额外高度） */
-#tab-panel .logbox{position:relative}
+#tab-panel .logbox,#tab-spi .logbox{position:relative}
 #tab-panel .logbox .log{height:100%}
+/* 桥页的日志直接放在 .main 里：高度落在 logbox 上（.log 自己按 30% 算会因为父高为 0 而塌掉）。
+   24% 而不是 30%：矮窗口（580px）里日志让出的这 26px 正好让下一块卡片露出来。 */
+#tab-spi #sp-logbox{flex:0 0 auto;height:24%;min-height:96px;display:flex;flex-direction:column}
+#tab-spi #sp-logbox .log{height:100%;min-height:0;flex:1 1 auto}
 #tab-panel .logclear{position:absolute;top:4px;right:10px;z-index:3;opacity:.9}
 /* 大卡片可以折叠（legend 里那个小按钮）：收起时只留标题行，并且**明确标出"已折叠"**
    —— 只有一行小字的话，用户会以为功能没了（实测就这么反馈过） */

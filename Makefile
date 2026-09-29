@@ -70,6 +70,8 @@ test:
 	$(NODE) tools/selftest/hpm-flash.test.mjs
 	$(NODE) tools/selftest/spi-proto.test.mjs
 	$(NODE) tools/selftest/spi-panel-code.test.mjs
+	$(NODE) tools/selftest/spi-frames-dsl.test.mjs
+	$(NODE) tools/selftest/spi-flash.test.mjs
 
 # 固件文件解析（ELF 按节取 + VMA→LMA、HEX、.bin）—— 离线
 test-image:
@@ -128,6 +130,14 @@ test-scope-render:
 # 「SPI/QSPI 屏」页的引擎层：帧编解码 / 打包器（一帧不跨包）/ HID 0x35 偏移 / 假探针帧执行
 test-spi:
 	$(NODE) tools/selftest/spi-proto.test.mjs
+
+# 手写多帧 DSL：解析 / 自动规则 / 错误必须带行号拦住（含面板示例的回归）
+test-dsl:
+	$(NODE) tools/selftest/spi-frames-dsl.test.mjs
+
+# 外接 SPI NOR：JEDEC ID / SFDP / 状态寄存器解析 + 连续读拆帧 + 按页编程 + 器件模型
+test-flash:
+	$(NODE) tools/selftest/spi-flash.test.mjs
 
 # 「SPI/QSPI 桥 + 屏」两页的真页面验收（假探针，不需要硬件；需要 8899 服务 + 9333 CDP 浏览器）
 test-spi-page: page-prep
@@ -281,6 +291,8 @@ check:
 	$(NODE) --check app/spi/panel-code.js
 	$(NODE) --check app/spi/panels-data.js
 	$(NODE) --check app/spi/image.js
+	$(NODE) --check app/spi/frames-dsl.js
+	$(NODE) --check app/spi/flash.js
 	$(NODE) --check app/main.js
 	$(NODE) --check bridge/rtt-bridge.mjs
 	pwsh -NoProfile -Command "Write-Host '语法检查通过'"

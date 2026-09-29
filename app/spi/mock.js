@@ -6,6 +6,9 @@
  *     它是给页面显示用的，不是标定值）。
  *   · bulk 侧：按固件的**同样规则**收包解析（`parsePack`）+ 执行帧，并记录"线上字节"，
  *     所以"档位展开对不对""打包器有没有把帧切成跨包"都能离线断言。
+ *   · 末级器件：`opts.flash`（缺省就挂一颗 W25Q128 的模型，见 flash.js 的 FlashDevice）——
+ *     **纯读/纯写**的 XFER 交给它答（RDID/SFDP/读/擦/写都能离线跑通），
+ *     **全双工（tx 与 rx 都非 0）**仍走回环模型（回环自检就靠这个形状）。
  *
  * 它同时演 HID 与 bulk 两个角色 —— 页面里**必须**把两边指向同一个实例（`#scope` 页踩过：
  * 两个实例会造出"配置发给了 A、数据从 B 出来"的假象）。
@@ -17,9 +20,13 @@ import {
   ACT, AUXIN_TE, CFG_LEN, CFG_FLAG, F, FRAME_MAX, HID_CMD, LINE, MAGIC, PROFILE_LEN,
   R, ST, T, TC, XFER_HDR, lineActiveLow, parsePack,
 } from './protocol.js';
+import { FlashDevice } from './flash.js';
 
 /** 逻辑引脚默认电平（RST/CS 低有效 → 空闲为高）*/
 const PIN_IDLE = { dc: 0, rst: 1, csAux: 1, bl: 0, te: 0 };
+
+/** IN 环的槽数（= 固件 in_ring_kb / 512；8 KB / 512 = 16）。满的时候固件暂停消费帧。 */
+export const IN_RING_SLOTS = 16;
 
 /** 简化版 sb_pick_sclk：模块时钟源（PLL0 三路）整数分频里挑最接近的（分频必须是偶数）*/
 export function mockPickSclk(wantHz){
@@ -65,6 +72,12 @@ export class MockSpiProbe {
     this.hidCalls = [];         // HID 调用流水
     this.delays = [];           // 收到的 DELAY/RESET/STEP.delay
     this.nakWrites = 0;         // 未使能时主机的写（真固件会 NAK）
+
+    /** 末级器件：缺省挂一颗 NOR（RDID/SFDP/读/擦/写都能离线跑通）。`flash:false` 可关掉 */
+    this.flash = opts.flash === false ? null
+      : opts.flash instanceof FlashDevice ? opts.flash
+      : new FlashDevice({ ...(opts.flash && typeof opts.flash === 'object' ? opts.flash : {}), clock: this.now });
+    this.flashNotes = [];       // 器件侧拒绝/说明（模型给的，不是协议错）
 
     /** 故障注入 */
     this.faults = {
@@ -191,7 +204,7 @@ export class MockSpiProbe {
     if (this.enabled) w |= 1;
     if (this.queue.length) w |= 2;
     if (this.cs) w |= 4;
-    if (this.rsps.length >= 14) w |= 8;
+    if (this.rsps.length >= IN_RING_SLOTS || this.faults.inFull) w |= 8;   // IN 流控
     if (this.queue.length >= 30) w |= 16;
     w |= (this.lastErr & 0xff) << 8;
     return w >>> 0;
@@ -265,7 +278,15 @@ export class MockSpiProbe {
   _drain(now = this.now()){
     while (this.queue.length){
       if (now < this.blockUntil) return;              // 非阻塞延时：到点再继续
-      const f = this.queue.shift();
+      const f = this.queue[0];
+      /**
+       * IN 环满 = **不消费这一帧**，等主机取走数据（照固件 `sb_in_alloc()==NULL` 的分支，
+       * spi_bridge.c:1562-1568：`return; /* IN 环满：不消费这一帧，等主机取走数据 *\/`）。
+       * 固件**从不丢应答** —— 早先这里模拟成"挤掉最老的"，会让一包 25 条带 RSP 的读帧
+       * 在假探针上假失败（真机上只会暂停一下，等主机把 IN 读走）。
+       */
+      if ((f.flags & F.RSP) && this.rsps.length >= IN_RING_SLOTS) return;
+      this.queue.shift();
       const st = this._exec(f, now);
       // 自动 CS 模式下"每帧一个 CS 窗口"，带 CS_HOLD 的帧结束后**不释放**（管道化刷像素就靠这个）
       if (st === ST.OK && (f.type === T.XFER || f.type === T.STEP)) this._csAfterFrame(f.flags);
@@ -323,7 +344,7 @@ export class MockSpiProbe {
       case T.CS: {
         const assert = !!p[0];
         if (assert && !this.cs){ this.cs = true; this.csWindows++; }
-        if (!assert) this.cs = false;
+        if (!assert){ this.cs = false; this.flash?.releaseCs(); }
         return ST.OK;
       }
 
@@ -400,6 +421,23 @@ export class MockSpiProbe {
 
     const tx = p.subarray(XFER_HDR, XFER_HDR + txLen);
     if (txLen){ this.wire.push(Uint8Array.from(tx)); this.stats.bytesTx += txLen; this.stats.txPoll++; }
+    if (tcfg & TC.DC_EN) this.pins.dc = (tcfg & TC.DC_LEVEL) ? 1 : 0;
+
+    // 器件模型：**纯读 / 纯写**（不含全双工）交给它；全双工仍走回环 —— 回环自检就靠那个形状
+    const duplex = txLen > 0 && rxLen > 0;
+    if (this.flash && !duplex && (cmdEn || addrEn || rxLen)){
+      const r = this.flash.exec({
+        cmd: p[0], cmdEn, addr: dv.getUint32(8, true), addrEn,
+        dummy: p[3], lines: (tcfg & TC.LINES_MASK) === TC.LINES_4 ? 4 : (tcfg & TC.LINES_MASK) === TC.LINES_2 ? 2 : 1,
+        tx, rxLen, csHold: !!(f.flags & F.CS_HOLD),
+      });
+      if (r.rx){ this._lastRx = r.rx; this.stats.bytesRx += r.rx.length; }
+      if (r.why){ this.flashNotes.push(r.why); this.wireLog.push(`器件：${r.why}`); }
+      this.wireLog.push(`XFER cmd=0x${p[0].toString(16).padStart(2, '0')} tx=${txLen} rx=${rxLen}` +
+        `${cmdEn ? '' : '（续读）'}${(f.flags & F.CS_HOLD) ? ' CS_HOLD' : ''} → 器件`);
+      return ST.OK;
+    }
+
     if (rxLen){
       this.stats.bytesRx += rxLen;
       // 回环模型：接好跳线时读回 = 刚发出去的；没接就是 0x00/0xFF
@@ -408,7 +446,6 @@ export class MockSpiProbe {
       else rx.fill(0x00);
       this._lastRx = rx;
     }
-    if (tcfg & TC.DC_EN) this.pins.dc = (tcfg & TC.DC_LEVEL) ? 1 : 0;
     this.wireLog.push(`XFER cmd=0x${p[0].toString(16).padStart(2, '0')} tx=${txLen} rx=${rxLen}` +
       ((f.flags & F.CS_HOLD) ? ' CS_HOLD' : ''));
     return ST.OK;

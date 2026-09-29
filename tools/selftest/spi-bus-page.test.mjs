@@ -152,42 +152,111 @@ console.log('== 5. 使能与状态 ==');
 }
 
 // ==================================================================== 6
-console.log('== 6. 通用帧：XFER 回环 + PING/GPIO/DELAY/RESET ==');
+console.log('== 6. 通用命令表（一行一条，最多 10 条）+ 文本面板 ==');
 {
-  const x = await ev(`
-    document.getElementById('sp-x-cmd').value = '0x2C';
-    document.getElementById('sp-x-cmden').checked = true;
-    document.getElementById('sp-x-lines').value = '1';
-    document.getElementById('sp-x-tx').value = 'aa bb cc dd';
-    document.getElementById('sp-x-rx').value = '4';
-    document.getElementById('sp-x-rsp').checked = true;
-    document.getElementById('sp-x-send').click();
-    await new Promise(r => setTimeout(r, 400));
-    const spi = window.__tools.spiSession;
-    return { wire: spi.mockProbe.wire.map(w => [...w]), log: document.getElementById('sp-log').textContent };`);
-  const last = x.wire[x.wire.length - 1] || [];
-  ok(last.join(',') === '170,187,204,221', `XFER 的 tx 真的落到线上（${last.join(' ')}）`);
-  ok(/XBAR|OK/.test(x.log) || /4 B/.test(x.log), '日志里能看到应答与读回长度');
+  const shape = await ev(`
+    const cards = ['sp-cmd-card','sp-dsl-card','sp-flash-card','sp-loop-card'].filter(i => !!document.getElementById(i));
+    const rows = document.querySelectorAll('#sp-cmd-body tr').length;
+    const cells = [...document.querySelectorAll('#sp-cmd-body tr:first-child [data-f]')].map(e => e.dataset.f);
+    const cols = [...document.querySelectorAll('#sp-cmd-card thead th')].map(e => e.textContent);
+    const old = ['sp-x-cmd','sp-x-token','sp-x-dcen','sp-x-csaux','sp-x-nodma'].map(i => !!document.getElementById(i));
+    return { cards, rows, cells, cols, old, stack: !!document.querySelector('#tab-spi .busstack'),
+             spcols: !!document.querySelector('#tab-spi .spcols') };`);
+  ok(shape.cards.length === 4, `右区就是那四块：${shape.cards.join(' / ')}`);
+  ok(shape.stack === true && shape.spcols === false, '改成单列堆叠（不再是两列 spcols）');
+  ok(shape.rows === 10, `命令表 10 行（实际 ${shape.rows}）`);
+  ok(shape.cols.join(',').includes('cmd') && shape.cols.join(',').includes('tx 数据'), `表头是参数项：${shape.cols.join(' | ')}`);
+  ok(shape.cells.join(',') === 'cmd,lines,addrLen,addr,dummy,rx,tx,res', `每行的字段：${shape.cells.join(',')}`);
+  ok(!shape.old.some(Boolean), '旧 XFER 表单里的 DC / token / 辅助 CS / 强制轮询等勾选项都撤了');
 
-  const simple = await ev(`
-    document.getElementById('sp-f-ping').click(); await new Promise(r=>setTimeout(r,150));
-    document.getElementById('sp-f-cs-low').click(); await new Promise(r=>setTimeout(r,150));
-    document.getElementById('sp-f-cs-high').click(); await new Promise(r=>setTimeout(r,150));
-    document.getElementById('sp-f-gpio-line').value = '0';
-    document.getElementById('sp-f-gpio-level').value = '1';
-    document.getElementById('sp-f-gpio').click(); await new Promise(r=>setTimeout(r,150));
-    document.getElementById('sp-f-delay').value = '2000';
-    document.getElementById('sp-f-delay-send').click(); await new Promise(r=>setTimeout(r,150));
-    document.getElementById('sp-f-reset-low').value = '5';
-    document.getElementById('sp-f-reset-post').value = '20';
-    document.getElementById('sp-f-reset-send').click(); await new Promise(r=>setTimeout(r,250));
+  // 填 1/2/4 行，第 3 行故意留空
+  const sent = await ev(`
+    const set = (r, f, v) => { document.querySelector('#sp-cmd-body tr:nth-child(' + r + ') [data-f=' + f + ']').value = v; };
+    set(1, 'cmd', '0x9F'); set(1, 'rx', '3');
+    set(2, 'cmd', '0x03'); set(2, 'addrLen', '3'); set(2, 'addr', '0x1000'); set(2, 'rx', '8');
+    set(4, 'cmd', '0x02'); set(4, 'addrLen', '3'); set(4, 'addr', '0x2000'); set(4, 'tx', 'aa bb');
+    const before = window.__tools.spiSession.mockProbe.stats.framesOk;
+    document.getElementById('sp-cmd-send').click();
+    for (let i = 0; i < 60 && window.__tools.spiSession.busy; i++) await new Promise(r => setTimeout(r, 100));
+    await new Promise(r => setTimeout(r, 250));
+    const res = [...document.querySelectorAll('#sp-cmd-body td.res')].map(td => td.textContent);
     const p = window.__tools.spiSession.mockProbe;
-    return { log: p.wireLog.slice(-6), delays: p.delays, cs: p.cs, framesOk: p.stats.framesOk };`);
-  ok(simple.log.some(l => /GPIO dc=1/.test(l)), 'GPIO 帧改到了 DC 电平');
-  ok(simple.delays.includes(2), `DELAY 帧的 2000 µs → 2 ms 被探针记下（${simple.delays.join(',')}）`);
-  ok(simple.delays.some(d => d === 25), 'RESET 帧折算成 5+20 ms（非阻塞登记）');
-  ok(simple.framesOk >= 7, `这一节 7 个帧都执行成功（frames_ok=${simple.framesOk}）`);
-  ok(simple.cs === false, 'CS 帧后处于释放状态');
+    return { before, after: p.stats.framesOk, res, log: document.getElementById('sp-log').textContent,
+             cls: [...document.querySelectorAll('#sp-cmd-body td.res')].map(td => td.className) };`);
+  ok(sent.after === sent.before + 3, `3 行发出 3 条帧，空行不发（frames_ok ${sent.before}→${sent.after}）`);
+  ok(/^OK/.test(sent.res[0]) && /ef 40 18/.test(sent.res[0]), `第 1 行读回 JEDEC ID 显示在「结果」列：${sent.res[0]}`);
+  ok(/^OK/.test(sent.res[1]), `第 2 行（读 8 B）也 OK：${sent.res[1]}`);
+  ok(/^OK/.test(sent.res[3]), `第 4 行（写 2 B，没有读）也能看到结果：${sent.res[3]}`);
+  ok(sent.res[2] === '' && sent.res.slice(4).every(x => x === ''), '没填的行结果列保持空白');
+  ok(/通用命令：发了 3 条/.test(sent.log), '日志里有整段总结');
+  ok(sent.cls[0] === 'res ok', '结果列带上 ok/bad 类（失败会标红）');
+}
+
+// ==================================================================== 6b
+console.log('== 6b. 文本面板：C 表行 / 语法错带行号 / 导出回灌 ==');
+{
+  // C 表行 + 非 XFER 帧混着来，一次发出去
+  const mix = await ev(`
+    const before = window.__tools.spiSession.mockProbe.stats.framesOk;
+    document.getElementById('sp-dsl-text').value = [
+      '# 贴一段 C 表',
+      '{0x9F, 1, 0, 0x000000, 0, 3, NULL},',
+      '{0x03, 1, 3, 0x000010, 0, 4, NULL},',
+      'delay 2000',
+      'gpio DC 1',
+      'reset 5 20',
+    ].join('\\n');
+    document.getElementById('sp-dsl-send').click();
+    for (let i = 0; i < 60 && window.__tools.spiSession.busy; i++) await new Promise(r => setTimeout(r, 100));
+    await new Promise(r => setTimeout(r, 250));
+    const p = window.__tools.spiSession.mockProbe;
+    return { before, after: p.stats.framesOk, delays: p.delays, gpio: p.wireLog.slice(-6), cs: p.cs,
+             sum: document.getElementById('sp-dsl-sum').textContent, errs: document.getElementById('sp-dsl-err').textContent };`);
+  ok(mix.after === mix.before + 5, `C 表行 + delay + gpio + reset 共 5 条帧都发了（frames_ok ${mix.before}→${mix.after}）`);
+  ok(mix.delays.includes(2) && mix.delays.some(d => d === 25), `delay 2000（µs）= 2 ms、reset 5 20 = 25 ms 都落到探针上（${mix.delays.join(',')}）`);
+  ok(mix.gpio.some(l => /GPIO dc=1/.test(l)), 'gpio 帧也落地了');
+  ok(mix.cs === false, '整段结束后 CS 是释放的');
+  ok(/发完/.test(mix.sum) && mix.errs === '', `摘要：${mix.sum}`);
+
+  // 语法错 → 一行都不发、错误表带行号
+  const bad = await ev(`
+    const before = window.__tools.spiSession.mockProbe.stats.framesOk;
+    document.getElementById('sp-dsl-text').value = '# 注释\\n\\n0x11\\n{0x9F, 1, 0, 0, 0}\\n0x29';
+    document.getElementById('sp-dsl-send').click();
+    await new Promise(r => setTimeout(r, 400));
+    const rows = [...document.querySelectorAll('#sp-dsl-err tr')].map(tr => tr.textContent);
+    return { rows, sum: document.getElementById('sp-dsl-sum').textContent, log: document.getElementById('sp-log').textContent,
+             before, after: window.__tools.spiSession.mockProbe.stats.framesOk, shown: document.getElementById('sp-dsl-errwrap').style.display };`);
+  ok(bad.rows.length === 1 && /^4/.test(bad.rows[0]), `错误表里正好 1 行、行号 4：${bad.rows[0]}`);
+  ok(/6~7 列/.test(bad.rows[0]), 'C 表行列数不够 → 说清了几列');
+  ok(bad.after === bad.before, `有语法错时**一条都不发**（frames_ok 没动：${bad.before}）`);
+  ok(/第 4 行/.test(bad.log) && bad.shown === '', '日志里有明确报错、错误表也显示了');
+
+  // 导出 → 回灌：C 表 / JSON / 文本三条路都要能再解析
+  const round = await ev(`
+    const D = await import('/app/spi/frames-dsl.js');
+    document.getElementById('sp-dsl-text').value = 'xfer cmd=0x6B addr=0 addrl=3 dummy=1 lines=4 rx=492 cs_hold\\nxfer lines=4 rx=100 cs_off\\ndelay 120ms';
+    const r = D.parseFrames(document.getElementById('sp-dsl-text').value);
+    const c = D.itemsToC(r.items), j = D.itemsToJson(r.items), t = D.itemsToDsl(r.items);
+    const rc = D.parseFrames(c), rj = D.parseFrames(D.jsonToDsl(j)), rt = D.parseFrames(t);
+    return { c0: c.split('\\n')[1], jlen: JSON.parse(j).length,
+             okC: rc.errors.length === 0 && rc.items.length === 2, okJ: rj.errors.length === 0 && rj.items.length === 3,
+             okT: rt.errors.length === 0 && rt.items.length === 3,
+             sameT: rt.items.every((it, i) => D.itemsToJson([it]) === D.itemsToJson([r.items[i]])) };`);
+  ok(/^\{0x6b, 4, 3, 0x000000, 1, 492, NULL\},/.test(round.c0), `导出的 C 表行与表格列序一致：${round.c0}`);
+  ok(round.okC && round.okJ && round.okT, `三条导出都能回灌（C ${round.okC} / JSON ${round.okJ} / 文本 ${round.okT}，JSON ${round.jlen} 条）`);
+  ok(round.sameT === true || round.sameT === undefined, '文本回灌后每帧与原来一致');
+
+  // 文件载入：读一个 .c 文件（用 DataTransfer 造一个 File，不需要真磁盘）
+  const file = await ev(`
+    const f = new File(['{0x9F, 1, 0, 0x000000, 0, 3, NULL},\\n{0x06, 1, 0, 0, 0, 0, NULL},'], 'test-table.c', { type: 'text/plain' });
+    await window.__tools.spi.dslLoadFile(f);
+    await new Promise(r => setTimeout(r, 300));
+    return { text: document.getElementById('sp-dsl-text').value, sum: document.getElementById('sp-dsl-sum').textContent,
+             log: document.getElementById('sp-log').textContent };`);
+  ok(/\{0x9F/.test(file.text), '读文件把内容填进了文本框');
+  ok(/解析通过：2 条帧/.test(file.sum), `载入后自动解析：${file.sum}`);
+  ok(/已读入 test-table.c/.test(file.log), '日志里写明读了哪个文件');
 }
 
 // ==================================================================== 7
@@ -229,10 +298,11 @@ console.log('== 8. 错误路径：必须看得见，不能静默 ==');
   const off = await ev(`
     document.getElementById('sp-disable').click();
     await new Promise(r => setTimeout(r, 300));
-    document.getElementById('sp-f-ping').click();
-    await new Promise(r => setTimeout(r, 500));
+    document.getElementById('sp-dsl-text').value = 'ping';
+    document.getElementById('sp-dsl-send').click();
+    await new Promise(r => setTimeout(r, 600));
     return { enabled: window.__tools.spiSession.mockProbe.enabled, log: document.getElementById('sp-log').textContent,
-             errs: window.__tools.spiSession.transport.errors };`);
+             errs: window.__tools.spiSession.transport.errors, sum: document.getElementById('sp-dsl-sum').textContent };`);
   ok(off.enabled === false, 'DISABLE 生效');
   ok(/没使能|NAK|写超时/.test(off.log) && off.errs >= 1, `失能后发帧被如实报错（transport.errors=${off.errs}）`);
 
@@ -241,11 +311,13 @@ console.log('== 8. 错误路径：必须看得见，不能静默 ==');
     document.getElementById('sp-enable').click(); await new Promise(r => setTimeout(r, 300));
     const p = window.__tools.spiSession.mockProbe;
     p.faults.dropRsp = true;
-    document.getElementById('sp-f-ping').click();
+    document.getElementById('sp-dsl-text').value = 'ping';
+    document.getElementById('sp-dsl-send').click();
     await new Promise(r => setTimeout(r, 1800));
     p.faults.dropRsp = false;
-    return document.getElementById('sp-log').textContent;`);
-  ok(/应答超时/.test(drop), '丢应答 → 页面报「应答超时」（不静默挂住）');
+    return { log: document.getElementById('sp-log').textContent, sum: document.getElementById('sp-dsl-sum').textContent };`);
+  ok(/应答超时/.test(drop.log), '丢应答 → 页面报「应答超时」（不静默挂住）');
+  ok(/没等到应答/.test(drop.sum), `DSL 摘要也点出没等到应答：「${drop.sum}」`);
 }
 
 // ==================================================================== 9
@@ -279,7 +351,116 @@ console.log('== 9. 统计对账（页面显示 = 探针计数）==');
 }
 
 // ==================================================================== 10
-console.log('== 10. 收尾：放掉探针（别的页签要用）==');
+console.log('== 10. NOR flash 卡（假探针里挂着一颗 W25Q128 模型）==');
+{
+  // 10.1 引脚下拉与固件拒绝规则对齐
+  const pads = await ev(`
+    const sel = document.getElementById('sp-pad-dc');
+    const dis = [...sel.options].filter(o => o.disabled).map(o => o.dataset.pad);
+    return { dis, note: document.getElementById('sp-pad-note').textContent };`);
+  ok(pads.dis.includes('9') && pads.dis.includes('10'), `PY00/PY01 已灰掉（固件 v1 不支持）：${pads.dis.join(',')}`);
+  ok(!pads.dis.includes('12'), '没开 qspi 档时 PA30/PA31 还能选');
+  ok(/PY00\/PY01/.test(pads.note), '提示文字里写明了为什么灰');
+
+  // 10.2 读 ID
+  const id = await ev(`
+    document.getElementById('sp-fl-readid').click();
+    await new Promise(r => setTimeout(r, 500));
+    return { out: document.getElementById('sp-fl-out').textContent, log: document.getElementById('sp-log').textContent };`);
+  ok(/Winbond/.test(id.out) && /16 MB/.test(id.out), `读 ID 显示厂商与容量：${id.out.split('\n')[1] || id.out}`);
+  ok(/JEDEC ID/.test(id.log), '日志里也有');
+
+  // 10.3 读 SFDP（含参数表头与 BFPT 原始 DWORD）
+  const sfdp = await ev(`
+    document.getElementById('sp-fl-sfdp').click();
+    for (let i = 0; i < 40 && window.__tools.spiSession.busy; i++) await new Promise(r => setTimeout(r, 100));
+    await new Promise(r => setTimeout(r, 300));
+    return { out: document.getElementById('sp-fl-out').textContent, dummy: document.getElementById('sp-fl-dummy').value };`);
+  ok(/JESD216B/.test(sfdp.out), `SFDP 版本读出来了`);
+  ok(/BFPT/.test(sfdp.out) && /DWORD/.test(sfdp.out), '参数表头与 BFPT 原始 DWORD 都摊开了');
+  ok(sfdp.dummy === '1', 'dummy 标定结果写回面板（模型用 8 拍，1 就对）');
+
+  // 10.4 读状态：SR1/SR2 解码
+  const sr = await ev(`
+    document.getElementById('sp-fl-sr').click();
+    await new Promise(r => setTimeout(r, 400));
+    return document.getElementById('sp-fl-out').textContent;`);
+  ok(/SR1/.test(sr) && /空闲/.test(sr), `读状态显示 SR1 且判为空闲`);
+  ok(/QE=0/.test(sr), 'SR2 指出 QE=0（四线读不出来的头号原因，这里必须提示）');
+
+  // 10.5 读一段：hexdump 出来
+  const rd = await ev(`
+    document.getElementById('sp-fl-mode').value = '3';   // READ 0x03（1 线，无 dummy）
+    document.getElementById('sp-fl-addr').value = '0';
+    document.getElementById('sp-fl-len').value = '64';
+    document.getElementById('sp-fl-read').click();
+    await new Promise(r => setTimeout(r, 600));
+    return { out: document.getElementById('sp-fl-out').textContent, log: document.getElementById('sp-log').textContent };`);
+  ok(/0000\s+ff ff ff/.test(rd.out), `擦除态读出全 FF（hexdump 带偏移）：${rd.out.split('\n')[1] || ''}`);
+  ok(/Flash 读 64 B/.test(rd.log), '日志里有长度与速率');
+
+  // 10.6 读测速：走 CS_HOLD 连续读，报实测与理论占比
+  const bench = await ev(`
+    document.getElementById('sp-fl-benchkb').value = '16';
+    document.getElementById('sp-fl-bench').click();
+    for (let i = 0; i < 60 && window.__tools.spiSession.busy; i++) await new Promise(r => setTimeout(r, 100));
+    await new Promise(r => setTimeout(r, 300));
+    return document.getElementById('sp-fl-out').textContent;`);
+  ok(/MB\/s|KB\/s/.test(bench), `读测速给出速率：${bench.split('\n')[1] || bench}`);
+  ok(/理论上限/.test(bench) && /%/.test(bench), '给出了"占理论值百分比"（不然不知道差在哪）');
+
+  // 10.7 擦写要有闸：不勾确认时按钮是禁的
+  const gate = await ev(`
+    const ids = ['sp-fl-erase', 'sp-fl-write', 'sp-fl-writebench'];
+    const off = ids.map(i => document.getElementById(i).disabled);
+    document.getElementById('sp-fl-armed').checked = true;
+    document.getElementById('sp-fl-armed').dispatchEvent(new Event('change'));
+    await new Promise(r => setTimeout(r, 100));
+    const on = ids.map(i => document.getElementById(i).disabled);
+    return { off, on };`);
+  ok(gate.off.every(Boolean), '没勾「我确认要擦写」时三个破坏性按钮全禁用');
+  ok(gate.on.every(x => x === false), '勾上之后才可用');
+
+  // 10.8 写 + 回读校验（写进 0x2000，之前是擦除态）
+  const wr = await ev(`
+    document.getElementById('sp-fl-addr').value = '0x2000';
+    document.getElementById('sp-fl-len').value = '256';
+    document.getElementById('sp-fl-fill').click();
+    const data = document.getElementById('sp-fl-data').value.slice(0, 23);
+    document.getElementById('sp-fl-write').click();
+    for (let i = 0; i < 80 && window.__tools.spiSession.busy; i++) await new Promise(r => setTimeout(r, 100));
+    await new Promise(r => setTimeout(r, 300));
+    return { out: document.getElementById('sp-fl-out').textContent, data, log: document.getElementById('sp-log').textContent };`);
+  ok(/回读一致 ✔/.test(wr.out), `写 256 B 后回读一致（写数据开头 ${wr.data}）`);
+  ok(/写 \+ 校验/.test(wr.log), '日志里有写+校验的总结行');
+
+  // 10.9 擦除扇区 + 再读回：应当变回 FF（证明确实擦掉了）
+  const er = await ev(`
+    document.getElementById('sp-fl-addr').value = '0x2000';
+    document.getElementById('sp-fl-erase').click();
+    for (let i = 0; i < 80 && window.__tools.spiSession.busy; i++) await new Promise(r => setTimeout(r, 100));
+    await new Promise(r => setTimeout(r, 300));
+    const out1 = document.getElementById('sp-fl-out').textContent;
+    document.getElementById('sp-fl-len').value = '16';
+    document.getElementById('sp-fl-read').click();
+    await new Promise(r => setTimeout(r, 500));
+    return { erased: out1, read: document.getElementById('sp-fl-out').textContent };`);
+  ok(/擦除完成/.test(er.erased), `扇区擦除走完（${er.erased.split('\n')[0]}）`);
+  ok(/0000\s+ff ff ff ff/.test(er.read), '擦完再读 → 全 FF（写入的内容确实没了）');
+
+  // 10.10 四线读：QE=0 时页面必须看得出来不对（模型会说明原因）
+  const quad = await ev(`
+    document.getElementById('sp-fl-mode').value = '235';  // QUAD I/O 0xEB（4 线）
+    document.getElementById('sp-fl-addr').value = '0';
+    document.getElementById('sp-fl-len').value = '16';
+    document.getElementById('sp-fl-read').click();
+    await new Promise(r => setTimeout(r, 600));
+    return { notes: window.__tools.spiSession.mockProbe.flashNotes.slice(-3), out: document.getElementById('sp-fl-out').textContent };`);
+  ok(quad.notes.some(n => /QE=0/.test(n)), '四线读在 QE=0 时器件侧给出明确原因（页面按全 00 显示，与真机一致）');
+}
+
+// ==================================================================== 11
+console.log('== 11. 收尾：放掉探针（别的页签要用）==');
 {
   const done = await ev(`
     await window.__tools.spiSession.teardown();
