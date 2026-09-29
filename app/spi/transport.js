@@ -254,9 +254,8 @@ export class MockSpiTransport {
     let sent = 0, failed = 0;
     for (let i = 0; i < packs.length; i++){
       if (shouldStop?.()) break;
-      try { await this.send(packs[i]); }
+      try { await this.send(packs[i]); sent++; }        // sent 只数成功的，与 WebUsbSpiTransport 同口径
       catch (e){ failed++; this.lastError = e?.message || String(e); if (stopOnError) throw e; }
-      sent++;
       onProgress?.(sent, packs.length, i);
       if ((i & 7) === 7) await yieldTask();
     }

@@ -232,13 +232,6 @@ dialog form{margin-top:16px;text-align:right}
    日志框是"帧流水"（每帧一行 + 应答一行），所以用等宽 + 预换行；颜色只分四档。 */
 #tab-spi .side .row>span:first-child,#tab-panel .side .row>span:first-child{width:74px}
 #tab-spi .row>span:first-child,#tab-panel .row>span:first-child{width:74px}
-#tab-panel .main .spcols{
-  display:grid;grid-template-columns:minmax(330px,1.05fr) minmax(300px,1fr);
-  gap:10px;align-items:start;max-height:62%;overflow:auto;padding-right:2px;
-}
-@media (max-width:1180px){
-  #tab-panel .main .spcols{grid-template-columns:1fr;max-height:none}
-}
 #tab-spi .framegrid,#tab-panel .framegrid{display:grid;grid-template-columns:1fr 1fr;gap:0 8px}
 #tab-spi .framegrid .row>span:first-child,#tab-panel .framegrid .row>span:first-child{width:62px}
 #tab-spi .tx,#tab-panel .tx{min-height:44px}
@@ -323,11 +316,19 @@ fieldset[disabled] legend::after{content:' · 未实现';color:var(--warn)}
    否则会出现"收起初始化区后下面留一大片空白、刷图区还被死高度卡着"这种明显不合理的画面。
    侧栏卡片按 DOM 顺序排（探针 → 屏型号 → 面板档 → 当前生效 → 面板电源/显示）。 */
 #tab-panel .main{gap:8px}
+/* 🚨 flex 子项的 min-width 默认是 auto：卡片里只要有不肯收缩的东西（.toolrow.nw 不换行、表格的
+   最小内容宽），fieldset 就会被撑到 ~713px —— 920px 视口下整页冒横向滚动条（实测定位）。
+   桥页的 .busstack>fieldset 早已加了同款纪律，这里对齐它。 */
+#tab-panel .main>fieldset{min-width:0}
 #tab-panel #pn-code-card{flex:3 1 0;min-height:180px;display:flex;flex-direction:column}
 #tab-panel #pn-code-card.folded{flex:0 0 auto;min-height:0}
 #tab-panel #pn-code-card > *{flex:none}
 #tab-panel #pn-code-card > #pn-code-text,
-#tab-panel #pn-code-card > #pn-code-wrap{flex:1 1 0;height:0;min-height:70px}
+#tab-panel #pn-code-card > #pn-code-wrap{flex:1 1 0;height:0}
+/* 文本框允许压到 70px（它本来就滚），解析表不行：矮窗口（920×600）下 70px 只剩 ~1.5 行，
+   观感像坏了。给表 120px 下限，空间不够就让 .main 整体滚动。 */
+#tab-panel #pn-code-card > #pn-code-text{min-height:70px}
+#tab-panel #pn-code-card > #pn-code-wrap{min-height:120px}
 #tab-panel #pn-img-card{flex:2 1 0;min-height:110px;max-height:60%;overflow:auto}
 #tab-panel #pn-img-card.folded{flex:0 0 auto;min-height:0;max-height:none;overflow:visible}
 #tab-panel #pn-log-card{flex:1 1 0;min-height:34px}

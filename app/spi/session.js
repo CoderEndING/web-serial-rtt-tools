@@ -163,6 +163,7 @@ export class SpiSession {
       await this.loadCfg({ quiet: true });
       await this.loadProfile({ quiet: true });
       await this.pollStatus();
+      this.ensurePoll();               // teardown 清了定时器，这里要重新武装（真机路径在 connectHid 里做）
     } else {
       this.usingMock = false;
       this.mockProbe = null;
@@ -174,6 +175,7 @@ export class SpiSession {
   }
 
   async teardown(){
+    if (this.pollTimer){ clearInterval(this.pollTimer); this.pollTimer = null; }   // 会话没了就别空转（重连时 ensurePoll 会再拉起）
     try { this.matcher.abortAll('会话结束'); } catch { /* 忽略 */ }
     if (this.transport){ try { await this.transport.close(); } catch { /* 忽略 */ } this.transport = null; }
     if (this.hid && !this.usingMock){ try { await this.hid.close(); } catch { /* 忽略 */ } }
@@ -305,6 +307,7 @@ export class SpiSession {
       if (r.type === P.R.EVT){
         this.log('w', `EVT 异步事件：${r.status}/${P.ST_TEXT[r.status] || '?'} · seq=${r.seq}`);
         this.events.push(r);
+        if (this.events.length > 64) this.events.shift();   // 与 RspMatcher.events 同款上限：长会话别让它一直涨
         continue;
       }
       if (!this.matcher.feed(pkt)) this.log('w', `收到无人认领的应答 seq=${r.seq}（超时后迟到？）`);
