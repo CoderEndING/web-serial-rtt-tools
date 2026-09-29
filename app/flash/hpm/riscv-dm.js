@@ -347,6 +347,13 @@ export class RiscvTransport {
     await this.sbaConfig();
     this._holdAddr = null;
     await this.dmiWrite(DM.SBADDRESS0, start);
+    /**
+     * 🚨 **别每读一个字就查一次 `sbcs`**（2026-10 提速）：
+     *    查一次 = 两次 DMI 扫描，和"读一个字"本身一样贵 —— 逐字查等于把读放大一倍。
+     *    改成每 `pollEvery` 个字查一次（并保留逐字的墙钟上限），错误照样抓得住
+     *    （64 个字 = 256 B，出错时仍然报得出大致位置），真机实测读回快约一倍。
+     */
+    const pollEvery = 64;
     for (let i = 0; i < words; i++){
       const here = (start + i * 4) >>> 0;
       let w;
@@ -357,14 +364,17 @@ export class RiscvTransport {
         throw new Error(`SBA 读 0x${here.toString(16)} 卡住了（${e.message}）——` +
           ' 这个地址多半没映射，或所在外设的时钟被门控（片内外设请让内核去读）');
       }
-      this.lastSbcs = await this.dmiRead(DM.SBCS, perWordMs);
-      if (this.lastSbcs & (SBCS.SBBUSYERROR | SBCS.SBERROR)){
-        this.sbaFailed = true;
-        throw new Error(`SBA 读 0x${here.toString(16)} 出错（sbcs=0x${this.lastSbcs.toString(16)}）`);
-      }
-      if (this.lastSbcs & SBCS.SBBUSY){
-        this.sbaFailed = true;
-        throw new Error(`SBA 读 0x${here.toString(16)} 时 sbbusy 一直不落 —— 总线事务没完成（地址没映射 / 外设没时钟）`);
+      const last = (i === words - 1);
+      if (last || (i % pollEvery) === pollEvery - 1){
+        this.lastSbcs = await this.dmiRead(DM.SBCS, perWordMs);
+        if (this.lastSbcs & (SBCS.SBBUSYERROR | SBCS.SBERROR)){
+          this.sbaFailed = true;
+          throw new Error(`SBA 读 0x${here.toString(16)} 出错（sbcs=0x${this.lastSbcs.toString(16)}）`);
+        }
+        if (this.lastSbcs & SBCS.SBBUSY){
+          this.sbaFailed = true;
+          throw new Error(`SBA 读 0x${here.toString(16)} 时 sbbusy 一直不落 —— 总线事务没完成（地址没映射 / 外设没时钟）`);
+        }
       }
       const b = [w & 0xff, (w >>> 8) & 0xff, (w >>> 16) & 0xff, (w >>> 24) & 0xff];
       for (let k = 0; k < 4; k++){
@@ -385,10 +395,23 @@ export class RiscvTransport {
     this._holdAddr = null;
     await this.dmiWrite(DM.SBADDRESS0, addr >>> 0);
     const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    /**
+     * 🚨 写是 **posted**（投出去就行），但每写一个字都收一次 NOP 会把写也放大一倍
+     *    （`dmiWrite` = 写 + NOP 两次扫描）。DMI 流水线只有一级深：投一条写、下一拍收状态，
+     *    所以这里**每 64 个字收一次**，其余只投 —— 出错时那一批的字都算在这批位置上，
+     *    报告位置够用了（2026-10 提速；探针固件 `riscv_jtag_write()` 也是 posted 写法）。
+     */
     for (let off = 0; off < bytes.length; off += 4){
-      await this.dmiWrite(DM.SBDATA0, dv.getUint32(off, true));
+      await this.dmiPost(DMI_OP.WRITE, DM.SBDATA0, dv.getUint32(off, true));
+      if ((off % 256) === 252 || off + 4 >= bytes.length){
+        const r = await this.dmiPost(DMI_OP.NOP, 0, 0);
+        if (r.op !== DMI_STATUS.SUCCESS){
+          this.sbaFailed = true;
+          throw new Error(`SBA 写 0x${(addr + off).toString(16)} 附近失败（DMI op=${r.op}）`);
+        }
+      }
     }
-    // posted 写：用一次 NOP 扫描 + 读 sbcs 确认没有攒着的错误
+    // 收尾：一次 NOP 扫描 + 读 sbcs 确认没有攒着的错误
     await this.dmiPost(DMI_OP.NOP, 0, 0);
     this.lastSbcs = await this.dmiRead(DM.SBCS);
     if (this.lastSbcs & (SBCS.SBBUSYERROR | SBCS.SBERROR)){

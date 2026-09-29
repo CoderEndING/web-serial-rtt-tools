@@ -444,6 +444,20 @@ export class FlashView {
       } catch (e){
         this._log('（0x33 stop 无响应，可能本来就空闲）');
       }
+      /**
+       * 🚨 **再把探针侧的 RTT 桥也停掉**（HID 0x31 action 0）。
+       *    2026-10 用户现场：**另一个标签页**里的「RTT 转发」会话还在跑，桥一直在轮询目标内存，
+       *    烧录这边每一条 DMI 都在跟它抢探针 —— 现象就是"烧录卡住、特别慢"（同一个镜像我这边 25 s，
+       *    他那边十几分钟不动）。同一个页面里的 RTT 会话我们会先断开（见上面 `rtt.disconnect()`），
+       *    但**跨标签页的会话无能为力**，只能在这里把桥停了。
+       *    停不掉也不当失败：没在跑时这条命令可能不回。
+       */
+      try {
+        await withTimeout(hid.stop(), 2500, 'RTT 桥 stop');
+        this._log('已请求探针停掉 RTT 桥（HID 0x31 action 0）—— 跨标签页残留的转发会话也会被它停掉');
+      } catch (e){
+        this._log('（RTT 桥 stop 无响应，可能本来就没在跑）');
+      }
     } catch (e){
       this._log('⚠ 切 output_mode 失败（继续试 JTAG）：' + (e?.message || e));
     } finally {
