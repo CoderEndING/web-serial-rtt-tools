@@ -23,8 +23,9 @@
  *   · 只在同源页签之间生效（BroadcastChannel 的天然边界），正合适。
  */
 
+import { sleep, waitMs } from './pace.js';
+
 export const PROBE_BUS_CHANNEL = 'web-serial-rtt-tools/probe-bus';
-const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 /** 探针的 VID（akaLinkPro / DAPLink 都是 0x0d28） */
 export const PROBE_VID = 0x0d28;
@@ -65,7 +66,17 @@ export class ProbeBus {
     /** 收到别人"让出探针"时要做的事（返回 Promise）。没设 = 本页签本来就不占探针 */
     this.onRelease = null;
     this._acked = 0;
+    /** 本轮"还活着"的同伴（说过话的）与"连续几轮没动静"的计数 —— 用来清掉已经不在的页签 */
+    this._heard = null;
+    this._missed = new Map();
     this._channel = null;
+    /**
+     * 关页签/刷新时喊一声"我走了"。
+     * 🚨 BroadcastChannel **不会**在对端消失时通知这边，所以不喊的话名单里会永远留个"鬼"：
+     *    每次烧录都要为它白等满 waitMs，日志上就是「请 1 个其他页签让出探针，0 个确认（等了 1236 ms）」。
+     */
+    this._bye = () => { this._post({ t: 'bye' }); };
+    try { if (typeof addEventListener === 'function') addEventListener('pagehide', this._bye); } catch {}
     try {
       if (typeof BroadcastChannel === 'function'){
         this._channel = new BroadcastChannel(PROBE_BUS_CHANNEL);
@@ -85,7 +96,12 @@ export class ProbeBus {
 
   _on(m){
     if (!m || m.from === this.name) return;
+    if (this._heard) this._heard.add(m.from);      // 本轮收到过它的任何消息 = 它还活着（清鬼的依据）
     switch (m.t){
+      case 'bye':                                  // 对方关页签/刷新了，立刻从名单里去掉
+        this.peers.delete(m.from);
+        this._missed.delete(m.from);
+        break;
       case 'hello':
         this.peers.add(m.from);
         this._post({ t: 'here' });
@@ -112,19 +128,45 @@ export class ProbeBus {
 
   /**
    * 请别的页签让出探针。
-   * @returns {Promise<{supported:boolean, asked:number, acked:number, ms:number}>}
-   *   asked = 认识的同源页签数；acked = 实际回执"已让出"的个数
+   * @returns {Promise<{supported:boolean, asked:number, acked:number, ghosts:number, ms:number}>}
+   *   asked = 这次真的喊到的同源页签数；acked = 回执"已让出"的个数；
+   *   ghosts = 其中**已经不在**的页签数（关掉/冻结/刷新掉，连喊话都不应答）
    */
-  async requestRelease({ why = '', settleMs = 250, waitMs = 1200 } = {}){
-    if (!this._channel) return { supported: false, asked: 0, acked: 0, ms: 0 };
+  async requestRelease({ why = '', settleMs = 250, waitMs: waitCap = 1200 } = {}){
+    if (!this._channel) return { supported: false, asked: 0, acked: 0, ghosts: 0, ms: 0 };
     const t0 = Date.now();
     this._acked = 0;
+    this._heard = new Set();
+    const asked = this.peers.size;
     this._post({ t: 'release', why });
-    // 先等一下 'here' 回执：一个同伴都没有就别干等
-    await sleep(settleMs);
-    while (Date.now() - t0 < waitMs && this._acked < this.peers.size) await sleep(40);
-    return { supported: true, asked: this.peers.size, acked: this._acked, ms: Date.now() - t0 };
+    /**
+     * 先等一下 'here' 回执：一个同伴都没有就别干等 —— 250 ms 的固定等待在"本来就没别人"
+     * 的常见情况下纯属白花（那 80 ms 用让路自旋，页面不可见时也不会被钳成 1 s）。
+     */
+    if (asked) await sleep(settleMs);
+    else await waitMs(Math.min(settleMs, 80));
+    while (Date.now() - t0 < waitCap && this._acked < this.peers.size) await sleep(40);
+    /**
+     * 清鬼：一轮下来**一句话都没说过**的同伴，就是已经不在了 —— 它会让每次烧录都白等满 waitMs。
+     * 判据很稳：活着的页签收到 'release' 会立刻回一句 'releasing'（同步发的），
+     * 只有"关掉/被浏览器冻结/在 bfcache 里"的页签才一声不吭。
+     * 连续两轮没动静才除名（一轮可能是它正忙着），除名只是"以后不再等它"，没有别的副作用。
+     */
+    let ghosts = 0;
+    for (const p of [...this.peers]){
+      if (this._heard.has(p)){ this._missed.delete(p); continue; }
+      const n = (this._missed.get(p) || 0) + 1;
+      this._missed.set(p, n);
+      if (n >= 2){ this.peers.delete(p); this._missed.delete(p); ghosts++; }
+    }
+    this._heard = null;
+    return { supported: true, asked, acked: this._acked, ghosts, ms: Date.now() - t0 };
   }
 
-  close(){ try { this._channel?.close(); } catch {} this._channel = null; }
+  close(){
+    try { if (typeof removeEventListener === 'function') removeEventListener('pagehide', this._bye); } catch {}
+    try { if (this._channel) this._post({ t: 'bye' }); } catch {}
+    try { this._channel?.close(); } catch {}
+    this._channel = null;
+  }
 }

@@ -4,11 +4,14 @@
  *   node tools/selftest/probe-bus.test.mjs      （等价：make test-probe-bus）
  *
  * 为什么值得有：这一层是"两个标签页抢同一台探针 → 认领接口失败 → 烧录直接卡住"的唯一解法。
- * 要钉住的语义有四条：
+ * 要钉住的语义有六条：
  *   ① 喊一嗓子之后，另一个"页签"真的会执行让出动作，并且回执给请求方；
- *   ② 没有同伴时不干等（< settle 窗口就返回）；
+ *   ② 没有同伴时不干等（< 100 ms 就返回）；
  *   ③ 同伴磨蹭时请求方也不会等过头（有 waitMs 上限）；
- *   ④ 环境里没有 BroadcastChannel 时静默降级，绝不让协调层变成新的失败点。
+ *   ④ 环境里没有 BroadcastChannel 时静默降级，绝不让协调层变成新的失败点；
+ *   ⑤ 同伴**关页签**会喊 bye，名单立刻清掉（否则"鬼页签"会让每次烧录都白等满上限 ——
+ *      真机日志里的「请 1 个其他页签让出探针，0 个确认（等了 1236 ms）」就是它）；
+ *   ⑥ 没喊 bye 又不应答的"冻结页签"（浏览器冻住/bfcache 里）：连续两轮没动静就除名。
  */
 import { ProbeBus, PROBE_BUS_CHANNEL } from '../../app/core/probe-bus.js';
 
@@ -44,7 +47,7 @@ console.log('\n── 2. 没有同伴：不干等 ──');
   await sleep(300);                                   // 等一会儿确认确实没人应答
   const r = await a.requestRelease({ why: '烧录' });
   ok(r.asked === 0 && r.acked === 0, `没人应答（asked=${r.asked} acked=${r.acked}）`);
-  ok(r.ms < 600, `只在 settle 窗口里等（${r.ms} ms，不占满 waitMs=1200）`);
+  ok(r.ms < 250, `只在很短的窗口里等（${r.ms} ms，不占满 settle/waitMs）`);
   a.close();
 }
 
@@ -73,7 +76,34 @@ console.log('\n── 4. 让出动作抛异常：不能把请求方带崩 ──
   a.close(); b.close();
 }
 
-console.log('\n── 5. 环境里没有 BroadcastChannel：静默降级 ──');
+console.log('\n── 6. 同伴关页签（会喊 bye）：立刻从名单里去掉 ──');
+{
+  const a = new ProbeBus('A6'), b = new ProbeBus('B6');
+  await sleep(150);
+  ok(a.peers.size === 1, `先认识 1 个同伴（peers=${a.peers.size}）`);
+  b.close();                                          // 关页签 = 喊一声 bye 再关闭
+  await sleep(120);
+  ok(a.peers.size === 0, `bye 立刻把它去掉（peers=${a.peers.size}）`);
+  const r = await a.requestRelease({ why: '烧录' });
+  ok(r.asked === 0 && r.ms < 250, `之后不再为它白等（asked=${r.asked}，${r.ms} ms）`);
+  a.close();
+}
+
+console.log('\n── 7. "冻结页签"（没喊 bye 也没应答）：两轮之后除名，不再白等 ──');
+{
+  const a = new ProbeBus('A7');
+  a.peers.add('frozen-tab-xxxxx');                    // 模拟：曾握过手、后来被浏览器冻结/关掉且没喊 bye
+  const r1 = await a.requestRelease({ why: '烧录', waitMs: 300 });
+  ok(r1.asked === 1 && r1.acked === 0, `第一轮照旧喊它并等满上限（asked=${r1.asked} acked=${r1.acked}）`);
+  ok(a.peers.has('frozen-tab-xxxxx'), '第一轮不除名（它可能只是刚好在忙）');
+  const r2 = await a.requestRelease({ why: '烧录', waitMs: 300 });
+  ok(r2.ghosts === 1 && !a.peers.has('frozen-tab-xxxxx'), `第二轮确认它不在，除名（ghosts=${r2.ghosts}）`);
+  const r3 = await a.requestRelease({ why: '烧录', waitMs: 300 });
+  ok(r3.asked === 0 && r3.ms < 250, `除名后不再为它白等（asked=${r3.asked}，${r3.ms} ms）`);
+  a.close();
+}
+
+console.log('\n── 8. 环境里没有 BroadcastChannel：静默降级 ──');
 {
   const saved = globalThis.BroadcastChannel;
   try {

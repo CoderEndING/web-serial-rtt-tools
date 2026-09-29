@@ -9,6 +9,13 @@
  *   · DAP_ResetTarget 响应 = [回显, DAP_OK, 执行标志]
  */
 import { u32le, u32leBytes } from '../core/bin.js';
+/**
+ * 等待原语（见 core/pace.js 的整段说明）：
+ * 🚨 轮询间隔**不能用 setTimeout** —— 页面不可见时浏览器把短延时钳到 ≥1 s，
+ *    一次烧录里几十处 2~5 ms 的轮询于是各花 1 秒，1.4 s 变成 47 s（真机定因）。
+ *    `yieldTask` = 让一步（不受节流）；`waitMs` = 至少等 ms（短等待同样不受节流）；`sleep` = 真定时器。
+ */
+import { sleep, waitMs } from '../core/pace.js';
 
 export const CMD = {
   Info: 0x00, Connect: 0x02, Disconnect: 0x03, TransferConfigure: 0x04,
@@ -33,8 +40,6 @@ const DP_PWRUP = 0xc0000000;
 const SWJ_nRESET = 1 << 7;
 const ACK = { 1: 'OK', 2: 'WAIT', 4: 'FAULT', 7: 'NO ACK' };
 const reqByte = (ap, rnw, addr) => (ap ? X_APnDP : 0) | (rnw ? X_RnW : 0) | (addr & X_ADDR);
-
-const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 /**
  * 被「挂起传输」搞脏的设备。
@@ -696,7 +701,7 @@ export class WebUsbDapProbe {
       try { await this._transfer([{ ap: false, rnw: false, addr: 0x00, data: 0x0000001e }]); } catch {}
     }
     await this._transfer([{ ap: false, rnw: false, addr: DP_SELECT, data: (this.apIndex << 24) >>> 0 }]);
-    await sleep(20);
+    await waitMs(20);            // 真实 20 ms（不受后台节流影响，见 pace.js）
     /**
      * ⚠️ **不要在这里用 DP CTRL/STAT 的读值去判断"上电成功没有"**（这一段曾经这么做，
      *    结果整晚排查方向跑偏，记录在此）：
@@ -778,7 +783,7 @@ export class WebUsbDapProbe {
       for (let k = 0; k < 20; k++){
         try { st = ((await this._transfer([{ ap: false, rnw: true, addr: DP_CTRL_STAT }]))[0]) >>> 0; } catch { st = 0; }
         if ((st & 0x30000000) === 0x30000000) break;
-        await sleep(10);
+        await waitMs(10);
       }
       try { await this._writeDP(DP_CTRL_STAT, 0x50000000); } catch {}
       this.lastDpStat = st;
@@ -787,7 +792,7 @@ export class WebUsbDapProbe {
         await this.swdActivation();
         await this._transfer([{ ap: false, rnw: true, addr: DP_IDCODE }]);
       } catch {}
-      await sleep(20);
+      await waitMs(20);
     }
     return true;   // 不判死：让第一笔 AP 访问去证伪（OpenOCD 也不因 ACK 缺失就放弃）
   }
@@ -799,7 +804,7 @@ export class WebUsbDapProbe {
    */
   async powerCycle(){
     try { await this._writeDP(DP_CTRL_STAT, 0x00000000); } catch {}
-    await sleep(30);
+    await waitMs(30);
     return await this._powerUpDP(3);
   }
 
@@ -1113,7 +1118,7 @@ export class WebUsbDapProbe {
       await this._dhcsr(0xA05F0001);                       // C_DEBUGEN=1, C_HALT=0
       const v = await this._readWord(0xE000EDF0);
       if (((v >>> 1) & 1) === 0) return;                   // C_HALT=0：确实在跑
-      await sleep(10);
+      await waitMs(10);                                    // 真实 10 ms（后台节流会把 sleep(10) 钳成 1 s）
     }
     console.warn('[dap] 让目标运行的回读一直显示 C_HALT=1（可能是读滞后）——继续，不中断流程');
   }
@@ -1122,7 +1127,7 @@ export class WebUsbDapProbe {
       await this._dhcsr(0xA05F0003);                       // C_DEBUGEN=1, C_HALT=1
       const v = await this._readWord(0xE000EDF0);
       if (((v >>> 1) & 1) === 1) return;                   // C_HALT=1：确实停住了
-      await sleep(10);
+      await waitMs(10);
     }
     console.warn('[dap] 停住目标的回读一直显示 C_HALT=0（可能是读滞后）——继续，不中断流程');
   }
@@ -1139,7 +1144,7 @@ export class WebUsbDapProbe {
     for (let i = 0; i < 50; i++){
       const b = await this.readMem(0xE000EDF0, 4);
       if (b[2] & 0x01) break;                        // DHCSR.S_REGRDY = bit16（字节 2 的 bit0）
-      await sleep(2);
+      await waitMs(2);
     }
     const b = await this.readMem(0xE000EDF8, 4);
     return (b[0] | (b[1] << 8) | (b[2] << 16) | (b[3] << 24)) >>> 0;
@@ -1150,7 +1155,7 @@ export class WebUsbDapProbe {
     for (let i = 0; i < 50; i++){
       const b = await this.readMem(0xE000EDF0, 4);
       if (b[2] & 0x01) return;
-      await sleep(2);
+      await waitMs(2);
     }
     throw new Error('调试寄存器同步超时（S_REGRDY 没置位）');
   }
@@ -1181,7 +1186,7 @@ export class WebUsbDapProbe {
    */
   async sysReset(){
     await this.writeMem(0xE000ED0C, u32leBytes(0x05FA0004));
-    await sleep(60);
+    await waitMs(60);            // 给目标 60 ms 真的复位（sleep 在后台会被钳成 1 s）
     await this._targetInit();
     return '软件复位（AIRCR.SYSRESETREQ）';
   }

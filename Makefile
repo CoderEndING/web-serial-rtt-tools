@@ -25,7 +25,7 @@ FW_DIR   = tools/target-firmware/stm32f103
 LA       = tools/la/kingst_la.py
 
 .DEFAULT_GOAL := help
-.PHONY: help serve serve-stop browser open test test-ui test-gen test-gen-page test-hid test-dwarf test-scope test-scope-page test-scope-render test-hw test-bridge test-bridge-gate test-hpm test-image test-all \
+.PHONY: help serve serve-stop browser open test test-ui test-gen test-gen-page test-hid test-dwarf test-scope test-scope-page test-scope-render test-hw test-bridge test-bridge-gate test-hpm test-image test-all flash-timing \
         bridge bridge-stop fw-build fw-flash fw-restore fw-h7-build fw-h7-slow fw-h7-flash \
         algo-check flash-plan la-info la-capture git-status git-log check clean
 
@@ -115,6 +115,13 @@ test-scope-render:
 test-hw:
 	$(NODE) tools/selftest/browser-hw.test.mjs webusb
 
+# 烧录耗时体检（真机：探针 + 目标板 + 8899/CDP 浏览器）：把"慢在哪一步"量出来。
+#   make flash-timing                        # 一轮时间线
+#   make flash-timing ARGS=--minimize-after=1  # 第 2 轮前最小化窗口（真节流：页面不可见）
+#   make flash-timing ARGS=--clamp             # 确定性模拟"每个短等待都被钳成 1 s"
+flash-timing:
+	$(NODE) tools/selftest/flash-timing.mjs $(ARGS)
+
 test-bridge:
 	$(NODE) tools/selftest/bridge.test.mjs
 
@@ -175,6 +182,7 @@ git-log:
 
 check:
 	$(NODE) --check app/rtt/dap-webusb.js
+	$(NODE) --check app/core/pace.js
 	$(NODE) --check app/rtt/view.js
 	$(NODE) --check app/flash/view.js
 	$(NODE) --check app/flash/runner.js

@@ -18,6 +18,7 @@ $lines = @(
   '  make test-ui       页面端到端（演示串口 + 假探针，不需要硬件）'
   '  make test-gen-page 「工程生成」页真页面验收（需要 make open 起的浏览器）'
   '  make test-hw       真机 WebUSB RTT 验收（探针 + 目标板）'
+  '  make flash-timing  烧录耗时体检（真机：慢在哪一步、是不是探针的锅；ARGS=--clamp 模拟后台节流）'
   '  make test-bridge   桥端到端（OpenOCD + 探针 + 目标板）'
   '  make test-all      上面全跑一遍'
   ''

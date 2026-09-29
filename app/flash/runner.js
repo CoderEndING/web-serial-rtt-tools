@@ -8,7 +8,14 @@
  * 寄存器访问走 CoreSight 调试寄存器：DCRSR 选寄存器 + DCRDR 读写（都是内存映射地址，
  * 用现成的 readMem/writeMem 就能碰）。
  */
-const sleep = ms => new Promise(r => setTimeout(r, ms));
+/**
+ * 等待原语（见 core/pace.js）：
+ * 🚨 这个执行器靠**轮询**判断 flashloader 跑完没有，轮询间隔用 setTimeout 会被
+ *    后台节流钳到 1 s —— 一次烧录 5 个入口（load/擦/写），每处都白等好几秒，
+ *    真机现象就是用户说的"烧录非常慢，每一步都要好几秒钟"（1.4 s → 47 s）。
+ *    `yieldTask` = 让一步（不受节流）；`sleep` 只用在"算法真的要跑很久"的兜底节奏上。
+ */
+import { sleep, yieldTask } from '../core/pace.js';
 
 export function b64ToBytes(b64){
   const s = atob(b64);
@@ -61,12 +68,20 @@ export class FlashRunner {
     await p.regWrite(15, entry >>> 0);               // PC 最后写（写它就会跳过去执行）
     await p.run();
     const t0 = Date.now();
+    let spins = 0;
     while (!(await p.isHalted())){
       if (Date.now() - t0 > timeoutMs){
         const pc = await p.regRead(15).catch(() => 0);
         throw new Error(`flashloader 执行超时（入口 0x${entry.toString(16)}，停在 pc=0x${pc.toString(16)}）—— 算法与芯片/RAM 地址不匹配？`);
       }
-      await sleep(5);
+      /**
+       * 🚨 **两级节奏**（见 core/pace.js 的定因记录）：轮询间隔不能用 setTimeout ——
+       *    页面不可见时浏览器把它钳到 ≥1 s，这里每转一圈就白等 1 秒。
+       *    头 40 圈让路自旋：毫秒级响应，而且每圈本身就有一笔真实 USB 往返垫着，不吃 CPU；
+       *    40 圈之后说明算法真的在跑很久（整片擦除之类），改用真定时器 ——
+       *    那时 1 s 一圈完全够用，也不空转 CPU（拿 1 s 换掉无谓的自旋是划算的）。
+       */
+      if (spins++ < 40) await yieldTask(); else await sleep(20);
     }
     const r0 = await p.regRead(0);
     if (r0 !== 0) throw new Error(`flashloader 返回错误码 ${r0}（入口 0x${entry.toString(16)}）—— 擦写失败或地址/参数不对`);

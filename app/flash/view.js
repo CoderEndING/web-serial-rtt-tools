@@ -30,6 +30,7 @@ import { AkaLinkHid } from '../hid/probe.js';
 import { FlashRunner } from './runner.js';
 import { parseFirmware } from './image.js';
 import { bytes as fBytes } from '../core/format.js';
+import { waitMs } from '../core/pace.js';
 import { pickCfgs } from '../ui/cfgpicker.js';
 
 export class FlashView {
@@ -159,7 +160,8 @@ export class FlashView {
     }
     if (this.bus?.supported){
       const r = await this.bus.requestRelease({ why: `烧录 ${name || ''}`.trim() });
-      if (r.asked) this._log(`跨页签协调：请 ${r.asked} 个其他页签让出探针，${r.acked} 个确认（等了 ${r.ms} ms）`);
+      if (r.asked) this._log(`跨页签协调：请 ${r.asked} 个其他页签让出探针，${r.acked} 个确认（等了 ${r.ms} ms）`
+        + (r.ghosts ? `；其中 ${r.ghosts} 个已经不在（关掉的页签/被浏览器冻结），以后不再等它们` : ''));
       else this._log('跨页签协调：没有其他页签在用探针');
     }
     /**
@@ -230,6 +232,16 @@ export class FlashView {
 
   // ---------- 主通道：WebUSB 零安装 ----------
   async _flashWebusb(name){
+    /**
+     * 分段计时：每一步各花多久，收尾时写一行「耗时小结」。
+     * 为什么值得记：用户报「烧录很慢」时，日志里只有寥寥几行，**看不出慢在哪一步** ——
+     * 有一次实测的真凶（页面不可见时浏览器把短延时钳到 1 s，见 core/pace.js）
+     * 就是靠"USB 往返总共只要 0.3 s、而整轮 47 s"这个对比才锁定的。
+     */
+    const t0 = Date.now();
+    let tPrev = t0;
+    const parts = [];
+    const lap = k => { const now = Date.now(); parts.push(`${k} ${now - tPrev}ms`); tPrev = now; };
     const chip = $('f-chip').value;
     // RISC-V（HPM 系列）走另一条路：目标核不是 Cortex-M，烧录算法也不是 ARM 的 flashloader
     if (HPM_BOARDS.some(b => b.id === chip)) return await this._flashHpmRiscv(name);
@@ -267,6 +279,7 @@ export class FlashView {
     const verify = $('f-verify').checked;
     const doReset = $('f-reset').checked;
     const runner = new FlashRunner(this.probe);
+    lap('探针');
     this._log(`── 零安装烧录：${this.file.name}（${fBytes(total)}）→ ${chip} ──`);
     this._bar(1);
     /**
@@ -280,6 +293,7 @@ export class FlashView {
     try { await this.probe.sysReset(); } catch (e){ this._log('软复位失败（继续试）：' + (e?.message || e)); }
     this._status('加载 flashloader 到目标 RAM…');
     await runner.load(algo);
+    lap('加载算法');
 
     /**
      * 🚨 **擦除粒度必须问芯片，不能照抄算法表。**
@@ -308,6 +322,7 @@ export class FlashView {
         }
       }
     } catch (e){ /* 读不到就按算法表来 */ }
+    lap('读DEV_ID');
 
     // 擦：覆盖固件的那些扇区
     let erased = 0, eraseTotal = 0;
@@ -332,6 +347,7 @@ export class FlashView {
 
     // 写：按缓冲块大小分块，数据进 RAM 缓冲 → 算法搬进 flash
     let written = 0;
+    lap('擦除');
     const chunk = runner.chunkSize();
     for (const seg of regions){
       for (let off = 0; off < seg.data.length; off += chunk){
@@ -356,6 +372,8 @@ export class FlashView {
       }
     }
 
+    lap('写入');
+
     // 校验：读回逐字节比对
     if (verify){
       this._status('校验（读回比对）…');
@@ -376,6 +394,7 @@ export class FlashView {
       }
       this._bar(99);
     }
+    lap('校验');
 
     if (doReset){
       /**
@@ -393,8 +412,16 @@ export class FlashView {
       try { await this.probe.run(); } catch { /* 让它跑失败也不影响烧录结果 */ }
       try { await this._bootCheck(regions, algo); } catch { /* 诊断失败绝不影响烧录结论 */ }
     }
+    lap('复位');
     this._bar(100);
     this._log('── 完成 ──');
+    /**
+     * 「耗时小结」：一行看清每一步各花了多久。
+     * 🚨 本页不可见时，浏览器会给定时器限速（短延时被钳到 ≥1 s）—— 烧录流程已经不靠定时器
+     *    等待（见 core/pace.js），但别的后台活儿仍可能被拖慢，所以这里如实标一句。
+     */
+    this._log(`耗时小结：${parts.join(' · ')} · 合计 ${((Date.now() - t0) / 1000).toFixed(2)}s`
+      + (this._hb?.hiddenTicks ? '（⚠ 期间本页不可见：浏览器对后台页有定时器限速，别把"慢"都算到探针头上）' : ''));
     setStatus($('f-result'),
       `✅ ${chip} · ${fBytes(total)}${verify ? ' · 校验通过' : ''}${doReset ? ' · 已复位运行' : ''}`, 'ok');
     toast('烧录成功', 'ok', 5000);
@@ -404,13 +431,14 @@ export class FlashView {
    * 复位之后核**到底在哪儿取指**？——把"烧完没反应"变成一句能照做的提示。
    *
    * 🚨 为什么值得单独看一眼（2026-10 真机走查，STM32F103ZE）：
-   *    那块板子的 **BOOT0 被拉高**（BOOT1=0），复位后内核进的是**系统存储区的 ROM bootloader**，
-   *    flash 里的固件根本不会被取指 —— 但烧录这边一切正常（擦写读回校验全过），
-   *    页面于是报告"✅ 已复位运行"，用户看到的是"烧成功了，板子一动不动"。
+   *    那次复位后内核进的是**系统存储区的 ROM bootloader**，flash 里的固件根本不会被取指 ——
+   *    但烧录这边一切正常（擦写读回校验全过），页面于是报告"✅ 已复位运行"，
+   *    用户看到的是"烧成功了，板子一动不动"。
    *    现场取证：`VTOR=0`（地址 0 别名到系统存储区，里面是 `200001fc 1ffff021` 那对 ROM 向量），
    *    PC 停在 0x1ffff3xx 的 ROM 轮询循环里、PRIMASK=1 —— 连 SysTick 都进不去，
    *    所以"RTT 不来、波形不动"这类现象都会跟着出现。
-   *    PC 落在哪一段就是**客观证据**，比让用户去猜"是不是固件没跑"强得多。
+   *    ⚠️ 那次的实际原因是**板子没接电源**（BOOT0 悬空被读成高电平，芯片只靠探针供电）——
+   *    所以提示里必须把"先确认板子有电"放在第一条，别一上来就让人去拆跳线。
    */
   async _bootCheck(regions, algo){
     // ⚠️ 读 PC 必须**先把核停住**：DCRSR/DCRDR 只对 halt 状态的核有效，
@@ -426,10 +454,12 @@ export class FlashView {
       const v = vtor ? (vtor[0] | (vtor[1] << 8) | (vtor[2] << 16) | (vtor[3] << 24)) >>> 0 : null;
       this._log('⚠⚠ 复位后内核跑的是**系统存储区的 ROM bootloader**，不是刚烧进去的固件 —— ' +
         '现象就是"提示烧录成功、板子却一动不动"（RTT 不来、波形不动都是这么来的）。');
-      this._log('   原因：BOOT0 引脚被拉高（BOOT0=1 且 BOOT1=0 = 从系统存储器启动），' +
-        (v != null ? `现场证据 VTOR=0x${v.toString(16)}（应指向 flash 的 0x${(algo.flash_start >>> 0).toString(16)} 向量表）` : ''));
-      this._log('   怎么办：把板子上的 **BOOT0 跳到 0**（或把 BOOT0 接地）再上电/按复位，flash 里的固件就会跑；' +
-        '烧录本身没问题，无需重烧。若只想临时看一眼，也可以用调试器把 VTOR 指向 flash 并装载向量启动。');
+      this._log('   启动模式落在了**系统存储器**（BOOT0=1 且 BOOT1=0）。两种常见情况：' +
+        '① **板子没接自己的电源**，BOOT0 悬空被读成高电平（本机实测就是这一条：只靠探针供电时必然这样）；' +
+        '② 板上 BOOT0 跳线/电阻真的把它拉高了。' +
+        (v != null ? `　现场证据：VTOR=0x${v.toString(16)}（应指向 flash 的 0x${(algo.flash_start >>> 0).toString(16)} 向量表）` : ''));
+      this._log('   怎么办：**先确认板子接了自己的电源**，再上电/按复位试一次；' +
+        '如果还进 ROM，就把 BOOT0 跳到 0（或接地）后上电。烧录本身没问题，不需要重烧。');
     }
   }
 
@@ -448,7 +478,7 @@ export class FlashView {
         if (same) return cur;
       }
       prev = cur;
-      await new Promise(r => setTimeout(r, 20));
+      await waitMs(20);          // 真实 20 ms（用 setTimeout 会被后台节流钳成 1 s，见 core/pace.js）
     }
     this._log('（提示：校验读连续 5 轮都不一致，可能是读不可靠或目标在动）');
     return prev;
@@ -677,9 +707,10 @@ export class FlashView {
    */
   _hbStart(){
     this._hbStop();
-    const h = this._hb = { lastOk: Date.now(), quietWarned: 0, worst: 0, fails: 0, tick: null };
+    const h = this._hb = { lastOk: Date.now(), quietWarned: 0, worst: 0, fails: 0, hiddenTicks: 0, tick: null };
     h.tick = setInterval(() => {
       const now = Date.now();
+      if (document.hidden) h.hiddenTicks++;      // 本页不可见 = 浏览器会给定时器限速（耗时小结里如实标注）
       const probe = this.probe;
       const okAt = probe?.lastOkAt || 0;
       const quiet = now - Math.max(okAt, h.lastOk);
