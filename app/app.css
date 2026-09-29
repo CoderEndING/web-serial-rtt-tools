@@ -7,6 +7,18 @@
 }
 *{box-sizing:border-box}
 html,body{height:100%}
+
+/* 加载遮罩：模块多（20+），慢网络下页面会"看着像坏的"（下拉空、按钮点了没反应）—— 用遮罩讲清楚。
+   main.js 初始化完会把它摘掉。 */
+#boot-mask{
+  position:fixed;inset:0;z-index:999;background:#0d1117f2;display:flex;
+  align-items:center;justify-content:center;backdrop-filter:blur(2px);
+}
+#boot-mask .boot-box{
+  display:flex;flex-direction:column;gap:8px;align-items:center;text-align:center;
+  color:var(--fg2);font-size:12.5px;max-width:420px;padding:0 20px;
+}
+#boot-mask .boot-box b{color:var(--fg);font-size:15px}
 body{
   margin:0;background:var(--bg);color:var(--fg);font:13px/1.5 var(--ui);
   display:flex;flex-direction:column;overflow:hidden;

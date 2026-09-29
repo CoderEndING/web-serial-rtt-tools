@@ -11,6 +11,16 @@
 </head>
 <body>
 
+<!-- 加载遮罩：模块有 20+ 个，网络慢（尤其走代理看线上版）时要几秒才跑完。
+     没有它的话，这期间页面"看着像坏的"：下拉是空的、按钮点了没反应（事件还没绑上）。
+     main.js 初始化完会把它摘掉。 -->
+<div id="boot-mask">
+  <div class="boot-box">
+    <b>正在加载…</b>
+    <span>页面有 20 多个 JS 模块，网络慢时需要几秒。加载完遮罩自动消失。</span>
+  </div>
+</div>
+
 <header class="topbar">
   <div class="brand"><span class="logo">&gt;_</span> 串口 / RTT 工具箱</div>
   <nav class="tabs" id="tabs">
@@ -767,13 +777,13 @@
       <fieldset>
         <legend>探针 · SPI 桥</legend>
         <div class="row btnrow">
-          <button id="sp-connect" class="primary" title="走探针的自定义 HID（usage page 0xFF00）：配置 / 状态 / 面板档走这条">连接探针</button>
+          <button id="sp-connect" class="primary" title="授权 HID（走探针的自定义 HID，usage page 0xFF00）：配置 / 状态 / 面板档走这条。⚠️ 第一次点会弹出**浏览器的设备选择框**——那个框就是"授权"，在里面选 akaLinkPro 即可">连接探针（授权）</button>
           <button id="sp-reconnect" title="用浏览器记住的探针直接连（不用再点弹框）">重连</button>
         </div>
         <p class="hint" id="sp-info">未连接</p>
         <label class="chk" title="不需要硬件：HID 与数据面共用同一个假探针，可跑通「配置 → 使能 → 发帧 → 应答 → 统计」整条链路"><input type="checkbox" id="sp-mock"> 用假探针（无需硬件）</label>
         <div class="row btnrow">
-          <button id="sp-usb" title="WebUSB 认领那个 vendor 接口（class 0xFF + EP11 双向）：OUT 0x0B 发帧、IN 0x8B 收应答">连接数据端点…</button>
+          <button id="sp-usb" title="授权 WebUSB 并认领 SPI 桥接口（class 0xFF + EP11 双向）：OUT 0x0B 发帧、IN 0x8B 收应答。⚠️ 第一次点会弹出**浏览器的设备选择框**（HID 与 WebUSB 要各授权一次）">连接数据端点…（授权）</button>
         </div>
         <label class="row"><span>在飞读</span><input id="sp-inflight" class="num" value="4" inputmode="numeric" title="同时在飞的 IN 读条数（连接数据端点时生效）"></label>
         <p class="hint" id="sp-usbinfo">未连接数据端点（假探针模式不需要）</p>
@@ -932,13 +942,13 @@
       <fieldset id="pn-conn-card">
         <legend>探针（与「SPI/QSPI 桥」页**共用同一次连接**）</legend>
         <div class="row btnrow">
-          <button id="pn-connect" class="primary">连接探针</button>
-          <button id="pn-reconnect">重连</button>
+          <button id="pn-connect" class="primary" title="授权 HID：配置 / 状态 / 面板档走这条。⚠️ 第一次点会弹出**浏览器的设备选择框**——那个框就是"授权"，选 akaLinkPro 即可">连接探针（授权）</button>
+          <button id="pn-reconnect" title="用浏览器记住的探针直接连（不用再点弹框）">重连</button>
         </div>
         <p class="hint" id="pn-info">未连接</p>
         <label class="chk" title="不需要硬件：与桥页共用同一个假探针实例"><input type="checkbox" id="pn-mock"> 用假探针（无需硬件）</label>
         <div class="row btnrow">
-          <button id="pn-usb">连接数据端点…</button>
+          <button id="pn-usb" title="授权 WebUSB 并认领 SPI 桥接口（刷图/发帧的数据走这条）。⚠️ 第一次点会弹出**浏览器的设备选择框**（HID 与 WebUSB 要各授权一次）">连接数据端点…（授权）</button>
         </div>
         <label class="row"><span>在飞读</span><input id="pn-inflight" class="num" value="4" inputmode="numeric"></label>
         <p class="hint" id="pn-usbinfo">未连接数据端点</p>

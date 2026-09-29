@@ -125,6 +125,17 @@ flash.bus = probeBus;
 
 window.__tools = { session, assistant, terminal, rtt, flash, gen, hid, stream, scope, spi, panel, spiSession, probeBus, summary, errors };
 
+/**
+ * 拆掉加载遮罩 —— 放在这里（所有 view 都 init 完、__tools 挂好之后）。
+ * 🚨 顺序很重要：遮罩**必须最后摘**。之前出过一次"线上页面看着像坏的"：
+ *    模块多（20+），走代理加载要好几秒，那期间下拉是空的、按钮点了没反应（事件还没绑上），
+ *    用户以为是功能缺失 —— 遮罩能把这个阶段说清楚。
+ */
+{
+  const mask = document.getElementById('boot-mask');
+  if (mask) requestAnimationFrame(() => mask.remove());
+}
+
 // ---------- 浏览器端端到端自检：?demo=serial&selftest=1 ----------
 const q = new URLSearchParams(location.search);
 if (q.get('selftest') === '1'){

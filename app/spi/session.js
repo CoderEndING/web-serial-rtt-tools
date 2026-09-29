@@ -22,6 +22,9 @@ import { MockSpiProbe } from './mock.js';
 
 const POLL_MS = 1000;          // 状态/计数器轮询间隔（观察量，1 s 够）
 const RING_MAX = 400;          // 日志 ring（切页时全量重放用）
+/** 未连接时的提示：**把"去哪儿授权"写清楚** —— 用户第一次打开会找不到入口
+ *  （按钮叫"连接"，而浏览器弹的那个框才叫"授权"，词对不上就容易卡住）。 */
+const NOT_CONNECTED_HINT = '未连接 —— 点上面「连接探针（授权）」授权 HID，再点「连接数据端点…（授权）」授权 WebUSB';
 
 export class SpiSession {
   constructor(){
@@ -38,7 +41,7 @@ export class SpiSession {
     this.profile = null;
     this.lastStatus = null;
     this.counters = { framesOk: 0, framesErr: 0, bytesTx: 0, bytesRx: 0, txPoll: 0, txDma: 0, outOverrun: 0, inDrop: 0, actualSclkHz: 0 };
-    this.stateText = '未连接';
+    this.stateText = NOT_CONNECTED_HINT;
     this.stateKind = '';
     this.ring = [];
     this.subs = new Set();
@@ -164,7 +167,7 @@ export class SpiSession {
       this.usingMock = false;
       this.mockProbe = null;
       this.log('i', '已关掉假探针');
-      this._setState('未连接');
+      this._setState(NOT_CONNECTED_HINT);
     }
     this._emit('state', this.stateInfo());
     return this.usingMock;
@@ -177,7 +180,7 @@ export class SpiSession {
     this.hid = null;
     this.stream?.reset();
     this.lastStatus = null;
-    this._setState('未连接');
+    this._setState(NOT_CONNECTED_HINT);
   }
 
   /** 长任务（回环自检 / 刷图）期间置忙：轮询暂停、两页的按钮一起禁用 */
@@ -399,3 +402,4 @@ export function parseHexBytes(s){
   for (let i = 0; i < out.length; i++) out[i] = parseInt(t.substr(i * 2, 2), 16);
   return out;
 }
+
