@@ -21,6 +21,8 @@
     <button class="tab" data-tab="scope">J-Scope 波形</button>
     <button class="tab" data-tab="flash">烧录器</button>
     <button class="tab" data-tab="gen">工程生成</button>
+    <button class="tab" data-tab="spi">SPI/QSPI 桥</button>
+    <button class="tab" data-tab="panel">SPI/QSPI 屏</button>
   </nav>
   <div class="topright">
     <span id="conn-flag" class="flag flag-off">未连接</span>
@@ -753,6 +755,324 @@
         <span id="g-status">待生成</span>
         <span class="spacer"></span>
         <span class="hint">模板逐字节移植自 <code>uvprojx2cmake.py</code>，默认再套 4 项修正（<code>make test-gen</code> 负责对账）</span>
+      </div>
+    </section>
+  </div>
+</section>
+
+<!-- ============================ SPI / QSPI 屏（探针的 USB→SPI 桥） ============================ -->
+<section class="panel" id="tab-spi">
+  <div class="ws">
+    <aside class="side">
+      <fieldset>
+        <legend>探针 · SPI 桥</legend>
+        <div class="row btnrow">
+          <button id="sp-connect" class="primary" title="走探针的自定义 HID（usage page 0xFF00）：配置 / 状态 / 面板档走这条">连接探针</button>
+          <button id="sp-reconnect" title="用浏览器记住的探针直接连（不用再点弹框）">重连</button>
+        </div>
+        <p class="hint" id="sp-info">未连接</p>
+        <label class="chk" title="不需要硬件：HID 与数据面共用同一个假探针，可跑通「配置 → 使能 → 发帧 → 应答 → 统计」整条链路"><input type="checkbox" id="sp-mock"> 用假探针（无需硬件）</label>
+        <div class="row btnrow">
+          <button id="sp-usb" title="WebUSB 认领那个 vendor 接口（class 0xFF + EP11 双向）：OUT 0x0B 发帧、IN 0x8B 收应答">连接数据端点…</button>
+        </div>
+        <label class="row"><span>在飞读</span><input id="sp-inflight" class="num" value="4" inputmode="numeric" title="同时在飞的 IN 读条数（连接数据端点时生效）"></label>
+        <p class="hint" id="sp-usbinfo">未连接数据端点（假探针模式不需要）</p>
+        <p class="hint" id="sp-state">未连接</p>
+      </fieldset>
+
+      <fieldset>
+        <legend>桥配置（HID 0x35）</legend>
+        <label class="row"><span>SCLK</span><select id="sp-sclk" title="5301EVKLite 上限 75 MHz。固件按模块时钟整数分频，实际生效值可能不等于请求值 —— 下面「实际 SCLK」会回读"></select></label>
+        <label class="row"><span>模式</span><select id="sp-mode" title="CPOL/CPHA">
+          <option value="0">0 · CPOL=0 CPHA=0</option>
+          <option value="1">1 · CPOL=0 CPHA=1</option>
+          <option value="2">2 · CPOL=1 CPHA=0</option>
+          <option value="3">3 · CPOL=1 CPHA=1</option>
+        </select></label>
+        <label class="row"><span>CS 策略</span><select id="sp-cs" title="按固件实现：0/2 = PA26 作 GPIO CS（软件拉/放）、1 = 辅助脚作 GPIO CS、3 = 硬件 CS0。proto.h 的注释在这条上是反的"></select></label>
+        <label class="row"><span>DMA 阈值</span><input id="sp-thr" class="num" value="100" inputmode="numeric" title="数据相位 ≥ 阈值走 DMA。⚠️ 当前固件是 P1：全部走轮询（tx_dma 恒 0），这个值先存着"></label>
+        <label class="chk"><input type="checkbox" id="sp-clear" checked> 使能时先清环 / 复位状态机</label>
+        <div class="row btnrow">
+          <button id="sp-get">读取配置</button>
+          <button id="sp-set" class="primary">写入配置</button>
+        </div>
+        <p class="hint" id="sp-ring">OUT/IN 环大小：连接后回读</p>
+      </fieldset>
+
+      <fieldset>
+        <legend>辅助脚 + 有效电平</legend>
+        <label class="row"><span>DC</span><select id="sp-pad-dc"></select></label>
+        <label class="row"><span>RST</span><select id="sp-pad-rst"></select></label>
+        <label class="row"><span>CS 辅助</span><select id="sp-pad-csaux"></select></label>
+        <label class="row"><span>BL</span><select id="sp-pad-bl"></select></label>
+        <div class="row">
+          <label class="chk"><input type="checkbox" id="sp-al-dc"> DC 低有效</label>
+          <label class="chk"><input type="checkbox" id="sp-al-rst" checked> RST 低有效</label>
+        </div>
+        <div class="row">
+          <label class="chk"><input type="checkbox" id="sp-al-cs" checked> CS 低有效</label>
+          <label class="chk"><input type="checkbox" id="sp-al-bl"> BL 低有效</label>
+        </div>
+        <div class="row btnrow"><button id="sp-pin-apply">应用引脚</button></div>
+        <p class="hint">TE 撕裂信号暂不暴露（TBD）。开了 qspi 档之后 PA30/PA31 不能再当辅助脚，固件会拒。</p>
+      </fieldset>
+
+      <fieldset>
+        <legend>使能与状态</legend>
+        <div class="row btnrow">
+          <button id="sp-enable" class="primary">使能</button>
+          <button id="sp-disable">失能</button>
+        </div>
+        <div class="row btnrow">
+          <button id="sp-reset" title="清环、复位状态机、清计数器（不动配置）">复位桥</button>
+          <button id="sp-abort" title="丢弃未处理帧与 IN 队列">中止</button>
+          <button id="sp-status">读状态</button>
+        </div>
+        <p class="hint">状态字 <b id="sp-word">—</b> <span id="sp-word-text"></span></p>
+        <p class="hint">实际 SCLK <b id="sp-sclk-actual">—</b>（固件分频后的真实值）</p>
+        <p class="hint">帧 ok <b id="sp-c-ok">0</b> · err <b id="sp-c-err">0</b> · tx <b id="sp-c-tx">0 B</b> · rx <b id="sp-c-rx">0 B</b> · 单笔 <b id="sp-last-us">—</b> µs<br>
+          轮询 <b id="sp-c-poll">0</b> · DMA <b id="sp-c-dma">0</b> · IN 丢弃 <b id="sp-c-in">0</b> · OUT 溢出 <b id="sp-c-ovf">0</b></p>
+      </fieldset>
+    </aside>
+
+    <section class="main">
+      <div class="toolbar">
+        <span class="hint" style="margin:0">通用帧：bulk OUT <code>0x0B</code> 发 → IN <code>0x8B</code> 收（顺序性只由这条流保证）</span>
+        <span class="spacer"></span>
+        <button id="sp-log-clear" class="mini">清空日志</button>
+      </div>
+
+      <div class="spcols">
+        <fieldset>
+          <legend>XFER（一次 SPI 事务 = 一个 CS 窗口）</legend>
+          <div class="framegrid">
+            <label class="row"><span>cmd</span><input id="sp-x-cmd" value="0x00"></label>
+            <label class="row"><span>线数</span><select id="sp-x-lines"><option>1</option><option>2</option><option>4</option></select></label>
+            <label class="row"><span>addr_len</span><input id="sp-x-addrlen" class="num" value="0" inputmode="numeric"></label>
+            <label class="row"><span>addr</span><input id="sp-x-addr" value="0"></label>
+            <label class="row"><span>dummy</span><input id="sp-x-dummy" class="num" value="0" inputmode="numeric"></label>
+            <label class="row"><span>rx_len</span><input id="sp-x-rx" class="num" value="0" inputmode="numeric"></label>
+          </div>
+          <label class="row"><span>tx 数据</span><textarea id="sp-x-tx" class="tx" placeholder="十六进制，如 12 34 AB（单帧最多 492 B）"></textarea></label>
+          <div class="row">
+            <label class="chk"><input type="checkbox" id="sp-x-cmden"> 发 cmd</label>
+            <label class="chk"><input type="checkbox" id="sp-x-addren"> 发地址</label>
+            <label class="chk"><input type="checkbox" id="sp-x-addrquad"> 地址四线</label>
+            <label class="chk"><input type="checkbox" id="sp-x-token"> 0x69 token</label>
+          </div>
+          <div class="row">
+            <label class="chk"><input type="checkbox" id="sp-x-dcen"> 设 DC</label>
+            <label class="chk"><input type="checkbox" id="sp-x-dclevel" checked> DC=1（数据）</label>
+          </div>
+          <div class="row">
+            <label class="chk"><input type="checkbox" id="sp-x-rsp" checked> 要应答</label>
+            <label class="chk"><input type="checkbox" id="sp-x-cshold"> CS_HOLD</label>
+            <label class="chk"><input type="checkbox" id="sp-x-csoff"> CS_OFF</label>
+            <label class="chk"><input type="checkbox" id="sp-x-csaux"> 用辅助 CS</label>
+          </div>
+          <div class="row">
+            <label class="chk"><input type="checkbox" id="sp-x-nodma"> 强制轮询</label>
+            <label class="chk"><input type="checkbox" id="sp-x-forcedma"> 强制 DMA</label>
+            <span class="spacer"></span>
+            <button id="sp-x-send" class="primary">发送 XFER</button>
+          </div>
+        </fieldset>
+
+        <div>
+          <fieldset>
+            <legend>简单帧 / 引脚</legend>
+            <div class="row btnrow">
+              <button id="sp-f-ping">PING</button>
+              <button id="sp-f-auxin" title="读一次辅助输入（TE）电平。TE 同步刷屏是 TBD，这里只是读">读 AUX_IN</button>
+              <button id="sp-f-cs-low">CS↓</button>
+              <button id="sp-f-cs-high">CS↑</button>
+            </div>
+            <div class="row">
+              <span>GPIO</span>
+              <select id="sp-f-gpio-line"><option value="0">DC</option><option value="1">RST</option><option value="2">CS 辅助</option><option value="3">BL</option></select>
+              <select id="sp-f-gpio-level"><option value="1">置 1</option><option value="0">置 0</option></select>
+              <button id="sp-f-gpio" class="mini">发</button>
+            </div>
+            <div class="row"><span>延时 µs</span><input id="sp-f-delay" class="num" value="1000" inputmode="numeric"><button id="sp-f-delay-send" class="mini">发</button></div>
+            <div class="row"><span>RST 脉冲</span><input id="sp-f-reset-low" class="num" value="10" inputmode="numeric"><input id="sp-f-reset-post" class="num" value="120" inputmode="numeric"><button id="sp-f-reset-send" class="mini">发</button></div>
+            <p class="hint">延时 / RST 都是<b>非阻塞</b>的：探针只登记「下一个允许时刻」，期间 DAP / RTT 照常。</p>
+          </fieldset>
+
+          <fieldset>
+            <legend>回环自检（MOSI↔MISO 跳线）</legend>
+            <label class="row"><span>长度</span><input id="sp-lb-lens" value="1,2,32,99,100,101,256,492" title="逗号分隔；单帧发送上限 492 B"></label>
+            <label class="row"><span>线数</span><select id="sp-lb-lines"><option>1</option><option>2</option><option>4</option></select></label>
+            <label class="chk"><input type="checkbox" id="sp-lb-dma"> 同时对照 FORCE_DMA 那一档</label>
+            <div class="row btnrow">
+              <button id="sp-lb-run" class="primary">跑回环</button>
+              <button id="sp-lb-cancel">中止</button>
+            </div>
+            <p class="hint">每个长度原样发出去、再原样读回来逐字节比对。真机没接 J3[19]↔J3[21] 跳线时会 FAIL —— 那正是它的用处。</p>
+            <p class="hint" id="sp-lb-sum">未跑</p>
+            <div class="scroll"><table class="sp"><thead><tr><th>长度</th><th>路径</th><th>结果</th><th>说明</th></tr></thead><tbody id="sp-lb-body"></tbody></table></div>
+          </fieldset>
+        </div>
+      </div>
+
+      <div id="sp-log" class="log"></div>
+
+      <div class="stats">
+        <span>协议：<code>HID 0x35</code> 控制面 + <code>bulk 0x0B/0x8B</code> 帧流</span>
+        <span class="spacer"></span>
+        <span class="hint" style="margin:0">屏相关的事（面板档 / 初始化表 / 刷图）在「SPI/QSPI 屏」页 · 方案 <code>docs/spi-bridge-page.md</code></span>
+      </div>
+    </section>
+  </div>
+</section>
+
+<!-- ============================ SPI / QSPI 屏（面板档 · 初始化步 · 刷图） ============================ -->
+<section class="panel" id="tab-panel">
+  <div class="ws">
+    <aside class="side">
+      <fieldset id="pn-conn-card">
+        <legend>探针（与「SPI/QSPI 桥」页**共用同一次连接**）</legend>
+        <div class="row btnrow">
+          <button id="pn-connect" class="primary">连接探针</button>
+          <button id="pn-reconnect">重连</button>
+        </div>
+        <p class="hint" id="pn-info">未连接</p>
+        <label class="chk" title="不需要硬件：与桥页共用同一个假探针实例"><input type="checkbox" id="pn-mock"> 用假探针（无需硬件）</label>
+        <div class="row btnrow">
+          <button id="pn-usb">连接数据端点…</button>
+        </div>
+        <label class="row"><span>在飞读</span><input id="pn-inflight" class="num" value="4" inputmode="numeric"></label>
+        <p class="hint" id="pn-usbinfo">未连接数据端点</p>
+        <p class="hint" id="pn-state">未连接</p>
+      </fieldset>
+
+      <fieldset id="pn-model-card">
+        <legend>屏型号与推荐值</legend>
+        <label class="row"><span>型号</span><select id="pn-preset"></select></label>
+        <p class="hint" id="pn-preset-note"></p>
+        <div class="row btnrow"><button id="pn-preset-apply" class="primary">套用推荐值</button></div>
+        <p class="hint">只改"屏相关"的字段（档位 / SCLK / DC / RST / BL），CS 策略等保持桥页里的设置；写入后照样回读对账。</p>
+      </fieldset>
+
+      <fieldset>
+        <legend>面板档（profile）</legend>
+        <label class="row"><span>档位</span><select id="pn-profile"></select></label>
+        <label class="row"><span>默认线数</span><select id="pn-deflines"><option>1</option><option>2</option><option>4</option></select></label>
+        <label class="chk"><input type="checkbox" id="pn-dcactive" checked> DC 高 = 数据（AXS15352 就是这样）</label>
+        <label class="chk"><input type="checkbox" id="pn-cshold" checked> 翻 DC 时保持 CS（复刻 ESP-IDF 行为）</label>
+        <label class="row"><span>QSPI 写</span><input id="pn-qspiwr" class="num" value="0x02"></label>
+        <label class="row"><span>QSPI 像素</span><input id="pn-qspicolor" class="num" value="0x32"></label>
+        <label class="row"><span>地址字节</span><input id="pn-qspiaddr" class="num" value="3" inputmode="numeric"></label>
+        <div class="row btnrow">
+          <button id="pn-prof-get">读取档位</button>
+          <button id="pn-prof-set" class="primary">写入档位</button>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>当前生效（只读）</legend>
+        <p class="hint">SCLK <b id="pn-sum-sclk">—</b> · 实际 <b id="pn-sclk-actual">—</b></p>
+        <p class="hint">CS <b id="pn-sum-cs">—</b></p>
+        <p class="hint">辅助脚 <b id="pn-sum-pads">—</b></p>
+        <p class="hint">档位 <b id="pn-sum-profile">—</b></p>
+        <div class="row btnrow">
+          <button id="pn-enable" class="primary">使能</button>
+          <button id="pn-disable">失能</button>
+        </div>
+        <p class="hint">基础配置（SCLK / 模式 / CS 策略 / 通用辅助脚 / 回环自检）在「SPI/QSPI 桥」页；这边只做屏相关的事。</p>
+      </fieldset>
+
+      <fieldset id="pn-power-card">
+        <legend>面板电源 / 显示</legend>
+        <div class="row btnrow">
+          <button id="pn-pwr-on" title="发 STEP 0x11（sleep out）—— 退出睡眠，之后必须等约 120 ms 才能收下一条命令">上电 11h</button>
+          <button id="pn-disp-on" title="发 STEP 0x29（display on）—— 打开显示输出；面板要初始化过才会显示内容">开显示 29h</button>
+        </div>
+        <div class="row btnrow">
+          <button id="pn-disp-off" title="发 STEP 0x28（display off）—— 只关显示输出，显存内容还在">关显示 28h</button>
+          <button id="pn-pwr-off" title="发 STEP 0x10（sleep in）—— 进入睡眠（最省电），之后要 11h 才能唤醒">下电 10h</button>
+        </div>
+        <div class="row"><span>RST 脉冲</span><input id="pn-rst-low" class="num" value="10" inputmode="numeric" title="把面板 RST 脚拉低多久（毫秒）"><input id="pn-rst-post" class="num" value="120" inputmode="numeric" title="RST 释放之后再等多久（毫秒）"><button id="pn-rst-send" class="mini">发</button></div>
+        <p class="hint"><b>RST 脉冲</b>两个数字：<b>前一个</b> = 把面板 RST 脚拉低几毫秒，<b>后一个</b> = 释放之后再多等几毫秒（默认 10 / 120，多数屏厂规值）。走辅助 RST 脚（pad 与有效电平在桥页配），全程非阻塞。</p>
+      </fieldset>
+    </aside>
+
+    <section class="main">
+      <fieldset id="pn-code-card">
+          <legend>面板初始化（把 C 数组贴进来 / 载入内置示例）<button class="mini foldbtn" data-fold="pn-code-card">收起</button></legend>
+          <div class="toolrow">
+            <span>内置示例</span>
+            <select id="pn-code-preset"></select>
+            <button id="pn-code-load" class="mini">载入</button>
+            <button id="pn-code-file" class="mini">载入文件…</button>
+            <input type="file" id="pn-code-file-input" accept=".h,.c,.txt,.json" hidden>
+            <span class="spacer"></span>
+            <label class="chk" title="AXS15352 的厂家表里没有这两条，缺了会全黑（实测结论）：0x36 MADCTL=0x00（RGB 顺序）+ 0x3A COLMOD=0x55（RGB565）。只影响重放/导出，不改你贴的文本。"><input type="checkbox" id="pn-code-prefix" checked> 自动补 MADCTL/COLMOD</label>
+            <button id="pn-code-parse" class="primary mini">解析并预览</button>
+          </div>
+          <textarea id="pn-code-text" class="code" spellcheck="false" placeholder="把面板初始化代码贴到这里（C 数组为主，也认纯文本行与 JSON）：&#10;&#10;{0xCE, (uint8_t[]){0x5A, 0xA5}, 2, 0},&#10;{0xA1, (uint8_t[]){0x00, 0xDD}, 2, 0},&#10;{0x11, NULL, 0, 100},&#10;{0x29, NULL, 0, 0},"></textarea>
+          <div class="toolrow nw">
+            <span class="hint" id="pn-code-sum" style="margin:0">把代码贴进来 → 点「解析并预览」</span>
+            <span class="spacer"></span>
+            <button id="pn-code-c" class="mini" title="导出成能贴回 C 头文件的片段">导出 C</button>
+            <button id="pn-code-json" class="mini">导出 JSON</button>
+            <button id="pn-code-text-out" class="mini">导出文本</button>
+            <button id="pn-code-clear" class="mini">清空</button>
+          </div>
+          <div class="scroll" id="pn-code-wrap">
+            <table class="sp"><thead><tr><th>#</th><th>源行</th><th>命令</th><th>参数</th><th>延时</th><th></th></tr></thead><tbody id="pn-code-body"></tbody></table>
+          </div>
+          <div class="row btnrow">
+            <button id="pn-code-play" class="primary" title="按当前面板档把整表编成 STEP 帧发出（档 1：同一 CS 窗口内「命令→翻 DC→参数」；档 2：0x02 + 24 bit 地址 + 参数）。行尾的「单发 / 从此重放」可以只跑其中一段">重放全部</button>
+            <button id="pn-code-stop">中止</button>
+            <span class="hint" id="pn-code-prog" style="margin:0"></span>
+          </div>
+        </fieldset>
+
+        <fieldset id="pn-img-card">
+          <legend>图片 / 图案刷屏<button class="mini foldbtn" data-fold="pn-img-card">收起</button></legend>
+          <div class="row"><span>内置图案</span><div class="chips" id="pn-patterns"></div></div>
+          <div id="pn-drop" class="drop">把 <b>BMP / PNG / JPEG</b> 拖到这里，或点击选择</div>
+          <input type="file" id="pn-img-file" accept="image/*,.bmp" hidden>
+          <div class="imgrow">
+            <div class="canvasbox"><canvas id="pn-canvas" width="240" height="296"></canvas></div>
+            <div class="imginfo">
+              <p class="hint" id="pn-img-info" style="margin-top:0">（还没选图 / 图案）</p>
+              <label class="row"><span>缩放</span>
+                <select id="pn-fit">
+                  <option value="fill">铺满（裁剪）</option>
+                  <option value="fit">适应（留边）</option>
+                  <option value="stretch">拉伸</option>
+                  <option value="none">原始尺寸</option>
+                </select></label>
+              <label class="row"><span>开窗 x/y</span><input id="pn-x" class="num" value="0" inputmode="numeric"><input id="pn-y" class="num" value="0" inputmode="numeric"></label>
+              <label class="row"><span>屏幕</span><select id="pn-geom"></select></label>
+              <label class="row"><span>字节序</span>
+                <select id="pn-byteorder" title="RGB565 的字节序。默认「高字节在前」与 MADCTL=0x00(RGB) 是正确组合；颜色不对时**只翻一个**开关（先试 R/B 交换，再试低字节在前）">
+                  <option value="be">高字节在前（默认）</option>
+                  <option value="le">低字节在前</option>
+                </select></label>
+              <label class="chk"><input type="checkbox" id="pn-swap"> R/B 交换（等价 MADCTL 的 BGR 位）</label>
+              <label class="row"><span>电平</span><input id="pn-level" class="num" value="255" inputmode="numeric" title="255 = 不改；把满量程分量压到这个值，用来做灰阶测试"></label>
+              <div class="row btnrow"><button id="pn-img-send" class="primary">刷这一张</button></div>
+              <p class="hint" id="pn-img-sum" style="margin:0"></p>
+            </div>
+          </div>
+          <p class="hint">预览里的<b>橙色虚线</b>是探针真正下发的对齐窗口（列地址按 4 像素对齐，多出来的列用边缘填充）。
+            每片 492 B，一屏 ST77916 是 <b>527 片</b>；只有最后一片要应答。</p>
+        </fieldset>
+
+      <fieldset id="pn-log-card" class="folded">
+        <legend>日志<button class="mini foldbtn" data-fold="pn-log-card">展开</button></legend>
+        <div class="logbox">
+          <button id="pn-log-clear" class="mini logclear" title="只清屏上的日志（记录仍保留在会话里，展开/切页回来会重放）">清空</button>
+          <div id="pn-log" class="log"></div>
+        </div>
+      </fieldset>
+
+      <div class="stats">
+        <span>帧 ok <b id="pn-c-ok">0</b> · err <b id="pn-c-err">0</b> · tx <b id="pn-c-tx">0 B</b> · rx <b id="pn-c-rx">0 B</b></span>
+        <span class="spacer"></span>
+        <span class="hint" style="margin:0">与桥页共享同一次连接 · 方案 <code>docs/spi-bridge-page.md</code></span>
       </div>
     </section>
   </div>

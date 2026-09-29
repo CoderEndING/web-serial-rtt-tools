@@ -29,9 +29,9 @@ FW_DIR   = tools/target-firmware/stm32f103
 LA       = tools/la/kingst_la.py
 
 .DEFAULT_GOAL := help
-.PHONY: help serve serve-stop browser open page-prep test test-ui test-gen test-gen-page test-hid test-dwarf test-scope test-scope-page test-scope-render test-hw test-record test-bridge test-bridge-gate test-hpm test-image test-all flash-timing hw-campaign hw-campaign-hpm campaign-summary \
+.PHONY: help serve serve-dev serve-stop browser open page-prep test test-ui test-gen test-gen-page test-hid test-dwarf test-scope test-scope-page test-scope-render test-spi test-spi-page test-hw test-record test-bridge test-bridge-gate test-hpm test-image test-all flash-timing hw-campaign hw-campaign-hpm campaign-summary \
         bridge bridge-stop fw-build fw-flash fw-restore fw-h7-build fw-h7-slow fw-h7-flash \
-        algo-check flash-plan la-info la-capture git-status git-log check clean
+        algo-check flash-plan la-info la-capture git-status git-log check clean spi-hw spi-flow
 
 help:
 	pwsh -NoProfile -ExecutionPolicy Bypass -File tools/dev/help.ps1
@@ -40,6 +40,12 @@ help:
 serve:
 	$(PY) -m http.server $(PORT) --bind 127.0.0.1
 
+# 开发用静态服务：**明确不发缓存**。—— 改页面时用这个
+# 🚨 python -m http.server 不发 Cache-Control，浏览器就按"启发式缓存"自己决定存多久，
+#    于是"改完代码 → 刷新 → 还是老的"，强刷都不一定管用（ES 模块的缓存尤其顽固）。
+serve-dev:
+	$(NODE) tools/dev/serve-nocache.mjs $(PORT)
+
 serve-stop:
 	pwsh -NoProfile -Command "Get-NetTCPConnection -State Listen -LocalPort $(PORT) -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $$_.OwningProcess -Force }"
 
@@ -47,8 +53,9 @@ browser:
 	pwsh -NoProfile -File tools/selftest/launch-browser.ps1 -Port $(CDP) -Url $(APP)
 
 # 起服务（后台，已在跑就跳过）再开浏览器 —— 一条命令进入真机调试状态
+# 服务用**不发缓存**的那个（node tools/dev/serve-nocache.mjs）：改完代码普通刷新就能看到
 open:
-	pwsh -NoProfile -Command "if (-not (Get-NetTCPConnection -State Listen -LocalPort $(PORT) -ErrorAction SilentlyContinue)) { Start-Process -FilePath '$(PY)' -ArgumentList '-m','http.server','$(PORT)','--bind','127.0.0.1' -WindowStyle Hidden; Start-Sleep -Seconds 1 }; & 'tools/selftest/launch-browser.ps1' -Port $(CDP) -Url '$(APP)'"
+	pwsh -NoProfile -Command "if (-not (Get-NetTCPConnection -State Listen -LocalPort $(PORT) -ErrorAction SilentlyContinue)) { Start-Process -FilePath '$(NODE)' -ArgumentList 'tools/dev/serve-nocache.mjs','$(PORT)' -WorkingDirectory (Get-Location) -WindowStyle Hidden; Start-Sleep -Seconds 1 }; & 'tools/selftest/launch-browser.ps1' -Port $(CDP) -Url '$(APP)'"
 	pwsh -NoProfile -Command "Write-Host '页面：$(APP)    浏览器调试端口：$(CDP)'"
 
 # ---------------------------------------------------------------- 自测
@@ -61,6 +68,8 @@ test:
 	$(NODE) tools/selftest/bridge-origin.test.mjs
 	$(NODE) tools/selftest/flash-image.test.mjs
 	$(NODE) tools/selftest/hpm-flash.test.mjs
+	$(NODE) tools/selftest/spi-proto.test.mjs
+	$(NODE) tools/selftest/spi-panel-code.test.mjs
 
 # 固件文件解析（ELF 按节取 + VMA→LMA、HEX、.bin）—— 离线
 test-image:
@@ -115,6 +124,27 @@ test-scope-page:
 test-scope-render:
 	pwsh -NoProfile -Command "if (-not (Get-NetTCPConnection -State Listen -LocalPort $(PORT) -ErrorAction SilentlyContinue)) { Start-Process -FilePath '$(PY)' -ArgumentList '-m','http.server','$(PORT)','--bind','127.0.0.1' -WindowStyle Hidden; Start-Sleep -Seconds 1 }"
 	$(NODE) tools/selftest/scope-render.test.mjs
+
+# 「SPI/QSPI 屏」页的引擎层：帧编解码 / 打包器（一帧不跨包）/ HID 0x35 偏移 / 假探针帧执行
+test-spi:
+	$(NODE) tools/selftest/spi-proto.test.mjs
+
+# 「SPI/QSPI 桥 + 屏」两页的真页面验收（假探针，不需要硬件；需要 8899 服务 + 9333 CDP 浏览器）
+test-spi-page: page-prep
+	$(NODE) tools/selftest/spi-bus-page.test.mjs && $(NODE) tools/selftest/spi-panel-page.test.mjs
+
+# 「SPI/QSPI 屏」真机验收（探针 + 真屏）：默认 AXS15352/40MHz
+#   make spi-hw                                  # 一屏一套：连接 → 推荐值 → 面板初始化 → 刷图
+#   make spi-hw ARGS="--panel=st77916"           # 换 ST77916（档 2，QSPI）
+#   make spi-hw ARGS="--sclk=20,40,60,75"        # 逐档 SCLK 刷一遍对比
+#   make spi-hw ARGS=--loop                      # 先跑回环自检（要 J3[19]↔J3[21] 跳线）
+spi-hw: page-prep
+	$(NODE) tools/selftest/spi-hw.mjs $(ARGS)
+
+# 「SPI/QSPI 屏」页面功能流程验收（用户 2026-09-29 指定顺序，出错即停）：
+#   打开 web -> 连接探针 -> 初始化屏 -> 发图 x3 -> 再次初始化屏 -> 发图 x3
+spi-flow: page-prep
+	$(NODE) tools/selftest/spi-hw-flow.mjs $(ARGS)
 
 # ---------------------------------------------------------------- 页面类脚本的共同前置
 # 8899 静态服务 + 9333 CDP 浏览器（哪个不在就起哪个）。
@@ -242,6 +272,15 @@ check:
 	$(NODE) --check app/scope/render.js
 	$(NODE) --check app/scope/transport.js
 	$(NODE) --check app/scope/view.js
+	$(NODE) --check app/spi/protocol.js
+	$(NODE) --check app/spi/mock.js
+	$(NODE) --check app/spi/transport.js
+	$(NODE) --check app/spi/session.js
+	$(NODE) --check app/spi/bus-view.js
+	$(NODE) --check app/spi/panel-view.js
+	$(NODE) --check app/spi/panel-code.js
+	$(NODE) --check app/spi/panels-data.js
+	$(NODE) --check app/spi/image.js
 	$(NODE) --check app/main.js
 	$(NODE) --check bridge/rtt-bridge.mjs
 	pwsh -NoProfile -Command "Write-Host '语法检查通过'"

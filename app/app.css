@@ -58,7 +58,14 @@ main{flex:1;min-height:0;position:relative}
 .panel{position:absolute;inset:0;display:none;padding:10px}
 .panel.active{display:block}
 .ws{display:grid;grid-template-columns:308px minmax(0,1fr);gap:10px;height:100%}
-.side{overflow:auto;display:flex;flex-direction:column;gap:9px;padding-right:2px}
+.side{overflow-y:auto;overflow-x:hidden;display:flex;flex-direction:column;gap:9px;padding-right:2px}
+/* 🚨 flex 子项的 min-width 默认是 auto —— 只要卡片里有一个不肯换行的元素（长下拉文本、长句子），
+   整个 fieldset 就会被撑到比侧栏还宽；再配 overflow-x:hidden，字就是被**裁掉**（看不见，也不滚动）。
+   🚨 同理 flex-shrink 默认是 1 —— 卡片多了以后它们会被**压扁**（而不是撑出滚动条），
+   被压扁的卡片内部按钮就"显示不出来"了。所以这里必须 flex:none：卡片保持自然高度，超出交给滚动。 */
+.side>fieldset{min-width:0;flex:none}
+.side .hint,.side p,.side .chk,.side label,.side .row>span{overflow-wrap:anywhere;min-width:0}
+.side select,.side input{max-width:100%}
 .main{display:flex;flex-direction:column;gap:8px;min-width:0;min-height:0}
 fieldset{border:1px solid var(--line);border-radius:9px;padding:6px 10px 9px;margin:0;background:var(--bg2)}
 legend{font-size:11.5px;color:var(--fg2);padding:0 5px;letter-spacing:.4px}
@@ -208,3 +215,111 @@ dialog form{margin-top:16px;text-align:right}
   .rx{min-height:45vh}
   .termbox{min-height:55vh}
 }
+
+/* ---- SPI/QSPI 两页（#spi 桥 / #panel 屏）----
+   日志框是"帧流水"（每帧一行 + 应答一行），所以用等宽 + 预换行；颜色只分四档。 */
+#tab-spi .side .row>span:first-child,#tab-panel .side .row>span:first-child{width:74px}
+#tab-spi .row>span:first-child,#tab-panel .row>span:first-child{width:74px}
+#tab-spi .main .spcols,#tab-panel .main .spcols{
+  display:grid;grid-template-columns:minmax(330px,1.05fr) minmax(300px,1fr);
+  gap:10px;align-items:start;max-height:62%;overflow:auto;padding-right:2px;
+}
+@media (max-width:1180px){
+  #tab-spi .main .spcols,#tab-panel .main .spcols{grid-template-columns:1fr;max-height:none}
+}
+#tab-spi .framegrid,#tab-panel .framegrid{display:grid;grid-template-columns:1fr 1fr;gap:0 8px}
+#tab-spi .framegrid .row>span:first-child,#tab-panel .framegrid .row>span:first-child{width:62px}
+#tab-spi .tx,#tab-panel .tx{min-height:44px}
+.log{
+  flex:0 0 auto;height:30%;min-height:126px;overflow:auto;background:#010409;border:1px solid var(--line);
+  border-radius:9px;padding:6px 8px;font-family:var(--mono);font-size:12px;line-height:1.5;
+  white-space:pre-wrap;word-break:break-all;margin:0;
+}
+.log .dim{color:var(--fg2)}
+.log .warn{color:var(--warn)}
+.log .err{color:var(--err)}
+.log .ok{color:var(--ok)}
+table.sp{width:100%;border-collapse:collapse;font-family:var(--mono);font-size:11.5px}
+table.sp th{color:var(--fg2);text-align:left;padding:3px 6px;border-bottom:1px solid var(--line);font-weight:600}
+table.sp td{padding:2px 6px;border-bottom:1px solid var(--bg3)}
+/* 解析结果表：行高压紧（矮窗口里表头 + 行距能吃掉一半高度，用户只能看到 1 行） */
+#tab-panel table.sp th{padding:2px 6px}
+#tab-panel table.sp td{padding:1px 6px}
+table.sp tr.ok td{color:var(--ok)}
+table.sp tr.bad td{color:var(--err)}
+#tab-spi .scroll,#tab-panel .scroll{overflow:auto;max-height:200px;border:1px solid var(--line);border-radius:8px;margin-top:6px}
+/* 占位卡片（还没做的功能）：明确"还没做"，不是坏掉的控件 */
+fieldset[disabled]{opacity:.62}
+fieldset[disabled] legend::after{content:' · 未实现';color:var(--warn)}
+
+/* ---- 屏页（#panel）----
+   主区三块按**权重弹性分配**：初始化区 3 : 图片区 2 : 日志 1。
+   关键：折叠的块让出全部空间（flex:0 0 auto），**剩下的块自动长大** ——
+   否则会出现"收起初始化区后下面留一大片空白、刷图区还被死高度卡着"这种明显不合理的画面。
+   侧栏卡片按 DOM 顺序排（探针 → 屏型号 → 面板档 → 当前生效 → 面板电源/显示）。 */
+#tab-panel .main{gap:8px}
+#tab-panel #pn-code-card{flex:3 1 0;min-height:180px;display:flex;flex-direction:column}
+#tab-panel #pn-code-card.folded{flex:0 0 auto;min-height:0}
+#tab-panel #pn-code-card > *{flex:none}
+#tab-panel #pn-code-card > #pn-code-text,
+#tab-panel #pn-code-card > #pn-code-wrap{flex:1 1 0;height:0;min-height:70px}
+#tab-panel #pn-img-card{flex:2 1 0;min-height:110px;max-height:60%;overflow:auto}
+#tab-panel #pn-img-card.folded{flex:0 0 auto;min-height:0;max-height:none;overflow:visible}
+#tab-panel #pn-log-card{flex:1 1 0;min-height:34px}
+#tab-panel #pn-log-card.folded{flex:0 0 auto;min-height:0}
+#tab-panel #pn-log-card .logbox{height:100%;min-height:92px}
+/* 拖放区压扁一点：它只是"选图入口"，别占掉命令区的高度（图案按钮就在上面一行） */
+#tab-panel .drop{padding:5px 9px;margin:4px 0;font-size:12px}
+#tab-panel .toolrow{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:0 0 7px}
+/* 初始化卡片里的固定行压紧一点：矮窗口下这些"工具条"加起来能吃掉 150px，
+   压紧后省下来的高度全给文本框和表格（用户："初始化部分被压缩得太厉害了"）。 */
+#tab-panel #pn-code-card .toolrow{margin:0 0 4px}
+#tab-panel #pn-code-card .row{margin:3px 0}
+#tab-panel #pn-code-card legend{padding:0 4px}
+#tab-panel #pn-code-card>.row.btnrow button{padding:3px 9px}
+/* 摘要 + 导出按钮挤一行（折行会白吃 28px 高度，那点高度留给文本框和表格） */
+#tab-panel .toolrow.nw{flex-wrap:nowrap;overflow:hidden}
+#tab-panel .toolrow.nw #pn-code-sum{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#tab-panel .toolrow.nw button{flex:none}
+#tab-panel .toolrow>span:first-child{color:var(--fg2);font-size:12px;flex:none}
+#tab-panel .toolrow select{max-width:340px}
+#pn-code-text{
+  width:100%;font-family:var(--mono);font-size:12px;line-height:1.45;
+  resize:none;white-space:pre;overflow:auto;
+}
+#tab-panel .scroll{max-height:none;margin-top:0}
+/* 预览限高：不然 360×360 的画布会把"图片"卡片撑得比初始化面板还高 */
+#tab-panel #pn-canvas{max-height:170px;width:auto}
+#tab-panel .imginfo .row{margin:3px 0}
+#tab-panel .imgrow{gap:10px}
+/* 日志：折叠卡片里的一块滚动区 + 右上角浮动"清空"（不占额外高度） */
+#tab-panel .logbox{position:relative}
+#tab-panel .logbox .log{height:100%}
+#tab-panel .logclear{position:absolute;top:4px;right:10px;z-index:3;opacity:.9}
+/* 大卡片可以折叠（legend 里那个小按钮）：收起时只留标题行，并且**明确标出"已折叠"**
+   —— 只有一行小字的话，用户会以为功能没了（实测就这么反馈过） */
+fieldset.folded > *:not(legend){display:none}
+fieldset.folded{padding-bottom:6px}
+fieldset.folded > legend{color:var(--acc)}
+fieldset.folded > legend::after{content:' · 已折叠';color:var(--fg2);font-size:11px}
+.foldbtn{margin-left:8px;padding:0 6px;font-size:11px}
+#pn-code-body td:nth-child(4){word-break:break-all;white-space:normal;max-width:560px}
+#pn-code-sum.ok{color:var(--ok)} #pn-code-sum.warn{color:var(--warn)} #pn-code-sum.err{color:var(--err)}
+.drop{
+  border:2px dashed var(--line);border-radius:9px;padding:9px;text-align:center;
+  color:var(--fg2);cursor:pointer;font-size:12.5px;margin:5px 0;transition:.15s;
+}
+.drop.hot{border-color:var(--acc);background:#4ea1ff12;color:var(--fg)}
+.imgrow{display:flex;gap:12px;align-items:flex-start;flex-wrap:wrap;margin-top:8px}
+.canvasbox{flex:none}
+#pn-canvas{
+  background:#000;border:1px solid var(--line);border-radius:6px;image-rendering:pixelated;
+  max-width:min(42vw,380px);height:auto;
+}
+.imginfo{flex:1;min-width:240px}
+.imginfo .row>span:first-child{width:74px}
+.imginfo .num{width:72px}
+.chips{display:flex;flex-wrap:wrap;gap:4px}
+.chips button{padding:2px 8px;font-size:11.5px}
+.chips button.on{border-color:var(--acc);background:#1f6feb;color:#fff}
+#pn-img-sum{white-space:pre-wrap}

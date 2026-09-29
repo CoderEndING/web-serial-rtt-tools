@@ -13,6 +13,9 @@ import { GenView } from './gen/view.js';
 import { RttCdcView } from './hid/view.js';
 import { RttCdcStreamView } from './hid/stream.js';
 import { ScopeView } from './scope/view.js';
+import { SpiSession } from './spi/session.js';
+import { SpiBusView } from './spi/bus-view.js';
+import { SpiPanelView } from './spi/panel-view.js';
 import { ProbeBus, closeProbeUsbDevices } from './core/probe-bus.js';
 import { toast } from './ui/toast.js';
 
@@ -30,6 +33,10 @@ const gen = new GenView();
 const hid = new RttCdcView();
 const stream = new RttCdcStreamView(session);
 const scope = new ScopeView();
+// SPI 桥：**一次连接，两页共用**（桥页管链路与通用帧，屏页管面板档/初始化/刷图）
+const spiSession = new SpiSession();
+const spi = new SpiBusView(spiSession);
+const panel = new SpiPanelView(spiSession);
 
 assistant.init();
 terminal.init();
@@ -39,12 +46,16 @@ gen.init();
 hid.init();
 stream.init();
 scope.init();
+spi.init();
+panel.init();
 
 initTabs(name => {
   if (name === 'terminal') requestAnimationFrame(() => terminal.onShow());
   if (name === 'rtt') requestAnimationFrame(() => rtt.onShow());
   if (name === 'rttcdc') requestAnimationFrame(() => stream.onShow());
   if (name === 'scope') requestAnimationFrame(() => scope.onShow());
+  if (name === 'spi') requestAnimationFrame(() => spi.onShow());
+  if (name === 'panel') requestAnimationFrame(() => panel.onShow());
   if (name === 'gen') requestAnimationFrame(() => gen.onShow());
 });
 
@@ -68,6 +79,10 @@ probeBus.onRelease = async why => {
   } catch { /* 同上 */ }
   try {
     if (hid.last?.running){ await hid.stop(); done.push('RTT 转发（探针桥）'); }
+  } catch { /* 同上 */ }
+  try {
+    // SPI 桥：既占 HID（配置）又占 USB 接口（数据面），别的页签要用探针时必须两边都放掉
+    if (spiSession.connected || spiSession.dataReady){ await spiSession.teardown(); done.push('SPI 桥会话'); }
   } catch { /* 同上 */ }
   // 🚨 最后一步**必须**把本页签的探针 USB 句柄都关掉：视图那边可能早就"断开"了、
   //    只是引用丢了没 close()，而浏览器仍然认为接口被这个页签占着 —— 不关的话
@@ -95,6 +110,8 @@ function summary(){
     hid: hid?.summary?.() || null,
     stream: stream?.summary?.() || null,
     scope: scope?.summary?.() || null,
+    spi: spi?.summary?.() || null,
+    panel: panel?.summary?.() || null,
     vendor: 'serial-rtt-tools',
   };
 }
@@ -106,7 +123,7 @@ document.body.appendChild(box);
 // 烧录器抢探针前会通过它请别的页签让位（见上面的 probeBus）
 flash.bus = probeBus;
 
-window.__tools = { session, assistant, terminal, rtt, flash, gen, hid, stream, scope, probeBus, summary, errors };
+window.__tools = { session, assistant, terminal, rtt, flash, gen, hid, stream, scope, spi, panel, spiSession, probeBus, summary, errors };
 
 // ---------- 浏览器端端到端自检：?demo=serial&selftest=1 ----------
 const q = new URLSearchParams(location.search);
