@@ -21,6 +21,17 @@
  *      而且**实例 ID 会随插在哪个 USB 口而变** —— 所以这里会自动把"当前口"的 ID 补进去
  *      （见 ensureAuthorizedProfile）。没有它，页面的 RX 计数（= 用户的判决口径）就测不了。
  *   ③ 出错**立刻停**（打印原因 + dump 数据 + 退 1），不跑完再看；`--keep-going` 才继续。
+ *
+ * 2026-10 基线（STM32F103ZE + akaLinkPro，2 轮 + 5 遍交替，判决 20/20 全过）：
+ *   烧录 狂发（ZE 版 1.0 KB）0.73 s · scope（3.3 KB）1.04 s
+ *   RTT Viewer 610~616 KB/s · RTT 转发 **2.90 MB/s**（探针侧 2.55~2.6，60 MHz 档）
+ *   转发 10.2 s 存盘 29.4 MB，逐字节核对（误差 0.2%）· 积压 ~200 KB
+ *   J-Scope：1 变量上限 437~441 kHz · 3 变量（1 span/10 B）109 kHz · 50 kHz 档零丢样本
+ *
+ * ⚠️ 固件版本很要紧：狂发固件必须用 `build-ze`（96 MHz + RTT 32 KB 缓冲）。
+ *    仓库里曾长期躺着一份**旧简化版**（无 PLL 设置、SYST_RVR=8000 → 复位后 HSI 8 MHz、缓冲 4 KB），
+ *    用它测转发只有 **0.45 MB/s**，看着像工具坏了 —— 其实是目标喂不满。已从
+ *    `E:\Share\github\akaLinkPro\script_test\stm32f103_rtt_speed` 同步成 96 MHz 版。
  */
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
@@ -37,7 +48,10 @@ const APP = (LOCAL ? (process.env.APP || 'http://127.0.0.1:8899/index.html') : R
 const ORIGIN = LOCAL ? 'http://127.0.0.1:8899' : 'https://minichao9901.github.io:443';
 const PROFILE = path.join(process.env.TEMP, 'chrome-rtt-authorized');
 const FW = {
-  spam: 'tools/target-firmware/stm32f103_rtt_speed/build/fw.elf',
+  // 🚨 用 **ZE 版**（512KB flash / 64KB RAM，RTT 上行 32KB）：本机这块是 ZET6。
+  //    编译：pwsh -File tools/target-firmware/stm32f103_rtt_speed/build.ps1 -Board ze
+  //    （CB/C8 版输出在 build-cb / build-c8，两块固件可以同时躺着）
+  spam: 'tools/target-firmware/stm32f103_rtt_speed/build-ze/fw.elf',
   scope: 'tools/target-firmware/stm32f103_scope/build/fw.elf',
 };
 const COM = (arg('com') || '--com=COM5').split('=')[1];

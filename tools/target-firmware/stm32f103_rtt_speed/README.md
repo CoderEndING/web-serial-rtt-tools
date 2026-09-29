@@ -2,6 +2,40 @@
 
 用来量 **SEGGER RTT 的极限速度**，并且**在同一块板子上对比 WebUSB 与 OpenOCD 两条主机通路**。
 
+## 主频（超频）—— 生产者速率随主频线性缩放
+
+固件启动时自己把主频顶上去（`main.c` 的 `clock_init()`），**不依赖 OpenOCD 外挂 boost**：
+
+| 目标主频 | 配置 | RTT 生产者实测 |
+| --- | --- | --- |
+| 8 MHz | 复位默认 HSI | 277 KB/s |
+| 64 MHz | HSI/2 ×16 | 2217 KB/s |
+| 72 MHz | HSE 8 MHz ×9 | 2477 KB/s |
+| **96 MHz** | **HSE ×12（当前默认 `TARGET_HCLK_MHZ 96`）** | ~3300 KB/s（外推） |
+| 128 MHz | HSE ×16，固件切会硬故障（见下） | ~4400 KB/s（外推） |
+
+**生产者速率 ≈ 34.6 B/ms 每 MHz 主频**（8/64/72 MHz 三个点都吻合到 1% 以内）。
+要更高的 RTT 交付率，先把目标主频提上去，而不是一味提 SWDCLK。
+
+选 96 MHz 而不是 128 MHz 的理由：**flash 余量**。latency 上限是 2（3 周期），
+96 MHz 下 = 31 ns，128 MHz 下 = 23 ns，而 F103 flash 实际需要 ~40 ns —— 两者都在超，
+但 96 MHz 安全得多；而实测交付率两者持平（96 MHz: 2508 KB/s、128 MHz: 2507~2637 KB/s），
+因为 45 MHz SWD 档的**链路本身只到 ~2.5 MB/s**，生产者再快也吐不出来。
+
+两条硬限制（都实测过）：
+
+1. **这块板子上 144 MHz 做不到**：板上晶振实测 8.005 MHz，而 F103 的 PLL 倍频上限是 **×16**
+   ⇒ 物理上限 128 MHz。要 144 得换 9 MHz（×16）或 12 MHz（×12）晶振，或从 OSC_IN 灌外部时钟。
+2. **128 MHz 下 flash 喂不动核心**：latency 最多 2（3 周期 ≈ 23 ns），而 F103 flash 实际要 ~40 ns。
+   固件自己在开头切到 128 MHz 会立刻硬故障（实测 `HFSR=0x40000000` FORCED、
+   `CFSR=0x00001001` = IACCVIOL|STKERR，即取指出错跳飞）。128 MHz 目前只能在 halted 状态下由
+   上位机切换、让固件从复位向量就以该频率启动 —— 紧凑循环靠预取缓冲勉强跑得住，余量很小；
+   想稳跑 128 MHz 应把热代码搬到 SRAM 执行。
+
+`clock_init()` 里三件套缺一不可：FLASH_ACR 先给足等待周期 + 预取；APB1 ≤ 36 MHz、APB2 ≤ 72 MHz；
+以及**换频必须走完整时序**（SW→HSI、关 PLL、改倍频、开 PLL、SW→PLL）——PLL 配置位在 `PLLON=1`
+时是写保护的，直接改无效（最容易踩的一条，症状是"设了新频率但速度没变"）。
+
 ## 它做什么
 
 ```c
@@ -26,10 +60,22 @@ RTT 配成 **`SEGGER_RTT_MODE_BLOCK_IF_FIFO_FULL`**（缓冲满就阻塞）—�
 
 ## 编译 / 烧录
 
+**每块板子一个独立输出目录，互不覆盖**（`-Clean` 也只清当前这块）：
+
 ```powershell
-pwsh -File build.ps1          # arm-none-eabi-gcc，不需要 Keil
-pwsh -File flash.ps1          # OpenOCD + CMSIS-DAP（烧录前先把桥/OpenOCD 停掉）
+pwsh -File build.ps1             # CB  : 128KB flash / 20KB RAM, RTT 上行 12KB -> build-cb\
+pwsh -File build.ps1 -Board c8   # C8  :  64KB flash / 20KB RAM, RTT 上行 12KB -> build-c8\
+pwsh -File build.ps1 -Board ze   # ZET6: 512KB flash / 64KB RAM, RTT 上行 32KB -> build-ze\
+
+pwsh -File flash.ps1 -Board cb   # OpenOCD + CMSIS-DAP（烧录前先把桥/OpenOCD 停掉）
+pwsh -File flash.ps1 -Board ze -Erase
 ```
+
+产物：每个目录下 `fw.elf` / `fw.bin` / `fw.hex` / `fw.map`。ZE 的 32KB 上行缓冲通过
+`-DBUFFER_SIZE_UP=32768` 覆盖 `segger_rtt/SEGGER_RTT_Conf.h` 的默认值（那里有 `#ifndef` 守卫）。
+
+> ⚠️ 跑 64KB `load_image` 基准（`script_test/swd/benchmark_readback.tcl`）会把 ZE 的
+> **整片 SRAM**（含 RTT 控制块）覆盖掉，跑完要重新烧固件。
 
 ## 跑吞吐测试
 
