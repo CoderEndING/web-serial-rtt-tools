@@ -278,5 +278,37 @@ export async function runUiSelfTest(tools){
     return `HPM 选项 ${hpm.length} 个 · ${b.name}（芯片选择已复原为 ${keep}）`;
   });
 
+  await step('RTT Viewer：目标类型下拉（SWD / RISC-V）就位', async () => {
+    /**
+     * RTT Viewer 的 RISC-V 通路（2026-10 新加，见 `app/rtt/riscv-mem.js`）：
+     * 页面上得有那个下拉，切过去之后几个"只有 Cortex-M 才有"的控件要收起来，
+     * 而且 RAM 扫描范围不能还是 ARM 的 0x20000000（HPM 的控制块在 AXI SRAM）。
+     * 这里只做**结构检查**（真机速率在 hw-campaign-hpm 里判）。
+     */
+    document.querySelector('#tabs .tab[data-tab=rtt]').click();
+    await new Promise(r => setTimeout(r, 60));
+    const sel = $('r-target');
+    if (!sel) throw new Error('没有目标类型下拉 #r-target');
+    const vals = [...sel.options].map(o => o.value);
+    for (const v of ['swd', 'riscv']) if (!vals.includes(v)) throw new Error(`目标类型下拉少了 ${v}（现有 ${vals.join('/')}）`);
+    const keepTarget = sel.value, keepRange = $('r-range').value, keepChip = $('r-ocd-target').value;
+
+    sel.value = 'riscv';
+    sel.dispatchEvent(new Event('change'));
+    await new Promise(r => setTimeout(r, 60));
+    if (!$('r-reset').disabled) throw new Error('RISC-V 下「复位目标」应该置灰（没有 DHCSR/AIRCR 语义）');
+    if (!$('r-range').value.includes('0x01240000')) throw new Error('RISC-V 下 RAM 范围没换成 AXI SRAM：' + $('r-range').value);
+    if (!/JTAG|TCK/i.test($('r-usb-clock').closest('label').textContent)) throw new Error('时钟那格的标签没改成 JTAG TCK');
+    const mod = await import('/app/rtt/riscv-mem.js');
+    if (typeof mod.openRiscvMem !== 'function') throw new Error('riscv-mem.js 没导出 openRiscvMem');
+
+    sel.value = keepTarget;                     // 复原：这些控件是 store 绑定的，别把测试 profile 带偏
+    sel.dispatchEvent(new Event('change'));
+    $('r-range').value = keepRange;
+    $('r-ocd-target').value = keepChip;
+    if ($('r-reset').disabled && keepTarget === 'swd') throw new Error('切回 SWD 后「复位目标」该恢复可用');
+    return `下拉 ${vals.join('/')} · RISC-V 下关复位、范围换 AXI SRAM、标签改 JTAG TCK`;
+  });
+
   return out;
 }

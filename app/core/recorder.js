@@ -250,13 +250,22 @@ export class FileRecorder {
     this._notify(true);
     try { await this._wq; } catch { /* _fail 里已记 */ }
     clearInterval(this._progTimer); this._progTimer = null;
-    this.draining = false;
+    /**
+     * 🚨 **`draining` 要一直挂到 `close()` 返回为止**（2026-10 真机基准测试抓到）：
+     *    Chrome 的写法是"先写 `.crswap`，`close()` 时才改名成正式文件"，所以在 close 落地之前
+     *    **磁盘上那个正式文件还是 0 字节**。早期版本在这里就把 draining 置 false，于是：
+     *      · 界面上按钮已经变回「● 记录到文件」，用户以为落盘完了；
+     *      · 自动化脚本按"draining=false 即落盘完成"去读文件，**读到 0 字节**
+     *        （实测 10 秒 13.98 MB 的记录，判成 0.00 MB —— 白跑一轮）。
+     *    顺序换一下，`draining` = "文件还没改名完"，语义和按钮文字就能对上。
+     */
     if (this._w){
       try { await this._w.close(); } catch (e){ info.error = info.error || e; }
       this._w = null;
     } else if (this._mem.length){
       download(this.name, new Blob(this._mem, { type: 'application/octet-stream' }));
     }
+    this.draining = false;
     info.pushed = this.pushed;
     this._mem = []; this._memBytes = 0;
     this._disarmGuards();

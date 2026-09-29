@@ -10,6 +10,7 @@ import { RxBuffer } from '../core/rxview.js';
 import { FileRecorder, recordButtonState } from '../core/recorder.js';
 import { Rtt } from './protocol.js';
 import { WebUsbDapProbe, withTimeout } from './dap-webusb.js';
+import { openRiscvMem } from './riscv-mem.js';
 import { MockProbe } from './mock.js';
 import { BridgeClient } from './bridge.js';
 import { findSymbol } from './elf.js';
@@ -51,6 +52,17 @@ const OCD_RAM = {
   stm32wb:  '0x20000000-0x20040000',  // WB55 256K
   stm32wl:  '0x20000000-0x20010000',  // WLE5 64K
 };
+
+/**
+ * RISC-V 目标的默认扫描范围。
+ *
+ * 🚨 **别照搬 ARM 的 0x20000000**：HPM 这类 RISC-V 片子的 RTT 控制块一般被固件放在
+ *    **AXI SRAM 的非缓存别名区**（HPM6800 是 `0x01240000` 起）—— 必须是非缓存区，
+ *    因为探针的 SBA（系统总线）读**不旁路 D-cache**，放可缓存区读到的是陈旧值
+ *    （scope 那份固件故意放了 `g_v` / `g_v_cached` 两份做对照，实测就是这样）。
+ * 窗口给 16 KB：SBA 是一个字一个字搬的，扫太大就是干等（要更大就手改这一格）。
+ */
+const RISCV_RAM_DEFAULT = '0x01240000-0x01244000';
 
 export class RttView {
   constructor(){
@@ -140,6 +152,32 @@ export class RttView {
     };
     applyBackend();
     $('r-backend').addEventListener('change', () => { applyBackend(); if (this.probe || this.bridge) this.disconnect(); });
+
+    /**
+     * 目标类型：**SWD/ARM** 还是 **RISC-V/JTAG**（零安装通路的两套底层，见 app/rtt/riscv-mem.js）。
+     * 只影响 WebUSB 后端；桥后端（OpenOCD/J-Link）自己知道目标是什么。
+     * RISC-V 下把界面里那几个"只有 Cortex-M 才有"的东西收起来/关掉，别让用户以为坏了：
+     *   · 「复位目标」按钮（DHCSR/AIRCR 那套 RISC-V 上没有）→ 禁用；
+     *   · RAM 扫描范围（RISC-V 板子的 RTT 控制块一般在 AXI SRAM，不在 0x20000000）→ 给常见默认值；
+     *   · SWD 时钟那格的**含义变成 JTAG TCK**（DAP_SWJ_Clock），标签改掉。
+     */
+    const applyTarget = () => {
+      const rv = $('r-target').value === 'riscv';
+      const clkLbl = $('r-usb-clock')?.closest('label')?.querySelector('span');
+      if (clkLbl) clkLbl.textContent = rv ? 'JTAG TCK' : 'SWD 时钟';
+      $('r-usb-clock').title = rv
+        ? 'RISC-V/JTAG 下它是 **JTAG TCK 频率**（DAP_SWJ_Clock），留「自动」即可；'
+          + '注意它与 HID 0x31 action 7 那个 clockHz 字段不是一回事（后者是 DMI idle，必须 0）'
+        : 'SWD 时钟：自动 = 从高到低试到通为止';
+      $('r-reset').disabled = rv;
+      $('r-reset').title = rv
+        ? 'RISC-V 下没有 Cortex-M 的 DHCSR/AIRCR 复位语义（探针的 RISC-V 引擎只管 halt/resume）—— 要复位就按板子上的复位键'
+        : '复位目标（AIRCR.SYSRESETREQ；探针没接 NRST 时靠软复位）';
+      $('r-range').value = rv ? RISCV_RAM_DEFAULT : (OCD_RAM[$('r-ocd-target').value] || $('r-range').value);
+    };
+    applyTarget();
+    store.bind($('r-target'), 'rtt.target');
+    $('r-target').addEventListener('change', () => { applyTarget(); if (this.probe || this.bridge) this.disconnect(); });
 
     // ---------- 连接按钮 ----------
     $('r-usb-connect').addEventListener('click', () => this.connectProbe());
@@ -252,6 +290,30 @@ export class RttView {
             toast('已停掉「RTT 转发」的探针桥（它和本页读同一个 RTT 环，两个读者会互相抢数据）', 'warn', 7000);
           } catch (e){ /* 停不掉也继续连，最多就是两边抢数据 */ }
         }
+        const clockKhz = Number(store.get('rtt.clockKhz', 0)) || 0;
+        if ($('r-target').value === 'riscv'){
+          /**
+           * RISC-V/JTAG 走另一套底层：HID 切 SWD+JTAG → WebUSB 的 DAP_JTAG_Sequence → DMI → SBA
+           * （见 app/rtt/riscv-mem.js）。它自己会把探针侧那个占着 TAP 的 RISC-V 引擎/RTT 桥停掉，
+           * 所以这里不用再管 `authorized()` 那套 ARM 的时钟协商（那套按 SWD 走，RISC-V 上必 NO ACK）。
+           */
+          const openOnce = () => openRiscvMem({ clockKhz, all: $('r-usb-all').checked, log: s => console.log('[riscv]', s) });
+          try {
+            this.probe = await openOnce();
+          } catch (e1){
+            setStatus($('r-err'), `RISC-V 第一次连接失败（${e1.message}）—— 等 1.2 s 重试一次…`, 'warn');
+            await sleep(1200);
+            try { await closeProbeUsbDevices(); } catch { /* 关不掉就继续试 */ }
+            this.probe = await openOnce();
+          }
+          const inf = this.probe.info();
+          toast(`RISC-V 已就绪：${this.probe.name} · IDCODE 0x${Number(inf.idcode || 0).toString(16)}`, 'ok');
+          this.stream = false;
+          this._uiConnected(true);
+          if ($('r-record-auto').checked && !this.rec.active) this._autoStartRecord();
+          await this._startRtt();
+          return;
+        }
         // 已经授权过的探针**不用再弹选择框**（用户体验也好得多）；想换设备点「换设备…」
         // 🚨 全部加超时：USB 服务被挂起传输搞脏时，getDevices()/open() 会永远不返回，
         //    界面看着像"点了一下就没反应"（实测卡过 90 秒）。宁可 5 秒报错并给出自救提示。
@@ -262,7 +324,6 @@ export class RttView {
           throw new Error(`${e.message} —— 浏览器 USB 服务可能被上一次中断的会话卡住了：刷新页面（或拔插一次探针）再试`);
         }
         this._forcePick = false;
-        const clockKhz = Number(store.get('rtt.clockKhz', 0)) || 0;
         if (auth.length){
           /**
            * 🚨 **刚被别的会话用过的探针，第一次常常连不上**（2026-10 真机复现多次）：
@@ -677,6 +738,10 @@ export class RttView {
 
   async resetTarget(){
     if (!this.probe){ toast('先连接一个后端', 'warn'); return; }
+    if (typeof this.probe.reset !== 'function'){
+      toast('当前目标（RISC-V）没有软复位通路：探针的 RISC-V 引擎只管 halt/resume，要复位请按板子上的复位键', 'warn', 7000);
+      return;
+    }
     try {
       const how = await this._strict(() => this.probe.reset());   // 复位是关键动作 → 严格档
       toast(`已复位目标（${how}），2 秒后重新读取控制块…`, 'ok');

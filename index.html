@@ -208,8 +208,14 @@
             <button id="r-usb-pick" title="换一个探针（会弹浏览器设备选择框）">换设备…</button>
             <button id="r-usb-disconnect" disabled>断开</button>
           </div>
+          <label class="row"><span>目标类型</span>
+            <select id="r-target" title="零安装通路的两种目标：ARM/Cortex-M 走 SWD + AHB-AP（浏览器里做 ADIv5）；RISC-V（HPM 等）走 JTAG + DMI + SBA 系统总线读。两者都只用 WebUSB，不需要装驱动">
+              <option value="swd">SWD / ARM（Cortex-M，默认）</option>
+              <option value="riscv">RISC-V / JTAG（HPM、CH32V…）</option>
+            </select>
+          </label>
           <label class="row"><span>SWD 时钟</span>
-            <select id="r-usb-clock" title="SWD 时钟：自动 = 从高到低试到通为止">
+            <select id="r-usb-clock" title="SWD 时钟：自动 = 从高到低试到通为止；RISC-V/JTAG 下它是 **JTAG TCK 频率**（DAP_SWJ_Clock），同样留「自动」即可">
               <option value="0">自动</option>
               <option value="1000">1 MHz</option>
               <option value="5000">5 MHz</option>
