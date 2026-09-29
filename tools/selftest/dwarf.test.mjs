@@ -17,7 +17,8 @@ const url = p => 'file://' + join(app, p).replace(/\\/g, '/');
 const fix = p => join(root, 'tools', 'fixtures', 'dwarf', p);
 
 const { Elf, looksLikeElf } = await import(url('elf/elf.js'));
-const { Dwarf, listSampleable, listFromSymtab, SCALARS, DEFAULT_RAM } = await import(url('elf/dwarf.js'));
+const { Dwarf, listSampleable, listFromSymtab, SCALARS, DEFAULT_RAM, ramWindowsOf } = await import(url('elf/dwarf.js'));
+const hex32 = n => '0x' + (n >>> 0).toString(16).padStart(8, '0');
 
 let pass = 0, fail = 0;
 const ok = (cond, name, extra = '') => {
@@ -124,6 +125,42 @@ console.log('== 3. 没有 DWARF 时的退化路径（符号表）==');
      'g_pack 在列（24 B）但**类型未知**（要用户手选）');
   ok(r.skipped.some(s => s.name === 'g_vectors' && /RAM/.test(s.reason)), 'flash 里的符号被剔除并说明不在 RAM');
   ok(!r.sampleable.some(v => v.name === '_estack'), '_estack（栈顶符号）也被 RAM 窗口滤掉');
+}
+
+// ------------------------------------------------------------------ 3.5
+console.log('== 3.5. DWARF 5 的 ELF：退到符号表而不是整盘失败 ==');
+{
+  // 拿现成的 DWARF4 快照，把 .debug_info 的版本字段改成 5 —— GCC 11+ 默认就是 5，
+  // 真机验收时用 HPM SDK 编出来的 demo.elf 就是这种情况：原来会直接"解析失败、0 个变量"，
+  // 看起来像页面坏了。现在应该退回符号表并带一句可执行的提示。
+  const raw = new Uint8Array(readFileSync(fix('stm32f103_scope.elf')));
+  const elf0 = new Elf(raw);
+  const sec = elf0.section('.debug_info');
+  ok(!!sec && sec.size > 8, '.debug_info 节存在（拿它做版本伪造）');
+  const dv = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
+  ok(dv.getUint16(sec.off + 4, true) === 4, `原快照的 DWARF 版本 = ${dv.getUint16(sec.off + 4, true)}（期望 4）`);
+  dv.setUint16(sec.off + 4, 5, true);                       // 伪造成 DWARF 5
+  const r = listSampleable(new Elf(raw));
+  ok(r.source === 'symtab', `DWARF 5 → 退回符号表（source=${r.source}）`);
+  ok(/DWARF 5/.test(r.note || '') && /gdwarf-4/.test(r.note || ''), '提示里说清了原因与改法：' + (r.note || '（没有 note）'));
+  ok(r.sampleable.length > 0, `退回后照样列得出变量（${r.sampleable.length} 个）`);
+  ok(r.sampleable.every(v => v.scalar === null), '符号表路径下类型未知（界面提示用户手选）');
+}
+
+// ------------------------------------------------------------------ 3.6
+console.log('== 3.6. RAM 窗口按 ELF 可写节自动识别（RISC-V 的 ILM/SRAM 不在 0x2xxxxxxx）==');
+{
+  const w = ramWindowsOf(new Elf(new Uint8Array(readFileSync(fix('stm32f103_scope.elf')))));
+  ok(w.some(([lo, hi]) => lo <= 0x20000000 && hi > 0x20000000) || w.some(([lo]) => lo === DEFAULT_RAM[0]),
+     `STM32 的窗口仍然覆盖 0x20000000（${w.map(([a, b]) => hex32(a) + '~' + hex32(b)).join(' / ')}）`);
+  const fake = { sections: () => [
+    { name: '.text', type: 1, flags: 0x6, addr: 0x80000000, size: 0x1000 },      // ALLOC|EXEC，不算 RAM
+    { name: '.data', type: 1, flags: 0x3, addr: 0x01200000, size: 0x400 },       // ALLOC|WRITE → RAM
+    { name: '.bss',  type: 8, flags: 0x3, addr: 0x01200400, size: 0x400 },       // NOBITS + WRITE → RAM
+  ] };
+  const w2 = ramWindowsOf(fake);
+  ok(w2.some(([lo, hi]) => lo <= 0x01200000 && hi >= 0x01200800),
+     `RISC-V 风格的 0x01200000 被认成 RAM（${w2.map(([a, b]) => hex32(a) + '~' + hex32(b)).join(' / ')}）`);
 }
 
 // ------------------------------------------------------------------ 4

@@ -452,12 +452,16 @@ export class Dwarf {
 
   /**
    * 列出可采样的"通道"。
-   * @param {{ram?:[number,number], maxDepth?:number}} opts
+   * @param {{ram?:[number,number]|[number,number][], maxDepth?:number}} opts
+   *   `ram` 可以是单个窗口 `[lo,hi]`（STM32 传统写法），也可以是**多个窗口**的数组
+   *   （RISC-V/HPM 的 RAM 散落在 ILM 0x0 与 SRAM 0x01200000 两处，一个窗口盖不住）。
    */
   listVariables({ ram = DEFAULT_RAM, maxDepth = 4 } = {}){
     this.index();
     const sampleable = [], skipped = [];
-    const inRam = a => a >= ram[0] && a < ram[1];
+    const wins = Array.isArray(ram[0]) ? ram : [ram];
+    const inRam = a => wins.some(([lo, hi]) => a >= lo && a < hi);
+    const winTxt = () => wins.map(([lo, hi]) => `${hex32(lo)}~${hex32(hi)}`).join(' / ');
 
     const leaves = (name, addr, type, group, depth) => {
       if (depth > maxDepth){ skipped.push({ name, reason: '结构体嵌套太深（>4 层）' }); return; }
@@ -479,7 +483,7 @@ export class Dwarf {
       }
       if (type.kind === 'scalar'){
         if (!type.scalar){ skipped.push({ name, size: type.size, reason: type.reason || '类型不在采样表里' }); return; }
-        if (!inRam(addr)){ skipped.push({ name, size: type.size, reason: `地址 ${hex32(addr)} 不在 RAM 窗口 ${hex32(ram[0])}~${hex32(ram[1])}` }); return; }
+        if (!inRam(addr)){ skipped.push({ name, size: type.size, reason: `地址 ${hex32(addr)} 不在 RAM 窗口（可写数据区） ${winTxt()}` }); return; }
         sampleable.push({ name, label: name, addr, size: type.size, scalar: type.scalar,
                           typeName: type.name || type.scalar, group: group || name, path: name });
         return;
@@ -510,32 +514,88 @@ function upperBound(arr, offset){
 }
 
 /**
+ * 从 ELF 自己的节表推"哪些地址是 RAM"：`SHF_ALLOC | SHF_WRITE` 的可写节
+ * （`.data` / `.bss` / `.noncacheable` …）覆盖的区间。
+ *
+ * 🚨 为什么不能只用 STM32 那套默认窗口（2026-10 真机验收踩到）：
+ *    `DEFAULT_RAM = [0x20000000, 0x40000000)` 对 STM32 成立，但 RISC-V 的 HPM 系列
+ *    RAM 在 `0x00000000`(ILM) / `0x01200000`(SRAM) —— 用默认窗口过滤会把**全部**变量
+ *    判成"不在 RAM 窗口"，界面显示"可采样 0 个"，看着像页面坏了。
+ *    改成问 ELF 自己：可写节的地址区间就是 RAM。找不到可写节时才退回默认窗口。
+ */
+export function ramWindowsOf(elf){
+  const out = [];
+  try {
+    for (const s of elf.sections()){
+      if (s.type === 8 /* SHT_NOBITS */ || s.type === 1 /* PROGBITS */){
+        const ALLOC = 0x2, WRITE = 0x1;
+        if ((s.flags & ALLOC) && (s.flags & WRITE) && s.size) out.push([s.addr >>> 0, (s.addr + s.size) >>> 0]);
+      }
+    }
+  } catch { /* 节表坏了就当没有 */ }
+  /**
+   * ⚠️ **并上默认窗口**，而不是"有可写节就不看默认窗口"：
+   *    有些快照/裁剪过的 ELF 只有很小一段可写节覆盖不到全部变量，
+   *    只信可写节会把本来能采样的变量判掉（dwarf 自测就是这么炸的）。
+   *    并集的最坏后果是"多认了几个地址"（RISC-V 镜像里 0x2xxxxxxx 基本是 ROM，不会有全局变量），
+   *    比"漏掉真变量"轻得多。
+   */
+  out.push([DEFAULT_RAM[0], DEFAULT_RAM[1]]);
+  if (!out.length) return [DEFAULT_RAM];
+  // 合并相邻/重叠区间（`.data`/`.bss`/`.noncacheable` 常连着）
+  out.sort((a, b) => a[0] - b[0]);
+  const merged = [out[0].slice()];
+  for (const [a, b] of out.slice(1)){
+    const last = merged[merged.length - 1];
+    if (a <= last[1] + 0x1000) last[1] = Math.max(last[1], b);
+    else merged.push([a, b]);
+  }
+  return merged;
+}
+
+/**
  * 一步到位：给一个 ELF，拿到"能采样的通道 + 采不了的原因"。
  * 没有 DWARF 时**退化**到符号表（有地址有大小，但没有类型 —— 界面必须让用户手选类型）。
+ *
+ * 🚨 **DWARF 5 也要退到符号表，不能整盘失败**（2026-10 真机验收踩到）：
+ *    GCC 11+ 默认就是 `-gdwarf-5`（HPM SDK 的工程也是），用户随手编译出来的 ELF
+ *    在我们这儿会直接"解析失败、一个变量都没有"，看起来像页面坏了。
+ *    现在的做法：解析不了就把原因写进 `note`，然后**照样列出符号表里的全局变量**
+ *    （能采样，只是类型要手选）—— 用户至少能立刻用起来，也能看到该怎么重编译。
  */
 export function listSampleable(elf, opts = {}){
+  const ram = opts.ram || ramWindowsOf(elf);
   if (Dwarf.available(elf)){
-    const dw = new Dwarf(elf);
-    const versions = [...new Set(dw.versions())];
-    const bad = versions.filter(v => v >= 5);
-    if (bad.length){
-      throw new Error(`目标固件的调试信息是 DWARF ${bad.join('/')}，本页只支持 DWARF 4 —— ` +
-        '请在工程里加 -gdwarf-4（GCC/armclang 同名选项）重新编译');
+    let note = '';
+    try {
+      const dw = new Dwarf(elf);
+      const versions = [...new Set(dw.versions())];
+      const bad = versions.filter(v => v >= 5);
+      if (bad.length){
+        note = `调试信息是 DWARF ${bad.join('/')}（本页只支持 4）：已退回符号表 —— ` +
+          '想要类型/结构体成员，请在工程里加 -gdwarf-4 重新编译';
+      } else {
+        const r = dw.listVariables({ ...opts, ram });
+        return { ...r, source: 'dwarf', versions, note, ram };
+      }
+    } catch (e){
+      note = `DWARF 解析失败（${e?.message || e}）：已退回符号表`;
     }
-    const r = dw.listVariables(opts);
-    return { ...r, source: 'dwarf', versions };
+    const r = listFromSymtab(elf, { ...opts, ram });
+    return { ...r, note, ram };
   }
-  return listFromSymtab(elf, opts);
+  return { ...listFromSymtab(elf, { ...opts, ram }), ram };
 }
 
 /** 没有 DWARF 时的退化路径：符号表（有地址有大小、**没有类型** → 界面必须让用户手选类型）*/
 export function listFromSymtab(elf, opts = {}){
-  const [lo, hi] = opts.ram || DEFAULT_RAM;
+  const wins = Array.isArray(opts.ram?.[0]) ? opts.ram : [opts.ram || DEFAULT_RAM];
+  const inRam = a => wins.some(([lo, hi]) => a >= lo && a < hi);
   const sampleable = [], skipped = [];
   for (const s of elf.symbols()){
     if (!s.isObject || !s.name) continue;
     if (!s.size){ skipped.push({ name: s.name, reason: '符号大小为 0（类型/数组长度未知）' }); continue; }
-    if (s.addr < lo || s.addr >= hi){ skipped.push({ name: s.name, size: s.size, reason: `地址 ${hex32(s.addr)} 不在 RAM 窗口` }); continue; }
+    if (!inRam(s.addr)){ skipped.push({ name: s.name, size: s.size, reason: `地址 ${hex32(s.addr)} 不在 RAM 窗口（可写数据区）` }); continue; }
     sampleable.push({ name: s.name, label: s.name, addr: s.addr, size: s.size, scalar: null,
                       typeName: '未知（请手选类型）', group: s.name, path: s.name });
   }

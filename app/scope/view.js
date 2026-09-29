@@ -369,16 +369,18 @@ export class ScopeView {
       const buf = new Uint8Array(await file.arrayBuffer());
       const elf = new Elf(buf);
       const r = listSampleable(elf);
-      this.elf = { name: file.name, source: r.source, versions: r.versions, stats: r.stats };
+      this.elf = { name: file.name, source: r.source, versions: r.versions, stats: r.stats, note: r.note || '' };
       this.all = r.sampleable;
       this.skipped = r.skipped;
       this.selected = this.selected.filter(v => this.all.some(a => a.name === v.name && a.addr === v.addr));
       $('sc-elfinfo').textContent =
-        `${file.name} · ${r.source === 'dwarf' ? `DWARF ${r.versions.join('/')}` : '符号表（无调试信息）'} · ` +
-        `可采样 ${r.sampleable.length} 个 · 采不了 ${r.skipped.length} 个`;
+        `${file.name} · ${r.source === 'dwarf' ? `DWARF ${r.versions.join('/')}` : '符号表（无可用调试信息）'} · ` +
+        `可采样 ${r.sampleable.length} 个 · 采不了 ${r.skipped.length} 个` + (r.note ? `　⚠ ${r.note}` : '');
       this.renderVars();
       this.updatePlan();
-      this.setStatusText(`ELF 解析完成：${r.sampleable.length} 个可采样通道`, 'ok');
+      this.setStatusText(r.note
+        ? `ELF 解析完成（${r.sampleable.length} 个通道，按符号表）—— ⚠ ${r.note}`
+        : `ELF 解析完成：${r.sampleable.length} 个可采样通道`, r.note ? 'warn' : 'ok');
     } catch (e){
       $('sc-elfinfo').textContent = '解析失败：' + (e?.message || e);
       this.setStatusText('ELF 解析失败：' + (e?.message || e), 'err');
@@ -739,7 +741,18 @@ export class ScopeView {
     }
     const clkRow = $('sc-clock-row');
     if (clkRow) clkRow.classList.toggle('off', riscv);
+    this._applyMhzUi();                     // 🚨 立刻改这一格，别等下一次统计刷新（否则会短暂显示旧的 "SWD xx MHz"）
     this.updatePlan();                      // 计划行的速率/建议周期按后端分档
+  }
+
+  /** `#sc-mhz` 这一格：RISC-V 下显示后端名（SWD 时钟在 JTAG 下无意义），否则显示 SWD 时钟档。
+   *  两处都要调：`_applyBackendUi()`（后端一变就改）与周期性的统计刷新。 */
+  _applyMhzUi(){
+    const el = $('sc-mhz');
+    if (!el) return;
+    el.textContent = this.backend === P.BACKEND.RISCV
+      ? 'RISC-V/JTAG'
+      : (this.swdMhz ? `SWD ${this.swdMhz} MHz` : 'SWD —');
   }
   benchKeyOf(){
     const vars = (this.selected.length ? this.selected : this.mockVars()).map(v => v.name).sort().join('+');
@@ -1179,9 +1192,7 @@ export class ScopeView {
     $('sc-buf').textContent = st ? `${Math.round(st.count / st.capacity * 100)}%` : '0%';
     $('sc-mem').textContent = st ? fmtBytes(st.bytes()) : '0 B';
     // 这一格在 RISC-V 下显示后端（SWD 时钟在 JTAG 下无意义），不再只写 "SWD —"
-    $('sc-mhz').textContent = this.backend === P.BACKEND.RISCV
-      ? 'RISC-V/JTAG'
-      : (this.swdMhz ? `SWD ${this.swdMhz} MHz` : 'SWD —');
+    this._applyMhzUi();
     const err = $('sc-err');
     if (err){
       err.textContent = this.planMismatch ? `⚠ ${this.planMismatch}`
