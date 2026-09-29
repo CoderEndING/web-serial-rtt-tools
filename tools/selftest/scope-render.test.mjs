@@ -79,8 +79,9 @@ console.log('目标: ' + APP);
  * @returns {{subpaths:number, lines:number, xs:number[], per:number, cols:number, lod:boolean}}
  */
 const PROBE = `
-  const { SampleStore } = await import('/app/scope/store.js');
-  const { ScopeRenderer } = await import('/app/scope/render.js');
+  const BASE = location.pathname.replace(/[^/]*$/, '');      // 本地 / 线上（/web-serial-rtt-tools/）都能跑
+  const { SampleStore } = await import(BASE + 'app/scope/store.js');
+  const { ScopeRenderer } = await import(BASE + 'app/scope/render.js');
   window.__cv = window.__cv || (() => {
     const c = document.createElement('canvas');
     c.style.cssText = 'position:fixed;left:-9999px;top:0;width:800px;height:300px';
