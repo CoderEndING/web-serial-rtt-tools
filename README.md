@@ -9,7 +9,7 @@
 |---|---|---|
 | **串口助手** | SSCOM 那套核心功能：端口/波特率、ASCII/HEX 收发、**ANSI 彩色接收**（像 MobaXterm）、时间戳、定时发送、5 条快捷发送、保存接收数据、**记录到文件**（高速采集不丢数）、**高速自动关显示**（>50KB/s 停渲染、数据照收） | 桌面版 Chrome / Edge（Web Serial） |
 | **终端** | Xshell 式串口终端：xterm.js 渲染 ANSI、本地回显、回车/退格映射、粘贴发送；侧栏还能开 **akaLinkPro 的 RTT→CDC 转发**（探针自己读 RTT 塞进 CDC，主机只读一个 COM 口） | 同上（与串口助手共用同一个串口会话）；转发功能需要 akaLinkPro 探针 |
-| **RTT Viewer** | SEGGER RTT 多通道查看 + 下行输入 + 复位目标，四种后端；同样支持记录到文件与高速自动关显示 | **零安装**：WebUSB + CMSIS-DAP 探针<br>**可选**：本地桥 + OpenOCD / J-Link |
+| **RTT Viewer** | SEGGER RTT 多通道查看 + 下行输入 + 复位目标，四种后端；**目标类型可选 SWD/ARM 或 RISC-V/JTAG**（HPM 等，零安装走 JTAG+DMI+SBA）；同样支持记录到文件与高速自动关显示 | **零安装**：WebUSB + CMSIS-DAP 探针<br>**可选**：本地桥 + OpenOCD / J-Link |
 | **RTT 转发** | akaLinkPro 的**探针侧** RTT→CDC：探针自己通过 SWD 轮询目标控制块、把数据塞进它的 CDC 串口；本页开那个 COM 口收数据。**纯输出，没有发送**：ASCII/ANSI/HEX、时间戳、暂停、保存数据、记录到文件、高速自动关显示 | akaLinkPro 探针（配置走它的自定义 HID；接收走它的 CDC 口） |
 | **J-Scope 波形** | 类 SEGGER J-Scope 的**变量示波器**：探针自己按固定周期读目标 RAM（HSS，目标固件不用改），数据走 WebUSB 的独立批量端点，网页画多通道波形、带**触发**、导出 CSV、原始包可回放 | **网页侧已可用**：勾「用假探针」或打开 `.jsp` 回放即可体验；真机需要探针固件支持 `HID 0x32`（见 [`docs/scope-page.md`](docs/scope-page.md)） |
 | **烧录器** | .elf/.hex/.bin 写进目标：**零安装 WebUSB**（页面跑 flashloader，擦/写/校验/复位一条龙）或**本地桥 OpenOCD** | 零安装：同上探针；桥：OpenOCD |
@@ -97,6 +97,53 @@ make hw-campaign ARGS="--keep-going"          # 出错也跑完（长稳观察�
 2. **串口授权只能人工点一次**（Web Serial 的浏览器规定）；之后用
    `node tools/selftest/serial-grant.mjs` 可以把授权搬进测试 profile / 补"当前这个 USB 口"的实例 ID。
 3. 跑之前**别让别的浏览器/工具占着探针**（你自己那个浏览器里的 RTT Viewer、J-Scope 数据端点都算）。
+
+## 真机场景验收 · HPM6800EVK（RISC-V/JTAG，2026-10）
+
+同一套口径搬到 RISC-V 板子上 —— **RTT Viewer 现在也有 RISC-V 通路了**（零安装，走
+HID 切 SWD+JTAG → WebUSB 的 `DAP_JTAG_Sequence` → RISC-V DMI → SBA 系统总线读内存）：
+
+```powershell
+make hw-campaign-hpm                          # 2 轮全场景 + flood↔scope 交替烧录 5 遍（约 5 分钟）
+make hw-campaign-hpm ARGS=--record            # 只记录不判决，末尾打印"实测 × 80%"的 spec 建议
+make hw-campaign-hpm ARGS="--cycles=1 --alt=1"   # 冒烟
+```
+
+| 步骤 | 判决（spec = 首跑实测 × 80%） |
+|---|---|
+| ① 烧 flood 固件（RTT 在**非缓存 AXI SRAM**） | ≤ 11.3 s |
+| 　 RTT Viewer（RISC-V 通路，控制块地址从 ELF 的 `_SEGGER_RTT` 取） | **> 56.5 KB/s** · 零错位读 |
+| 　 RTT 转发（探针侧桥 → CDC） | **> 1.10 MB/s** |
+| 　 转发 **10 s 存盘** | 文件字节 = 同窗口收数（≥98%）· 内容可读 · 无积压 |
+| ② 烧 scope 固件 → J-Scope 1 变量 / 3 变量（采**非缓存** `g_v` 成员） | ≥ 206.6 kHz / ≥ 32.6 kHz |
+| 　 @20 µs（50 kHz 档） | **探针丢 0 / USB 丢 0** |
+| ③ ①②重复 2 遍　④ 交替烧录 5 遍 | 逐次计时（实测均 8.4 s / 8.4 s） |
+
+**2026-10 基线（实测均值；`make hw-campaign-hpm` 原样可复现）**
+
+| 项目 | 实测 |
+|---|---|
+| 烧录 flood（45.6 KB）/ scope（45.1 KB，JTAG + 校验） | **9.5 s / 8.5 s**（交替 5 遍各 8.4 s 上下） |
+| RTT Viewer（RISC-V/JTAG，SBA 读法） | **70.6 KB/s**（轮询 2.7 Hz，零错位读） |
+| RTT 转发 | **1.377 MB/s**（探针侧自报 1.20~1.23） |
+| 转发 10.2 s 存盘 | **13.95 MB**，一致性 99.6~99.7%，积压 48~68 KB |
+| J-Scope 1 变量 @2 µs | 257~259 kHz（1 span / 4 B） |
+| J-Scope 3 变量 @2 µs | 40.8 kHz（1 span / 12 B） |
+| J-Scope @20 µs（50 kHz 档） | 1 变量 50.00 kHz · **探针丢 0 / USB 丢 0**（缺口固定 6，是起跑边界） |
+
+跟 F103 那份的差别（也是不能拿 F103 的线来卡 HPM 的原因）：
+
+- **RTT Viewer 慢一个量级**（70 KB/s vs 616 KB/s）：RISC-V 走 SBA，一次读要"每字两次 DMI 扫描"，
+  瓶颈是**每条 CMSIS-DAP 命令的 USB 往返**（实测 TCK 1 MHz 与 60 MHz 一样快）。已按"一条命令塞多拍"
+  优化（512 个字从 ~1024 条命令降到 69 条，真机 6.3 → 59 KB/s），仍远低于探针固件自己搬的那条路。
+- **烧录慢十几倍**（9.5 s vs 0.73 s）：HPM 是 XPI flash + JTAG，页面要跑 ROM API 算法，
+  每写一批都过 DMI/SBA；离线校验读回的那 45 KB 现在也走批量读。
+- **控制块地址要自己给**：HPM 的结构体在 AXI SRAM（本机固件 `_SEGGER_RTT = 0x01240000`），
+  从 `0x20000000` 起自动搜是搜不到的 —— 页面「载入 ELF…」或基准脚本从 ELF 符号表取。
+- **必须是非缓存内存**：探针的 SBA 读**不旁路 D-Cache**，放可缓存区会读到陈旧值
+  （scope 固件故意放了 `g_v` / `g_v_cached` 两份做对照）。
+
+完整数据、读法与三条踩坑见 [`docs/真机基准测试-hpm.md`](docs/真机基准测试-hpm.md)。
 
 ## 快速开始
 
@@ -230,7 +277,7 @@ make hw-campaign ARGS="--keep-going"          # 出错也跑完（长稳观察�
 | 目标 | 后端 | 算法 | 进度 |
 |---|---|---|---|
 | **STM32** F0/F1/F4/F7/H7/L0/L4 | WebUSB · CMSIS-DAP | ARM flashloader（pyOCD 的算法块，见 `app/flash/algos.js`） | 真机打通（F103 实测逐字节一致） |
-| **HPM 系列**（RISC-V）5300/5E00/6200/6300/6700/6800/6E00/6P00 | WebUSB · CMSIS-DAP **JTAG** | 自制 RV32 flashloader（HPM SDK 的 `openocd_algo`，1.4 KB，**一份通吃全系**） | ⚠️ **离线全通、待真机 bring-up** |
+| **HPM 系列**（RISC-V）5300/5E00/6200/6300/6700/6800/6E00/6P00 | WebUSB · CMSIS-DAP **JTAG** | 自制 RV32 flashloader（HPM SDK 的 `openocd_algo`，1.4 KB，**一份通吃全系**） | ✅ **真机打通**（HPM6800EVK，45 KB 约 9 s，含校验；见 [`docs/真机基准测试-hpm.md`](docs/真机基准测试-hpm.md)） |
 
 HPM 那条路的要点：探针切 SWD+JTAG 输出模式 → `DAP_Connect(JTAG)` → 用 `DAP_JTAG_Sequence`
 驱动 RISC-V 的 DMI（IR=0x11）→ Debug Module + SBA 把 flashloader 写进 SRAM → 调它的
@@ -281,8 +328,12 @@ tools/
     stm32f103_scope/          **F103 J-Scope 靶子固件**：**96 MHz** 时基 + 契约已知的波形/变量，
                               `-Board ze|c8`（默认 ze）、check.py 客观验收（含 4 KB 地址空洞 → 两个 span 的读计划场景）；与探针仓库里那份逐字节同步
     stm32h7b0_rtt_speed/      **H7B0 RTT 吞吐测试**（HSI→PLL1 280MHz，DTCM 布局，见其 README）
+    hpm6800evk_rtt_flood/     **HPM6800EVK（RISC-V）RTT 吞吐靶子**：96 MHz 死循环灌 hello world，
+                              RTT 控制块放**非缓存 AXI SRAM**（`_SEGGER_RTT = 0x01240000`）
+    hpm6800evk_scope/         **HPM6800EVK J-Scope 靶子**：契约变量块 `g_v`（非缓存）+ 对照 `g_v_cached`
 docs/                   后端配置与排障；逻辑分析仪攻略.md（含 LA 工具完整源码与踩坑）；
                         scope-page.md（J-Scope 波形页方案）；真机基准测试.md（**F103 全场景基线与前置**）；
+                        真机基准测试-hpm.md（**HPM6800EVK / RISC-V 基线与 RTT Viewer 的 RISC-V 通路**）；
                         rtt-cdc.md（RTT 转发 + 4.5 节「.crswap 与落盘时机」）
 ```
 
@@ -322,7 +373,9 @@ node tools\selftest\browser-hw.test.mjs bridge     # 桥 + OpenOCD
 node tools\selftest\browser-hw.test.mjs serial     # 串口助手
 
 # 5) 真机场景验收 / 体检（`make` 会自己起 8899 服务与 CDP 浏览器，页面类目标都依赖 page-prep）
-make hw-campaign                                   # ①烧狂发→Viewer/转发(判决+10s存盘) ②烧scope→J-Scope ③重复2轮 ④交替5遍
+make hw-campaign                                   # F103：①烧狂发→Viewer/转发(判决+10s存盘) ②烧scope→J-Scope ③重复2轮 ④交替5遍
+make hw-campaign-hpm                               # HPM6800EVK（RISC-V）：同一套口径，含 **RTT Viewer 的 RISC-V 通路**判决
+make hw-campaign-hpm ARGS=--record                 # 只记录不判决，末尾打印"实测 × 80%"的 spec 建议
 make flash-timing                                  # 烧录耗时时间线（慢在哪一步）；ARGS=--clamp 模拟"后台页被限速"
 make test-record                                   # 「记录到文件」的落盘语义（.crswap / 积压 / 落盘进度），OPFS 替身，不需要硬件
 node tools\selftest\serial-grant.mjs --show        # 看测试 profile 里的 Web Serial 授权 / 默认=补当前口 / --clean 清过期

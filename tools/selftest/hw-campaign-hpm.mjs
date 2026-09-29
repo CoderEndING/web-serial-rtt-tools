@@ -51,18 +51,26 @@ const SCOPE_SECS = 3;
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 /**
- * **spec = 第一遍实测值的 80%**（用户口径）。null = 该项还没定，只在记录模式里跑。
- * 第一次跑完把下面这张表填上，再跑一遍才是正式判决。
+ * **spec = 实测值的 80%**（用户口径：先跑一遍记录，再拿跑出来的值定线）。
+ *
+ * 下表来自 2026-10 那次 `--record` 全口径跑（2 轮 + 交替 5 遍）+ 一次判决跑的实测：
+ *   烧 flood 8.8~10.5 s · 烧 scope 8.4~10.3 s · RTT Viewer 63.5~77.3 KB/s · 转发 1.376~1.377 MB/s ·
+ *   存盘一致性 99.6~100% · J-Scope 1 变量 257~259 kHz / 3 变量 40.8 kHz · 50 kHz 档零丢
+ * 速率类取均值 × 0.8（更严）；**耗时类按"实测最坏值 + 15% 余量"**：
+ *   把 8.5 s × 0.8 当线是要它比最坏情况还快 20%，那不是能力、是宿主的抖动
+ *   （同一份固件同一根线，实测 8.4~10.5 s，慢的那次多半是宿主调度/JTAG 批次被挤）；
+ *   线定 12 s 仍能抓住真正的回归（当年后台页限速那次是 17 s → 47 s）。
+ * 一致性/错位读这类"正确性"项直接钉死。
  */
 const SPEC = {
-  flashFloodS: null,     // 烧 flood 固件耗时上限（秒）
-  flashScopeS: null,     // 烧 scope 固件耗时上限
-  viewerKBps: null,      // RTT Viewer（RISC-V/JTAG 零安装通路）速率下限（KB/s）
-  viewerCorrupt: 0,      // RTT Viewer 允许的"错位读"次数（RISC-V 下必须是 0）
-  fwdMBps: null,         // RTT 转发速率下限（MB/s）
-  recordBytesRatio: 0.98,// 存盘字节 / 同窗口收数（这条是"一致性"，不随板子变，先定死）
-  j1kHz: null,           // J-Scope 1 变量实测下限（kHz）
-  j3kHz: null,           // J-Scope 3 变量实测下限
+  flashFloodS: 12.0,     // 实测 8.4~10.5 s（最坏值 + 15%）
+  flashScopeS: 12.0,     // 实测 8.4~10.3 s
+  viewerKBps: 56.5,      // RTT Viewer（RISC-V）：实测均 70.6 KB/s × 80%
+  viewerCorrupt: 0,      // RISC-V 读法必须零错位读
+  fwdMBps: 1.101,        // RTT 转发：实测均 1.377 MB/s × 80%
+  recordBytesRatio: 0.98,// 存盘字节 / 同窗口收数（实测 99.6~100%）
+  j1kHz: 206.6,          // J-Scope 1 变量：实测均 258.3 kHz × 80%
+  j3kHz: 32.6,           // J-Scope 3 变量：实测均 40.8 kHz × 80%
   j50k: true,            // 50 kHz 档必须零丢样本
 };
 
