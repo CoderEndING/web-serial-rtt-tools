@@ -28,11 +28,15 @@ function hexDump(bytes, max = 256){
   }
   return lines.join('\n') || '（空）';
 }
-/** 吞吐文本：B/ms → KB/s 或 MB/s */
+/**
+ * 吞吐文本：B/ms → KB/s 或 MB/s。
+ * 🚨 用**十进制**（MB/s 就是 1e6 B/s）：以前拿 1048576 去除却标"MB/s"，
+ *    20 MHz 四线明明该是 10.00 MB/s，显示成 9.54 —— 用户一眼就看出不对。
+ */
 const rate = (bytes, ms) => {
   if (!ms) return '—';
   const bps = bytes / (ms / 1000);
-  return bps >= 1048576 ? (bps / 1048576).toFixed(2) + ' MB/s' : (bps / 1024).toFixed(0) + ' KB/s';
+  return bps >= 1e6 ? (bps / 1e6).toFixed(2) + ' MB/s' : (bps / 1e3).toFixed(0) + ' KB/s';
 };
 
 export class SpiBusView {
@@ -818,9 +822,19 @@ export class SpiBusView {
       if (r.bad) throw new Error(`${r.bad} 条帧不是 OK（读失败了，先「读 ID / SFDP」确认链路）`);
       const sclk = s.counters?.actualSclkHz || s.cfg?.sclkHz || 0;
       const theo = sclk ? sclk / 8 * (mode.lines >= 4 ? 4 : mode.lines) : 0;   // B/s
+      const theo1 = sclk ? sclk / 8 : 0;                                       // 1 线时的上限（B/s）
       const eff = theo ? (r.off / (dt / 1000)) / theo * 100 : 0;
+      /**
+       * 🚨 多线档要提醒：**只接了 1 线 SPI 的 flash 用不了四线档**（IO2/IO3 没接）。
+       *    用户 2026-09-30 就踩了这个：flash 是 1 线接法、却选了 QUAD I/O 0xEB，
+       *    结果读回全是错位垃圾，还把"写 + 校验"报成了失败。理论值也跟着档位虚高。
+       */
+      const multi = mode.lines > 1;
       const line = `${kb} KB 用时 ${dt.toFixed(1)} ms → ${rate(r.off, dt)}` +
-        (theo ? `（实际 SCLK ${P.sclkLabel(sclk)} 理论上限 ${(theo / 1048576).toFixed(2)} MB/s，实测占 ${eff.toFixed(0)}%）` : '');
+        (theo ? `（实际 SCLK ${P.sclkLabel(sclk)} 理论上限 ${(theo / 1e6).toFixed(2)} MB/s，实测占 ${eff.toFixed(0)}%）` : '') +
+        (multi ? `　⚠ 本档是 ${mode.lines} 线数据相位：只接了 1 线 SPI 的 flash **用不了这一档** —— ` +
+                 `IO1~IO3 没接，读回来的必然是垃圾，**而且每片都要等到超时才罢休、整段看着像卡死**；` +
+                 `普通 SPI 请选 READ 0x03 / FAST READ 0x0B —— 那两档的理论上限是 ${(theo1 / 1e6).toFixed(2)} MB/s` : '');
       s.log(eff && eff < 45 ? 'w' : 'g', '读测速：' + line, this.tag);
       if (eff && eff < 45) s.log('w', '占理论值不到一半：检查 ①CS_HOLD 连续读有没有生效 ②每帧 492 B 有没有被拆小 ③线数/模式是否与器件匹配', this.tag);
       this.flOut(`读测速  ${mode.name}\n${line}`, eff && eff < 45 ? 'warn' : 'ok');
@@ -926,7 +940,9 @@ export class SpiBusView {
       const same = bytesEqual(vr.bytes, data);
       s.log(same ? 'g' : 'e', `写 + 校验：${data.length} B · ${dt.toFixed(0)} ms · ${rate(data.length, dt)} · ` +
         (same ? '回读一致 ✔' : `回读**不一致**（前 16 B：${hexDump(vr.bytes.subarray(0, 16))}）`), this.tag);
-      if (!same) s.log('w', `不一致的常见原因：页间等 tPP 太短（现在 ${tpp} ms，试着加大）、没先擦除（NOR 只能 1→0）、地址写到了别处`, this.tag);
+      if (!same) s.log('w', `不一致的常见原因：` +
+        `① **读模式与接线不匹配**（当前是 ${this.flMode().name}）—— 只接了 1 线 SPI 的 flash 用不了 0xEB/0x6B 四线档，换 READ 0x03 / FAST READ 0x0B 再验；` +
+        `② 页间等 tPP 太短（现在 ${tpp} ms，试着加大）；③ 没先擦除（NOR 只能 1→0）；④ 地址写到了别处`, this.tag);
       this.flOut(`写 + 校验  ${data.length} B @0x${addr.toString(16)}\n${pages} 页 · ${dt.toFixed(0)} ms · ${rate(data.length, dt)}\n回读${same ? '一致 ✔' : '不一致 ✘'}` +
         (same ? '' : `\n写：${hexDump(data.subarray(0, 24))}\n读：${hexDump(vr.bytes.subarray(0, 24))}`), same ? 'ok' : 'err');
     } catch (e){
