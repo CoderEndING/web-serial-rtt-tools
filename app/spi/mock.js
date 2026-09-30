@@ -17,7 +17,7 @@
  * `forceStatus`、`inFull`、`nakWhenDisabled`。
  */
 import {
-  ACT, AUXIN_TE, CFG_LEN, CFG_FLAG, F, FRAME_MAX, HID_CMD, LINE, MAGIC, PROFILE_LEN,
+  ACT, AUXIN_TE, CFG_LEN, CFG_FLAG, F, FRAME_MAX, HID_CMD, LINE, MAGIC, PKT, PROFILE_LEN,
   R, ST, T, TC, XFER_HDR, lineActiveLow, parsePack,
 } from './protocol.js';
 import { FlashDevice } from './flash.js';
@@ -250,10 +250,34 @@ export class MockSpiProbe {
 
   // ======================================================================== bulk 侧
 
-  /** 主机送来一个包（= 真设备的一次 OUT 回调）。未使能时真固件不 arm 端点 → 会 NAK */
+  /**
+   * 主机送来一次传输（= 真设备端点被 arm 之后的若干次 OUT 回调）。
+   *
+   * 🚨 **一次 USB 传输可以带多个 512 B 包**（主机攒批提交，见 `protocol.batchPacks`）：
+   *    真固件每次只 arm 一个 512 B 槽（`usbd_ep_start_read(..., SB_PKT_SIZE)`），收满/收到短包就回调一次、
+   *    解析这一槽里的帧。所以这里也照同一个口径**按 512 B 拆槽**，一槽一次 `write` 语义 ——
+   *    攒批不该改变设备看到的东西，只该让主机少喊几次。
+   * 未使能时真固件不 arm 端点 → 会 NAK。
+   */
   write(pack){
     const b = pack instanceof Uint8Array ? pack : new Uint8Array(pack);
     if (!this.enabled){ this.nakWrites++; return { accepted: false }; }
+    if (b.length > PKT){
+      let frames = 0, firstErr = null, residue = 0;
+      for (let off = 0; off < b.length; off += PKT){
+        const slot = b.subarray(off, Math.min(off + PKT, b.length));
+        const r = this._writeSlot(slot);
+        frames += r.frames || 0;
+        residue += r.residue || 0;
+        if (r.err && !firstErr) firstErr = r.err;
+      }
+      return { accepted: true, frames, residue, err: firstErr, slots: Math.ceil(b.length / PKT) };
+    }
+    return this._writeSlot(b);
+  }
+
+  /** 一个 512 B 槽（= 真固件的一次 OUT 回调）*/
+  _writeSlot(b){
     const r = parsePack(b);
     if (r.err){
       this.stats.framesErr++;

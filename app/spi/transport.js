@@ -6,7 +6,8 @@
  *
  * 三条纪律（都是踩过的坑）：
  *  1. **一帧不跨包**：调用方用 protocol.packFrames() 切好的包，这里只负责发；
- *     一次 send() = 一次 transferOut = 固件的一次 OUT 回调。
+ *     一次 send() = 一个包；**一次 sendRaw() = 一次 transferOut**，可以带攒批后的多个包
+ *     （固件仍按 512 B 槽解析，见 protocol.batchPacks 的注释）。
  *  2. **保持多条 IN 在飞**：一条 USB 读一次往返 0.2~0.5 ms，串行读会把速率锁死。
  *  3. **收尾要先停发、再等在飞读写回来**：WebUSB 没有取消接口（见 app/scope/transport.js 的说明），
  *     挂起的读会偷走下一场的应答。
@@ -16,7 +17,7 @@
  *  · 同一个设备上有**两个 class 0xFF 的接口**（这个是 SPI 桥，另一个是 WebUSB 平台接口，0 个端点），
  *    所以判据是"class 0xFF 且 bulk EP11 双向都有"，不能只看 class。
  */
-import { EP_NUM, PKT } from './protocol.js';
+import { EP_NUM, PKT, BATCH_MAX, batchPacks } from './protocol.js';
 import { yieldTask, sleep } from '../core/pace.js';
 
 const VID = 0x0d28;
@@ -131,6 +132,17 @@ export class WebUsbSpiTransport {
   async send(pack, timeoutMs = this.outTimeoutMs){
     const data = pack instanceof Uint8Array ? pack : new Uint8Array(pack);
     if (data.length > PKT) throw new Error(`一个包不能超过 ${PKT} B（固件按包解析）`);
+    return this.sendRaw(data, timeoutMs);
+  }
+
+  /**
+   * 发**一次传输**（URB）—— 可以是攒批后的多个 512 B 包（见 `batchPacks` 的注释：
+   * 固件仍按 512 B 槽解析，所以包序列不变，只是主机少喊几次）。
+   */
+  async sendRaw(buf, timeoutMs = this.outTimeoutMs){
+    const data = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+    if (!data.length) return 0;
+    if (data.length > BATCH_MAX) throw new Error(`一次传输 ${data.length} B 超过上限 ${BATCH_MAX} B`);
     let timer = null;
     const timeout = new Promise((_, rej) => {
       timer = setTimeout(() => { this.dirty = true; rej(new Error(`写超时（${timeoutMs} ms）—— 桥没使能？OUT 环满？`)); }, timeoutMs);
@@ -144,28 +156,32 @@ export class WebUsbSpiTransport {
   }
 
   /**
-   * 发一批包。**保持 `outInFlight` 条写请求在飞** —— 这是刷屏吞吐的关键：
-   * 串行 await 时每片要等一个完整 USB 往返（真机实测每片 ~120 µs 开销，289 片就吃掉 35 ms），
-   * 而 SPI 本身只花 57 ms（20 MHz）。并发提交后开销被摊掉，吞吐基本贴着 SPI 线速。
+   * 发一批包。**按 `batchBytes` 攒批提交，并保持 `outInFlight` 批在飞**：
+   *
+   *   · `batchBytes = PKT`（默认）= 每包一次 transferOut，与老行为**完全等价**；
+   *   · 攒批（一帧的量级）：一帧 290 个包 → 10 次提交，把主机侧每次调用 ~150 µs 的固定开销
+   *     从 44 ms/帧 压到 ~2 ms/帧 —— 60 MHz 单线刷一帧只要 18.9 ms，帧率瓶颈就还给了 SPI/固件侧。
    *
    * ⚠️ 顺序仍然有保证：USB 同一端点上的传输按**提交顺序**入队（FIFO），
    *    而 CS_HOLD 的管道化刷屏依赖顺序 —— 所以这里只在**同一条端点**上并发提交，不改顺序。
    */
   async sendPacks(packs, opts = {}){
     const { onProgress, stopOnError = false, shouldStop, timeoutMs = this.outTimeoutMs,
-            concurrency = this.outInFlight } = opts;
+            concurrency = this.outInFlight, batchBytes = PKT } = opts;
+    const batches = batchPacks(packs, batchBytes);
     const total = packs.length;
     let next = 0, sent = 0, failed = 0, firstErr = null, stopped = false;
     const worker = async () => {
       for (;;){
         if (stopped || shouldStop?.()) return;
         const i = next++;
-        if (i >= total) return;
+        if (i >= batches.length) return;
+        const b = batches[i];
         try {
-          await this.send(packs[i], timeoutMs);
-          sent++;
+          await this.sendRaw(b.data, timeoutMs);
+          sent += b.packs;
         } catch (e){
-          failed++;
+          failed += b.packs;
           this.lastError = e?.message || String(e);
           if (!firstErr) firstErr = e;
           if (stopOnError){ stopped = true; return; }
@@ -173,10 +189,10 @@ export class WebUsbSpiTransport {
         onProgress?.(sent + failed, total, i);
       }
     };
-    const n = Math.max(1, Math.min(concurrency, total || 1));
+    const n = Math.max(1, Math.min(concurrency, batches.length || 1));
     await Promise.all(Array.from({ length: n }, worker));
     if (firstErr && stopOnError) throw firstErr;
-    return { sent, failed, total };
+    return { sent, failed, total, batches: batches.length, calls: this.writes };
   }
 
   /** 停止收流：等在飞的读全部回来（最多 800 ms），**不要**让它们挂在那儿 */
@@ -243,23 +259,32 @@ export class MockSpiTransport {
   async send(pack){
     const data = pack instanceof Uint8Array ? pack : new Uint8Array(pack);
     if (data.length > PKT) throw new Error(`一个包不能超过 ${PKT} B`);
+    return this.sendRaw(data);
+  }
+
+  /** 攒批后的一次传输：假探针自己按 512 B 槽拆开（与真固件的 `usbd_ep_start_read(..., 512)` 同口径）*/
+  async sendRaw(buf){
+    const data = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+    if (data.length > BATCH_MAX) throw new Error(`一次传输 ${data.length} B 超过上限 ${BATCH_MAX} B`);
     this.writes++; this.writeBytes += data.length;
     const r = this.probe.write(data);
     if (!r.accepted){ this.errors++; this.lastError = '桥没使能（真固件这里会 NAK）'; throw new Error(this.lastError); }
     await this._drain();
     return data.length;
   }
+
   async sendPacks(packs, opts = {}){
-    const { onProgress, stopOnError = false, shouldStop } = opts;
+    const { onProgress, stopOnError = false, shouldStop, batchBytes = PKT } = opts;
+    const batches = batchPacks(packs, batchBytes);
     let sent = 0, failed = 0;
-    for (let i = 0; i < packs.length; i++){
+    for (let i = 0; i < batches.length; i++){
       if (shouldStop?.()) break;
-      try { await this.send(packs[i]); sent++; }        // sent 只数成功的，与 WebUsbSpiTransport 同口径
-      catch (e){ failed++; this.lastError = e?.message || String(e); if (stopOnError) throw e; }
-      onProgress?.(sent, packs.length, i);
+      try { await this.sendRaw(batches[i].data); sent += batches[i].packs; }   // sent 只数成功的，与 WebUsbSpiTransport 同口径
+      catch (e){ failed += batches[i].packs; this.lastError = e?.message || String(e); if (stopOnError) throw e; }
+      onProgress?.(sent + failed, packs.length, i);
       if ((i & 7) === 7) await yieldTask();
     }
-    return { sent, failed, total: packs.length };
+    return { sent, failed, total: packs.length, batches: batches.length, calls: this.writes };
   }
   async stop(){
     if (!this.running) return;

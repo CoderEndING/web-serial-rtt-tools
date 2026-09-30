@@ -94,8 +94,10 @@ export class PanelAnim {
     this.onFrame = o.onFrame || null;
     this.onState = o.onState || null;
     this.video = o.video || null;          // 页面里那个 <video>（rVFC 需要它真的在渲染）
+    this.batchBytes = o.batchBytes || (() => undefined);   // 攒批档位（见 protocol.batchPacks）
+    this.callsOf = o.callsOf || null;      // transport.writes 的取值器（统计"调用/帧"）
     this.src = null;                       // { kind:'video'|'gif', name, w, h, frames? }
-    this.stat = { frames: 0, bytes: 0, dropped: 0, t0: 0, ms: 0, fps: 0, kbs: 0, lastMs: 0 };
+    this.stat = { frames: 0, bytes: 0, calls: 0, dropped: 0, t0: 0, ms: 0, fps: 0, kbs: 0, lastMs: 0 };
     this._stop = false;
     this._running = false;
     this._q = [];                          // 已解码待发的帧（RGB565）
@@ -112,6 +114,7 @@ export class PanelAnim {
     const s = this.stat;
     const sec = s.ms / 1000;
     this.onState?.({ running: this._running, frames: s.frames, dropped: s.dropped, bytes: s.bytes,
+                     calls: s.calls, callsPerFrame: s.frames ? s.calls / s.frames : 0,
                      ms: s.ms, fps: sec > 0 ? s.frames / sec : 0, kbs: sec > 0 ? s.bytes / 1024 / sec : 0,
                      lastMs: s.lastMs, src: this.src });
   }
@@ -224,7 +227,7 @@ export class PanelAnim {
     this._prep();
     this._stop = false;
     this._running = true;
-    this.stat = { frames: 0, bytes: 0, dropped: 0, t0: performance.now(), ms: 0, fps: 0, kbs: 0, lastMs: 0 };
+    this.stat = { frames: 0, bytes: 0, calls: 0, dropped: 0, t0: performance.now(), ms: 0, fps: 0, kbs: 0, lastMs: 0 };
     this._emit();
     const g = this.geometry();
     const prof = this.profile();
@@ -245,6 +248,7 @@ export class PanelAnim {
       this._emit();
       this.log(st.frames ? 'g' : 'w', `动画结束：${st.frames} 帧 · ${(st.bytes / 1024).toFixed(0)} KB · ` +
         `${(st.ms / 1000).toFixed(1)} s · 实测 ${st.fps.toFixed(1)} fps · ${st.kbs.toFixed(0)} KB/s` +
+        (st.frames ? ` · 每次提交 ${(st.calls / st.frames).toFixed(1)} 个（攒批档 ${this.batchBytes() || 512} B）` : '') +
         (st.dropped ? ` · 丢帧 ${st.dropped}（发送跟不上解码，正常）` : ''), st.frames ? 'g' : 'w');
     }
   }
@@ -320,12 +324,14 @@ export class PanelAnim {
     const r = await this.session.sendFrames(items, {
       tag: 'panel', quiet: true, timeoutMs: 8000,
       shouldStop: () => this._stop,
+      batchBytes: this.batchBytes(),
     });
     if (this._stop) return;                       // 用户按了停止：这一帧是半截的，别记账也别报错
     const bad = r.rsps.filter(x => x && x.status !== P.ST.OK).length;
     if (bad) this.log('e', `动画第 ${this.stat.frames + 1} 帧有 ${bad} 个非 OK 应答`, 'panel');
     this.stat.frames++;
     this.stat.bytes += px.length;
+    this.stat.calls += r.batches ?? 0;            // 这一帧喊了几次 USB（攒批后应远小于片数）
     this.stat.lastMs = performance.now() - t0;
     this.stat.ms = performance.now() - this.stat.t0;
     this.onFrame?.(px, this.win);

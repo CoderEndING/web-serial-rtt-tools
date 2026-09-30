@@ -14,6 +14,7 @@
  * 预览里显示的是**量化后的样子**（走一遍 565 往返 + R/B 交换 + 电平），所以"预览 == 发出去的"。
  */
 import { $, setStatus } from '../ui/dom.js';
+import { store } from '../core/store.js';
 import * as P from './protocol.js';
 import * as C from './panel-code.js';
 import * as I from './image.js';
@@ -82,6 +83,11 @@ export class SpiPanelView {
     $('pn-reconnect').addEventListener('click', () => s.connectHid(false));
     $('pn-usb').addEventListener('click', () => s.connectUsb(null, { inFlight: +($('pn-inflight').value || 4) }));
     $('pn-mock').addEventListener('change', e => s.setMock(e.target.checked));
+    /**
+     * 攒批档位：一次 `transferOut` 带多少字节（见 `protocol.batchPacks` 的注释）。
+     * 落 store 是为了实验时不用每次重设；512 = 老行为（一片一次调用）。
+     */
+    store.bind($('pn-batch'), 'spi.batch');
 
     // 档位 / 推荐值
     $('pn-prof-get').addEventListener('click', () => this.wrap(() => s.loadProfile({ tag: this.tag })));
@@ -180,6 +186,8 @@ export class SpiPanelView {
       log: (kind, text, tag) => s.log(kind, text, tag || this.tag),
       onFrame: (px, win) => this.drawAnimFrame(px, win),
       onState: st => this.renderAnim(st),
+      batchBytes: () => this.batchBytes(),
+      callsOf: () => s.transport?.writes ?? 0,     // transferOut 调用计数（状态行显示"调用/帧"）
     });
     this.anim.loop = $('pn-anim-loop').checked;
     $('pn-anim-file').addEventListener('click', () => $('pn-anim-input').click());
@@ -492,7 +500,7 @@ export class SpiPanelView {
     s.log('i', `${label}：${items.length} 条 / ${totalBytes} 参数字节`, this.tag);
     try {
       const r = await s.sendFrames(items, {
-        tag: this.tag, quiet: true, timeoutMs: 4000,
+        tag: this.tag, quiet: true, timeoutMs: 4000, batchBytes: this.batchBytes(),
         onProgress: (sent, total) => {
           $('pn-code-prog').textContent = `${label}：${sent}/${total} 包`;
           if (this.playAbort) throw new Error('用户中止');
@@ -501,7 +509,7 @@ export class SpiPanelView {
       });
       const ms = performance.now() - t0;
       const bad = r.rsps.filter(x => x && x.status !== P.ST.OK).length;
-      s.log(bad ? 'e' : 'g', `${label} 完成：${r.packs} 包 · ${ms.toFixed(0)} ms` +
+      s.log(bad ? 'e' : 'g', `${label} 完成：${r.packs} 包 · ${r.batches ?? r.packs} 次提交 · ${ms.toFixed(0)} ms` +
         ` · 平均 ${(totalBytes / Math.max(1, ms) * 1000 / 1024).toFixed(1)} KB/s` + (bad ? ` · ${bad} 个非 OK 应答` : ''), this.tag);
       $('pn-code-prog').textContent = `${label} 完成（${r.packs} 包 / ${ms.toFixed(0)} ms）`;
     } catch (e){
@@ -585,6 +593,16 @@ export class SpiPanelView {
     return I.PANEL_GEOMETRY[k] || I.PANEL_GEOMETRY.st77916;
   }
 
+  /**
+   * 攒批档位（一次 `transferOut` 带多少字节）。
+   * ⚠️ 只影响**主机侧提交粒度**：固件仍按 512 B 槽解析（包序列一模一样），
+   *    所以刷屏结果不变，变的只是"喊几次 USB" —— 见 `protocol.batchPacks` 的注释。
+   */
+  batchBytes(){
+    const v = +($('pn-batch')?.value || 0);
+    return P.BATCH_CHOICES.includes(v) ? v : 8192;
+  }
+
   applyGeometry(){
     const g = this.geometry();
     $('pn-canvas').width = g.w;
@@ -665,7 +683,7 @@ export class SpiPanelView {
     s.log('i', `刷图开始：${g.w}×${g.h} · ${out.slices} 片 / ${out.px} 字节 · 档 ${s.profile?.profile ?? '?'}`, this.tag);
     try {
       const r = await s.sendFrames(out.items, {
-        tag: this.tag, quiet: true, timeoutMs: 5000,
+        tag: this.tag, quiet: true, timeoutMs: 5000, batchBytes: this.batchBytes(),
         onProgress: (sent, total) => {
           const pct = (sent / total * 100).toFixed(0);
           const dt = (performance.now() - t0) / 1000;
@@ -677,9 +695,9 @@ export class SpiPanelView {
       const bad = r.rsps.filter(v => v && v.status !== P.ST.OK);
       const kbPerSec = out.px / 1024 / Math.max(0.001, ms / 1000);
       this.lastRun = { ms, bytes: out.px, slices: out.slices, frames: out.items.length,
-                       sclkHz: s.counters.actualSclkHz, kbPerSec, badRsp: bad.length, when: Date.now() };
+                       calls: r.batches ?? null, sclkHz: s.counters.actualSclkHz, kbPerSec, badRsp: bad.length, when: Date.now() };
       s.log(bad.length ? 'e' : 'g',
-        `刷图完成：${out.slices} 片 · ${fmtBytes(out.px)} · ${ms.toFixed(0)} ms · ` +
+        `刷图完成：${out.slices} 片 · ${r.batches ?? out.slices} 次提交 · ${fmtBytes(out.px)} · ${ms.toFixed(0)} ms · ` +
         `${kbPerSec.toFixed(0)} KB/s` +
         (bad.length ? ` · ${bad.length} 个非 OK 应答（${P.ST_TEXT[bad[0].status] || bad[0].status}）` : ''), this.tag);
       this.renderPreview();
@@ -744,13 +762,15 @@ export class SpiPanelView {
   renderAnim(st){
     if (!st) return;
     const el = $('pn-anim-info');
+    // 「调用」= 这一帧喊了几次 transferOut（`st.calls/frames`）：攒批档位有没有生效，看这个数最直接
+    const calls = st.frames ? ` · USB 调用 ${(st.calls / st.frames).toFixed(1)} 次/帧` : '';
     if (el){
       if (st.running){
         el.textContent = `发送中：${st.frames} 帧 · 实测 ${st.fps.toFixed(1)} fps · ${st.kbs.toFixed(0)} KB/s` +
-          ` · 最后帧 ${st.lastMs.toFixed(0)} ms` + (st.dropped ? ` · 丢帧 ${st.dropped}（解码比发送快，正常）` : '');
+          ` · 最后帧 ${st.lastMs.toFixed(0)} ms` + calls + (st.dropped ? ` · 丢帧 ${st.dropped}（解码比发送快，正常）` : '');
       } else if (st.frames){
         el.textContent = `上次：${st.frames} 帧 · ${(st.bytes / 1024).toFixed(0)} KB · ${(st.ms / 1000).toFixed(1)} s · ` +
-          `实测 ${st.fps.toFixed(1)} fps · ${st.kbs.toFixed(0)} KB/s` + (st.dropped ? ` · 丢帧 ${st.dropped}` : '');
+          `实测 ${st.fps.toFixed(1)} fps · ${st.kbs.toFixed(0)} KB/s` + calls + (st.dropped ? ` · 丢帧 ${st.dropped}` : '');
       }
     }
     this.refreshButtons();
@@ -842,6 +862,9 @@ export class SpiPanelView {
         kind: this.anim.src?.kind || null,
         srcFrames: this.anim.src?.frames ?? null,        // 源自身帧数（GIF/APNG/WebP）；视频为 null
         srcDuration: this.anim.src?.duration ?? null,    // 视频时长（s）
+        batchBytes: this.batchBytes(),                   // 攒批档位（一次 transferOut 的字节上限）
+        calls: this.anim.stat.calls,                     // 累计 transferOut 次数
+        callsPerFrame: this.anim.stat.frames ? +(this.anim.stat.calls / this.anim.stat.frames).toFixed(2) : null,
         running: this.anim.running, frames: this.anim.stat.frames, dropped: this.anim.stat.dropped,
         bytes: this.anim.stat.bytes, fps: +this.anim.stat.fps.toFixed(2), kbs: +this.anim.stat.kbs.toFixed(1),
         lastMs: +this.anim.stat.lastMs.toFixed(1),

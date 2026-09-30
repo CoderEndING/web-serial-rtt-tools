@@ -896,6 +896,16 @@
           <button id="pn-usb" title="授权 WebUSB 并认领 SPI 桥接口（刷图/发帧的数据走这条）。⚠️ 第一次点会弹出**浏览器的设备选择框**（HID 与 WebUSB 要各授权一次）">连接数据端点…（授权）</button>
         </div>
         <label class="row"><span>在飞读</span><input id="pn-inflight" class="num" value="4" inputmode="numeric" title="同时在飞的 IN 读条数（连接数据端点时生效）"></label>
+        <!-- 攒批：一次 transferOut 带多个 512 B 包。固件仍按 512 B 槽解析（设备看到的包序列不变），
+             只是主机少喊几次 —— 60 MHz 单线刷一帧只要 18.9 ms，而"每片一次调用"的固定开销
+             （~150 µs × 290 片 ≈ 44 ms）才是帧率的真正瓶颈。512 = 老行为。 -->
+        <label class="row"><span>攒批</span><select id="pn-batch" title="一次 USB 传输带多少字节。固件按 512 B 槽解析，所以攒批不改变设备看到的东西，只减少主机侧的调用次数；512 B = 老行为（每片一次 transferOut）。真机实测（AXS15352 · 档 1 · 60 MHz）：512 B → 25.7 fps / 3.6 MB/s，8 KB → 35.3 fps / 4.9 MB/s，再往上没差别">
+          <option value="512">512 B（一片一次调用 · 老行为）</option>
+          <option value="4096">4 KB（8 片 / 次）</option>
+          <option value="8192" selected>8 KB（16 片 / 次 · 实测最优）</option>
+          <option value="16384">16 KB（32 片 / 次）</option>
+          <option value="32768">32 KB（64 片 / 次）</option>
+        </select></label>
         <p class="hint" id="pn-usbinfo">未连接数据端点</p>
         <p class="hint" id="pn-state">未连接</p>
       </fieldset>

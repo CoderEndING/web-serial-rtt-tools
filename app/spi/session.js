@@ -315,10 +315,12 @@ export class SpiSession {
   }
 
   /**
-   * 发一批帧：分配 seq → 打包（一帧不跨包）→ 逐个 transferOut → 带回所有带 RSP 帧的应答。
+   * 发一批帧：分配 seq → 打包（一帧不跨包）→ **按 `batchBytes` 攒批** submit → 带回所有带 RSP 帧的应答。
    * @param {Array<{type:number,payload:Uint8Array,flags?:number,label?:string}>} items
-   * @param {{quiet?:boolean,tag?:string,timeoutMs?:number,onProgress?:Function,shouldStop?:Function}} opts
-   * @returns {Promise<{sent:number, failed:number, rsps:Array<{status:number,data:Uint8Array}|null>, packs:number}>}
+   * @param {{quiet?:boolean,tag?:string,timeoutMs?:number,onProgress?:Function,shouldStop?:Function,batchBytes?:number}} opts
+   *        `batchBytes` = 一次 transferOut 带多少字节（默认 PKT = 每包一次调用，与老行为等价；
+   *        刷屏/动画那条路传 16 KB 量级，见 `protocol.batchPacks`：设备看到的包序列不变，主机少喊几次）。
+   * @returns {Promise<{sent:number, failed:number, rsps:Array<{status:number,data:Uint8Array}|null>, packs:number, batches?:number}>}
    */
   async sendFrames(items, opts = {}){
     if (!this.dataReady) throw new Error('数据端点没连上（先「连接数据端点」或勾「用假探针」）');
@@ -340,12 +342,14 @@ export class SpiSession {
       if (!opts.quiet) this.log('d', '→ ' + P.describeFrame(it.type, it.payload, it.flags | 0, seq), tag);
     }
     const packs = P.packFrames(frames);
-    let sent = 0;
+    let sent = 0, batches = null;
     try {
       const r = await this.transport.sendPacks(packs, {
         onProgress: opts.onProgress, shouldStop: opts.shouldStop, stopOnError: true,
+        batchBytes: opts.batchBytes,
       });
       sent = r.sent;
+      batches = r.batches ?? null;
       /**
        * 🚨 被 `shouldStop` 中止时，**后面那些没发出去的帧不会有应答** —— 不在这里取消的话，
        *    下面 `await waits[i]` 会一路挂到 `timeoutMs`（实测 8 s）。表现出来就是
@@ -372,7 +376,7 @@ export class SpiSession {
           (res.data?.length ? ` · ${res.data.length} B: ${hex(res.data, 12)}` : ''), tag);
       }
     }
-    return { sent, failed: packs.length - sent, rsps, packs: packs.length };
+    return { sent, failed: packs.length - sent, rsps, packs: packs.length, batches };
   }
 
   /** 自检摘要（给 main.js 的 summary()） */
@@ -380,7 +384,8 @@ export class SpiSession {
     return {
       connected: this.connected, dataReady: this.dataReady, mock: this.usingMock,
       iface: this.transport?.iface ?? null,
-      packets: this.transport?.writes ?? 0,
+      packets: this.transport?.writes ?? 0,          // = 主机侧 transferOut 调用次数（攒批后按"批"计）
+      writeBytes: this.transport?.writeBytes ?? 0,
       framesOk: this.counters.framesOk, framesErr: this.counters.framesErr,
       bytesTx: this.counters.bytesTx, bytesRx: this.counters.bytesRx,
       actualSclkHz: this.counters.actualSclkHz,

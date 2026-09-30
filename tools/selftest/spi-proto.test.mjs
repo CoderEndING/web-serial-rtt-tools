@@ -86,6 +86,53 @@ console.log('== 2. 打包器：一帧不跨包、绝不填充 ==');
   try { P.packFrames([new Uint8Array(513)]); } catch { threw = true; }
   ok(threw, '单帧 > 512 B 直接抛错（固件无法解析这种帧）');
 
+  // ⑥ 攒批（batchPacks）：一次 transferOut 带多个 512 B 包 —— 设备侧看到的东西必须**一个字节都不变**
+  {
+    // 刷屏的真实形状：3 条小命令帧 + 288 个 512 B 整包 + 1 个 404 B 末片
+    const cmds = [mk(8, 1), mk(8, 2), mk(13, 3)];
+    const full = Array.from({ length: 10 }, (_, i) => P.frame(P.T.XFER, P.xferPayload({ cmd: 0, tcfg: 2, tx: new Uint8Array(492) }), { flags: i === 9 ? 0 : P.F.CS_HOLD, seq: 0 }));
+    const tail = P.frame(P.T.XFER, P.xferPayload({ cmd: 0, tcfg: 2, tx: new Uint8Array(384) }), { flags: P.F.RSP, seq: 99 });
+    const packs = P.packFrames([...cmds, ...full, tail]);
+    ok(packs.length === 1 + 10 + 1, `打包后 ${packs.length} 个包（3 条命令被攒成 1 包 + 10 个整包 + 末片）`);
+    ok(packs[1].length === 512, `整包正好 512 B（一片一个 USB 包，不需要补填充）`);
+
+    // 默认 = PKT：与"每包一次 transferOut"完全等价
+    const b0 = P.batchPacks(packs);
+    ok(b0.length === packs.length && b0.every((b, i) => b.packs === 1 && b.data === packs[i]),
+       `batchBytes=512 时退化成"一包一批"（${b0.length} 批 = ${packs.length} 包，零行为变化）`);
+
+    // 4 KB 攒批：整包按 8 个一组，短包（命令包/末片）各自收尾
+    const b4 = P.batchPacks(packs, 4096);
+    ok(b4[0].packs === 1 && b4[0].bytes < 512, `短包（命令 3 帧 = ${b4[0].bytes} B）自成一个尾批 —— 短包绝不能夹在中间`);
+    ok(b4.slice(1, -1).every(b => b.bytes === 4096 && b.packs === 8), `中间批次都是 8 包 / 4096 B（${b4.length} 批）`);
+    ok(b4[b4.length - 1].bytes === 2 * 512 + 404 && b4[b4.length - 1].packs === 3,
+       `末批 = 剩下 2 个整包 + 末片（${b4[b4.length - 1].bytes} B / ${b4[b4.length - 1].packs} 包，末片 404 B 收尾）`);
+    ok(b4.reduce((a, b) => a + b.packs, 0) === packs.length, '批里的包数守恒（没有丢包）');
+
+    // 关键不变量：把批按 512 B 拆回槽，解出来的帧序列与逐包发**完全一致**
+    const seqOf = arr => { const out = []; for (const x of arr) for (const fr of P.parsePack(x).frames) out.push(`${fr.type}:${fr.payload.length}`); return out.join(','); };
+    const oneByOne = packs.map(p => P.parsePack(p)).flatMap(r => r.frames);
+    const byBatch = [];
+    for (const b of b4){
+      for (let off = 0; off < b.data.length; off += 512){
+        const slot = b.data.subarray(off, Math.min(off + 512, b.data.length));
+        const r = P.parsePack(slot);
+        if (r.err) byBatch.push('ERR:' + r.err.why);
+        for (const fr of r.frames) byBatch.push(`${fr.type}:${fr.payload.length}`);
+      }
+    }
+    ok(byBatch.join(',') === oneByOne.map(f => `${f.type}:${f.payload.length}`).join(','),
+       '攒批后按 512 B 槽解出来的帧序列，与逐包发一字不差');
+    ok(!byBatch.some(x => String(x).startsWith('ERR:')), '每个槽都干净（没有跨槽帧、没有 ≥8 B 残渣）');
+
+    // 上限保护
+    let threw2 = false;
+    try { P.batchPacks([new Uint8Array(513)]); } catch { threw2 = true; }
+    ok(threw2, '单包 > 512 B 在攒批入口也直接抛错');
+    const huge = P.batchPacks(packs, 10 * 1024 * 1024);
+    ok(huge.every(b => b.bytes <= P.BATCH_MAX), `一次传输被夹在 ${P.BATCH_MAX / 1024} KB 以内（最大 ${Math.max(...huge.map(b => b.bytes))} B）`);
+  }
+
   // ⑤ 残渣语义：< 8 B 静默丢弃；≥ 8 B 的垃圾会被当成帧头 → err
   const one = P.frame(P.T.STEP, P.stepPayload({ cmd: 1, params: new Uint8Array(1) }));   // 13 B
   const residue = new Uint8Array(one.length + 4);

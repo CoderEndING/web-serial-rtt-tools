@@ -716,6 +716,46 @@ console.log('== 9c. 仓库自带素材（samples/anim）：帧数认得出来 ·
   }
 }
 
+// ==================================================================== 9d
+console.log('== 9d. 攒批：USB 调用次数降一个数量级，设备侧收到的帧一个不少 ==');
+{
+  // 背景（2026-10，用户现场 "3 MB/s 瓶颈在哪"）：一帧 240×296 = 142 KB 被"一帧不跨包"切成
+  // 289 片像素 + 3 条命令 = 292 个帧。固件每次只 arm 一个 512 B 槽，但 **USB 层面一次 bulk 传输
+  // 可以带任意多个 512 B 包** —— 所以"每片一次 transferOut"是主机侧自找的开销（每次 ~150 µs ⇒ 44 ms/帧）。
+  // 这条自测钉住两件事：① 攒批后调用次数掉到 ~11 次/帧；② 设备（假探针按 512 B 槽解析）收到的
+  // 协议帧数与不攒批时**完全一样**。
+  const run = async (batchBytes, ms) => ev(`
+    const sel = document.getElementById('pn-batch');
+    sel.value = '${batchBytes}'; sel.dispatchEvent(new Event('change', { bubbles: true }));
+    await new Promise(r => setTimeout(r, 100));
+    const p = window.__tools.spiSession.mockProbe;
+    p.resetState();
+    document.getElementById('pn-anim-play').click();
+    await new Promise(r => setTimeout(r, ${ms}));
+    document.getElementById('pn-anim-stop').click();
+    await new Promise(r => setTimeout(r, 500));
+    const a = window.__tools.panel.summary().anim;
+    return { a, framesOk: p.stats.framesOk, framesErr: p.stats.framesErr,
+             perFrame: a.frames ? p.stats.framesOk / a.frames : 0 };`);
+
+  const big = await run(16384, 1200);
+  ok(big.a.callsPerFrame > 0 && big.a.callsPerFrame <= 12,
+     `16 KB 攒批：每帧只喊 ${big.a.callsPerFrame} 次 USB（不攒批要 ~290 次）`);
+  ok(big.framesErr === 0, `攒批后设备侧零错误（frames_err=${big.framesErr}）`);
+  ok(Math.abs(big.perFrame - 292) <= 6,
+     `设备侧每帧收到的协议帧数不变：${big.perFrame.toFixed(1)} ≈ 292（289 片 + 3 条命令）`);
+
+  const small = await run(512, 1200);
+  ok(small.a.callsPerFrame >= 250,
+     `512 B 档 = 老行为：每帧 ${small.a.callsPerFrame} 次调用（一包一次 transferOut）`);
+  ok(Math.abs(small.perFrame - big.perFrame) <= 6 && small.framesErr === 0,
+     `两档的设备侧帧数一致（${small.perFrame.toFixed(1)} vs ${big.perFrame.toFixed(1)}）—— 攒批只改提交粒度`);
+
+  // 收尾：把档位放回默认的 16 KB，别影响后面的用例
+  await ev(`const sel = document.getElementById('pn-batch');
+            sel.value = '16384'; sel.dispatchEvent(new Event('change', { bubbles: true })); return 1;`);
+}
+
 // ==================================================================== 10
 console.log('== 10. 收尾 ==');
 {

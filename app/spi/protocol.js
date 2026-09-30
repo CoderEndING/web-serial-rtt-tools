@@ -283,6 +283,62 @@ export function packFrames(frames, maxPacket = PKT){
   return packs;
 }
 
+/** 一次 bulk 传输（URB）能带多少字节的上限保护 —— 不是 USB 的限制（USB 层面多大都行），
+ *  只是别让一次调用带上几 MB，出问题时连"发到哪儿了"都说不清。 */
+export const BATCH_MAX = 60 * 1024;
+
+/** 页面里"多少字节攒一次 transferOut"的档位（真机实测 8 KB 起就到底了，见 panel 页的旋钮说明）*/
+export const BATCH_CHOICES = [PKT, 4096, 8192, 16384, 32768];
+
+/**
+ * 把"包"合并成"一次 transferOut 提交的批"（攒批）。
+ *
+ * 为什么这样是对的（2026-10 定案，用户点破 + 真机数据复核）：
+ *   · 固件**每次 arm 一个 512 B 槽**，收满就回调、解析这一槽里的帧（`spi_bridge.c` 的
+ *     `s_out_buf[slot][512]` + `usbd_ep_start_read(..., SB_PKT_SIZE)`）；
+ *   · 但 **USB 层面一次 bulk 传输可以带任意多个 512 B 包**：内核自动切包，设备没准备好就 NAK
+ *     —— 这就是背压，不需要主机"一次只交一个包"。
+ *   · 所以"每片一个 transferOut"是主机侧自找的开销：真机实测每次调用 ~150 µs，
+ *     一帧 290 个包 ≈ 44 ms；而 60 MHz 单线 SPI 刷一帧只要 18.9 ms ⇒ 帧率被主机侧调用次数锁死。
+ *   · 攒批之后设备看到的**包序列完全一样**（同样的 512 B 槽、同样的帧），只是主机少喊几次。
+ *
+ * 唯一的硬约束：**短包只能落在一批的末尾**。
+ *   · 设备 arm 的是固定 512 B 缓冲，"收到短包"= 这次端点传输到此为止；
+ *   · 短包夹在中间 → 它后面的包会被当成新的一次传输（白等一次 arm），对齐也乱。
+ *   · 刷屏的实际形状：像素片正好 512 B（整包），只有帧头那几条命令帧（16/16/21 B）
+ *     和末片（404 B）是短包 —— 让它们各自收尾即可，**不需要补任何填充字节**。
+ *
+ * @param {Uint8Array[]} packs 每个 ≤ PKT
+ * @param {number} [batchBytes=PKT] 一批的上限；= PKT 时与"每包一次 transferOut"完全等价（零行为变化）
+ * @returns {Array<{data:Uint8Array, packs:number, bytes:number}>}
+ */
+export function batchPacks(packs, batchBytes = PKT){
+  const limit = Math.max(PKT, Math.min((batchBytes | 0) || PKT, BATCH_MAX));
+  const out = [];
+  let cur = [], curLen = 0;
+  const flush = () => {
+    if (!curLen) return;
+    if (cur.length === 1) out.push({ data: cur[0], packs: 1, bytes: curLen });
+    else {
+      const buf = new Uint8Array(curLen);
+      let off = 0;
+      for (const p of cur){ buf.set(p, off); off += p.length; }
+      out.push({ data: buf, packs: cur.length, bytes: curLen });
+    }
+    cur = []; curLen = 0;
+  };
+  for (const p of packs){
+    const b = p instanceof Uint8Array ? p : new Uint8Array(p);
+    if (b.length > PKT) throw new Error(`单包 ${b.length} B 超过 ${PKT} B（固件按 512 B 槽解析）`);
+    if (!b.length) continue;
+    if (curLen && curLen + b.length > limit) flush();
+    cur.push(b); curLen += b.length;
+    if (b.length < PKT) flush();            // 短包 = 这一批的尾巴
+  }
+  flush();
+  return out;
+}
+
 /**
  * 按**固件同样的规则**解析一个包（自测/日志/假探针共用）：
  * 返回 { frames:[{type,flags,seq,len,payload,off}], residue, err }。
