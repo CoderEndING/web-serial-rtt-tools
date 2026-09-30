@@ -346,6 +346,15 @@ export class SpiSession {
         onProgress: opts.onProgress, shouldStop: opts.shouldStop, stopOnError: true,
       });
       sent = r.sent;
+      /**
+       * 🚨 被 `shouldStop` 中止时，**后面那些没发出去的帧不会有应答** —— 不在这里取消的话，
+       *    下面 `await waits[i]` 会一路挂到 `timeoutMs`（实测 8 s）。表现出来就是
+       *    "点了「停止」/「中止」好几秒没反应"（动画里尤其明显：一帧 292 个帧、RSP 在末片）。
+       *    cancel 之后那些 wait 会立刻以 `{error}` 兑现，口径与"半路失败"完全一致。
+       */
+      if (opts.shouldStop?.()){
+        for (const s of seqs) if (s) this.matcher.cancel(s, '已中止（后续帧没发出去）');
+      }
     } catch (e){
       // 发送半路失败：把本批还没兑现的在飞请求取消掉（别让它们挂到超时）
       for (const s of seqs) if (s) this.matcher.cancel(s, e?.message || String(e));

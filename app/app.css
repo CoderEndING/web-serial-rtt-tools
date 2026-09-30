@@ -451,6 +451,15 @@ fieldset.folded > legend::after{content:' · 已折叠';color:var(--fg2);font-si
 .imginfo{flex:1;min-width:240px}
 .imginfo .row>span:first-child{width:74px}
 .imginfo .num{width:72px}
+/* 动画 / 视频：源片小预览 + 状态行（发送是节拍器，状态行每帧刷新） */
+#tab-panel .animbox{margin-top:9px;border-top:1px solid var(--line);padding-top:8px}
+#tab-panel .animrow{display:flex;gap:10px;align-items:flex-start;margin-top:5px}
+#pn-anim-video{
+  width:132px;max-height:100px;flex:none;border:1px solid var(--line);border-radius:6px;
+  background:#000;display:none;
+}
+#pn-anim-video.on{display:block}
+#pn-anim-info{flex:1;min-width:0;white-space:pre-wrap}
 .chips{display:flex;flex-wrap:wrap;gap:4px}
 .chips button{padding:2px 8px;font-size:11.5px}
 .chips button.on{border-color:var(--acc);background:#1f6feb;color:#fff}

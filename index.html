@@ -985,6 +985,23 @@
         </div>
         <p class="hint">预览里的<b>橙色虚线</b>是探针真正下发的对齐窗口（列地址按 4 像素对齐，多出来的列用边缘填充）。
           每片 492 B，一屏 ST77916 是 <b>527 片</b>；只有最后一片要应答。</p>
+
+        <!-- 动画 / 视频：整帧刷（用户 2026-09-30 拍板先不做局部开窗）。
+             发送是节拍器：解码跟得上就丢帧，绝不在 USB 队列里堆延迟。 -->
+        <div class="animbox">
+          <div class="row"><span>动画 / 视频</span>
+            <button id="pn-anim-file" class="mini" title="MP4 / WebM / GIF / APNG —— 浏览器原生解码，零依赖">选择文件…</button>
+            <input type="file" id="pn-anim-input" accept="video/*,.gif,.webp,.png,.apng" hidden>
+            <button id="pn-anim-play" class="primary mini" disabled title="按当前屏几何 / 面板档把每一帧整屏发出去（与「刷这一张」同一条路）">播放到屏</button>
+            <button id="pn-anim-stop" class="mini" disabled>停止</button>
+            <label class="chk"><input type="checkbox" id="pn-anim-loop" checked> 循环</label>
+          </div>
+          <div class="animrow">
+            <video id="pn-anim-video" muted playsinline></video>
+            <p class="hint" id="pn-anim-info" style="margin:0">逐帧整屏刷：发送多快就播多快，解码更快时丢帧（不堆延迟）。
+              选 MP4 / WebM 或 GIF —— 帧率上限由链路决定（AXS15352 实测 ~20 fps、ST77916 ~13 fps）。</p>
+          </div>
+        </div>
       </fieldset>
 
       <fieldset id="pn-code-card">

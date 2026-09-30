@@ -18,6 +18,7 @@ import * as P from './protocol.js';
 import * as C from './panel-code.js';
 import * as I from './image.js';
 import { BitPopover } from './bit-editor.js';
+import { PanelAnim } from './anim.js';
 import { fmtBytes } from './session.js';
 
 /** 两块目标屏的推荐值。`short` 是侧栏下拉用的短名（长名字会把 300px 宽的侧栏撑爆 → 字被裁）*/
@@ -160,6 +161,36 @@ export class SpiPanelView {
     for (const id of ['pn-x', 'pn-y', 'pn-level']) $(id).addEventListener('input', () => this.renderPreview());
     $('pn-img-send').addEventListener('click', () => this.sendImage());
 
+    /**
+     * 动画 / 视频：解码（`<video>`+rVFC 或 `ImageDecoder`）→ 逐帧整屏刷。
+     * 播放器在 `anim.js`（纯逻辑 + 一个 `<video>` 元素），这里只接按钮与状态显示。
+     * 发送是节拍器：解码更快就丢帧（`stat.dropped`），不会在 USB 队列里堆延迟。
+     */
+    this.anim = new PanelAnim({
+      session: s,
+      video: $('pn-anim-video'),
+      geometry: () => this.geometry(),
+      profile: () => s.profile?.profile ?? 0,
+      pixelOpts: () => ({
+        swap: $('pn-swap').checked,
+        littleEndian: $('pn-byteorder').value === 'le',
+        level: Math.max(0, Math.min(255, +$('pn-level').value || 255)),
+        fit: $('pn-fit').value,
+      }),
+      log: (kind, text, tag) => s.log(kind, text, tag || this.tag),
+      onFrame: (px, win) => this.drawAnimFrame(px, win),
+      onState: st => this.renderAnim(st),
+    });
+    this.anim.loop = $('pn-anim-loop').checked;
+    $('pn-anim-file').addEventListener('click', () => $('pn-anim-input').click());
+    $('pn-anim-input').addEventListener('change', e => this.loadAnim(e.target.files[0]));
+    $('pn-anim-play').addEventListener('click', () => this.playAnim());
+    $('pn-anim-stop').addEventListener('click', () => this.anim.stop());
+    $('pn-anim-loop').addEventListener('change', e => {
+      this.anim.loop = e.target.checked;
+      if (this.anim.video) this.anim.video.loop = e.target.checked;
+    });
+
     // 面板电源 / 显示：4 个独立命令（上电 11h / 开显示 29h / 关显示 28h / 下电 10h）+ RST 脉冲
     $('pn-rst-send').addEventListener('click', () => this.sendResetPulse());
     for (const [id, cmd, delayMs, label] of [
@@ -273,6 +304,12 @@ export class SpiPanelView {
     for (const id of ['pn-code-play', 'pn-img-send', 'pn-rst-send', 'pn-pwr-on', 'pn-disp-on', 'pn-disp-off', 'pn-pwr-off']) $(id).disabled = !canSend;
     $('pn-code-stop').disabled = !busy;
     $('pn-code-parse').disabled = false;
+    // 动画：有源 + 端点就绪 + 不忙 才能播；播放中「播放」变灰、「停止」可用
+    const anim = this.anim;
+    $('pn-anim-play').disabled = !(canSend && anim?.src);
+    $('pn-anim-play').textContent = anim?.running ? '播放中…' : '播放到屏';
+    $('pn-anim-stop').disabled = !anim?.running;
+    $('pn-anim-file').disabled = !!anim?.running;
     for (const b of $('pn-code-body').querySelectorAll('button[data-act]')) b.disabled = !canSend;
   }
 
@@ -655,6 +692,67 @@ export class SpiPanelView {
     }
   }
 
+  // ==================================================================== 动画 / 视频
+
+  /** 选文件 → 建源（视频走 `<video>`+rVFC，GIF/APNG 走 ImageDecoder）*/
+  async loadAnim(file){
+    if (!file) return;
+    try {
+      const src = await this.anim.load(file);
+      $('pn-anim-video').classList.toggle('on', src.kind === 'video');
+      $('pn-anim-info').textContent = `${src.name} · ${src.w}×${src.h}` +
+        (src.kind === 'gif' ? ` · ${src.frames} 帧（GIF）` : ` · ${(src.duration || 0).toFixed(1)} s（视频）`) +
+        `　→ 开窗后每帧 ${this.geometry().w * this.geometry().h * 2} 字节，整帧刷`;
+      this.session.log('g', `动画已就绪：${src.name}（${src.w}×${src.h}）—— 点「播放到屏」开播`, this.tag);
+    } catch (e){
+      this.session.log('e', '动画源加载失败：' + (e?.message || e), this.tag);
+      $('pn-anim-info').textContent = '加载失败：' + (e?.message || e);
+    }
+    this.refreshButtons();
+  }
+
+  async playAnim(){
+    try {
+      await this.anim.start();
+    } catch (e){
+      this.session.log('e', '动画播放失败：' + (e?.message || e), this.tag);
+    }
+    this.refreshButtons();
+  }
+
+  /** 每帧的预览：画的是**量化后真正发出去的那份**（与静图预览同一个口径）*/
+  drawAnimFrame(px, win){
+    const canvas = $('pn-canvas');
+    const g = this.geometry();
+    if (canvas.width !== g.w || canvas.height !== g.h){ canvas.width = g.w; canvas.height = g.h; }
+    if (!this._animOff){ this._animOff = document.createElement('canvas'); }
+    const off = this._animOff;
+    if (off.width !== win.w || off.height !== win.h){ off.width = win.w; off.height = win.h; }
+    const shown = I.rgb565ToRgba(px);
+    off.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(shown), win.w, win.h), 0, 0);
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, g.w, g.h);
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(off, win.x0, win.y0);
+  }
+
+  /** 播放状态行（每帧刷新一次；同时同步按钮可用性）*/
+  renderAnim(st){
+    if (!st) return;
+    const el = $('pn-anim-info');
+    if (el){
+      if (st.running){
+        el.textContent = `发送中：${st.frames} 帧 · 实测 ${st.fps.toFixed(1)} fps · ${st.kbs.toFixed(0)} KB/s` +
+          ` · 最后帧 ${st.lastMs.toFixed(0)} ms` + (st.dropped ? ` · 丢帧 ${st.dropped}（解码比发送快，正常）` : '');
+      } else if (st.frames){
+        el.textContent = `上次：${st.frames} 帧 · ${(st.bytes / 1024).toFixed(0)} KB · ${(st.ms / 1000).toFixed(1)} s · ` +
+          `实测 ${st.fps.toFixed(1)} fps · ${st.kbs.toFixed(0)} KB/s` + (st.dropped ? ` · 丢帧 ${st.dropped}` : '');
+      }
+    }
+    this.refreshButtons();
+  }
+
   // ==================================================================== 档位 / 推荐值 / 复位
 
   async wrap(fn){
@@ -736,6 +834,12 @@ export class SpiPanelView {
       bitpopOpen: this.bitpop.isOpen,
       parseErrors: this.parsed?.errors?.length ?? 0,
       source: this.src ? `${this.src.name} ${this.src.w}×${this.src.h}` : null,
+      anim: this.anim ? {
+        src: this.anim.src ? `${this.anim.src.name} ${this.anim.src.w}×${this.anim.src.h} ${this.anim.src.kind}` : null,
+        running: this.anim.running, frames: this.anim.stat.frames, dropped: this.anim.stat.dropped,
+        bytes: this.anim.stat.bytes, fps: +this.anim.stat.fps.toFixed(2), kbs: +this.anim.stat.kbs.toFixed(1),
+        lastMs: +this.anim.stat.lastMs.toFixed(1),
+      } : null,
       lastRun: this.lastRun || null,          // 最近一次刷图的客观数字（脚本/自检直接读，别去解析日志）
       logLines: this.session.ring.length,
     };

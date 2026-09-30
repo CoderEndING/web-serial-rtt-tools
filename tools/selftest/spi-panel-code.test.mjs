@@ -18,6 +18,7 @@ const url = p => 'file://' + join(app, p).replace(/\\/g, '/');
 const P = await import(url('spi/protocol.js'));
 const C = await import(url('spi/panel-code.js'));
 const I = await import(url('spi/image.js'));
+const A = await import(url('spi/anim.js'));
 const M = await import(url('spi/mock.js'));
 
 let pass = 0, fail = 0;
@@ -360,6 +361,63 @@ console.log('== D. 字节 ↔ 位（解析表里"点字节改 bit"的纯逻辑�
   ok(items[0].payload[0] === 0x36 && items[0].payload[1] === 1 && items[0].payload[4] === 0x08,
      '改过的参数进到 STEP 帧载荷里（cmd=0x36 / n=1 / param=0x08）');
   ok(/0x08/.test(C.rowsToC(rows)), '导出的 C 用的也是改后的值');
+}
+
+// ==================================================================== E
+console.log('== E. 动画 / 视频：摆放映射 + 一帧的帧序列（整帧刷）==');
+{
+  // ① 源 → 窗口的映射（与静图的 composeImage 同语义：fill 裁源、fit 留边、none 原始居中、stretch 拉伸）
+  const fill = A.fitRects(640, 480, 240, 296, 'fill');
+  ok(fill.dw === 240 && fill.dh === 296 && fill.sw < 640 && fill.sh === 480,
+     `铺满：目标铺满整窗、源按比例裁掉两侧（源取 ${fill.sw}×${fill.sh}）`);
+  const fit = A.fitRects(640, 480, 240, 296, 'fit');
+  ok(fit.dw === 240 && fit.dh === 180 && fit.dy === 58 && fit.sw === 640,
+     `适应：整幅源都在、上下留黑边（${fit.dw}×${fit.dh} @ y=${fit.dy}）`);
+  const none = A.fitRects(640, 480, 240, 296, 'none');
+  ok(none.dw === 240 && none.dh === 296 && none.sx === 200,
+     `原始尺寸：按 1:1 居中裁出 ${none.dw}×${none.dh}（源偏移 x=${none.sx}）`);
+  const stretch = A.fitRects(640, 480, 240, 296, 'stretch');
+  ok(stretch.sx === 0 && stretch.sy === 0 && stretch.sw === 640 && stretch.dw === 240 && stretch.dh === 296,
+     '拉伸：整幅源压进整窗（无裁剪、无留边）');
+  // 源比窗口小：fill 会放大并裁掉多余的一边（60×40 的源按 240×296 的窗口取景 → 裁成 32×40）
+  const small = A.fitRects(60, 40, 240, 296, 'fill');
+  ok(small.sh === 40 && small.sw === 32 && small.dw === 240 && small.dh === 296,
+     `源比窗口小：铺满 = 放大 + 裁掉多余的一边（源取 ${small.sw}×${small.sh} → 目标 ${small.dw}×${small.dh}）`);
+  const smallNone = A.fitRects(60, 40, 240, 296, 'none');
+  ok(smallNone.dw === 60 && smallNone.dh === 40 && smallNone.dx === 90, '原始尺寸：不放大，居中放（dx=90）');
+
+  // ② 一帧的帧序列：档 1（AXS15352）= 开窗 2 帧 + RAMWR 命令 1 帧 + 像素片 N
+  const g = I.PANEL_GEOMETRY.axs15352;
+  const px = new Uint8Array(g.w * g.h * 2);            // 142080 B
+  const cache = {};
+  const items = A.frameItems(px, { geometry: g, profile: 1, lines: g.lines, cache });
+  const slices = Math.ceil(px.length / I.PIXEL_SLICE);
+  ok(slices === 289 && items.length === 3 + slices,
+     `档 1：${slices} 片像素 + 开窗 2 + RAMWR 1 = ${items.length} 帧/帧（142080 B）`);
+  ok(items[0].label === 'CASET 0..239' && items[1].label === 'RASET 0..295' && /RAMWR/.test(items[2].label),
+     `帧序：先开窗再 RAMWR（${items.slice(0, 3).map(x => x.label).join(' → ')}）`);
+  const rspCount = items.filter(x => x.flags & P.F.RSP).length;
+  ok(rspCount === 2, `一帧只要 2 次应答（RAMWR + 末片）—— 每片都要会把吞吐砍半（实测 ${rspCount}）`);
+  ok((items[items.length - 1].flags & P.F.RSP) !== 0, '末片带 RSP（整帧完成才知道有没有错）');
+  ok((items[3].flags & P.F.CS_HOLD) !== 0 && (items[items.length - 1].flags & P.F.CS_HOLD) === 0,
+     '档 1：CS 从 RAMWR 一路保持到末片才抬（管道化，与静图同一条路）');
+
+  // ③ 档 2（ST77916）：没有 RAMWR 命令帧（每片自带 0x32 + 24bit 地址）
+  const g2 = I.PANEL_GEOMETRY.st77916;
+  const px2 = new Uint8Array(g2.w * g2.h * 2);          // 259200 B
+  const items2 = A.frameItems(px2, { geometry: g2, profile: 2, lines: g2.lines, cache: {} });
+  ok(items2.length === 2 + Math.ceil(px2.length / I.PIXEL_SLICE) && !/RAMWR/.test(items2[2].label),
+     `档 2：${items2.length} 帧（开窗 2 + 像素 ${Math.ceil(px2.length / I.PIXEL_SLICE)}），没有单独的 RAMWR 帧`);
+
+  // ④ 帧头缓存：同一个窗口刷 N 帧时，"开窗 + RAMWR"这三条逐字节相同 → 复用同一组对象（不每帧重建）
+  const items3 = A.frameItems(px, { geometry: g, profile: 1, lines: g.lines, cache });
+  ok(items3[0] === items[0] && items3[1] === items[1] && items3[2] === items[2],
+     '第 2 帧复用同一组"帧头"对象（缓存生效，每帧少建 3 个对象）');
+  ok(items3.length === items.length, '复用时帧数不变');
+  // ⑤ 打包：一帧不跨包（512 B 包）—— 3 条帧头挤进第 1 包，之后每片像素各自一包
+  const packs = P.packFrames(items.map(it => P.frame(it.type, it.payload, { flags: it.flags })));
+  ok(P.checkPacks(packs).length === 0 && packs.length === 1 + slices,
+     `打包干净：${items.length} 帧 → ${packs.length} 包（3 条帧头 1 包 + 每片 1 包，一帧不跨包）`);
 }
 
 console.log(`\n${fail ? '❌' : '✅'} spi-panel-code.test: ${pass} 通过 / ${fail} 失败`);

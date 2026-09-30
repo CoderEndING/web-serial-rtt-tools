@@ -552,6 +552,110 @@ console.log('== 9. 两页联动：屏页失能 → 桥页立刻看到 ==');
   ok(/STEP/.test(busLog), '屏页发的 STEP 也补进了桥页日志（切页按 ring 重放）');
 }
 
+// ==================================================================== 9b
+console.log('== 9b. 动画 / 视频：录一段 WebM 当源 → 逐帧整屏刷（假探针对账）==');
+{
+  // ① 源：页面里现录一段（canvas.captureStream + MediaRecorder），不依赖任何外部素材
+  //    🚨 用 `captureStream(0)` + `track.requestFrame()` 手动推帧：自动帧率那条路在
+  //    "画布不在 DOM 里 / 窗口被遮住"时会一帧都录不到（实测只录出 110 字节的裸头）。
+  const rec = await ev(`
+    const cv = document.createElement('canvas'); cv.width = 96; cv.height = 120;
+    cv.style.cssText = 'position:fixed;right:6px;bottom:6px;width:96px;height:120px;z-index:9';
+    document.body.appendChild(cv);
+    const ctx = cv.getContext('2d');
+    const stream = cv.captureStream(0);
+    const track = stream.getVideoTracks()[0];
+    const chunks = [];
+    const rec = new MediaRecorder(stream, { mimeType: 'video/webm' });
+    rec.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
+    const stopped = new Promise(r => { rec.onstop = r; });
+    rec.start();
+    for (let i = 0; i < 10; i++){
+      ctx.fillStyle = i % 2 ? '#ff0000' : '#0000ff';
+      ctx.fillRect(0, 0, 96, 120);
+      ctx.fillStyle = '#00ff00';
+      ctx.fillRect(i * 8, 40, 16, 16);
+      track.requestFrame();
+      await new Promise(r => setTimeout(r, 80));
+    }
+    rec.stop();
+    await stopped;
+    track.stop();
+    cv.remove();
+    const blob = new Blob(chunks, { type: 'video/webm' });
+    window.__animFile = new File([blob], 'selftest.webm', { type: 'video/webm' });
+    return { bytes: blob.size, chunks: chunks.length };`);
+  ok(rec.bytes > 500, `页面里现录了一段 WebM 当测试素材（${rec.bytes} 字节 / ${rec.chunks} 块）`);
+
+  const loaded = await ev(`
+    const input = document.getElementById('pn-anim-input');
+    const dt = new DataTransfer(); dt.items.add(window.__animFile);
+    input.files = dt.files;
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    for (let i = 0; i < 40 && !window.__tools.panel.summary().anim.src; i++) await new Promise(r => setTimeout(r, 100));
+    const s = window.__tools.panel.summary();
+    return { anim: s.anim, videoOn: document.getElementById('pn-anim-video').classList.contains('on'),
+             playDisabled: document.getElementById('pn-anim-play').disabled,
+             info: document.getElementById('pn-anim-info').textContent.slice(0, 80) };`);
+  ok(loaded.anim?.src && /selftest\.webm/.test(loaded.anim.src) && loaded.anim.src.includes('video'),
+     `源已装载：${loaded.anim?.src}`);
+  ok(loaded.videoOn === true && loaded.playDisabled === false, '源片段预览出现、「播放到屏」可用');
+
+  // ② 播放：先定死 AXS15352（档 1）+ 使能，再开播 ~2 s
+  const played = await ev(`
+    document.getElementById('pn-preset').value = 'axs15352';
+    document.getElementById('pn-preset-apply').click();
+    await new Promise(r => setTimeout(r, 900));
+    await window.__tools.spiSession.setEnabled(true, 'bus');
+    await new Promise(r => setTimeout(r, 300));
+    const p = window.__tools.spiSession.mockProbe;
+    p.resetState();
+    document.getElementById('pn-anim-play').click();
+    await new Promise(r => setTimeout(r, 2200));
+    const during = window.__tools.panel.summary().anim;
+    const stopDisabled = document.getElementById('pn-anim-stop').disabled;
+    document.getElementById('pn-anim-stop').click();
+    await new Promise(r => setTimeout(r, 800));
+    const after = window.__tools.panel.summary().anim;
+    return { during, after, stopDisabled,
+             framesOk: p.stats.framesOk, framesErr: p.stats.framesErr, bytesTx: p.stats.bytesTx,
+             info: document.getElementById('pn-anim-info').textContent,
+             log: document.getElementById('pn-log').textContent };`);
+  ok(played.during.running === true && played.stopDisabled === false, '播放中：停止按钮可用');
+  ok(played.after.frames >= 3, `2.2 s 内发了 ${played.after.frames} 帧（整帧 292 帧/次）`);
+  ok(played.after.frames * 292 <= played.framesOk, `假探针执行帧数对账：${played.framesOk} ≥ ${played.after.frames}×292`);
+  ok(played.framesErr === 0, `零错误（frames_err=${played.framesErr}）`);
+  ok(played.after.bytes >= played.after.frames * 142080 * 0.99,
+     `字节对账：${(played.after.bytes / 1024).toFixed(0)} KB ≈ ${played.after.frames} 帧 × 142080 B`);
+  ok(played.after.fps > 0 && played.after.kbs > 0 && played.after.fps < 60, `实测速率合理：${played.after.fps} fps / ${played.after.kbs} KB/s`);
+  ok(played.after.running === false && /停止|上次/.test(played.info) && !/NaN/.test(played.info),
+     `停止后状态行给了总结：「${played.info.slice(0, 70)}」`);
+  ok(/动画开始/.test(played.log) && /动画结束/.test(played.log), '日志里有开始/结束（含实测 fps）');
+  ok(played.after.dropped >= 0, `丢帧计数存在（${played.after.dropped}）—— 发送是节拍器，解码更快就丢`);
+
+  // ③ GIF/PNG 那条路（ImageDecoder）：拿刚画的 canvas 存一张 PNG 当"单帧动画"
+  const img = await ev(`
+    const cv = document.createElement('canvas'); cv.width = 240; cv.height = 296;
+    const ctx = cv.getContext('2d');
+    ctx.fillStyle = '#0f0'; ctx.fillRect(0, 0, 240, 296);
+    ctx.fillStyle = '#f0f'; ctx.fillRect(20, 20, 60, 60);
+    const blob = await new Promise(r => cv.toBlob(r, 'image/png'));
+    const input = document.getElementById('pn-anim-input');
+    const dt = new DataTransfer(); dt.items.add(new File([blob], 'frame.png', { type: 'image/png' }));
+    input.files = dt.files;
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    for (let i = 0; i < 30 && !/png/.test(window.__tools.panel.summary().anim?.src || ''); i++) await new Promise(r => setTimeout(r, 100));
+    const p = window.__tools.spiSession.mockProbe;
+    p.resetState();
+    document.getElementById('pn-anim-play').click();
+    await new Promise(r => setTimeout(r, 1000));
+    document.getElementById('pn-anim-stop').click();
+    await new Promise(r => setTimeout(r, 600));
+    return { anim: window.__tools.panel.summary().anim, framesErr: p.stats.framesErr };`);
+  ok(/frame\.png/.test(img.anim?.src || '') && img.anim.frames >= 2,
+     `ImageDecoder 那条路也通（PNG 单帧循环发了 ${img.anim?.frames} 帧，零错误=${img.framesErr === 0}）`);
+}
+
 // ==================================================================== 10
 console.log('== 10. 收尾 ==');
 {

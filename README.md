@@ -14,7 +14,7 @@
 | **J-Scope 波形** | 类 SEGGER J-Scope 的**变量示波器**：探针自己按固定周期读目标 RAM（HSS，目标固件不用改），数据走 WebUSB 的独立批量端点，网页画多通道波形、带**触发**、导出 CSV、原始包可回放 | **网页侧已可用**：勾「用假探针」或打开 `.jsp` 回放即可体验；真机需要探针固件支持 `HID 0x32`（见 [`docs/scope-page.md`](docs/scope-page.md)） |
 | **烧录器** | .elf/.hex/.bin 写进目标：**零安装 WebUSB**（页面跑 flashloader，擦/写/校验/复位一条龙）或**本地桥 OpenOCD** | 零安装：同上探针；桥：OpenOCD |
 | **SPI/QSPI 桥** | 探针当 USB→SPI/QSPI 主站：通用命令表 / 手写帧 DSL / 回环自检 / 外接 NOR Flash 测试；SCLK、模式、CS 策略、辅助脚与有效电平都在这里配 | akaLinkPro 探针（HID `0x35` 控制面 + bulk 帧流）；方案见 [`docs/spi-bridge-page.md`](docs/spi-bridge-page.md) |
-| **SPI/QSPI 屏** | 把屏点亮那一页：**面板初始化**（贴 C 数组 → 解析成步骤表 → 重放；每个字节可直接改、点开看/改它的 8 个 bit）+ **图片/图案刷屏**（开窗对齐、492 B 切片、两档面板档） | 与「SPI/QSPI 桥」页**共用同一次连接** |
+| **SPI/QSPI 屏** | 把屏点亮那一页：**面板初始化**（贴 C 数组 → 解析成步骤表 → 重放；每个字节可直接改、点开看/改它的 8 个 bit）+ **图片/图案刷屏**（开窗对齐、492 B 切片、两档面板档）+ **动画/视频**（MP4/WebM/GIF 逐帧整屏刷，发送当节拍器） | 与「SPI/QSPI 桥」页**共用同一次连接** |
 | **工程生成** | 拖进 Keil `.uvprojx` 就能生成调试/下载配套文件：`Makefile.jlink`、`jlink_gdb.script`、`Makefile.pyocd`、`Makefile.openocd`（连带 `rtt_logger.py`）、`test_sram.bin`；参数可填可勾，产物**实时预览** | 不需要任何硬件/后端（纯前端生成） |
 
 > 为什么 RTT 要分三种后端：J-Link 与 OpenOCD 都是**本机程序**，网页无权启动进程、也无权开 TCP。
