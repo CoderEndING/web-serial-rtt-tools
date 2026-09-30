@@ -694,14 +694,17 @@ export class SpiPanelView {
 
   // ==================================================================== 动画 / 视频
 
-  /** 选文件 → 建源（视频走 `<video>`+rVFC，GIF/APNG 走 ImageDecoder）*/
+  /** 选文件 → 建源（视频走 `<video>`+rVFC，GIF/APNG/动画 WebP 走 ImageDecoder）*/
   async loadAnim(file){
     if (!file) return;
     try {
       const src = await this.anim.load(file);
+      // ImageDecoder 那条路能吃的其实有 GIF / APNG / 动画 WebP，别一律写成"（GIF）"——
+      // 用户看到「rgb-ramp.webp · 36 帧（GIF）」会以为选错文件了。
+      const ext = (/\.([a-z0-9]+)$/i.exec(src.name || '')?.[1] || 'gif').toUpperCase();
       $('pn-anim-video').classList.toggle('on', src.kind === 'video');
       $('pn-anim-info').textContent = `${src.name} · ${src.w}×${src.h}` +
-        (src.kind === 'gif' ? ` · ${src.frames} 帧（GIF）` : ` · ${(src.duration || 0).toFixed(1)} s（视频）`) +
+        (src.kind === 'gif' ? ` · ${src.frames} 帧（${ext}）` : ` · ${(src.duration || 0).toFixed(1)} s（视频）`) +
         `　→ 开窗后每帧 ${this.geometry().w * this.geometry().h * 2} 字节，整帧刷`;
       this.session.log('g', `动画已就绪：${src.name}（${src.w}×${src.h}）—— 点「播放到屏」开播`, this.tag);
     } catch (e){
@@ -836,6 +839,9 @@ export class SpiPanelView {
       source: this.src ? `${this.src.name} ${this.src.w}×${this.src.h}` : null,
       anim: this.anim ? {
         src: this.anim.src ? `${this.anim.src.name} ${this.anim.src.w}×${this.anim.src.h} ${this.anim.src.kind}` : null,
+        kind: this.anim.src?.kind || null,
+        srcFrames: this.anim.src?.frames ?? null,        // 源自身帧数（GIF/APNG/WebP）；视频为 null
+        srcDuration: this.anim.src?.duration ?? null,    // 视频时长（s）
         running: this.anim.running, frames: this.anim.stat.frames, dropped: this.anim.stat.dropped,
         bytes: this.anim.stat.bytes, fps: +this.anim.stat.fps.toFixed(2), kbs: +this.anim.stat.kbs.toFixed(1),
         lastMs: +this.anim.stat.lastMs.toFixed(1),

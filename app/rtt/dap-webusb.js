@@ -1279,7 +1279,9 @@ export class WebUsbDapProbe {
     const dev = this.device;
     this._usbOff = e => {
       if (e.device !== dev) return;
-      try { dev.close(); } catch { /* 设备可能已经不在了 */ }
+      // close() 返回 Promise：设备已经掉线时它会**异步 reject**（NotFoundError），
+      // 光靠同步 try/catch 拦不住，会在控制台留下未捕获错误 —— 必须接住。
+      try { dev.close()?.catch?.(() => {}); } catch { /* 设备可能已经不在了 */ }
       this._ready = false;
       this._note('探针掉线（被复位/拔插）→ 已关闭本页签的句柄，接口认领随之释放');
     };

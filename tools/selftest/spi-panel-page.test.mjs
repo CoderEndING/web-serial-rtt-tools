@@ -656,6 +656,46 @@ console.log('== 9b. 动画 / 视频：录一段 WebM 当源 → 逐帧整屏刷�
      `ImageDecoder 那条路也通（PNG 单帧循环发了 ${img.anim?.frames} 帧，零错误=${img.framesErr === 0}）`);
 }
 
+// ==================================================================== 9c
+console.log('== 9c. 仓库自带素材（samples/anim）：帧数认得出来 · 不勾循环播完就停 ==');
+{
+  // 🚨 这一条钉的是两个真出现过的坑（2026-10 实测 Chrome 153）：
+  //    ① `await decoder.completed` 之后 `tracks.selectedTrack` 还是 null → frameCount 记成 0，
+  //       状态行写成"0 帧"，用户以为素材坏了；
+  //    ② 帧数 0 时 `_runGif` 里 `i >= 0` 第一帧就成立 → **不勾循环时只播一帧**。
+  //    素材由 tools/dev/make-anim-samples.py 生成，静态服务 8899 的根目录就是仓库根 —— 同源 fetch 得到。
+  const gif = await ev(`
+    const r = await fetch('samples/anim/bars-sweep-240x296.gif').catch(() => null);
+    if (!r || !r.ok) return { skip: r ? 'HTTP ' + r.status : '取不到' };
+    const b = await r.blob();
+    const input = document.getElementById('pn-anim-input');
+    const dt = new DataTransfer(); dt.items.add(new File([b], 'bars-sweep-240x296.gif', { type: 'image/gif' }));
+    input.files = dt.files;
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    for (let i = 0; i < 60 && !/bars-sweep/.test(window.__tools.panel.summary().anim?.src || ''); i++) await new Promise(r => setTimeout(r, 100));
+    return { bytes: b.size, anim: window.__tools.panel.summary().anim,
+             info: document.getElementById('pn-anim-info').textContent };`);
+  if (gif.skip){
+    console.log(`  ⚠ 跳过：本地静态服务里没有 samples/anim（${gif.skip}）—— 先跑 make samples-anim`);
+  } else {
+    ok(gif.anim?.srcFrames === 50, `GIF 帧数认得出来：srcFrames=${gif.anim?.srcFrames}（素材 50 帧 / ${gif.bytes} B）`);
+    ok(/50 帧/.test(gif.info), `状态行如实写帧数：「${gif.info.slice(0, 64)}」`);
+    const once = await ev(`
+      const loop = document.getElementById('pn-anim-loop');
+      loop.checked = false; loop.dispatchEvent(new Event('change', { bubbles: true }));
+      const p = window.__tools.spiSession.mockProbe; p.resetState();
+      document.getElementById('pn-anim-play').click();
+      for (let i = 0; i < 120; i++){ await new Promise(r => setTimeout(r, 100)); if (!window.__tools.panel.summary().anim.running) break; }
+      const a = window.__tools.panel.summary().anim;
+      loop.checked = true; loop.dispatchEvent(new Event('change', { bubbles: true }));
+      return { a, framesErr: p.stats.framesErr, info: document.getElementById('pn-anim-info').textContent };`);
+    ok(once.a.running === false && once.a.frames >= 40,
+       `不勾循环：播完自己停，共 ${once.a.frames} 帧（曾经只播 1 帧）`);
+    ok(once.framesErr === 0, `零错误（frames_err=${once.framesErr}）`);
+    ok(!/NaN/.test(once.info), `停止后状态行没有 NaN：「${once.info.slice(0, 64)}」`);
+  }
+}
+
 // ==================================================================== 10
 console.log('== 10. 收尾 ==');
 {

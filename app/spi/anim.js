@@ -124,12 +124,19 @@ export class PanelAnim {
       if (typeof ImageDecoder === 'undefined') throw new Error('这个浏览器没有 ImageDecoder（GIF 播放需要 Chrome/Edge 94+）——换成 MP4/WebM 也行');
       const dec = new ImageDecoder({ data: await file.arrayBuffer(), type: file.type || 'image/gif' });
       await dec.completed;
-      const track = dec.tracks.selectedTrack;
+      /**
+       * 🚨 `completed` 只保证"数据收齐了"，**不等于轨道信息就绪**：这时
+       * `tracks.selectedTrack` 很可能还是 null / `frameCount` 还是 0。实测（Chrome 153）：
+       * 不 await `tracks.ready` 的话，一个 60 帧的 GIF 会被记成 **0 帧**，
+       * 于是「循环」没勾时 `_runGif` 里 `i >= 0` 立刻成立 → **只播一帧就收工**。
+       */
+      if (dec.tracks?.ready) await dec.tracks.ready;
+      const track = dec.tracks.selectedTrack || dec.tracks?.[0] || null;
       const first = await dec.decode({ frameIndex: 0 });
       const w = first.image.displayWidth, h = first.image.displayHeight;
       first.image.close();
       this.src = { kind: 'gif', name, w, h, frames: track?.frameCount ?? 0, dec };
-      this.log('i', `动画源：${name}（GIF/APNG · ${w}×${h} · ${this.src.frames} 帧）`);
+      this.log('i', `动画源：${name}（逐帧图像 GIF/APNG/WebP · ${w}×${h} · ${this.src.frames} 帧）`);
     } else if (this.video){
       const v = this.video;
       const url = URL.createObjectURL(file);
@@ -281,15 +288,25 @@ export class PanelAnim {
 
   async _runGif(){
     const dec = this.src.dec;
+    const total = dec.tracks?.selectedTrack?.frameCount || this.src.frames || 0;
     let i = 0;
     while (!this._stop){
-      const { image } = await dec.decode({ frameIndex: i });
+      let image;
+      try {
+        ({ image } = await dec.decode({ frameIndex: i }));
+      } catch (e){
+        // 越界 = 全片播完了（有的源浏览器给不出 frameCount，只能靠这一步兜底）。
+        // i === 0 还解不出来 = 这个文件根本没法播，别在这儿空转。
+        if (!this.loop || i === 0) break;
+        i = 0;
+        continue;
+      }
       if (this._stop){ image.close(); break; }
       const px = this._grab(image);
       image.close();
       await this._sendOne(px);
       i++;
-      if (i >= (dec.tracks.selectedTrack?.frameCount ?? 0)){
+      if (total && i >= total){
         if (!this.loop) break;
         i = 0;
       }

@@ -5,3 +5,9 @@ tools/fixtures/gen/** -text
 tools/fixtures/gen/mdk-arm/test_sram.bin binary
 # DWARF 解析的对账基线是**真 ELF**（二进制）：同样绝不能被换行转换碰（碰了段表/偏移全废）
 tools/fixtures/dwarf/** binary
+# 屏页「动画 / 视频」的示例素材：二进制容器，换行转换会直接毁掉它（README.md 不在此列，正常当文本处理）
+samples/anim/*.gif binary
+samples/anim/*.apng binary
+samples/anim/*.webp binary
+samples/anim/*.mp4 binary
+samples/anim/*.webm binary

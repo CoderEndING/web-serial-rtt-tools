@@ -364,7 +364,8 @@ tools/
   fixtures/gen/         对账基线：Python 工具（uvprojx2cmake.py）对真实工程的原始产物，逐字节比对用
   fixtures/dwarf/       DWARF 解析基线：两份**真 ELF**（scope 靶子固件 + RTT 吞吐固件）
   la/                   逻辑分析仪：kingst_la.py（KingstVIS Socket API 单文件工具）+ SWD 流量发生器
-  dev/                  extract-algo.py（从 pyOCD 抽 flash 算法，别手抄 base64）、help.ps1
+  dev/                  extract-algo.py（从 pyOCD 抽 flash 算法，别手抄 base64）、help.ps1、
+                        make-anim-samples.py（造屏页动画/视频示例素材，`make samples-anim`）
   target-firmware/
     stm32f103/          STM32F103 测试固件（UART + RTT，含 SEGGER RTT 源码）
     stm32f103_rtt_speed/      F103 RTT 吞吐测试（死循环灌 hello world）；
@@ -379,6 +380,10 @@ docs/                   后端配置与排障；逻辑分析仪攻略.md（含 L
                         scope-page.md（J-Scope 波形页方案）；真机基准测试.md（**F103 全场景基线与前置**）；
                         真机基准测试-hpm.md（**HPM6800EVK / RISC-V 基线与 RTT Viewer 的 RISC-V 通路**）；
                         rtt-cdc.md（RTT 转发 + 4.5 节「.crswap 与落盘时机」）
+samples/
+  anim/                 屏页「动画 / 视频」的示例素材：6 个文件（GIF/APNG/动画 WebP/MP4/WebM），
+                        每个都写明"看什么"（彩条·弹跳球·色相·帧号·棋盘·立方体），
+                        `make samples-anim` 重造；用法与两条口径坑见 samples/anim/README.md
 ```
 
 ## 自测（不需要硬件也能跑一部分）

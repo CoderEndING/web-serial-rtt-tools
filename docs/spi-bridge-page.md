@@ -788,7 +788,7 @@ await send('Emulation.clearDeviceMetricsOverride');   // 脚本收尾**必须**�
 | 一帧的帧序列 | `frameItems()`：`CASET/RASET` +〔档 1 的 RAMWR〕+ 像素片 —— **与「刷这一张」同一条路**；"帧头"三条按窗口缓存复用 |
 | UI | 图片/图案刷屏卡片底部一行：选择文件 / 播放到屏 / 停止 / 循环 + 源片段预览 + 状态行（实测 fps、KB/s、最后帧 ms、丢帧） |
 | 视频源 | `<video>` + `requestVideoFrameCallback`（原生解码、硬件加速，零依赖） |
-| 动图源 | `ImageDecoder`（GIF/APNG/PNG，逐帧解码 —— 发送完一帧再解下一帧，天然不积压） |
+| 动图源 | `ImageDecoder`（GIF / APNG / 动画 WebP，逐帧解码 —— 发送完一帧再解下一帧，天然不积压） |
 
 **四条设计纪律**（都写进 `anim.js` 的注释，自测 §9b 钉住）：
 1. **发送是节拍器**：解码比发送快就**丢帧**（`MAX_QUEUE = 4`，队列满连抓都不抓 ⇒ `stat.dropped`），
@@ -808,6 +808,50 @@ await send('Emulation.clearDeviceMetricsOverride');   // 脚本收尾**必须**�
 
 **下一步（想做更快时，按性价比）**：① **局部开窗**（每帧只发与上一帧不同的包围盒，按面积比提升帧率）；
 ② 在飞写 8→16；③ 60/75 MHz 档（1 线档有收益）；④ 接 TE 引脚"等 TE 再发下一帧"消撕裂。
+
+---
+
+## 11.9 示例素材 `samples/anim/`（2026-09-30：六个"看什么"明确的文件 + 顺手修两个真 bug）
+
+用户："有没有视频和 gif 文件？帮我造几个，放到目录下。" —— 仓库里原本**一个都没有**（`docs/shots/` 只有截图），
+所以补了一套**图案本身带预期**的素材，屏上出问题时能一眼归因：
+
+```powershell
+make samples-anim        # = python tools/dev/make-anim-samples.py → samples/anim/
+```
+
+| 文件 | 格式 | 看什么 |
+|---|---|---|
+| `bars-sweep-240x296.gif` | GIF · 50 帧 | 彩条顺序（R/B 交换立刻露馅）+ 11 级灰阶 + 横扫白线直不直 |
+| `ball-grid-240x296.gif` | GIF · 60 帧 | 弹跳球带拖尾：丢帧 = 跳格，撕裂 = 圆边断开 |
+| `rgb-ramp-240x296.webp` | 动画 WebP · 36 帧（无损） | 色相平移 + 16 级灰阶：RGB565 色深、字节序 |
+| `count-cube-240x296.apng` | APNG · 50 帧（无损） | 帧号连续 + 秒针：帧序/丢帧；APNG 走 ImageDecoder |
+| `checker-scroll-360x360.webm` | WebM/VP9 · 3 s | 棋盘斜移 + 红边框 + 蓝十字：撕裂/卷屏/开窗缺边 |
+| `cube-clock-360x360.mp4` | MP4/H.264 · 4 s | 旋转立方体：流畅度上限（AXS15352 ~20 fps） |
+
+生成器 `tools/dev/make-anim-samples.py` 只用 Pillow + numpy + imageio-ffmpeg（**自带 ffmpeg 7.1，本机没装 ffmpeg 也能编 H.264/VP9**），
+每个素材的"看什么"写在函数注释里；中文说明烧帧上时优先用系统 `msyh.ttc`（Pillow 默认字体没有 CJK 字形，会画成豆腐块）。
+合计 ~1.2 MB，**不进 Pages**（部署只拷 `index.html app docs`），素材说明见 `samples/anim/README.md`。
+
+> **口径坑（写进 README）**：GIF 是按**链路速度**播的（发送才是节拍器），不按文件里的帧时长 ——
+> 2 秒的 GIF 在假探针上 0.2 秒就播完；要判断"作者定义的时长/流畅度"用 MP4/WebM（`<video>` 那条路按真实时间播）。
+
+拿真页面逐个装载这 6 个文件（CDP `DOM.setFileInputFiles`，走用户真实路径）时**逮到两个真 bug**：
+
+1. **GIF/APNG 帧数记成 0 → 不勾"循环"时只播一帧**。`ImageDecoder` 的 `completed` 只保证**数据收齐**，
+   这时 `tracks.selectedTrack` 还是 `null`：`src.frames` 记成 0 → 状态行写"0 帧"，
+   且 `_runGif` 里 `i >= (frameCount ?? 0)` 第一帧就成立 → 直接收工。
+   修法：`await dec.tracks.ready`（拿不到就退 `tracks[0]`），`_runGif` 再用"解码越界"兜底判播完（`anim.js`）。
+   自测 §9c 钉住：素材 50 帧 → `summary().anim.srcFrames === 50`、不勾循环**播满 50 帧自己停**。
+2. **探针掉线时控制台留未捕获错误**：`navigator.usb` 的 `disconnect` 回调里 `dev.close()` 返回 Promise，
+   设备已经不在了会**异步 reject**（`NotFoundError: Failed to execute 'close'`），同步 `try/catch` 拦不住
+   → 改成 `dev.close()?.catch?.(() => {})`（`dap-webusb.js` 的 `_watchUsb`）。
+
+顺带把 `summary().anim` 补上 `kind` / `srcFrames` / `srcDuration`（源自身元数据，与"已发送帧数"分开；
+脚本/自测不用再去解析状态行文本），状态行里的"（GIF）"也改成按扩展名显示 —— 动画 WebP 别再写成 GIF。
+
+**自测**：`spi-panel-page` 由 97 → **102 通过 / 0 失败**（新增 §9c 五条）；真页面装载 6/6 成功、三段真播通过、
+页面零未捕获错误（`tmp/check-anim-samples.mjs`）。
 
 ---
 

@@ -78,6 +78,29 @@ for (let i = 0; i < 60; i++){
 }
 if (!ready) throw new Error('页面没起来（__tools.scope 不存在）');
 
+// 🚨 目标类型是**用户设置**：`#sc-target` 与 store 的 `rtt.target` 双向绑定（change → 写 localStorage），
+//    切页时页面还会按 store 再同步一次（view.js 的 onShow）。于是"上一轮跑到 §14/§15 切到 RISC-V/JTAG"
+//    会**跨次污染**：再跑本套件时一加载就是 RISC-V，读计划按 JTAG 的实测值算（单字 3.17 µs 而不是
+//    ARM 快路径 1.55 µs），§12 那几条断言就会莫名其妙地飘（2026-09-30 实测：91 通过 / 3 失败，非偶发）。
+//    ⚠️ 必须**派发 change**（bind 挂在事件上）—— 只改 `t.value` 再调 applyTargetType() 不写回 store，
+//       之后任何一次切页都会把它同步回 RISC-V，等于没钉住。
+//    本套件的基准假设是 SWD：开跑先钉死，别依赖浏览器里前一晚留下的状态。
+{
+  const pinned = await ev(`
+    const KEY = 'serial-rtt-tools:v1';
+    const stored = () => { try { return JSON.parse(localStorage.getItem(KEY) || '{}')['rtt.target']; } catch { return null; } };
+    const t = document.getElementById('sc-target');
+    const before = { sel: t ? t.value : '(没有 sc-target)', stored: stored() };
+    if (t && (before.sel !== 'swd' || before.stored !== 'swd')){
+      t.value = 'swd';
+      t.dispatchEvent(new Event('change', { bubbles: true }));
+      await new Promise(r => setTimeout(r, 250));
+    }
+    return { before, after: { sel: t?.value, stored: stored() } };`);
+  ok(pinned.after.sel === 'swd' && pinned.after.stored === 'swd',
+     `基准目标类型钉成 SWD 并落盘（浏览器里遗留：下拉 ${pinned.before.sel} / store ${pinned.before.stored}）`);
+}
+
 console.log('== 1. 标签页与初始状态 ==');
 {
   const s = await ev('return window.__tools.summary();');
