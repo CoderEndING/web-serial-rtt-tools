@@ -132,6 +132,10 @@ console.log('== 2. 读 GRAM 的计划：切片 / 续读 / CS_HOLD / 地址递增
     ok(winQ[0].type === P.T.XFER && winQ[1].type === P.T.XFER && winQ[0].payload[0] === 0x02 &&
        wdv(0).getUint32(8, true) === (0x2a << 8) && wdv(1).getUint32(8, true) === (0x2b << 8),
        `档 2 读回的开窗 = 两条 XFER（02 + 00 2A 00 / 00 2B 00），不走 STEP`);
+    // 开窗的 opcode 要跟面板档（qspi_wr_opcode）走，而不是硬编码 0x02
+    const alt = R.gramReadPlan({ geometry: G.st77916, profile: 2, x0: 0, y0: 0, x1: 9, y1: 9,
+                                 qspi: { opcode: 0x0b, addrLen: 3, dummy: 1, lines: 1, wrOpcode: 0x05 } });
+    ok(alt.chunks[0].items[0].payload[0] === 0x05, '开窗 opcode 跟着 qspi.wrOpcode（这里 0x05）走');
   }
   const addrOf = c => new DataView(c.items[c.items.length - 1].payload.buffer,
                                    c.items[c.items.length - 1].payload.byteOffset,

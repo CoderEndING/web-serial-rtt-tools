@@ -823,7 +823,9 @@ export class SpiPanelView {
       lines: +$('pn-read-lines').value || 1,
       dcs: { ramrdCmd: hxOf($('pn-read-ramrd').value, 0x2e), contCmd: hxOf($('pn-read-cont').value, 0x3e) },
       qspi: { opcode: hxOf($('pn-read-opcode').value, 0x0b), addrLen: Math.max(0, Math.min(4, +$('pn-read-addrlen').value || 0)),
-              baseAddr: hxOf($('pn-read-addr').value, 0x2e00) },
+              baseAddr: hxOf($('pn-read-addr').value, 0x2e00),
+              // 开窗命令用的 opcode 跟着面板档走（与像素写侧同一个值），别硬编码 0x02
+              wrOpcode: parseHexByteSafe($('pn-qspiwr').value, 0x02) },
     };
   }
 

@@ -48,6 +48,7 @@ export const REG_READS = [
  *   （写侧同族：§8.8.5.1 的 0x02 / 0xA2 / 0x32 / 0x38 + `CMD : 0x00XX00`。）*/
 export const QSPI_READ_DEFAULT = {
   opcode: 0x0b,      // 读命令相位（FASTREAD）
+  wrOpcode: 0x02,    // 命令写 opcode —— 档 2 的**开窗命令**用它（面板档里的 qspi_wr_opcode）
   addrLen: 3,        // 地址字节数（QSPI 屏惯例 3）
   dummy: 1,          // dummy 周期（1 = 1 字节；0 = 不加）
   lines: 1,          // 读相位线数：多数屏读只走 1 线（QSPI 读要 4 线的话填 4）
@@ -165,6 +166,7 @@ export function gramReadPlan(o = {}){
   const q = { ...QSPI_READ_DEFAULT, ...(o.qspi || {}) };
 
   // 开窗：档 0/1 走 STEP（固件按档展开）；档 2 **直接发 XFER**（固件的 STEP 展开编码是错的，见 §11.12）
+  // opcode 用面板档里的"命令写 opcode"（qspi_wr_opcode，默认 0x02），与像素写侧同一个来源
   const win = windowItems({ x0, x1, y0, y1 }, g,
                            { profile: o.profile, qspiWrOpcode: q.wrOpcode, qspiAddrBytes: q.addrLen });
   const chunks = [];
