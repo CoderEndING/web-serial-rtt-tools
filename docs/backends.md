@@ -79,6 +79,23 @@ ESP-IDF 自带那份 OpenOCD（`~\.espressif\tools\openocd-esp32\v0.12.0-esp32-*
 - 官方 CLI 可用参数（`JLinkRTTLogger.exe -?`）：`-Device -If -Speed -USB -IP -RTTAddress -RTTSearchRanges -RTTChannel -JLinkScriptFile <OutFilename>`。
 - J-Link **没有 WebUSB 通路**（协议不开放），想用 J-Link 就必须起桥。
 
+### 3.4.1 退出清理：Ctrl+C 必须把子进程一起收掉（2026-09-30 补）
+
+`Windows 上父进程退出不会带走子进程` —— 桥一退，`openocd.exe` / `JLinkGDBServerCL.exe` 会变成
+**孤儿继续占着探针**，之后网页再连就是"被占 / 连不上"（README 里那条"首连失败十有八九是探针被占"，
+一大半根因就在这）。老代码只有"网页断开 WebSocket"那条路会 `backend.stop()`，Ctrl+C 走默认退出、什么都不做。
+
+现在：`SIGINT / SIGTERM / SIGHUP` 三个信号都挂上 → `cleanupAndExit()`（`stop()` 后端 → 关闭 WS（1001）
+告诉网页 → 250 ms 让 taskkill 落地 → 退出），`process.on('exit')` 再兜一次底；两个后端的 `stop()`
+统一用 `taskkill /PID x /T /F`（连子孙一起收；非 Windows 上退回 `child.kill()`），J-Link 还会删掉
+logger 的 `%TEMP%` 日志。横幅里也写明了这一点。
+
+自测：`node tools/selftest/bridge-lifecycle.test.mjs`（离线，进 `make test`）—— 15 项：
+`cleanupAndExit()` 只清一次 + 真的调 `exit(0)`、两个后端的 `stop()` **用真子进程**验"确实退出"、
+logger 临时文件被删、以及"直接跑桥时横幅确实讲了退出行为"（证明主路径挂上了钩子）。
+⚠️ Windows 上没法给子进程发真 Ctrl+C（SIGINT 只能由控制台产生），所以是"单测处理函数 + 真收真子进程"
+两条合起来覆盖，这点在测试文件里注明了。
+
 ### 3.5 烧录（JLink.exe Commander）
 
 `flash(backend=jlink)` 用官方 `JLink.exe`：`erase → loadfile → verify → r`，烧完不自动重启 RTT。

@@ -66,6 +66,7 @@ test:
 	$(NODE) tools/selftest/dwarf.test.mjs
 	$(NODE) tools/selftest/scope-proto.test.mjs
 	$(NODE) tools/selftest/bridge-origin.test.mjs
+	$(NODE) tools/selftest/bridge-lifecycle.test.mjs
 	$(NODE) tools/selftest/flash-image.test.mjs
 	$(NODE) tools/selftest/hpm-flash.test.mjs
 	$(NODE) tools/selftest/spi-proto.test.mjs

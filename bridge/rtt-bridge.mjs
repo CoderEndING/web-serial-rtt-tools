@@ -463,7 +463,17 @@ class OpenOcdBackend {
 
   stop(){
     try { this.sock?.destroy(); } catch {}
-    try { if (this.child) this.child.kill(); } catch {}
+    /**
+     * 子进程用 `taskkill /T /F` 收（和 J-Link 那条路一致）：Windows 上 `child.kill()` 只
+     * 终止它自己，而 taskkill /T 连子孙一起收 —— OpenOCD 里那些 adapter 驱动、还有
+     * "桥被 Ctrl+C"这种父进程先死的场景，靠它才收得干净。非 Windows 上 taskkill 不存在，
+     * 会抛 ENOENT，被下面的 catch 吞掉、退回 `child.kill()`。
+     */
+    if (this.child){
+      const pid = this.child.pid;
+      try { spawn('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore' }); } catch {}
+      try { this.child.kill(); } catch {}
+    }
     this.sock = null; this.child = null;
   }
 }
@@ -881,6 +891,45 @@ const server = http.createServer((req, res) => {
 let backend = null;      // 当前后端（OpenOCD 或 J-Link）
 let client = null;       // 当前 WS 连接（单客户端足够）
 
+/* ============================ 退出清理 ============================ */
+/**
+ * **Ctrl+C / 关窗口 / 被 kill 时，必须把调试器子进程一起收掉。**
+ *
+ * 🚨 为什么：Windows 上父进程退出**不会**带走子进程 —— 桥一退，OpenOCD / JLinkGDBServerCL
+ *    就变成孤儿继续占着探针，之后网页/OpenOCD 再连就是"被占 / 连不上"（本机那条
+ *    "首连失败十有八九是探针被占（孤儿 OpenOCD）"的经验，有一大半就是这么来的）。
+ *    老代码只有"网页断开 WebSocket"那条路会 `backend.stop()`，Ctrl+C 走的是默认退出，什么都不做。
+ *
+ * 做法：三个终止信号都挂上 → `backend.stop()`（OpenOCD 走 taskkill /T /F，J-Link 还会删 logger
+ * 的 %TEMP% 日志）→ 给子进程 250 ms 落地 → 退出；`process.on('exit')` 再兜一次底。
+ *
+ * @param {string} sig 触发信号（只为日志）
+ * @param {{be?:object, exit?:Function, delayMs?:number, log?:Function}} [opts] 测试用注入点
+ */
+export function cleanupAndExit(sig, opts = {}){
+  const be = opts.be !== undefined ? opts.be : backend;
+  const exit = opts.exit || (c => process.exit(c));
+  const delayMs = opts.delayMs ?? 250;
+  const log = opts.log || (s => console.log(s));
+  if (cleanupStarted) return false;               // 两个信号连着来（Ctrl+C 连按）只清一次
+  cleanupStarted = true;
+  log(`\n[退出] 收到 ${sig}：先把调试器子进程收掉（不然会留下孤儿占着探针）…`);
+  try { be?.stop(); } catch (e){ log('[退出] 收子进程出错：' + (e?.message || e)); }
+  if (be === backend) backend = null;
+  try { client?.close(1001); } catch {}      // 告诉网页"桥要走了"，免得它以为还能接着用
+  // 给 taskkill / 子进程一点落地时间，再退；250 ms 足够，也不至于让用户觉得"卡住"
+  setTimeout(() => exit(0), delayMs);
+  return true;
+}
+let cleanupStarted = false;                      // "只清一次"的进程级开关
+function installExitHooks(){
+  for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']){
+    try { process.on(sig, () => cleanupAndExit(sig)); } catch {}
+  }
+  // 正常走完 / 被别的路径 exit 时兜底（exit 回调里只能干同步活，child.kill 是同步的）
+  process.on('exit', () => { try { backend?.stop(); } catch {} });
+}
+
 /* ============================ WebSocket 准入 ============================ */
 /** 默认放行的 Origin。**这不是可选项**：桥只监听 127.0.0.1 挡不住浏览器 ——
  *  任意网页都能向 ws://127.0.0.1:17321/ws 发起跨源 WebSocket（CSWSH），
@@ -1147,16 +1196,35 @@ async function handle(conn, text, log){
   }
 }
 
-server.listen(args.port, args.host, () => {
-  console.log(`\nrtt-bridge ${VERSION}`);
-  console.log(`  网页地址 : http://${args.host}:${args.port}/    （同源打开 → 没有本地网络访问权限提示）`);
-  console.log(`  WebSocket: ws://${args.host}:${args.port}/ws`);
-  console.log(`  静态根   : ${args.root}`);
-  console.log(`  目标配置 : ${args.target || '(无，等网页指定)'}`);
-  if (args.jlinkAttach){
-    console.log(`  J-Link 流: 连 127.0.0.1:${args.jlinkPort}（先用 JLinkRTTViewer 把 RTT 会话开起来）`);
-  } else {
-    console.log(`  OpenOCD  : ${args.attach ? '复用已在跑的（--attach）' : findOpenOcd()}`);
-  }
-  console.log('\n按 Ctrl+C 退出\n');
-});
+/**
+ * 只有"被当成脚本直接跑"时才起服务 + 挂退出钩子。
+ * 为什么加这道门：自测要 `import` 这个模块去测 `cleanupAndExit()` 与两个后端的 `stop()`
+ * （收子进程的行为必须用**真的子进程**验），import 时当然不能顺手把端口占了、还挂一堆 signal。
+ * 判定用 `process.argv[1]` 与 `import.meta.url` 比 —— 直接 `node rtt-bridge.mjs` 时为真。
+ */
+const isMain = (() => {
+  try {
+    const entry = process.argv[1] ? path.resolve(process.argv[1]) : '';
+    return !!entry && entry === path.resolve(fileURLToPath(import.meta.url));
+  } catch { return true; }        // 判不出来就按老行为（直接跑）
+})();
+
+if (isMain){
+  installExitHooks();
+  server.listen(args.port, args.host, () => {
+    console.log(`\nrtt-bridge ${VERSION}`);
+    console.log(`  网页地址 : http://${args.host}:${args.port}/    （同源打开 → 没有本地网络访问权限提示）`);
+    console.log(`  WebSocket: ws://${args.host}:${args.port}/ws`);
+    console.log(`  静态根   : ${args.root}`);
+    console.log(`  目标配置 : ${args.target || '(无，等网页指定)'}`);
+    if (args.jlinkAttach){
+      console.log(`  J-Link 流: 连 127.0.0.1:${args.jlinkPort}（先用 JLinkRTTViewer 把 RTT 会话开起来）`);
+    } else {
+      console.log(`  OpenOCD  : ${args.attach ? '复用已在跑的（--attach）' : findOpenOcd()}`);
+    }
+    console.log('\nCtrl+C 退出（会把 OpenOCD / J-Link 子进程一起收掉，不留孤儿占探针）\n');
+  });
+}
+
+/** 自测用的出口：两个后端（收子进程的行为要真验）+ 退出清理逻辑 */
+export { OpenOcdBackend, JLinkBackend };

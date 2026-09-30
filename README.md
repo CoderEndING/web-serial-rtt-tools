@@ -153,6 +153,8 @@ make hw-campaign-hpm ARGS="--cycles=1 --alt=1"   # 冒烟
 2. **串口**：点「选择…」在浏览器弹框里选一次 COM 口（浏览器规定必须手动选一次），然后「连接」。
 3. **RTT（零安装）**：RTT Viewer → 后端选 `WebUSB · CMSIS-DAP` → 「连接探针」→ 它会自动扫描 RAM 找到 `SEGGER RTT` 控制块（换芯片先在「RTT 控制块 → 芯片」选系列，RAM 范围自动带出；也可以先「载入 ELF…」用符号直接定位，更快）。
 4. **RTT（J-Link / OpenOCD）**：双击 `bridge/start-bridge.bat`，页面里后端选「本地桥 · OpenOCD」→ 选目标芯片（常用 STM32 系列已内置；其它芯片选「自定义 cfg…」填 cfg 文件）→ 连接。
+   桥要 Node 18+（零 npm 依赖）；**退出请用 Ctrl+C**（或先关网页）—— 桥会把 OpenOCD / J-Link 子进程一起收掉，
+   不会留下孤儿占着探针（这正是"下次连不上"最常见的根因）。
 
 串口和 RTT 可以**同时**用（一个走 USB CDC、一个走探针）。
 
@@ -320,6 +322,7 @@ app/
   ui/                   tabs / toast / dom 小工具
 bridge/
   rtt-bridge.mjs        Node 单文件、零 npm 依赖：静态托管 + WebSocket + OpenOCD/J-Link 后端
+                        （Ctrl+C / 关窗口会把调试器子进程一起收掉，不留孤儿占探针）
   bridge.config.json    目标配置（stm32f103 / esp32s31 / …）
   start-bridge.bat|sh   双击启动
 tools/
