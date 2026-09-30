@@ -108,7 +108,9 @@ export class SpiPanelView {
     $('pn-prof-get').addEventListener('click', () => this.wrap(() => s.loadProfile({ tag: this.tag })));
     $('pn-prof-set').addEventListener('click', () => this.applyProfile());
     $('pn-preset').addEventListener('change', () => this.fillPresetNote());
-    /* 屏型号落 store：桥页的「引脚分配图」要拿它当**未配置时的默认脚位**（先接线后配置的人靠这个）。*/
+    /* 屏型号落 store：刷新/重开标签页后还停在上次选的那块屏。
+       （引脚图的默认脚位**不再**依赖它 —— 那边用的是固定表 `protocol.AUX_DEFAULT`，
+        只按配置值覆盖；曾因为跟着屏型号走而出现"DC 消失 / BL 指到不能用的 PA10"。）*/
     store.bind($('pn-preset'), 'panel.preset');
     this.fillPresetNote();
     $('pn-preset-apply').addEventListener('click', () => this.applyPreset());
