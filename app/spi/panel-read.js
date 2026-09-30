@@ -12,7 +12,7 @@
  *
  * 档 2（QSPI，如 ST77916）—— 跟 **SPI Flash 一模一样的形状**：
  *   一条 XFER 里带 命令相位（读 opcode，默认 `03h`）+ 24 bit 地址 + dummy + 读 N 字节，
- *   地址随片递增（RAMRD 的地址 = `(2Eh << 16)`，与写侧的 `(2Ch << 16)` 同一个编码）。
+ *   地址随片递增（RAMRD 的地址 = `0x002E00` —— `00 2E 00`，与写侧 `0x002C00` 同一个编码）。
  *   读 opcode / 地址 / dummy / 线数**都可配**（厂家之间不统一，见下方 `QSPI_READ_DEFAULT`）。
  *
  * 参考：`E:\Datasheets\05_显示_与_MIPI\03_LCD_Driver\01_sitronix\`（ST7796S / ST77916 等）。
@@ -41,13 +41,18 @@ export const REG_READS = [
   { name: '自定义…', cmd: null, rx: 1 },
 ];
 
-/** QSPI 读的默认时序（可改：厂家之间不统一，`03h` 是 SPI Flash 那套的常规读）*/
+/** QSPI 读的默认时序 —— 照 **ST77916 数据手册 §8.8.5.2**（Read command mode）：
+ *   "host needs to send 1 byte of write command instruction (**0x0B**). Then host sends 3 bytes of
+ *    AD[23:0] which is composed of 1 byte of 0x00, **1 byte of command address** and 1 byte of 0x00"
+ *   读 opcode 是 **0x0B（FASTREAD）**，不是 SPI Flash 那套 0x03；地址同样是 `00 XX 00`（命令在中间字节）。
+ *   （写侧同族：§8.8.5.1 的 0x02 / 0xA2 / 0x32 / 0x38 + `CMD : 0x00XX00`。）*/
 export const QSPI_READ_DEFAULT = {
-  opcode: 0x03,      // 读命令相位
-  addrLen: 3,        // 地址字节数（与写侧的 24 bit 一致）
+  opcode: 0x0b,      // 读命令相位（FASTREAD）
+  addrLen: 3,        // 地址字节数（QSPI 屏惯例 3）
   dummy: 1,          // dummy 周期（1 = 1 字节；0 = 不加）
   lines: 1,          // 读相位线数：多数屏读只走 1 线（QSPI 读要 4 线的话填 4）
   addrQuad: false,   // 地址相位是否 4 线
+  baseAddr: 0x2e00,  // RAMRD(2Eh) 的地址 = 0x00 2E 00
 };
 
 /** 档 1 的默认时序 */
@@ -100,7 +105,7 @@ export function regReadItems(o = {}){
                  TC.CMD_EN | TC.ADDR_EN | (q.addrQuad ? TC.ADDR_QUAD : 0);
     return { rx, label, items: [{
       type: T.XFER,
-      payload: xferPayload({ cmd: q.opcode, tcfg, addrLen: q.addrLen, addr: (cmd << 16) >>> 0,
+      payload: xferPayload({ cmd: q.opcode, tcfg, addrLen: q.addrLen, addr: ((cmd << 8) >>> 0),
                              dummy: q.dummy, tx: new Uint8Array(0), rxLen: rx }),
       flags: F.RSP, label,
     }] };
@@ -125,7 +130,7 @@ export function regReadItems(o = {}){
                TC.CMD_EN | TC.ADDR_EN | (q.addrQuad ? TC.ADDR_QUAD : 0);
   return { rx, label, items: [{
     type: T.XFER,
-    payload: xferPayload({ cmd: q.opcode, tcfg, addrLen: q.addrLen, addr: (cmd << 16) >>> 0,
+    payload: xferPayload({ cmd: q.opcode, tcfg, addrLen: q.addrLen, addr: ((cmd << 8) >>> 0),
                            dummy: q.dummy, tx: new Uint8Array(0), rxLen: rx }),
     flags: F.RSP, label,
   }] };
@@ -167,16 +172,34 @@ export function gramReadPlan(o = {}){
     const last = off + n >= total;
     let items;
     if (o.profile === 2){
-      const tcfg = (q.lines === 4 ? TC.LINES_4 : q.lines === 2 ? TC.LINES_2 : TC.LINES_1) |
-                   TC.CMD_EN | TC.ADDR_EN | (q.addrQuad ? TC.ADDR_QUAD : 0);
-      const addr = (((q.baseAddr ?? (dcs.ramrdCmd << 16)) >>> 0) + off) >>> 0;
-      items = [{
-        type: T.XFER,
-        payload: xferPayload({ cmd: q.opcode, tcfg, addrLen: q.addrLen, addr, dummy: q.dummy,
-                               tx: new Uint8Array(0), rxLen: n }),
-        flags: F.RSP, label: `读片 ${idx} @0x${addr.toString(16)}（${n} B）`,
-      }];
-      if (idx === 0) items = [...win, ...items];
+      /**
+       * QSPI 读也是**一条命令 + 连续读**（与写侧、与 ESP-IDF 的做法一致）：
+       *   · 首片：`读 opcode(0Bh) + AD[23:0]=00 2E 00 + dummy` 然后读 n 字节；
+       *   · 后续片：**纯数据相位**（不带 cmd/addr），CS 一路保持到末片 —— 面板的读地址计数器自己走。
+       *   每片都重发 `0Bh + 00 2E 00` 会把读指针打回窗口原点（读回来的永远是开头那一段）。
+       */
+      const base = (q.baseAddr ?? (dcs.ramrdCmd << 8)) >>> 0;
+      if (idx === 0){
+        const tcfg0 = (q.lines === 4 ? TC.LINES_4 : q.lines === 2 ? TC.LINES_2 : TC.LINES_1) |
+                      TC.CMD_EN | TC.ADDR_EN | (q.addrQuad ? TC.ADDR_QUAD : 0);
+        items = [{
+          type: T.XFER,
+          payload: xferPayload({ cmd: q.opcode, tcfg: tcfg0, addrLen: q.addrLen, addr: base,
+                                 dummy: q.dummy, tx: new Uint8Array(0), rxLen: n }),
+          flags: F.RSP | (last ? 0 : F.CS_HOLD),
+          label: `读首片 @0x${base.toString(16)}（opcode 0x${q.opcode.toString(16)} + ${n} B，CS 保持）`,
+        }];
+        items = [...win, ...items];
+      } else {
+        const tcfg = (q.lines === 4 ? TC.LINES_4 : q.lines === 2 ? TC.LINES_2 : TC.LINES_1);
+        items = [{
+          type: T.XFER,
+          payload: xferPayload({ cmd: 0, tcfg, addrLen: 0, addr: 0, dummy: 0,
+                                 tx: new Uint8Array(0), rxLen: n }),
+          flags: F.RSP | (last ? 0 : F.CS_HOLD),
+          label: `续读 ${n} B（纯数据相位，CS 保持）`,
+        }];
+      }
     } else {
       const cmdByte = idx === 0 ? (dcs.ramrdCmd & 0xff) : (dcs.contCmd & 0xff);
       const cmdItem = {

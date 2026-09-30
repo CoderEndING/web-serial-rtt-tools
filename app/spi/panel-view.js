@@ -822,8 +822,8 @@ export class SpiPanelView {
       dummy: Math.max(0, Math.min(4, +$('pn-read-dummy').value || 0)),
       lines: +$('pn-read-lines').value || 1,
       dcs: { ramrdCmd: hxOf($('pn-read-ramrd').value, 0x2e), contCmd: hxOf($('pn-read-cont').value, 0x3e) },
-      qspi: { opcode: hxOf($('pn-read-opcode').value, 0x03), addrLen: Math.max(0, Math.min(4, +$('pn-read-addrlen').value || 0)),
-              baseAddr: hxOf($('pn-read-addr').value, 0x2e0000) },
+      qspi: { opcode: hxOf($('pn-read-opcode').value, 0x0b), addrLen: Math.max(0, Math.min(4, +$('pn-read-addrlen').value || 0)),
+              baseAddr: hxOf($('pn-read-addr').value, 0x2e00) },
     };
   }
 
@@ -1072,7 +1072,7 @@ function parseHexByteSafe(s, fallback = 0){
   return parseInt(t, 16) & 0xff;
 }
 
-/** 读时序那几个格子：十六进制，位数不限（读命令 03 / 地址 0x2E0000 都要用）*/
+/** 读时序那几个格子：十六进制，位数不限（读命令 0B / 地址 0x2E00 都要用）*/
 function hxOf(s, fallback = 0){
   const t = String(s ?? '').trim().replace(/^0x/i, '');
   if (!/^[0-9a-f]{1,8}$/i.test(t)) return fallback;

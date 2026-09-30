@@ -220,6 +220,15 @@ export class PanelAnim {
   async start(){
     if (!this.src) throw new Error('先选一个视频 / GIF');
     const s = this.session;
+    /**
+     * 页面在后台时 **Chrome 不为隐藏页面渲染 `<video>`**：`play()` 照样 resolve，但 `currentTime`
+     * 不走、`requestVideoFrameCallback` 一帧都不回调 —— 视频那条路会"0 帧"卡住（GIF/APNG 走
+     * ImageDecoder，不受影响，所以现象很迷惑）。真机自测里踩过，这里如实提示一句。
+     */
+    if (this.src.kind === 'video' && typeof document !== 'undefined' && document.hidden){
+      this.log('w', '页面在后台（窗口被最小化/遮住）：Chrome 不渲染隐藏页面里的 <video>，逐帧回调不会触发 —— ' +
+        '把窗口放到前台再播（GIF / APNG 那条 ImageDecoder 路不受影响）', 'panel');
+    }
     if (!s.dataReady) throw new Error('先「连接数据端点」（或勾「用假探针」）');
     if (!s.enabled) this.log('w', '桥还没使能 —— 未使能时 bulk OUT 端点不武装，写会一直 NAK/超时');
     if (s.busy) throw new Error('桥上正忙（另一次刷屏/重放没结束）');

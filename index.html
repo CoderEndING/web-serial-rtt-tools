@@ -1102,9 +1102,9 @@
 
         <div class="toolrow nw">
           <span class="hint" style="margin:0">读时序</span>
-          <label class="chk" title="档 2（QSPI）的读 opcode —— 跟 SPI Flash 那套一样，默认 03h">读命令 <input id="pn-read-opcode" class="num" value="03" style="width:48px"></label>
+          <label class="chk" title="档 2（QSPI）的读 opcode。ST77916 数据手册 §8.8.5.2 给的是 0Bh（FASTREAD）；别的屏按手册改">读命令 <input id="pn-read-opcode" class="num" value="0B" style="width:48px"></label>
           <label class="chk">地址字节 <input id="pn-read-addrlen" class="num" value="3" style="width:36px"></label>
-          <label class="chk" title="读的起始地址（= 命令字<<16，与写侧 0x2C0000 同一个编码）">地址 <input id="pn-read-addr" value="0x2E0000" style="width:84px"></label>
+          <label class="chk" title="读的起始地址 = 命令字<<8（线上 00 2E 00）。ST77916 手册 §8.8.5.1/5.2：AD[23:0] = 00 / 命令字 / 00，与写侧 0x002C00 同一个编码">地址 <input id="pn-read-addr" value="0x2E00" style="width:84px"></label>
           <label class="chk" title="数据相位前的 dummy 周期（1 = 1 字节）">dummy <input id="pn-read-dummy" class="num" value="1" style="width:34px"></label>
           <label class="chk">读线数 <select id="pn-read-lines"><option>1</option><option>2</option><option>4</option></select></label>
           <label class="chk" title="档 1（SPI+DC）的读命令">RAMRD <input id="pn-read-ramrd" class="num" value="2E" style="width:44px"></label>

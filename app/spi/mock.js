@@ -542,7 +542,13 @@ export class MockSpiProbe {
     const prof = this.profile;
     const bytes = [];
     if (prof.profile === 2){
-      bytes.push(prof.qspiWrOpcode, cmd, 0x00, 0x00, ...params);      // opcode + 24 bit 地址(=命令字<<16) + 参数
+      /**
+       * ⚠️ 这里**照当前固件**展开：`sb_step_qspi()` 把命令字放在 24 bit 地址的**最低字节**
+       * （`x.addr = cmd` → 线上 `02 | 00 00 XX`）。这与 ST77916 数据手册 §8.8.5.1 的
+       * `CMD : 0x00XX00`（命令在**中间**字节）不符 —— 固件侧待修（见 docs/spi-bridge-page.md §11.12）。
+       * 页面已经绕开它：QSPI 的开窗不再走 STEP，而是直接发 XFER（`image.js` 的 windowItems）。
+       */
+      bytes.push(prof.qspiWrOpcode, cmd, 0x00, 0x00, ...params);      // 固件口径：opcode + cmd + 00 00
     } else if (prof.profile === 1){
       bytes.push(cmd, ...params);                                     // 命令(DC=0) → 翻 DC → 参数(DC=1)
     } else {
@@ -608,23 +614,49 @@ export class MockSpiProbe {
      */
     const dcData = !!(tcfg & TC.DC_EN) && !!(tcfg & TC.DC_LEVEL);
     const addr = dv.getUint32(8, true);
-    const isPanelAddr = (((addr >>> 16) & 0xff) === 0x2e) || (((addr >>> 16) & 0xff) === 0x2c);
+    /**
+     * 面板地址判据（照 **ST77916 数据手册 §8.8.5.1**）：24 bit 地址 = `00 XX 00`，
+     * **命令字在中间字节**；写用 `2Ch`（RAMWR）、读用 `2Eh`（RAMRD），开窗是 `2Ah/2Bh`。
+     * ⚠️ 别按 `cmd << 16` 认地址 —— 那是老错误编码（详见 `image.js` 的 windowItems/pixelItems 注释）。
+     */
+    const panelCmd = (addr >>> 8) & 0xff;
+    const addrShape = ((addr & 0xff) === 0) && (((addr >>> 16) & 0xff) === 0) && panelCmd !== 0;
+    const isPanelAddr = addrShape && (panelCmd === 0x2c || panelCmd === 0x2e);
     /**
      * 命令相位（不带读）：档 1 的单字节命令（`2Ah/2Ch/2Eh/3Eh`，DC=0 + `tx=[cmd]`）、
      * 档 2 的 `CMD_EN`（`p[0]` 就是命令字）。**只通知面板模型、不吞掉这一帧** ——
      * SPI NOR 的写/擦也是同样的形状（`02h/20h + 地址 + 数据`），不能在这里 return。
      */
     if (this.gram){
-      const cmdByte = cmdEn ? p[0] : ((tcfg & TC.DC_EN) && !dcData && txLen >= 1 ? tx[0] : null);
-      if (cmdByte != null) this._gramCmd(cmdByte, txLen > 1 ? tx.subarray(1) : new Uint8Array(0));
+      /**
+       * 命令相位的**语义**（只通知模型，不吞帧）：
+       *   · 档 1：DC=0 的单字节命令（`2Ah/2Ch/2Eh/3Eh` 配 `tx=[cmd]`）；
+       *   · 档 2：命令字藏在地址里（`00 XX 00`）—— 开窗 `2Ah/2Bh` 带 4 字节坐标、`2Eh` 无数据；
+       *     **像素片（`2Ch` + 数据）不在这里重置写指针**：QSPI 屏是"一条 RAMWR 命令之后连续写"，
+       *     每片都重发同一个地址（`0x002C00`）不该把地址计数器打回窗口原点。
+       */
+      let cmdByte = null, params = new Uint8Array(0);
+      if (cmdEn && this.profile.profile === 2 && addrShape){
+        if (panelCmd !== 0x2c || txLen === 0){ cmdByte = panelCmd; params = tx; }
+      } else if (cmdEn){
+        cmdByte = p[0];
+      } else if ((tcfg & TC.DC_EN) && !dcData && txLen >= 1){
+        cmdByte = tx[0]; params = tx.subarray(1);
+      }
+      if (cmdByte != null) this._gramCmd(cmdByte, params);
     }
     /**
      * 面板 GRAM 的数据面（读回功能）：
      *   · **有 DC 的数据相位**（`DC_EN|DC_LEVEL`）= 面板的像素读写 —— SPI NOR 从不用 DC，所以这条判据不吃到它；
-     *   · 档 2（QSPI）没有 DC：靠地址区分（`2Ch<<16` 写 / `2Eh<<16` 读，页码与写侧同一个编码）。
+     *   · 档 2（QSPI）没有 DC：靠地址区分（`00 2C 00` 写 / `00 2E 00` 读）；
+     *   · 档 2 的**续传**（一条命令 + 整帧连续流，CS 保持）：后续片不带 cmd/addr，
+     *     靠 GRAM 自己的模式（还在 write/read）接手 —— 与真面板"地址计数器自己走"同一个模型。
      */
-    const gramWrite = txLen && (dcData || (this.profile.profile === 2 && isPanelAddr && (addr >>> 16) === 0x2c));
-    const gramRead = rxLen && (dcData || (this.profile.profile === 2 && isPanelAddr));
+    const qspiContinue = this.profile.profile === 2 && !cmdEn && !addrEn;
+    const gramWrite = txLen && (dcData || (this.profile.profile === 2 && isPanelAddr && panelCmd === 0x2c) ||
+                                (qspiContinue && this.gram?.mode === 'write'));
+    const gramRead = rxLen && (dcData || (this.profile.profile === 2 && isPanelAddr) ||
+                               (qspiContinue && this.gram?.mode === 'read'));
     if (this.gram && !(txLen && rxLen)){
       if (gramWrite){
         this.gram.write(tx);
@@ -635,8 +667,13 @@ export class MockSpiProbe {
         /**
          * 读寄存器优先：命令字节认得出（`MOCK_DCS_REGS`）就回那张表 —— 与 GRAM 读同一个形状，
          * 真屏上也是"命令 → 数据相位"两步。认不出才当 GRAM 像素读。
+         * ⚠️ 档 2 的命令字在**地址的中间字节**里（`00 XX 00`），`p[0]` 只是读 opcode（0Bh）——
+         *    早先这里按 `p[0]` 查表，结果 `0Bh` 撞上 RDDMADCTL，把 GRAM 读当成了寄存器读。
          */
-        const reg = this._pendingReg ?? (cmdEn ? (MOCK_DCS_REGS[p[0]] ? p[0] : null) : null);
+        const regCmd = this.profile.profile === 2
+          ? (addrShape && MOCK_DCS_REGS[panelCmd] ? panelCmd : null)
+          : (cmdEn && MOCK_DCS_REGS[p[0]] ? p[0] : null);
+        const reg = this._pendingReg ?? regCmd;
         if (reg != null && MOCK_DCS_REGS[reg]){
           const table = MOCK_DCS_REGS[reg];
           const rx = new Uint8Array(rxLen);

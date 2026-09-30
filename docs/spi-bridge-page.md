@@ -958,6 +958,46 @@ Pillow 解开是 240×296 RGB，中心白块/渐变都对得上。
 
 ---
 
+## 11.12 QSPI 地址编码修正：命令在**中间**字节（2026-10，用户指出）
+
+用户："地址按片递增（0x2E0000，与写侧 0x2C0000 同编码）—— 这个是不是不太对？应该是 0x002E00 和 0x002C00？
+我记得 qspi 协议的 lcd，地址中间 byte 才是 cmd?" —— **用户是对的，我们错了**，而且错的不止读回默认值。
+
+**三份证据**：
+
+1. **ST77916 数据手册 §8.8.5.1（Command write mode）**：
+   > host needs to send 1 byte of write command instruction (0x02、0xA2、0x32 or 0x38). Then host sends
+   > 3 bytes of AD[23:0] which is composed of **1 byte of 0x00, 1 byte of command address and 1 byte of 0x00** … `CMD : 0x00XX00`
+   读那边（§8.8.5.2）同格式，读指令是 **`0x0B`（FASTREAD）**。
+2. **ESP-IDF 官方驱动** `espressif__esp_lcd_st77916/esp_lcd_st77916_spi.c`：
+   `lcd_cmd <<= 8; lcd_cmd |= LCD_OPCODE_WRITE_CMD << 24;` → `0x02 | 00 cmd 00`（同目录下 `qspi_lcd_mouse` 工程
+   `use_qspi_interface = 1`，跑在真机上）。
+3. 我们自己的老实现（`cmd << 16` → 线上 `2C 00 00`）与 akaLinkPro 固件 `sb_step_qspi()`（`addr = cmd` → 线上 `00 00 2C`）
+   **两种都不对**。
+
+**改了什么**：
+
+| 位置 | 原来是 | 现在 |
+|---|---|---|
+| `image.js pixelItems`（档 2 像素） | 每片各自 `cmd=0x32 + addr=0x2C0000`（每片一条命令、各自一个 CS 窗口） | 地址 `0x002C00`；**首片**带 opcode+地址，后续片是纯数据相位，**CS 一路保持到末片**（一条命令 + 整帧连续流，与 ESP-IDF 的做法一致）。每片重发命令会把面板写指针打回窗口原点 |
+| `image.js windowItems`（档 2 开窗） | `STEP` 帧（固件按 `addr = cmd` 展开，编码错） | **直接发 XFER**：`0x02 + 00 2A 00 / 00 2B 00 + 4 字节坐标`（绕开固件的 STEP 展开） |
+| `panel-read.js`（档 2 读） | opcode `0x03`、地址 `0x2E0000`、每片重发 | opcode **`0x0B`**、地址 `0x002E00`；首片带 opcode+地址+dummy，后续片纯数据相位 + CS 保持 |
+| 假探针 `mock.js` | 按 `cmd << 16` 认地址 | 按 `00 XX 00` 认（命令字在中间字节）；认"CS 保持的续传"（纯数据相位落到 GRAM 模型上）；寄存器查表也改成看地址里的命令字（否则读 opcode `0Bh` 会撞上 RDDMADCTL） |
+| 页面「读时序」默认值 | `03` / `0x2E0000` | `0B` / `0x2E00`（都还能手改；换屏按各自手册来） |
+
+**固件侧待修**（akaLinkPro，不在本仓库）：`sb_step_qspi()` 的 `x.addr = cmd` 要改成 `x.addr = (uint32_t)cmd << 8`，
+注释里"命令字放在最低字节"的结论是错的（当初用 LA 只验了地址字段的**字节序**是 MSB 在前，没验"哪个字节装命令"）。
+本页面的 QSPI 开窗已经绕开 STEP，所以在固件修好之前页面也能用。
+
+**自测**：`spi-read.test` 46 → **52**（QSPI 读的地址/续读形状 + **QSPI 写→读往返逐字节相同**）；
+`spi-panel-code` 加了两条（首片带命令+地址、后续片纯数据 + CS 保持，整屏只有 3 个 CS 窗口）；`spi-panel-page` 的 QSPI 线上字节随之改为 `259200 + 8`。
+
+> 另一条环境坑（顺带记下）：**窗口被最小化/遮住时 Chrome 不渲染隐藏页面里的 `<video>`** ——
+> `play()` 会 resolve 但 `currentTime` 不走、`rVFC` 一帧都不回调，症状是"视频那条路 0 帧"而 GIF/APNG 正常。
+> 自测里已加 `Page.bringToFront`；页面也会在开播时提示一句。
+
+---
+
 ## 12. 已拍板与 TBD
 
 **已拍板**：见 §0（9 条），本轮不再有悬空问题。

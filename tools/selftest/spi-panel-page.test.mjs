@@ -66,6 +66,14 @@ async function ev(expr){
 await send('Page.enable');
 await send('Runtime.enable');
 try { await send('Network.enable'); await send('Network.setCacheDisabled', { cacheDisabled: true }); } catch {}
+/**
+ * 🚨 **先把窗口提到前台**：窗口被最小化/完全遮住时 `document.visibilityState === 'hidden'`，
+ * 而 Chrome **不为隐藏页面渲染 `<video>`** —— `play()` 照样 resolve，但 `currentTime` 不走、
+ * `requestVideoFrameCallback` 一帧都不回调。症状是 §9b（视频那条路）"0 帧"，而同节的
+ * GIF/PNG（ImageDecoder 那条路）一切正常 —— 极易误判成代码坏了（2026-10 本文件踩过，
+ * 当时排查了半天才发现是窗口被遮住）。
+ */
+await send('Page.bringToFront').catch(() => {});
 await send('Page.navigate', { url: URL_ });
 console.log('目标: ' + URL_);
 
@@ -488,7 +496,8 @@ console.log('== 7. 图片 / 图案刷屏 ==');
              log: document.getElementById('pn-log').textContent };`);
   ok(send.geom === 'st77916', '屏幕几何跟着"套用推荐值"切到了 ST77916');
   ok(send.framesOk === 529 && send.framesErr === 0, `整屏 529 帧全成功（2 条开窗 + 527 片像素，实测 ${send.framesOk}）`);
-  ok(send.bytesTx === 259200 + 16, `线上字节 = 像素 259200 + 开窗 16（实测 ${send.bytesTx}）`);
+  // 开窗在档 2 是两条 XFER（opcode + 00 XX 00 + 4 字节坐标），所以是 2×4 而不是老写法两条 STEP 的 16
+  ok(send.bytesTx === 259200 + 8, `线上字节 = 像素 259200 + 开窗 8（QSPI 两条 XFER 各 4 字节坐标，实测 ${send.bytesTx}）`);
   ok(/刷图完成：527 片/.test(send.log), `日志里给了切片数与速率（「${(send.log.match(/刷图完成[^\n]*/) || [''])[0]}」）`);
 
   // R/B 交换：同一张图，勾上之后首片像素字节不同（抽验第一片的前 2 字节）

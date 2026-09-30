@@ -66,12 +66,21 @@ console.log('== 1. 读寄存器：三种档位的帧形状 ==');
      '数据帧：DC=1、rx=3、dummy=1、带 RSP');
   ok((d.flags & P.F.CS_HOLD) === 0, '数据帧读完释放 CS');
 
-  const g2 = R.regReadItems({ cmd: 0x0b, rx: 1, profile: 2, qspi: { opcode: 0x03, addrLen: 3, dummy: 1, lines: 1 } });
+  const g2 = R.regReadItems({ cmd: 0x0b, rx: 1, profile: 2, qspi: { opcode: 0x0b, addrLen: 3, dummy: 1, lines: 1 } });
   ok(g2.items.length === 1, '档 2：一条 XFER 搞定（命令 + 地址 + dummy + 读）');
   const p2 = g2.items[0].payload;
   const dv2 = new DataView(p2.buffer, p2.byteOffset, p2.byteLength);
-  ok(p2[0] === 0x03 && (p2[1] & P.TC.CMD_EN) && (p2[1] & P.TC.ADDR_EN) && p2[2] === 3 && dv2.getUint32(8, true) === (0x0b << 16),
-     `档 2：opcode=0x03 + 3 字节地址 0x${(dv2.getUint32(8, true)).toString(16)}（= 命令字<<16）`);
+  /**
+   * 🚨 地址必须是 `00 XX 00`（命令在**中间**字节）：ST77916 数据手册 §8.8.5.1/§8.8.5.2
+   * "3 bytes of AD[23:0] which is composed of 1 byte of 0x00, 1 byte of command address and
+   * 1 byte of 0x00"，`CMD : 0x00XX00`；ESP-IDF 官方驱动也是 `lcd_cmd <<= 8`。
+   * 用户 2026-10 指出我们原来写的 `cmd << 16`（线上 XX 00 00）是错的。
+   */
+  ok(p2[0] === 0x0b && (p2[1] & P.TC.CMD_EN) && (p2[1] & P.TC.ADDR_EN) && p2[2] === 3 &&
+     dv2.getUint32(8, true) === (0x0b << 8),
+     `档 2：opcode=0x0B(FASTREAD) + 3 字节地址 0x${dv2.getUint32(8, true).toString(16).padStart(6, '0')}（= 命令字<<8 = 线上 00 0B 00）`);
+  ok((dv2.getUint32(8, true) >>> 16) === 0 && ((dv2.getUint32(8, true) >>> 8) & 0xff) === 0x0b && (dv2.getUint32(8, true) & 0xff) === 0,
+     '地址三字节 = 00 / 命令字 / 00（命令在中间字节）');
 
   const g0 = R.regReadItems({ cmd: 0x0f, rx: 1, profile: 0, lines: 1 });
   ok(g0.items.length === 2 && g0.items[0].payload[12] === 0x0f && (g0.items[1].payload[1] & P.TC.DC_LEVEL),
@@ -114,15 +123,23 @@ console.log('== 2. 读 GRAM 的计划：切片 / 续读 / CS_HOLD / 地址递增
 
   // QSPI：地址递增、每片自包含（没有 0x3E）
   const q = R.gramReadPlan({ geometry: G.st77916, profile: 2, x0: 0, y0: 0, x1: 359, y1: 359,
-                             qspi: { opcode: 0x03, addrLen: 3, dummy: 1, lines: 1 } });
+                             qspi: { opcode: 0x0b, addrLen: 3, dummy: 1, lines: 1 } });
   ok(q.chunks.length === Math.ceil(360 * 360 * 2 / R.READ_CHUNK_DEFAULT), `QSPI 整屏：${q.chunks.length} 片`);
   const addrOf = c => new DataView(c.items[c.items.length - 1].payload.buffer,
                                    c.items[c.items.length - 1].payload.byteOffset,
                                    c.items[c.items.length - 1].payload.byteLength).getUint32(8, true);
-  ok(addrOf(q.chunks[0]) === (0x2e << 16), `首片地址 = RAMRD(0x2E)<<16 = 0x${addrOf(q.chunks[0]).toString(16)}`);
-  ok(addrOf(q.chunks[1]) === (0x2e << 16) + R.READ_CHUNK_DEFAULT,
-     `第二片地址 +${R.READ_CHUNK_DEFAULT}（0x${addrOf(q.chunks[1]).toString(16)}）`);
-  ok(q.chunks[1].items.length === 1, 'QSPI 后续片只有一条 XFER（地址自带，不需要续读命令）');
+  ok(addrOf(q.chunks[0]) === 0x2e00,
+     `首片地址 = 0x${addrOf(q.chunks[0]).toString(16).padStart(6, '0')}（RAMRD 2Eh → 线上 00 2E 00）`);
+  // 后续片是**纯数据相位**（不带 cmd/addr）+ CS 保持：一条命令 + 连续读，面板的地址计数器自己走。
+  // 每片都重发 `0Bh + 00 2E 00` 会把读指针打回窗口原点（读回来永远是开头那一段）—— 2026-10 修正。
+  const c1q = q.chunks[1].items[0];
+  const dv1q = new DataView(c1q.payload.buffer, c1q.payload.byteOffset, c1q.payload.byteLength);
+  ok(!(c1q.payload[1] & P.TC.CMD_EN) && !(c1q.payload[1] & P.TC.ADDR_EN) && dv1q.getUint16(6, true) === R.READ_CHUNK_DEFAULT,
+     '后续片：纯数据相位（无 cmd/addr），只读 N 字节');
+  ok((q.chunks[0].items[q.chunks[0].items.length - 1].flags & P.F.CS_HOLD) &&
+     !(q.chunks[q.chunks.length - 1].items[0].flags & P.F.CS_HOLD),
+     'QSPI 读也靠 CS 保持串成一整帧（首片起、末片放）');
+  ok(q.chunks[1].items.length === 1, 'QSPI 后续片只有一条 XFER（纯数据相位续读，不需要重发命令）');
 
   ok(R.readPlanProblem(plan) === null, '合法计划：静态检查通过');
   ok(/空/.test(R.readPlanProblem(R.gramReadPlan({ geometry: G.axs15352, profile: 1, x0: 5, y0: 0, x1: 4, y1: 10 })) || ''),
@@ -228,26 +245,38 @@ console.log('== 4. 假探针 GRAM 往返：写进去的 = 读回来的 ==');
 }
 
 // ==================================================================== 5
-console.log('== 5. 读计划对 QSPI 也用同一套（地址递增 + 窗口） ==');
+console.log('== 5. QSPI（档 2）：写进去的 = 读回来的（地址按手册 00 XX 00 编码）==');
 {
   const probe = new M.MockSpiProbe({ flash: false, loopback: false, gram: { w: 360, h: 360 } });
   probe.enabled = true;
   probe.profile = { profile: 2, defLines: 4, dcActiveHigh: 1, csHoldInStep: 1, qspiWrOpcode: 0x02, qspiColorOpcode: 0x32, qspiAddrBytes: 3, flags: 0 };
   const g = G.st77916;
-  const plan = R.gramReadPlan({ geometry: g, profile: 2, x0: 0, y0: 0, x1: 31, y1: 31,
-                                qspi: { opcode: 0x03, addrLen: 3, dummy: 1, lines: 1 } });
+
+  // ① 按页面的写路径写一帧（QSPI：开窗两条 XFER + 每片 opcode 0x32 带地址）
+  const img = I.makePattern('GRID', 64, 48);
+  const out = I.imageToFrames(img.rgba, img.w, img.h, { geometry: g, profile: 2, x: 8, y: 4, w: 64, h: 48, fit: 'fill',
+                                                        swap: false, littleEndian: false, level: 255 });
+  const winFrames = out.items.slice(0, 2);
+  ok(winFrames[0].type === P.T.XFER && winFrames[1].type === P.T.XFER, 'QSPI 开窗是两条 **XFER**（不再走 STEP）');
+  const wdv = new DataView(winFrames[0].payload.buffer, winFrames[0].payload.byteOffset, winFrames[0].payload.byteLength);
+  ok(winFrames[0].payload[0] === 0x02 && wdv.getUint32(8, true) === (0x2a << 8),
+     `CASET 地址 = 0x${wdv.getUint32(8, true).toString(16).padStart(6, '0')}（线上 02 | 00 2A 00 | 坐标）`);
+  runItems(probe, out.items);
+  ok(probe.gram.writes === out.bytes.length, `写进 GRAM ${probe.gram.writes} B（= 这张图 ${out.bytes.length} B）`);
+
+  // ② 按读计划读回来（同一个窗口）
+  const plan = R.gramReadPlan({ geometry: g, profile: 2, x0: 8, y0: 4, x1: 8 + 64 - 1, y1: 4 + 48 - 1,
+                                qspi: { opcode: 0x0b, addrLen: 3, dummy: 1, lines: 1 } });
   const got = new Uint8Array(plan.total);
   let off = 0;
   for (const c of plan.chunks){
     const rsps = runItems(probe, c.items);
-    const last = rsps[rsps.length - 1];
-    got.set(last.data.subarray(0, c.bytes), off); off += c.bytes;
+    got.set(rsps[rsps.length - 1].data.subarray(0, c.bytes), off); off += c.bytes;
   }
-  const expect = probe.gram.snapshot();
-  let same = true;
-  for (let i = 0; i < got.length && same; i++) if (got[i] !== expect[i]) same = false;
-  void same;
-  ok(off === 32 * 32 * 2 && got[0] === expect[0], `QSPI 读 32×32 拿到 ${off} B，首字节与窗口起点一致（0x${got[0].toString(16)}）`);
+  let same = got.length === out.bytes.length;
+  for (let i = 0; i < got.length && same; i++) if (got[i] !== out.bytes[i]) same = false;
+  ok(same, `QSPI 往返：读回来 ${off} B 与写进去的逐字节相同`);
+  ok(probe.stats.framesErr === 0, `假探针零错误（frames_err=${probe.stats.framesErr}）`);
 }
 
 console.log(`\n${fail ? '❌' : '✅'} spi-read.test: ${pass} 通过 / ${fail} 失败`);

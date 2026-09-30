@@ -243,10 +243,17 @@ console.log('== B3. 切片与开窗帧（帧数 / 字节数 / 不跨包）==');
   ok(items.length === Math.ceil(259200 / I.PIXEL_SLICE), `整屏 ${items.length} 帧（= ceil(259200/492) = ${Math.ceil(259200 / 492)}）`);
   ok(new DataView(items[0].payload.buffer).getUint16(4, true) === 492, '首帧带满 492 B 数据');
   ok(new DataView(items[items.length - 1].payload.buffer).getUint16(4, true) === 259200 % 492, '末帧只剩余数');
-  ok(items[0].flags === 0 && items[items.length - 1].flags === P.F.RSP, '只有末帧带 RSP');
+  // 一条命令 + 整帧连续流：首片带 CS_HOLD、末片带 RSP（否则面板的写地址计数器会被打回窗口原点）
+  ok((items[0].flags & P.F.CS_HOLD) && !(items[0].flags & P.F.RSP) &&
+     !(items[items.length - 1].flags & P.F.CS_HOLD) && (items[items.length - 1].flags & P.F.RSP),
+     '首片保持 CS，末片放 CS + 带 RSP（只有末帧要应答）');
   const h0 = items[0].payload;
   ok(h0[0] === 0x32 && h0[1] === (P.TC.CMD_EN | P.TC.ADDR_EN | P.TC.LINES_4) && h0[2] === 3, `档 2 像素帧头：cmd=0x32 / cmd+addr+4线 / 3 字节地址（实测 ${hex(h0.subarray(0, 4))}）`);
-  ok(new DataView(h0.buffer).getUint32(8, true) === 0x2c0000, '地址 = RAMWR(0x2C) << 16');
+  // 🚨 地址 = 命令字 << 8（线上 `32 | 00 2C 00 | 像素`）：ST77916 手册 §8.8.5.1 的 `CMD : 0x00XX00`
+  //    （"1 byte of 0x00, 1 byte of command address and 1 byte of 0x00"），ESP-IDF 驱动也是 `<< 8`。
+  //    老写法 `<< 16` 线上是 `2C 00 00`，面板认不出这条命令（用户 2026-10 指出后核实）。
+  ok(new DataView(h0.buffer).getUint32(8, true) === (0x2c << 8),
+     `地址 = RAMWR(0x2C) << 8 = 0x${(new DataView(h0.buffer).getUint32(8, true)).toString(16).padStart(6, '0')}（线上 00 2C 00）`);
   const items1 = I.pixelItems(new Uint8Array(10), { profile: 1, lines: 1 });
   ok(items1[0].payload[1] === (P.TC.DC_EN | P.TC.DC_LEVEL), '档 1（SPI+DC）像素帧：DC=1 走数据，不发命令');
 
@@ -292,9 +299,13 @@ console.log('== B3b. 档 1（SPI+DC）的管道化刷屏：RAMWR + CS 一路保�
   ok(probe.stats.bytesTx === 2 * 5 + 1 + geom.w * geom.h * 2,
      `线上字节 = 开窗 10（两条 STEP 各 5 B）+ RAMWR 1 + 像素 ${geom.w * geom.h * 2}（实测 ${probe.stats.bytesTx}）`);
 
-  // 对照：档 2 是"每片自成窗口"
+  // 对照：档 2 也是"一条命令 + 整帧连续流"（首片带 opcode+地址，后面纯数据相位，CS 一路保持）
   const out2 = I.imageToFrames(img.rgba, img.w, img.h, { geometry: I.PANEL_GEOMETRY.st77916, profile: 2, fit: 'fill' });
-  ok(!out2.items.some(it => it.flags & P.F.CS_HOLD), '档 2（QSPI）不用 CS_HOLD：每片自带 opcode+地址，各成一个窗口');
+  const firstPx = out2.items[2], secondPx = out2.items[3];
+  ok(firstPx.payload[1] === (P.TC.CMD_EN | P.TC.ADDR_EN | P.TC.LINES_4) && (firstPx.flags & P.F.CS_HOLD),
+     '档 2 首片：opcode 0x32 + 地址（00 2C 00）+ 4 线数据，CS 保持');
+  ok(secondPx.payload[1] === P.TC.LINES_4 && (secondPx.flags & P.F.CS_HOLD) && secondPx.payload[2] === 0,
+     '档 2 后续片：纯数据相位（不带 cmd/addr），CS 继续保持 —— 面板的写指针才能连着走');
 }
 
 // ==================================================================== B4
@@ -316,9 +327,10 @@ console.log('== B4. 整屏刷端到端（无浏览器）：拼帧 → 打包 →
   for (const p of packs) probe.write(p);
   ok(probe.stats.framesErr === 0, `假探针零错误（frames_ok=${probe.stats.framesOk}）`);
   ok(probe.stats.framesOk === frames.length, `帧数对账：${probe.stats.framesOk} == ${frames.length}`);
-  ok(probe.stats.bytesTx === 2 * 8 + 259200,
-     `线上字节 = 开窗 16 B（两条 STEP 各 8 B：0x02+命令字+2 字节地址…）+ 像素 ${259200} B（实测 ${probe.stats.bytesTx}）`);
-  ok(probe.csWindows >= 529, `CS 窗口 ≥ 529（每帧一次事务，实测 ${probe.csWindows}）`);
+  // 开窗在档 2 是**两条 XFER**（不再是 STEP）：opcode + `00 2A 00` + 4 字节坐标（参数走 1 线）
+  ok(probe.stats.bytesTx === 2 * 4 + 259200,
+     `线上字节 = 开窗 2×4 B（QSPI：opcode + 00 XX 00 + 4 字节坐标）+ 像素 ${259200} B（实测 ${probe.stats.bytesTx}）`);
+  ok(probe.csWindows === 3, `CS 窗口 = 3（开窗 2 次 + 整帧像素**一个**长窗口，实测 ${probe.csWindows}）`);
 
   // 每片像素的数据必须原样落在线上（抽查首尾两片）
   const pxFrames = probe.wireLog.filter(l => /^XFER/.test(l));

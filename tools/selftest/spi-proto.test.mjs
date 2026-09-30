@@ -311,10 +311,14 @@ console.log('== 6. 假探针：帧执行（回环 / 档位展开 / 非阻塞延�
   ok(eqArr(P.parseRsp(probe2.takeRsp()).data, Uint8Array.of(0, 0)), '没接跳线 → 读回 0x00（回环自检会 FAIL，符合预期）');
 
   // ④ 档位展开：三条 STEP 的线上字节
+  //    ⚠️ 档 2 这条钉的是**当前固件**的展开（`sb_step_qspi()` 把命令字放最低字节 → `02 | F0 00 00`），
+  //       而 ST77916 数据手册 §8.8.5.1 要求 `02 | 00 F0 00`（`CMD : 0x00XX00`，命令在中间字节）
+  //       —— 固件侧待修，见 docs/spi-bridge-page.md §11.12。页面已经绕开 STEP：
+  //       QSPI 的开窗直接发 XFER（`image.js` 的 windowItems），地址按手册编码。
   const cases = [
     [{ profile: 0, defLines: 1 }, 'ce 5a a5', '档 0 raw：cmd + params'],
     [{ profile: 1 }, 'ce 5a a5', '档 1 spi_dcx：同一 CS 窗口里 DC 0→1'],
-    [{ profile: 2 }, '02 f0 00 00 28', '档 2 qspi：0x02 + 24 bit 地址(=命令字<<16) + 参数'],
+    [{ profile: 2 }, '02 f0 00 00 28', '档 2 qspi：固件当前口径（命令字在最低字节，待修）'],
   ];
   for (const [prof, want, label] of cases){
     const p = new M.MockSpiProbe();

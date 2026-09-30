@@ -244,14 +244,38 @@ export function parseBMP(bytes){
 // 开窗 + 像素切片的帧序列
 // ============================================================================
 
-/** 开窗：CASET / RASET（用 STEP 帧 —— 档 1 会展开成"DC 命令+参数"，档 2 展开成 0x02+24bit 地址+参数）*/
-export function windowItems({ x0, x1, y0, y1 }, g = {}){
+/**
+ * 开窗：CASET / RASET。
+ *
+ * 档 0/1 用 `STEP` 帧（固件按档展开：档 1 = 同一个 CS 窗口内"DC 命令 → 翻 DC → 参数"）。
+ *
+ * 档 2（QSPI）**直接发 XFER，不走 STEP** —— 因为固件当前的 `sb_step_qspi()` 把命令字放在
+ * 24 bit 地址的**最低字节**（`addr = cmd`，线上 `02 | 00 00 XX`），而 ST77916 数据手册 §8.8.5.1
+ * 写得很明确：`02h` 之后 3 字节 AD[23:0] = **`00 XX 00`**（"1 byte of 0x00, 1 byte of command
+ * address and 1 byte of 0x00"，`CMD : 0x00XX00`）。ESP-IDF 官方驱动也是这么做的
+ * （`esp_lcd_st77916_spi.c`：`lcd_cmd <<= 8`）。走 STEP 的 QSPI 命令一条都认不出来，
+ * 所以这里绕开它：地址 = `命令字 << 8`。
+ */
+export function windowItems({ x0, x1, y0, y1 }, g = {}, o = {}){
   const col = g.colCmd ?? 0x2a, row = g.rowCmd ?? 0x2b;
   const coord = v => Uint8Array.of((v >> 8) & 0xff, v & 0xff);
-  const body = (cmd) => Uint8Array.from([...coord(x0), ...coord(x1)]);
+  const body = () => Uint8Array.from([...coord(x0), ...coord(x1)]);
   const bodyRow = () => Uint8Array.from([...coord(y0), ...coord(y1)]);
+  if (o.profile === 2){
+    // QSPI：opcode(默认 0x02) + AD[23:0] = 0x00<命令字>00 + 1 线参数
+    const opcode = (o.qspiWrOpcode ?? 0x02) & 0xff;
+    const addrLen = o.qspiAddrBytes ?? 3;
+    const mk = (cmdByte, params, label) => ({
+      type: T.XFER,
+      payload: xferPayload({ cmd: opcode, tcfg: TC.LINES_1 | TC.CMD_EN | TC.ADDR_EN, addrLen,
+                             addr: ((cmdByte & 0xff) << 8) >>> 0, dummy: 0, tx: params, rxLen: 0 }),
+      flags: 0, label,
+    });
+    return [ mk(col, body(), `CASET ${x0}..${x1}（QSPI 0x${opcode.toString(16)} + 00 ${col.toString(16)} 00）`),
+             mk(row, bodyRow(), `RASET ${y0}..${y1}（QSPI 0x${opcode.toString(16)} + 00 ${row.toString(16)} 00）`) ];
+  }
   return [
-    { type: T.STEP, payload: stepPayload({ cmd: col, params: body(col), delayMs: 0 }), flags: 0, label: `CASET ${x0}..${x1}` },
+    { type: T.STEP, payload: stepPayload({ cmd: col, params: body(), delayMs: 0 }), flags: 0, label: `CASET ${x0}..${x1}` },
     { type: T.STEP, payload: stepPayload({ cmd: row, params: bodyRow(), delayMs: 0 }), flags: 0, label: `RASET ${y0}..${y1}` },
   ];
 }
@@ -286,6 +310,7 @@ export function pixelItems(px, o = {}){
   const profile = o.profile | 0;
   const lines = o.lines || 1;
   const items = [];
+  let first = true;
   for (let off = 0; off < px.length; off += slice){
     const end = Math.min(off + slice, px.length);
     const tx = px.subarray(off, end);
@@ -293,10 +318,20 @@ export function pixelItems(px, o = {}){
     let tcfg = lines === 4 ? TC.LINES_4 : lines === 2 ? TC.LINES_2 : TC.LINES_1;
     let cmd = 0, addrLen = 0, addr = 0, flags = 0;
     if (profile === 2){
-      tcfg |= TC.CMD_EN | TC.ADDR_EN;
+      /**
+       * 🚨 QSPI 的像素是**一条命令 + 整帧连续流**（CS 全程保持），不是"每片各自一条命令"：
+       *   · 数据手册 §8.8.5.1：`32h` 之后是 AD[23:0] = `00 2C 00`，然后连续写；
+       *   · ESP-IDF 官方驱动就是这么干的（一次 `tx_color` 把整帧 DMA 出去，CS 不抬）。
+       *   每片都重发 `32h + 00 2C 00` 会把面板的写地址计数器**打回窗口原点**（一片盖一片）。
+       *   所以：只有**首片**带 cmd+addr，后面的片都是纯数据相位（4 线），CS 一路保持到末片。
+       *   地址同样是 `命令字 << 8`（线上 `00 2C 00`），不是 `<< 16`。
+       */
+      if (first){ tcfg |= TC.CMD_EN | TC.ADDR_EN; }
       cmd = o.qspiColorOpcode ?? 0x32;
-      addrLen = o.qspiAddrBytes ?? 3;
-      addr = (((o.ramWr ?? 0x2c) << 16) >>> 0);
+      addrLen = first ? (o.qspiAddrBytes ?? 3) : 0;
+      addr = first ? (((o.ramWr ?? 0x2c) << 8) >>> 0) : 0;
+      if (!last) flags |= F.CS_HOLD;           // 一整帧在同一个 CS 窗口里（与档 1 同一个做法）
+      first = false;
     } else if (profile === 1){
       tcfg |= TC.DC_EN | TC.DC_LEVEL;          // DC=1 → 数据
       if (!last) flags |= F.CS_HOLD;           // CS 保持到最后一刻
@@ -347,7 +382,7 @@ export function imageToFrames(src, sw, sh, o = {}){
   const composed = composeImage(src, sw, sh, win.w, win.h, { mode: o.fit || 'fill' });
   const px = rgbaTo565(composed.rgba, { swap: o.swap, littleEndian: o.littleEndian, level: o.level });
   const items = [
-    ...windowItems(win, g),
+    ...windowItems(win, g, { profile, qspiWrOpcode: o.qspiWrOpcode, qspiAddrBytes: o.qspiAddrBytes ?? 3 }),
     ...(profile === 1 ? [ramwrCommandItem({ ramWr: g.ramWr, lines })] : []),
     ...pixelItems(px, {
       profile, qspiColorOpcode: g.colorOpcode ?? o.qspiColorOpcode,
