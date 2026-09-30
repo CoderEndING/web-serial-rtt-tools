@@ -496,3 +496,6 @@ fieldset.folded > legend::after{content:' · 已折叠';color:var(--fg2);font-si
 .pintab .p-sel.is-bad{color:#ff7b72;font-weight:600}
 /* 未配置、按屏型号推荐值先标出来的脚位（虚线）—— 接线时照它接，配完会变成实心 */
 .pintab .p-sel.is-dflt{color:#8fa6bb;border-bottom:1px dashed rgba(143,166,187,.65)}
+/* 图上"没出现"的线（比如 QSPI 不需要 DC）：明说原因，别让人以为是漏画 */
+#sp-pinmap-miss{color:#ffd479}
+#sp-pinmap-miss:empty{display:none}

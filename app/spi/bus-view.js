@@ -391,6 +391,26 @@ export class SpiBusView {
     $('sp-pinmap-sub').textContent = (c.padRst || c.padBl || c.padDc || c.padCsAux || c.padTe)
       ? `（实心 << 是当前配置；虚线 << 是没配的那几条线按「${modelName}」推荐值先标的位置）`
       : `（四条辅助线现在都是「不用」—— 图上已按「${modelName}」的推荐脚位先标好（虚线 <<），照着接线，接完点「套用推荐值」即可）`;
+
+    /**
+     * 图上**没出现**的线要交代清楚：缺一根 DC 不等于漏画，而是这个档位根本不用它。
+     * （用户 2026-09-30 问过"图中缺一个DC脚"。）
+     * 三种"没出现"：① 这档用不到（如 QSPI 没有独立 DC 脚）② 没配也没默认脚 ③ 有默认脚，
+     * 但那根脚已经被**别的线配走**了 —— ③ 必须明说，否则用户按脚注去接就接错了。
+     */
+    const WHY = {
+      DC: 'QSPI 档没有独立的 DC 脚，命令与数据靠 0x02（写命令 + 24 bit 地址）和 0x32（写像素）两个 opcode 区分',
+      CS_AUX: '第二片选，只挂一片屏时不用',
+      TE: '面板撕裂信号（输入），不接也能刷图',
+    };
+    const miss = [];
+    for (const [n, v, d] of LINES){
+      if (v) continue;                                        // 配了 → 图上实心
+      if (d && !LINES.some(([, v2]) => v2 === d)) continue;   // 有默认脚、且没被别的线配走 → 图上虚线
+      miss.push(n + '（' + (d ? `默认脚 ${P.PAD_NAME[d] || ('pad' + d)} 已被别的线占用` : (WHY[n] || '本档位用不到')) + '）');
+    }
+    const missEl = $('sp-pinmap-miss');
+    if (missEl) missEl.textContent = miss.length ? '图上没有出现的线：' + miss.join('；') : '';
   }
 
   // ==================================================================== 配置
