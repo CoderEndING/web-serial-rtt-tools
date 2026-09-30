@@ -212,10 +212,12 @@ console.log('== 4. 按屏套用推荐值（档位 + SCLK + 引脚）==');
              sum: { sclk: document.getElementById('pn-sum-sclk').textContent, pads: document.getElementById('pn-sum-pads').textContent } };`);
   ok(applied.prof.profile === 2, 'ST77916 → 档 2（qspi）');
   ok(applied.cfg.sclkHz === 40000000 && applied.probe.sclk === 40000000, 'ST77916 → SCLK 40 MHz（页面与探针都对）');
-  ok(applied.cfg.padDc === 0 && applied.cfg.padRst === 13 && applied.cfg.padBl === 11,
-     `引脚按屏改了：DC=${applied.cfg.padDc}（不用）/ RST=PB12 / BL=PB13`);
+  // RST = **PA02**（2026-09-30 实测：PA02 抓得到复位波形、PA31 抓不到）。
+  // 这条要紧：「重放前先复位」就发在这个脚上，默认值配错等于没复位。
+  ok(applied.cfg.padDc === 0 && applied.cfg.padRst === 5 && applied.cfg.padBl === 11,
+     `引脚按屏改了：DC=${applied.cfg.padDc}（不用）/ RST=PA02（pad ${applied.cfg.padRst}）/ BL=PA10（pad ${applied.cfg.padBl}）`);
   ok(/40 MHz/.test(applied.sum.sclk), `只读摘要显示 SCLK ${applied.sum.sclk}`);
-  ok(/RST=PA31/.test(applied.sum.pads), `只读摘要显示引脚「${applied.sum.pads}」`);
+  ok(/RST=PA02/.test(applied.sum.pads), `只读摘要显示引脚「${applied.sum.pads}」`);
   ok(/回读对账一致/.test(applied.log), '套用走的还是回读对账那条路（不靠状态字的 err）');
 
   const back = await ev(`
@@ -609,6 +611,7 @@ console.log('== 8. 面板电源 / 显示 4 个命令 + RST 脉冲 ==');
   const noRst = await ev(`
     const s = window.__tools.spiSession, p = s.mockProbe;
     const c0 = { ...s.cfg };
+    const rst0 = c0.padRst;                             // 不写死 13/5：跟着当前推荐值走
     await s.applyConfig({ ...c0, padRst: 0 }, 'panel');
     const applied = s.cfg.padRst;                       // 回读对账：真变成 0 了才继续
     p.resetState();
@@ -618,13 +621,13 @@ console.log('== 8. 面板电源 / 显示 4 个命令 + RST 脉冲 ==');
     const log = p.wireLog.filter(x => /RESET|GPIO/.test(x));
     const pageLog = document.getElementById('pn-log').textContent;
     await s.applyConfig(c0, 'panel');
-    return { sent, log, pageLog, applied, rstBack: s.cfg.padRst };`);
+    return { sent, log, pageLog, applied, rst0, rstBack: s.cfg.padRst };`);
   ok(noRst.applied === 0, `（前置条件）padRst 确实写进了 0 =「不用」（实测 ${noRst.applied}）`);
   ok(noRst.sent === true && noRst.log.join(' | ') === 'GPIO bl=1',
      `RST 脚没配 → 跳过复位、背光照开（实测「${noRst.log.join(' | ')}」）`);
   ok(/跳过复位/.test(noRst.pageLog) && /pad 0/.test(noRst.pageLog),
      `日志明确告警"跳过复位"并给出原因（「${(noRst.pageLog.match(/[^\n]*跳过复位[^\n]*/) || [''])[0]}」）`);
-  ok(noRst.rstBack === 13, `测完把 padRst 还原成 ${noRst.rstBack}（不脏化后续用例）`);
+  ok(noRst.rstBack === noRst.rst0, `测完把 padRst 还原成 ${noRst.rstBack}（不脏化后续用例）`);
 
   /**
    * 「刷这一张」**不**走重放前置（用户 2026-09-30 只点名了重放）：刷屏是高频动作，

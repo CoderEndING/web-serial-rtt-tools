@@ -37,9 +37,17 @@ export const PANEL_PRESETS = {
     label: 'ST77916（圆屏 360×360 · QSPI 四线）',
     short: 'ST77916（360×360）',
     profile: { profile: 2, defLines: 1, dcActiveHigh: true, csHoldInStep: true, qspiWrOpcode: 0x02, qspiColorOpcode: 0x32, qspiAddrBytes: 3 },
-    cfg: { sclkHz: 40000000, csPolicy: 0, padDc: 0, padRst: 13 /*PA31 J3[11]*/, padBl: 11 /*PA10 J3[33]*/, padActiveLow: 0x06 },
+    /**
+     * RST 用 **PA02（J3[7]）** 而不是 PA31：2026-09-30 实测，同一套流程下 PA02 一次就
+     * 抓到复位波形（LA CH8：低 1000 ms → 高 1000 ms ×2，间隔精确 1000 ms），而 PA31
+     * 反复抓不到预期电平（固件侧 PA31 无特殊处理；怀疑那根线/该脚上的 USB0_ID 网络
+     * —— 100k 上拉 + BAT54A + MOS 栅极 —— 让边沿变缓）。
+     * 这条很要紧：「重放前先复位」就发在这个脚上，默认值配错等于没复位。
+     * ⚠️ AXS15352 那档不能跟着改：它的 DC 占着 PA02。
+     */
+    cfg: { sclkHz: 40000000, csPolicy: 0, padDc: 0, padRst: 5 /*PA02 J3[7]*/, padBl: 11 /*PA10 J3[33]*/, padActiveLow: 0x06 },
     geom: 'st77916',
-    note: '档 2：0x02 + 24 bit 地址（00 XX 00，命令在中间字节）+ 参数；像素用 0x32 + 四线。SPI2：CS=J3[26] SCLK=J3[13] D0=J3[28] D1=J3[27] D2=J3[10] D3=J3[8]',
+    note: '档 2：0x02 + 24 bit 地址（00 XX 00，命令在中间字节）+ 参数；像素用 0x32 + 四线。SPI2：CS=J3[26] SCLK=J3[13] D0=J3[28] D1=J3[27] D2=J3[10] D3=J3[8]；RST=PA02 J3[7]（实测抓得到波形，PA31 抓不到）',
   },
 };
 
