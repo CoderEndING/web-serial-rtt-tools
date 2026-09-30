@@ -180,6 +180,12 @@ dialog form{margin-top:16px;text-align:right}
 #tab-gen.dragging{outline:2px dashed var(--acc);outline-offset:-6px}
 #tab-gen .side .row>span:first-child{width:88px}   /* 参数名比别的页长（OpenOCD 接口…） */
 #g-files{flex-wrap:wrap;border-radius:6px}
+/* 产物按钮分两行：工程配套文件（uvprojx2cmake 那几件）/ 本地桥安装包（`rtt-bridge-kit/…`）。
+   两类东西用途不同，混成一片时标签栏会挤成三行还认不出谁是谁（用户 2026-10 要求）。 */
+#g-files{display:flex;flex-direction:column;align-items:flex-start;gap:3px;border:none;overflow:visible}
+#g-files .filerow{display:flex;flex-wrap:wrap;border:1px solid var(--line);border-radius:6px;overflow:hidden}
+#g-files .filerow.kit{border-color:#3d5a80}
+#g-files .filerow.kit button{color:#9dc1e8}
 #g-preview{white-space:pre;overflow:auto}          /* 代码别折行，横向滚 */
 .fixlist{margin:4px 0 0;padding-left:18px}
 .fixlist li{margin:3px 0}

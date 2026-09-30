@@ -105,8 +105,8 @@ console.log('== 1b. 布局（用户 2026-09-30 定的口径）：刷图置顶不
              over: cs.overflowY, canScroll: main.scrollHeight > main.clientHeight + 4,
              scrollH: main.scrollHeight, clientH: main.clientHeight,
              docOverflow: document.documentElement.scrollWidth > document.documentElement.clientWidth + 1 };`);
-  ok(L.cards[0] === 'pn-img-card' && L.cards[1] === 'pn-code-card',
-     `主区顺序 = 刷图 → 面板初始化 → 日志（实测 ${L.cards.join(' → ')}）`);
+  ok(L.cards[0] === 'pn-img-card' && L.cards[1] === 'pn-log-card' && L.cards[2] === 'pn-code-card' && L.cards[3] === 'pn-read-card',
+     `主区顺序 = 刷图 → 日志 → 面板初始化 → 读回（实测 ${L.cards.join(' → ')}；2026-10 用户要求：日志挪到初始化前、读回放在初始化后）`);
   ok(L.hasImgFold === false && L.hasCodeFold === true, '刷图那块**没有**收起按钮，初始化那块保留');
   ok(Math.abs(L.tableH - 360) <= 2, `解析表高度 = 360px（原来 120px 下限的 3 倍，实测 ${L.tableH}）`);
   ok(L.over === 'auto' && L.canScroll, `主区自己出纵向滚动条（overflow-y=${L.over}，${L.clientH} → ${L.scrollH}）`);
@@ -754,6 +754,65 @@ console.log('== 9d. 攒批：USB 调用次数降一个数量级，设备侧收�
   // 收尾：把档位放回默认的 16 KB，别影响后面的用例
   await ev(`const sel = document.getElementById('pn-batch');
             sel.value = '16384'; sel.dispatchEvent(new Event('change', { bubbles: true })); return 1;`);
+}
+
+// ==================================================================== 9e
+console.log('== 9e. 回读：读寄存器 + 读 GRAM（假探针 GRAM → 预览 → BMP）==');
+{
+  // 用户 2026-10 的需求："spi/qspi 屏的回读功能（读一般都是 1 线读）：读寄存器；读 gram 值
+  // （发 2A+2B 开窗，2E 读数据，3E 是续读），把读出的数据还原成一帧图片并显示在预览窗口，
+  // 并提供保存为 bmp 的功能。"
+  // 位置也按用户要求钉住：日志在「面板初始化」**前**面，读回在初始化**后**面。
+  const order = await ev(`return [...document.querySelectorAll('#tab-panel .main > fieldset')].map(f => f.id);`);
+  ok(order.join(',') === 'pn-img-card,pn-log-card,pn-code-card,pn-read-card',
+     `屏页卡片顺序：图片 → 日志 → 面板初始化 → 读回（${order.join(' → ')}）`);
+
+  const reg = await ev(`
+    const s = window.__tools.spiSession;
+    document.getElementById('pn-read-reg').value = '4';
+    document.getElementById('pn-read-reg').dispatchEvent(new Event('change'));
+    document.getElementById('pn-read-reg-go').click();
+    await new Promise(r => setTimeout(r, 500));
+    return { reg: window.__tools.panel.summary().lastReg,
+             out: document.getElementById('pn-read-reg-out').textContent,
+             cmd: document.getElementById('pn-read-reg-cmd').value, len: document.getElementById('pn-read-reg-len').value };`);
+  ok(reg.reg?.bytes === 3 && reg.reg.hex === '00 93 96',
+     `读寄存器 RDDID 04h → ${reg.reg?.hex}（假探针的确定值；下拉选中会自动填命令/长度：${reg.cmd}/${reg.len}）`);
+
+  const rb = await ev(`
+    const RD = await import('./app/spi/panel-read.js');
+    const s = window.__tools.spiSession;
+    // 前面几节往假探针的 GRAM 里写过东西（刷图/动画），这里换回干净的面板：
+    // 假探针的"没写过的像素"是**确定性图案**，所以可以逐像素断言。
+    document.getElementById('pn-geom').value = 'axs15352';
+    document.getElementById('pn-geom').dispatchEvent(new Event('change'));
+    await new Promise(r => setTimeout(r, 200));
+    s.mockProbe.setPanelGeometry(240, 296);
+    document.getElementById('pn-read-x0').value = 8; document.getElementById('pn-read-y0').value = 4;
+    document.getElementById('pn-read-x1').value = 47; document.getElementById('pn-read-y1').value = 23;
+    const p = s.mockProbe;
+    p.resetState();
+    await window.__tools.panel.readGram();
+    const r = window.__tools.panel.summary().readBack;
+    const canvas = document.getElementById('pn-canvas');
+    const px = [...canvas.getContext('2d').getImageData(8, 4, 1, 1).data];
+    const bmp = RD.encodeBMP(window.__tools.panel.readBack.rgba, r.w, r.h);
+    const dv = new DataView(bmp.buffer);
+    return { r, px, progress: document.getElementById('pn-read-prog').textContent,
+             bmp: { len: bmp.length, magic: String.fromCharCode(bmp[0], bmp[1]), w: dv.getInt32(18, true), h: dv.getInt32(22, true), bpp: dv.getUint16(28, true) },
+             wire: p.wireLog.filter(x => /GRAM|寄存器/.test(x)).slice(0, 5) };`);
+  // 假探针的图案在 (8,4)：r = round(8*31/239)=1、g = round(4*63/295)=1、b = (8^4)&31=12 → RGB565 0x082C
+  ok(rb.r?.bytes === 40 * 20 * 2 && rb.r.chunks === 4 && rb.r.missed === 0,
+     `读回 40×20：${rb.r?.bytes} B / ${rb.r?.chunks} 片 / 丢 ${rb.r?.missed} 片（${rb.progress}）`);
+  ok(rb.r?.sample?.[0]?.join(',') === '8,4,98',
+     `解码后的第一个像素 = 假探针图案的 (8,4) → (${rb.r?.sample?.[0]?.join(',')})`);
+  ok(rb.px?.join(',') === '8,4,98,255', `预览框里画的就是它（canvas(8,4) = ${rb.px?.join(',')}）`);
+  ok(rb.bmp.magic === 'BM' && rb.bmp.w === 40 && rb.bmp.h === 20 && rb.bmp.bpp === 24 && rb.bmp.len === 54 + 40 * 3 * 20,
+     `BMP：${rb.bmp.w}×${rb.bmp.h} 24bpp · ${rb.bmp.len} B（54 + 40×3×20）`);
+
+  // 读回用的是"读"时序，不该把屏上的内容改掉：整场里没有任何 GRAM 写
+  const clean = await ev(`const w = window.__tools.spiSession.mockProbe.wireLog.filter(x => /^GRAM 写/.test(x)).length; return w;`);
+  ok(clean === 0, `读回全程只读不写（GRAM 写 ${clean} 次）`);
 }
 
 // ==================================================================== 10

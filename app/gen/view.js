@@ -198,6 +198,13 @@ export class GenView {
   renderFileTabs(){
     const box = $('g-files');
     box.innerHTML = '';
+    /**
+     * 两行：第一行 = 工程配套文件（uvprojx2cmake.py 那几件），第二行 = **本地桥安装包**的文件。
+     * 桥包那 7 个带 `rtt-bridge-kit/` 前缀，跟工程是两回事 —— 混在一行里既挤又认不出谁是谁
+     * （用户 2026-10 要求："他们都属于本地桥的，把他们放到第二行"）。
+     */
+    const row1 = document.createElement('div'); row1.className = 'filerow';
+    const row2 = document.createElement('div'); row2.className = 'filerow kit';
     this.files.forEach((f, i) => {
       const b = document.createElement('button');
       // 标签只显示文件名（桥包那 7 个带 rtt-bridge-kit/ 前缀，全写出来会把标签栏撑成三行）；
@@ -206,8 +213,10 @@ export class GenView {
       b.title = f.name;
       b.className = i === this.sel ? 'on' : '';
       b.addEventListener('click', () => { this.sel = i; this.renderFileTabs(); this.renderPreview(); });
-      box.appendChild(b);
+      (/^rtt-bridge-kit\//.test(f.name) ? row2 : row1).appendChild(b);
     });
+    box.appendChild(row1);
+    if (row2.childElementCount) box.appendChild(row2);   // 没勾桥包时不显示空行
   }
 
   renderPreview(){

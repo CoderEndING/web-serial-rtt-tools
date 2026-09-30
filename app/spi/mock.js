@@ -25,8 +25,125 @@ import { FlashDevice } from './flash.js';
 /** 逻辑引脚默认电平（RST/CS 低有效 → 空闲为高）*/
 const PIN_IDLE = { dc: 0, rst: 1, csAux: 1, bl: 0, te: 0 };
 
+/**
+ * 假探针的**面板 GRAM 模型** —— 读回功能（`app/spi/panel-read.js`）的自测靠它。
+ *
+ * 语义照 MIPI DCS：
+ *   · `2Ah/2Bh` 开窗（档 2 是 `02h + 24bit 地址(命令<<16) + 参数`）；
+ *   · `2Ch` 开始写：之后的数据相位按窗口逐像素填（行到尾自动换到下一行窗口行）；
+ *   · `2Eh` 开始读：读指针回到窗口起点；`3Eh` 续读（指针不动，接着往下）；
+ *   · **没写过的像素返回确定性图案**（渐变 + 中心方块），这样"读回来应该是什么"永远可断言。
+ *
+ * ⚠️ 它只负责"数据长什么样"，不模拟面板的时序/电源 —— 那部分由 mock 的帧执行器负责。
+ */
+export class PanelGram {
+  constructor(w = 240, h = 296, opts = {}){
+    this.w = Math.max(1, w | 0); this.h = Math.max(1, h | 0);
+    this.buf = new Uint8Array(this.w * this.h * 2);
+    this._pattern();
+    // 窗口（含端点，DCS 语义）
+    this.x0 = 0; this.y0 = 0; this.x1 = this.w - 1; this.y1 = this.h - 1;
+    this.cursor = 0;          // 在当前窗口里的**像素序号**（不是字节）
+    this.mode = 'idle';       // idle | write | read
+    this.writes = 0; this.reads = 0;
+    this.onAir = !!opts.blank;   // blank=true：初始化成全 0（测"没写过"的分支）
+  }
+
+  /** 确定性图案：横向 R 渐变、纵向 G 渐变、B 取 (x^y) 低位；中心 40×40 白块 */
+  _pattern(){
+    const { w, h, buf } = this;
+    for (let y = 0; y < h; y++){
+      for (let x = 0; x < w; x++){
+        const r = Math.round(x * 31 / Math.max(1, w - 1));
+        const g = Math.round(y * 63 / Math.max(1, h - 1));
+        const b = (x ^ y) & 31;
+        let v = (r << 11) | (g << 5) | b;
+        if (Math.abs(x - w / 2) < 20 && Math.abs(y - h / 2) < 20) v = 0xffff;
+        const i = (y * w + x) * 2;
+        buf[i] = (v >> 8) & 0xff; buf[i + 1] = v & 0xff;
+      }
+    }
+  }
+
+  get winW(){ return Math.max(1, this.x1 - this.x0 + 1); }
+  get winH(){ return Math.max(1, this.y1 - this.y0 + 1); }
+
+  setWindow(x0, y0, x1, y1){
+    this.x0 = Math.max(0, Math.min(this.w - 1, x0 | 0));
+    this.x1 = Math.max(this.x0, Math.min(this.w - 1, x1 | 0));
+    this.y0 = Math.max(0, Math.min(this.h - 1, y0 | 0));
+    this.y1 = Math.max(this.y0, Math.min(this.h - 1, y1 | 0));
+    this.cursor = 0;
+    this.mode = 'idle';
+  }
+
+  /** 窗口内第 i 个像素在整帧缓冲里的字节偏移（行到尾自动换到下一行窗口行）*/
+  _offset(i){
+    const px = i % this.winW, py = Math.floor(i / this.winW);
+    const x = this.x0 + px, y = this.y0 + py;
+    if (y > this.y1) return -1;                       // 越出窗口底：真面板会绕回窗口首行
+    return (y * this.w + x) * 2;
+  }
+
+  beginWrite(){ this.cursor = 0; this.mode = 'write'; }
+  beginRead(){ this.cursor = 0; this.mode = 'read'; }
+
+  /** 写一段像素字节（数据相位）。返回写进去的字节数 */
+  write(bytes){
+    if (this.mode !== 'write') this.beginWrite();
+    let n = 0;
+    for (let k = 0; k + 1 < bytes.length; k += 2){
+      let off = this._offset(this.cursor);
+      if (off < 0){ this.cursor = 0; off = this._offset(0); }   // 绕回窗口首行（与 DCS 一致）
+      this.buf[off] = bytes[k]; this.buf[off + 1] = bytes[k + 1];
+      this.cursor++; n += 2;
+    }
+    this.writes += n;
+    return n;
+  }
+
+  /** 读一段像素字节（数据相位）。返回 Uint8Array（长度 = min(n, 剩余窗口像素×2)）*/
+  read(n){
+    if (this.mode !== 'read') this.beginRead();
+    const out = new Uint8Array(n);
+    for (let k = 0; k + 1 < n; k += 2){
+      let off = this._offset(this.cursor);
+      if (off < 0){ this.cursor = 0; off = this._offset(0); }
+      out[k] = this.buf[off]; out[k + 1] = this.buf[off + 1];
+      this.cursor++; this.reads += 2;
+    }
+    return out;
+  }
+
+  /** 整窗口读一遍（自测对账用）*/
+  snapshot(){
+    const out = new Uint8Array(this.winW * this.winH * 2);
+    const save = this.cursor, mode = this.mode;
+    this.beginRead();
+    for (let i = 0; i < out.length; i += 2){ const b = this.read(2); out[i] = b[0]; out[i + 1] = b[1]; }
+    this.cursor = save; this.mode = mode;
+    return out;
+  }
+}
+
+
 /** IN 环的槽数（= 固件 in_ring_kb / 512；8 KB / 512 = 16）。满的时候固件暂停消费帧。 */
 export const IN_RING_SLOTS = 16;
+
+/**
+ * 假探针对**读寄存器**的回包（数据相位的字节，不含 dummy）。
+ * 真值当然以真屏为准；这里给的是"确定性的、像真的"一组，让离线自测能对账：
+ *   · `04h` RDDID  → 3 字节（ID1..3，ST7796S/ST7789 常见的 00 93 96 那一族）
+ *   · `09h` RDDST  → 4 字节显示状态（这里报"正常显示中"）
+ *   · `0Ah..0Fh`、`DAh..DCh` → 各 1 字节
+ *   · `D3h` RDID4 → 4 字节
+ */
+export const MOCK_DCS_REGS = {
+  0x04: [0x00, 0x93, 0x96],
+  0x09: [0x00, 0x00, 0x61, 0x00],
+  0x0a: [0x9c], 0x0b: [0x00], 0x0c: [0x55], 0x0d: [0x00], 0x0e: [0x00], 0x0f: [0x00],
+  0xda: [0x00], 0xdb: [0x93], 0xdc: [0x96], 0xd3: [0x00, 0x93, 0x96, 0x00],
+};
 
 /** 简化版 sb_pick_sclk：模块时钟源（PLL0 三路）整数分频里挑最接近的（分频必须是偶数）*/
 export function mockPickSclk(wantHz){
@@ -78,6 +195,14 @@ export class MockSpiProbe {
       : opts.flash instanceof FlashDevice ? opts.flash
       : new FlashDevice({ ...(opts.flash && typeof opts.flash === 'object' ? opts.flash : {}), clock: this.now });
     this.flashNotes = [];       // 器件侧拒绝/说明（模型给的，不是协议错）
+
+    /**
+     * 面板 GRAM 模型（读回功能用）。默认 240×296（AXS15352）；换屏时页面调 `setPanelGeometry()`。
+     * `gram:false` 可关掉（那时读回走回环/全 0 —— 用来测"读不到东西"的分支）。
+     */
+    this.gram = opts.gram === false ? null : new PanelGram(
+      opts.gram?.w ?? opts.gramW ?? 240, opts.gram?.h ?? opts.gramH ?? 296, opts.gram || {});
+    this.gramOn = !!this.gram;
 
     /** 故障注入 */
     this.faults = {
@@ -424,6 +549,7 @@ export class MockSpiProbe {
       bytes.push(cmd, ...params);                                     // raw：cmd + params 同线数
     }
     this.wire.push(Uint8Array.from(bytes));
+    this._gramCmd(cmd, params);                                       // 面板模型：窗口 / 读命令
     this.wireLog.push(`STEP cmd=0x${cmd.toString(16).padStart(2, '0')} n=${n}` +
       (prof.profile === 1 ? '（DC 0→1，同一 CS 窗口）' : prof.profile === 2 ? '（0x02 + 24bit 地址）' : ''));
     this.stats.bytesTx += bytes.length;
@@ -431,6 +557,33 @@ export class MockSpiProbe {
     if (delayMs > 0){ this.delays.push(delayMs); this.blockUntil = Math.max(this.blockUntil, now + delayMs); }
     return ST.OK;
   }
+
+  /**
+   * 面板命令的**语义**侧（GRAM 模型）：窗口 / 写起点 / 读起点 / 续读。
+   * 档 1 与档 2 在这里统一 —— 档 2 的命令藏在 `STEP` 展开的地址里（`02h + 命令<<16`）。
+   */
+  _gramCmd(cmd, params){
+    const g = this.gram;
+    if (!g) return;
+    const u16 = (i) => ((params[i] || 0) << 8) | (params[i + 1] || 0);
+    switch (cmd & 0xff){
+      case 0x2a: g.setWindow(u16(0), g.y0, u16(2), g.y1); break;      // CASET
+      case 0x2b: g.setWindow(g.x0, u16(0), g.x1, u16(2)); break;      // RASET
+      case 0x2c: g.beginWrite(); break;                               // RAMWR
+      case 0x2e: g.beginRead(); break;                                // RAMRD
+      case 0x3e: g.mode = 'read'; break;                              // RAMRDC（续读：指针不动）
+      default: break;
+    }
+    if (MOCK_DCS_REGS[cmd & 0xff]) this._pendingReg = cmd & 0xff;     // 读寄存器：记下命令，数据相位回它
+  }
+
+  /** 换屏（页面/自测在切几何时调）：重建 GRAM 并回到全屏窗口 */
+  setPanelGeometry(w, h){
+    this.gram = new PanelGram(w, h);
+    this.gramOn = true;
+    return this.gram;
+  }
+
 
   _execXfer(f, p){
     if (p.length < XFER_HDR) return ST.BAD_FRAME;
@@ -446,6 +599,59 @@ export class MockSpiProbe {
     const tx = p.subarray(XFER_HDR, XFER_HDR + txLen);
     if (txLen){ this.wire.push(Uint8Array.from(tx)); this.stats.bytesTx += txLen; this.stats.txPoll++; }
     if (tcfg & TC.DC_EN) this.pins.dc = (tcfg & TC.DC_LEVEL) ? 1 : 0;
+
+    /**
+     * 面板 GRAM 模型优先接这两类（读回功能的数据面）：
+     *   · **写像素**：档 1 = DC=1 的数据相位（`2Ch` 之后）；档 2 = `32h + 24bit 地址(2Ch<<16)`；
+     *   · **读像素**：档 1 = DC=1 且 `rx_len>0`；档 2 = 带地址的读（地址落在命令空间 `2Eh<<16`）。
+     * 认不出来就往下走器件/回环 —— SPI NOR（flash）那条路不受影响。
+     */
+    const dcData = !!(tcfg & TC.DC_EN) && !!(tcfg & TC.DC_LEVEL);
+    const addr = dv.getUint32(8, true);
+    const isPanelAddr = (((addr >>> 16) & 0xff) === 0x2e) || (((addr >>> 16) & 0xff) === 0x2c);
+    /**
+     * 命令相位（不带读）：档 1 的单字节命令（`2Ah/2Ch/2Eh/3Eh`，DC=0 + `tx=[cmd]`）、
+     * 档 2 的 `CMD_EN`（`p[0]` 就是命令字）。**只通知面板模型、不吞掉这一帧** ——
+     * SPI NOR 的写/擦也是同样的形状（`02h/20h + 地址 + 数据`），不能在这里 return。
+     */
+    if (this.gram){
+      const cmdByte = cmdEn ? p[0] : ((tcfg & TC.DC_EN) && !dcData && txLen >= 1 ? tx[0] : null);
+      if (cmdByte != null) this._gramCmd(cmdByte, txLen > 1 ? tx.subarray(1) : new Uint8Array(0));
+    }
+    /**
+     * 面板 GRAM 的数据面（读回功能）：
+     *   · **有 DC 的数据相位**（`DC_EN|DC_LEVEL`）= 面板的像素读写 —— SPI NOR 从不用 DC，所以这条判据不吃到它；
+     *   · 档 2（QSPI）没有 DC：靠地址区分（`2Ch<<16` 写 / `2Eh<<16` 读，页码与写侧同一个编码）。
+     */
+    const gramWrite = txLen && (dcData || (this.profile.profile === 2 && isPanelAddr && (addr >>> 16) === 0x2c));
+    const gramRead = rxLen && (dcData || (this.profile.profile === 2 && isPanelAddr));
+    if (this.gram && !(txLen && rxLen)){
+      if (gramWrite){
+        this.gram.write(tx);
+        this.wireLog.push(`GRAM 写 ${txLen} B（窗口 ${this.gram.winW}×${this.gram.winH}）`);
+        return ST.OK;
+      }
+      if (gramRead){
+        /**
+         * 读寄存器优先：命令字节认得出（`MOCK_DCS_REGS`）就回那张表 —— 与 GRAM 读同一个形状，
+         * 真屏上也是"命令 → 数据相位"两步。认不出才当 GRAM 像素读。
+         */
+        const reg = this._pendingReg ?? (cmdEn ? (MOCK_DCS_REGS[p[0]] ? p[0] : null) : null);
+        if (reg != null && MOCK_DCS_REGS[reg]){
+          const table = MOCK_DCS_REGS[reg];
+          const rx = new Uint8Array(rxLen);
+          for (let i = 0; i < rxLen; i++) rx[i] = table[i] ?? 0;
+          this._pendingReg = null;
+          this._lastRx = rx; this.stats.bytesRx += rx.length;
+          this.wireLog.push(`寄存器 0x${reg.toString(16).padStart(2, '0')} 读 ${rxLen} B → ${[...rx].map(v => v.toString(16).padStart(2, '0')).join(' ')}`);
+          return ST.OK;
+        }
+        const rx = this.gram.read(rxLen);
+        this._lastRx = rx; this.stats.bytesRx += rx.length;
+        this.wireLog.push(`GRAM 读 ${rxLen} B（窗口 ${this.gram.winW}×${this.gram.winH} · 第 ${this.gram.cursor} 像素）`);
+        return ST.OK;
+      }
+    }
 
     // 器件模型：**纯读 / 纯写**（不含全双工）交给它；全双工仍走回环 —— 回环自检就靠那个形状
     const duplex = txLen > 0 && rxLen > 0;

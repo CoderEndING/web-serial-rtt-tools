@@ -20,6 +20,7 @@ import * as C from './panel-code.js';
 import * as I from './image.js';
 import { BitPopover } from './bit-editor.js';
 import { PanelAnim } from './anim.js';
+import * as RD from './panel-read.js';
 import { fmtBytes } from './session.js';
 
 /** 两块目标屏的推荐值。`short` 是侧栏下拉用的短名（长名字会把 300px 宽的侧栏撑爆 → 字被裁）*/
@@ -198,6 +199,21 @@ export class SpiPanelView {
       this.anim.loop = e.target.checked;
       if (this.anim.video) this.anim.video.loop = e.target.checked;
     });
+
+    // ============================================================ 读回（寄存器 / GRAM）
+    this.readAbort = false;
+    this.readBack = null;                    // 最近一次读回的 { rgba, bytes, w, h, ms, plan }
+    for (const r of RD.REG_READS) $('pn-read-reg').appendChild(new Option(r.name, String(r.cmd ?? '')));
+    $('pn-read-reg').addEventListener('change', () => {
+      const r = RD.REG_READS.find(x => String(x.cmd) === $('pn-read-reg').value);
+      if (r && r.cmd != null){ $('pn-read-reg-cmd').value = r.cmd.toString(16).toUpperCase().padStart(2, '0'); $('pn-read-reg-len').value = r.rx; }
+    });
+    $('pn-read-reg').dispatchEvent(new Event('change'));
+    $('pn-read-reg-go').addEventListener('click', () => this.wrap(() => this.readRegister()));
+    $('pn-read-go').addEventListener('click', () => this.wrap(() => this.readGram()));
+    $('pn-read-stop').addEventListener('click', () => { this.readAbort = true; });
+    $('pn-read-bmp').addEventListener('click', () => this.saveReadBmp());
+    $('pn-read-full').addEventListener('click', () => this.fillReadWindow());
 
     // 面板电源 / 显示：4 个独立命令（上电 11h / 开显示 29h / 关显示 28h / 下电 10h）+ RST 脉冲
     $('pn-rst-send').addEventListener('click', () => this.sendResetPulse());
@@ -607,6 +623,8 @@ export class SpiPanelView {
     const g = this.geometry();
     $('pn-canvas').width = g.w;
     $('pn-canvas').height = g.h;
+    this.fillReadWindow();                                  // 读回窗口跟着屏走
+    this.session.mockProbe?.setPanelGeometry?.(g.w, g.h);   // 假探针的 GRAM 也换成这块屏
     this.renderPreview();
   }
 
@@ -776,6 +794,162 @@ export class SpiPanelView {
     this.refreshButtons();
   }
 
+  // ==================================================================== 读回（寄存器 / GRAM）
+
+  /** 窗口填成整屏（切几何 / 换屏时也调）*/
+  fillReadWindow(){
+    const g = this.geometry();
+    $('pn-read-x0').value = 0; $('pn-read-y0').value = 0;
+    $('pn-read-x1').value = g.w - 1; $('pn-read-y1').value = g.h - 1;
+  }
+
+  /** 当前面板档（读回要靠它选时序：1 = SPI+DC 走 DCS，2 = QSPI 走"读命令+地址"）*/
+  panelProfile(){
+    return this.session.profile?.profile ?? 0;
+  }
+
+  /** 档位是 raw(0) 时给一句提醒（屏基本都要 1 或 2，否则时序不对）*/
+  warnIfRawProfile(what){
+    if (this.panelProfile() !== 0) return false;
+    this.session.log('w', `${what}：当前档位是 raw(0) —— 屏一般是「spi_dcx(1)」或「qspi(2)」，` +
+      '先在「面板档（profile）」里点「写入档位」再读，否则时序对不上', this.tag);
+    return true;
+  }
+
+  /** UI 上的读时序（dummy/线数/opcode/地址…）→ panel-read 的 opts */
+  readTiming(){
+    return {
+      dummy: Math.max(0, Math.min(4, +$('pn-read-dummy').value || 0)),
+      lines: +$('pn-read-lines').value || 1,
+      dcs: { ramrdCmd: hxOf($('pn-read-ramrd').value, 0x2e), contCmd: hxOf($('pn-read-cont').value, 0x3e) },
+      qspi: { opcode: hxOf($('pn-read-opcode').value, 0x03), addrLen: Math.max(0, Math.min(4, +$('pn-read-addrlen').value || 0)),
+              baseAddr: hxOf($('pn-read-addr').value, 0x2e0000) },
+    };
+  }
+
+  /** 读寄存器（一条事务就回来）*/
+  async readRegister(){
+    const s = this.session;
+    if (!s.dataReady) return s.log('e', '读寄存器：先「连接数据端点」（或勾「用假探针」）', this.tag);
+    if (s.busy) return s.log('w', '读寄存器：桥上正忙（刷屏/重放没结束）', this.tag);
+    const t = this.readTiming();
+    this.warnIfRawProfile('读寄存器');
+    const cmd = hxOf($('pn-read-reg-cmd').value, 0x04);
+    const rx = Math.max(1, Math.min(+$('pn-read-reg-len').value || 1, RD.READ_CHUNK_MAX));
+    const { items, label } = RD.regReadItems({ cmd, rx, profile: this.panelProfile(), lines: t.lines,
+                                               dummy: t.dummy, qspi: t.qspi });
+    const t0 = performance.now();
+    const r = await s.sendFrames(items, { tag: this.tag, quiet: true, timeoutMs: 2500, batchBytes: this.batchBytes() });
+    const ms = performance.now() - t0;
+    const rsp = [...r.rsps].reverse().find(x => x);
+    const data = rsp?.data || new Uint8Array(0);
+    const hexs = [...data].map(v => v.toString(16).toUpperCase().padStart(2, '0'));
+    const body = data.length ? `${hexs.join(' ')}` : '（没读到数据）';
+    // dummy 是**固件在数据相位之前发的**，所以这里显示的整串都是参数（别把第一个当成 dummy 丢掉）
+    const note = t.dummy > 0 ? `（dummy=${t.dummy} 周期已由固件发过）` : '';
+    $('pn-read-reg-out').textContent = `${label} → ${body} ${note} · ${ms.toFixed(0)} ms`;
+    this.lastReg = { cmd, rx, bytes: data.length, hex: body, ms, dummy: t.dummy };
+    s.log(rsp ? 'g' : 'e', `读寄存器 0x${cmd.toString(16).padStart(2, '0')}：${body} ${note}（${ms.toFixed(0)} ms）`, this.tag);
+    await s.pollStatus(true);
+  }
+
+  /**
+   * 读 GRAM：按 `panel-read.gramReadPlan()` 一片一片读回来（每片 ≤504 B），拼成一帧。
+   * 读回来的画面直接画进「图片 / 图案刷屏」的预览框 —— 与"发出去的那一帧"同一个位置。
+   */
+  async readGram(){
+    const s = this.session;
+    if (!s.dataReady) return s.log('e', '读回：先「连接数据端点」（或勾「用假探针」）', this.tag);
+    if (s.busy) return s.log('w', '读回：桥上正忙（刷屏/重放没结束）', this.tag);
+    const g = this.geometry();
+    const t = this.readTiming();
+    this.warnIfRawProfile('读回');
+    const num = (id, dflt) => { const v = $(id).value.trim(); return v === '' ? dflt : (+v || 0); };
+    const plan = RD.gramReadPlan({
+      geometry: g, profile: this.panelProfile(),
+      x0: num('pn-read-x0', 0), y0: num('pn-read-y0', 0),
+      x1: num('pn-read-x1', g.w - 1), y1: num('pn-read-y1', g.h - 1),
+      chunk: Math.max(2, Math.min(+$('pn-read-chunk').value || RD.READ_CHUNK_DEFAULT, RD.READ_CHUNK_MAX)),
+      lines: t.lines, dcs: { ...t.dcs, dummy: t.dummy }, qspi: { ...t.qspi, dummy: t.dummy, lines: t.lines },
+    });
+    const bad = RD.readPlanProblem(plan);
+    if (bad) return s.log('e', '读回：' + bad, this.tag);
+
+    this.readAbort = false;
+    s.setBusy(true);
+    this.refreshButtons();
+    const t0 = performance.now();
+    const buf = new Uint8Array(plan.total);
+    let off = 0, done = 0, missed = 0;
+    s.log('i', `读回开始：${plan.w}×${plan.h} → ${plan.total} B / ${plan.chunks.length} 片` +
+      `（${s.profile?.profile === 2 ? 'QSPI：读命令 + 地址递增' : 'DCS：2E 读 + 3E 续读'}）`, this.tag);
+    try {
+      for (const c of plan.chunks){
+        if (this.readAbort) break;
+        const r = await s.sendFrames(c.items, {
+          tag: this.tag, quiet: true, timeoutMs: 4000, batchBytes: this.batchBytes(),
+          shouldStop: () => this.readAbort,
+        });
+        const rsp = [...r.rsps].reverse().find(x => x);
+        if (!rsp || !rsp.data?.length){ missed++; }
+        else { buf.set(rsp.data.subarray(0, c.bytes), off); }
+        off += c.bytes; done++;
+        const dt = (performance.now() - t0) / 1000;
+        $('pn-read-prog').textContent = `读片 ${done}/${plan.chunks.length} · ${(off / 1024).toFixed(1)} KB · ` +
+          `${dt.toFixed(1)} s · ${(off / 1024 / Math.max(0.001, dt)).toFixed(0)} KB/s` + (missed ? ` · 丢 ${missed} 片` : '');
+      }
+    } finally {
+      const ms = performance.now() - t0;
+      s.setBusy(false);
+      this.refreshButtons();
+      const littleEndian = $('pn-byteorder').value === 'le';
+      const swap = $('pn-swap').checked;
+      const rgba = RD.decodeGram(buf, { littleEndian, swap });
+      this.readBack = { rgba, bytes: buf, w: plan.w, h: plan.h, x0: plan.x0, y0: plan.y0,
+                        ms, chunks: plan.chunks.length, missed, littleEndian, swap };
+      this.drawReadBack();
+      const kbs = off / 1024 / Math.max(0.001, ms / 1000);
+      $('pn-read-prog').textContent = `读回 ${plan.w}×${plan.h} · ${fmtBytes(off)} · ${ms.toFixed(0)} ms · ` +
+        `${kbs.toFixed(0)} KB/s · ${plan.chunks.length} 片` + (missed ? ` · ⚠ 丢 ${missed} 片` : '') +
+        (this.readAbort ? '（已中止）' : '');
+      s.log(missed || this.readAbort ? 'w' : 'g',
+        `读回结束：${plan.w}×${plan.h} · ${fmtBytes(off)} · ${ms.toFixed(0)} ms · ${kbs.toFixed(0)} KB/s` +
+        (missed ? ` · ${missed} 片没拿到数据` : '') + (this.readAbort ? ' · 用户中止' : ''), this.tag);
+      await s.pollStatus(true);
+    }
+  }
+
+  /** 把读回来的一帧画进预览框（窗口不是整屏时按 x0/y0 摆放，其余保持黑）*/
+  drawReadBack(){
+    const rb = this.readBack;
+    if (!rb) return;
+    const g = this.geometry();
+    const canvas = $('pn-canvas');
+    if (canvas.width !== g.w || canvas.height !== g.h){ canvas.width = g.w; canvas.height = g.h; }
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, g.w, g.h);
+    const tmp = document.createElement('canvas');
+    tmp.width = rb.w; tmp.height = rb.h;
+    tmp.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(rb.rgba), rb.w, rb.h), 0, 0);
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(tmp, rb.x0, rb.y0);
+    const sum = $('pn-img-sum');
+    if (sum) sum.textContent = `读回：${rb.w}×${rb.h} @(${rb.x0},${rb.y0}) · ${fmtBytes(rb.bytes.length)} · ${rb.ms.toFixed(0)} ms` +
+      `　（${rb.littleEndian ? '低字节在前' : '高字节在前'}${rb.swap ? ' · R/B 交换' : ''}）`;
+  }
+
+  /** 读回来的那一帧 → 24 位 BMP（浏览器不会导出 BMP，自己拼头）*/
+  saveReadBmp(){
+    const rb = this.readBack;
+    if (!rb) return this.session.log('w', '还没读回一帧 —— 先点「读一帧」', this.tag);
+    const bmp = RD.encodeBMP(rb.rgba, rb.w, rb.h);
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    const name = `panel-read-${rb.w}x${rb.h}-${stamp}.bmp`;
+    saveBlob(new Blob([bmp], { type: 'image/bmp' }), name);
+    this.session.log('g', `已保存 ${name}（${fmtBytes(bmp.length)}，${rb.w}×${rb.h} 24 位 BMP）`, this.tag);
+  }
+
   // ==================================================================== 档位 / 推荐值 / 复位
 
   async wrap(fn){
@@ -870,6 +1044,15 @@ export class SpiPanelView {
         lastMs: +this.anim.stat.lastMs.toFixed(1),
       } : null,
       lastRun: this.lastRun || null,          // 最近一次刷图的客观数字（脚本/自检直接读，别去解析日志）
+      readBack: this.readBack ? {             // 最近一次读回（寄存器另见 lastReg）
+        w: this.readBack.w, h: this.readBack.h, x0: this.readBack.x0, y0: this.readBack.y0,
+        bytes: this.readBack.bytes.length, ms: +this.readBack.ms.toFixed(1),
+        chunks: this.readBack.chunks, missed: this.readBack.missed,
+        littleEndian: this.readBack.littleEndian, swap: this.readBack.swap,
+        // 抽样几个像素（脚本对账用；整帧 RGBA 太大不进 summary）
+        sample: [0, 1, 2].map(i => [this.readBack.rgba[i * 4], this.readBack.rgba[i * 4 + 1], this.readBack.rgba[i * 4 + 2]]),
+      } : null,
+      lastReg: this.lastReg || null,
       logLines: this.session.ring.length,
     };
   }
@@ -887,4 +1070,23 @@ function parseHexByteSafe(s, fallback = 0){
   const t = String(s ?? '').trim().replace(/^0x/i, '');
   if (!/^[0-9a-f]{1,2}$/i.test(t)) return fallback;
   return parseInt(t, 16) & 0xff;
+}
+
+/** 读时序那几个格子：十六进制，位数不限（读命令 03 / 地址 0x2E0000 都要用）*/
+function hxOf(s, fallback = 0){
+  const t = String(s ?? '').trim().replace(/^0x/i, '');
+  if (!/^[0-9a-f]{1,8}$/i.test(t)) return fallback;
+  return parseInt(t, 16) >>> 0;
+}
+
+/** 存文件（与「工程生成」页同一个做法：a[download] + objectURL）*/
+function saveBlob(blob, name){
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 4000);
 }

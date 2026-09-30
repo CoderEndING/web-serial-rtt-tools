@@ -29,7 +29,7 @@ FW_DIR   = tools/target-firmware/stm32f103
 LA       = tools/la/kingst_la.py
 
 .DEFAULT_GOAL := help
-.PHONY: help serve serve-dev serve-stop browser open page-prep test test-ui test-gen test-gen-page gen-embed samples-anim test-hid test-dwarf test-scope test-scope-page test-scope-render test-spi test-spi-page test-hw test-record test-bridge test-bridge-gate test-hpm test-image test-all flash-timing hw-campaign hw-campaign-hpm campaign-summary \
+.PHONY: help serve serve-dev serve-stop browser open page-prep test test-ui test-gen test-gen-page gen-embed samples-anim test-hid test-dwarf test-scope test-scope-page test-scope-render test-spi test-read test-spi-page test-hw test-record test-bridge test-bridge-gate test-hpm test-image test-all flash-timing hw-campaign hw-campaign-hpm campaign-summary \
         bridge bridge-stop fw-build fw-flash fw-restore fw-h7-build fw-h7-slow fw-h7-flash \
         algo-check flash-plan la-info la-capture git-status git-log check clean spi-hw spi-flow
 
@@ -71,6 +71,7 @@ test:
 	$(NODE) tools/selftest/hpm-flash.test.mjs
 	$(NODE) tools/selftest/spi-proto.test.mjs
 	$(NODE) tools/selftest/spi-panel-code.test.mjs
+	$(NODE) tools/selftest/spi-read.test.mjs
 	$(NODE) tools/selftest/spi-frames-dsl.test.mjs
 	$(NODE) tools/selftest/spi-flash.test.mjs
 
@@ -138,6 +139,10 @@ test-scope-render:
 # 「SPI/QSPI 屏」页的引擎层：帧编解码 / 打包器（一帧不跨包）/ HID 0x35 偏移 / 假探针帧执行
 test-spi:
 	$(NODE) tools/selftest/spi-proto.test.mjs
+
+# 屏的回读（读寄存器 / 读 GRAM → 预览 + BMP）：读计划、解码、BMP 头、假探针 GRAM 往返
+test-read:
+	$(NODE) tools/selftest/spi-read.test.mjs
 
 # 手写多帧 DSL：解析 / 自动规则 / 错误必须带行号拦住（含面板示例的回归）
 test-dsl:

@@ -1014,6 +1014,17 @@
         </div>
       </fieldset>
 
+      <!-- 日志：**默认展开**（用户 2026-09-30）—— 刷屏 / 重放完第一眼就想看它有没有报错，
+           折叠着等于每次都要多点一下。想省地方还能自己收。
+           2026-10 用户要求：日志挪到「面板初始化」**前面** —— 先看有没有报错，再看/改命令表。 -->
+      <fieldset id="pn-log-card">
+        <legend>日志<button class="mini foldbtn" data-fold="pn-log-card">收起</button></legend>
+        <div class="logbox">
+          <button id="pn-log-clear" class="mini logclear" title="只清屏上的日志（记录仍保留在会话里，展开/切页回来会重放）">清空</button>
+          <div id="pn-log" class="log"></div>
+        </div>
+      </fieldset>
+
       <fieldset id="pn-code-card">
           <legend>面板初始化（把 C 数组贴进来 / 载入内置示例）<button class="mini foldbtn" data-fold="pn-code-card">收起</button></legend>
           <div class="toolrow">
@@ -1057,13 +1068,57 @@
           </div>
         </fieldset>
 
-      <!-- 日志：**默认展开**（用户 2026-09-30）—— 刷屏 / 重放完第一眼就想看它有没有报错，
-           折叠着等于每次都要多点一下。想省地方还能自己收。 -->
-      <fieldset id="pn-log-card">
-        <legend>日志<button class="mini foldbtn" data-fold="pn-log-card">收起</button></legend>
-        <div class="logbox">
-          <button id="pn-log-clear" class="mini logclear" title="只清屏上的日志（记录仍保留在会话里，展开/切页回来会重放）">清空</button>
-          <div id="pn-log" class="log"></div>
+      <!-- ============================ 读回：寄存器 / GRAM ============================
+           用户 2026-10："spi/qspi 屏的回读功能（读一般都是 1 线读）：读寄存器；读 gram 值
+           （发 2A+2B 开窗，2E 读数据，3E 是续读），把读出的数据还原成一帧图片并显示在预览窗口，
+           并提供保存为 bmp 的功能。" —— 位置按用户要求：放在「面板初始化」之后。 -->
+      <fieldset id="pn-read-card">
+        <legend>读回（寄存器 / GRAM）<button class="mini foldbtn" data-fold="pn-read-card">收起</button></legend>
+
+        <div class="toolrow">
+          <span>寄存器</span>
+          <select id="pn-read-reg" title="MIPI DCS 的标准读命令；表外的直接改右边两个格子"></select>
+          <span class="hint" style="margin:0">命令</span><input id="pn-read-reg-cmd" class="num" value="04" style="width:52px" title="十六进制">
+          <span class="hint" style="margin:0">读</span><input id="pn-read-reg-len" class="num" value="3" style="width:44px" title="数据字节数（不含 dummy）">
+          <button id="pn-read-reg-go" class="mini">读寄存器</button>
+          <span class="spacer"></span>
+          <span class="hint" id="pn-read-reg-out" style="margin:0">还没读</span>
+        </div>
+
+        <div class="toolrow nw">
+          <span>窗口</span>
+          <input id="pn-read-x0" class="num" value="0" style="width:52px" title="x0">
+          <input id="pn-read-y0" class="num" value="0" style="width:52px" title="y0">
+          <span class="hint" style="margin:0">→</span>
+          <input id="pn-read-x1" class="num" value="239" style="width:52px" title="x1（含）">
+          <input id="pn-read-y1" class="num" value="295" style="width:52px" title="y1（含）">
+          <button id="pn-read-full" class="mini">整屏</button>
+          <span class="hint" style="margin:0">每片</span><input id="pn-read-chunk" class="num" value="500" style="width:56px" title="一次 XFER 读多少字节。上限是 503 而不是 504：504 的应答正好 512 B（满包），主机 transferIn 等不到短包会一直挂着（真机实测）">
+          <span class="spacer"></span>
+          <button id="pn-read-go" class="primary mini">读一帧</button>
+          <button id="pn-read-stop" class="mini">停止</button>
+          <button id="pn-read-bmp" class="mini" title="把刚读回来的那一帧存成 24 位 BMP（浏览器不会导出 BMP，这里自己拼头）">保存 BMP</button>
+        </div>
+
+        <div class="toolrow nw">
+          <span class="hint" style="margin:0">读时序</span>
+          <label class="chk" title="档 2（QSPI）的读 opcode —— 跟 SPI Flash 那套一样，默认 03h">读命令 <input id="pn-read-opcode" class="num" value="03" style="width:48px"></label>
+          <label class="chk">地址字节 <input id="pn-read-addrlen" class="num" value="3" style="width:36px"></label>
+          <label class="chk" title="读的起始地址（= 命令字<<16，与写侧 0x2C0000 同一个编码）">地址 <input id="pn-read-addr" value="0x2E0000" style="width:84px"></label>
+          <label class="chk" title="数据相位前的 dummy 周期（1 = 1 字节）">dummy <input id="pn-read-dummy" class="num" value="1" style="width:34px"></label>
+          <label class="chk">读线数 <select id="pn-read-lines"><option>1</option><option>2</option><option>4</option></select></label>
+          <label class="chk" title="档 1（SPI+DC）的读命令">RAMRD <input id="pn-read-ramrd" class="num" value="2E" style="width:44px"></label>
+          <label class="chk" title="档 1 的续读命令（每片一条）">续读 <input id="pn-read-cont" class="num" value="3E" style="width:44px"></label>
+        </div>
+
+        <p class="hint" style="margin:4px 0 0">
+          <b>档 1（SPI + DC）</b>走 MIPI DCS 读流程：<code>2Ah/2Bh</code> 开窗 → <code>2Eh</code>（RAMRD，<b>CS 保持</b>）→ 读数据（<b>首字节是 dummy</b>）→ 之后每片用 <code>3Eh</code> 续读。
+          <b>档 2（QSPI）</b>跟 SPI Flash 一样：一条事务里「读命令 + 24 bit 地址 + dummy + 数据」，地址按片递增。
+          一帧 240×296 = 142,080 B，要读 <b>285 片</b>（每片 ≤503 B：504 的应答正好 512 B 满包，主机会等不到短包）。读回来的画面显示在「图片 / 图案刷屏」的预览框里；
+          颜色不对时先只翻「字节序」（桥页/图片区的开关），再试 R/B 交换。
+        </p>
+        <div class="row btnrow">
+          <span class="hint" id="pn-read-prog" style="margin:0">待读</span>
         </div>
       </fieldset>
 
@@ -1150,6 +1205,25 @@
       </fieldset>
 
       <fieldset>
+        <legend>落地方式</legend>
+        <label class="row"><span>换行符</span>
+          <select id="g-newline" title="CRLF = 与 uvprojx2cmake.py 的产物逐字节一致；LF 更贴近 git 习惯">
+            <option value="crlf">CRLF（和 Python 工具一致）</option>
+            <option value="lf">LF</option>
+          </select>
+        </label>
+        <label class="chk"><input type="checkbox" id="g-force"> 已存在就直接覆盖（不再问）</label>
+        <div class="row btnrow">
+          <button id="g-save" class="primary" title="Edge/Chrome：选一个文件夹，多个文件直接写进去，不用解压">写入文件夹…</button>
+        </div>
+        <div class="row btnrow">
+          <button id="g-zip" title="不支持选文件夹的浏览器走这里：打包成一个 zip 落「下载」">打包 ZIP</button>
+        </div>
+        <p class="hint">网页不能自动写你的项目目录：得你亲手选一次文件夹（浏览器安全模型）。Edge/Chrome 支持直写，其它浏览器自动走 ZIP。</p>
+      </fieldset>
+
+      <!-- 本地桥：跟"工程配套文件"是两回事（那是本机跑的程序包），所以放在「落地方式」之后 -->
+      <fieldset id="g-bridge-card">
         <legend>本地桥（J-Link / OpenOCD）</legend>
         <label class="chk"><input type="checkbox" id="g-bk-on" checked title="J-Link / OpenOCD 都是本机程序，浏览器无权启动它们 —— 要用这两条后端就得有个本机桥。零安装的 WebUSB 通路不需要它">生成「本地桥」安装包（双击即用）</label>
         <label class="row"><span>端口</span><input id="g-bk-port" class="num" value="17321" inputmode="numeric" title="桥监听的本地端口；页面与桥都走它"></label>
@@ -1172,41 +1246,10 @@
             <option value="0">官方优先（nodejs.org）</option>
           </select></label>
         <label class="chk"><input type="checkbox" id="g-bk-autonode" checked title="关掉 = 没 Node 时只提示、不下载（企业内网/杀软敏感时用）">没 Node 时自动下便携版</label>
-        <div class="row btnrow"><button id="g-zip-bridge" title="只打包桥的 7 个文件（zip 里是 rtt-bridge-kit/…）：解压后双击 start-bridge.bat 就能起桥">下载桥包（ZIP）</button></div>
+        <div class="row btnrow"><button id="g-zip-bridge" title="只打包桥的文件（zip 里是 rtt-bridge-kit/…）：解压后双击 start-bridge.bat 就能起桥">下载桥包（ZIP）</button></div>
         <p class="hint">包里：启动器（bat/sh）+ 桥本体 + 配置 + 预检脚本 + 便携 Node 下载器 + 说明。
           <b>路径留空 = 桥自己探测</b>（ESP-IDF 的 openocd-esp32 → Program Files → PATH；J-Link 找 SEGGER 目录里版本号最大的）；
           起桥前会先跑一次环境预检，把"该改哪一行"打出来。退出用 <b>Ctrl+C</b>（会把 OpenOCD / J-Link 子进程一起收掉）。</p>
-      </fieldset>
-
-      <fieldset>
-        <legend>已套用的修正（固定 4 项）</legend>
-        <p class="hint" style="margin-top:2px">
-          生成时<b>固定</b>在 <code>uvprojx2cmake.py</code> 的产物上套这 4 处修补，不需要你勾：
-        </p>
-        <ol class="hint fixlist">
-          <li><b>RTT 范围</b> <code>0x5000 → 0x2000</code>（原来在 20KB RAM 的 F103 上会越过 RAM 顶）</li>
-          <li><b>clean-jlink 不再删 <code>*.log</code></b>（原来会连 <code>JLinkLog.txt</code> 一起删掉）</li>
-          <li><b>openocd-rtt 改用双引号</b>（<code>-c "…"</code>；原来单引号在 cmd.exe 里会报错）</li>
-          <li><b>去掉 jlink-swo 目标</b>（硬编码 72MHz、固件也没开 SWO，跑出来是空日志）</li>
-        </ol>
-      </fieldset>
-
-      <fieldset>
-        <legend>落地方式</legend>
-        <label class="row"><span>换行符</span>
-          <select id="g-newline" title="CRLF = 与 uvprojx2cmake.py 的产物逐字节一致；LF 更贴近 git 习惯">
-            <option value="crlf">CRLF（和 Python 工具一致）</option>
-            <option value="lf">LF</option>
-          </select>
-        </label>
-        <label class="chk"><input type="checkbox" id="g-force"> 已存在就直接覆盖（不再问）</label>
-        <div class="row btnrow">
-          <button id="g-save" class="primary" title="Edge/Chrome：选一个文件夹，多个文件直接写进去，不用解压">写入文件夹…</button>
-        </div>
-        <div class="row btnrow">
-          <button id="g-zip" title="不支持选文件夹的浏览器走这里：打包成一个 zip 落「下载」">打包 ZIP</button>
-        </div>
-        <p class="hint">网页不能自动写你的项目目录：得你亲手选一次文件夹（浏览器安全模型）。Edge/Chrome 支持直写，其它浏览器自动走 ZIP。</p>
       </fieldset>
     </aside>
 

@@ -356,6 +356,7 @@ bridge/
   start-bridge.bat|sh   双击启动
 tools/
   selftest/             自测：Node 协议测试 / 工程生成对账 / HID 协议 / 页面端到端(CDP) / 桥端到端 / 浏览器真机(CDP) / LA 参考流量
+    spi-read.test.mjs   **屏的回读**（读寄存器 / 读 GRAM → 预览 + BMP）：读计划、解码、BMP、假探针 GRAM 往返（`make test-read`）
     hw-campaign.mjs     **真机场景验收**（烧录+Viewer+转发+10s存盘+J-Scope+交替烧录计时，带判决，`make hw-campaign`）
     flash-timing.mjs    烧录耗时体检（`make flash-timing`，ARGS=--clamp 复现"后台页被限速"）
     recorder-file.test.mjs  「记录到文件」落盘语义（`.crswap`/积压/落盘进度，OPFS 替身；`make test-record`）
