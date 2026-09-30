@@ -733,10 +733,20 @@
           <button id="sp-bl-off" title="把 BL 脚置成「无效」电平 = 关背光">背光关</button>
         </div>
         <div class="row"><span>RST 脉冲</span><input id="sp-pin-rst-low" class="num" value="10" inputmode="numeric" title="把 RST 脚拉低几毫秒"><input id="sp-pin-rst-post" class="num" value="120" inputmode="numeric" title="释放后再等几毫秒"><button id="sp-pin-rst-send" class="mini">发</button></div>
-        <div class="row btnrow"><button id="sp-pinmap-btn" title="按当前档位画出 J3 40 针的引脚分配：桥的信号 / CDC 虚拟串口 / 能当辅助脚的 / 不能用的">引脚分配图</button></div>
-        <div id="sp-pinmap" class="pinmap" hidden>
-          <div class="pinmap-head"><b>J3 引脚分配</b><span class="hint" id="sp-pinmap-sub"></span><button id="sp-pinmap-close" class="mini">关闭</button></div>
-          <pre id="sp-pinmap-pre"></pre>
+        <div class="row btnrow"><button id="sp-pinmap-btn" title="弹出窗口显示 J3 40 针的引脚分配：桥的信号 / CDC 虚拟串口 / 能当辅助脚的 / 不能用的">引脚分配图</button></div>
+        <div id="sp-pinmap" class="pinmodal" hidden>
+          <div class="pinmodal-box">
+            <div class="pinmodal-head">
+              <b>J3 引脚分配（HPM5301EVKLite · 40 pin）</b>
+              <span class="hint" id="sp-pinmap-sub"></span>
+              <button id="sp-pinmap-close" class="mini">关闭 ✕</button>
+            </div>
+            <div class="pinmodal-body">
+              <table class="pintab"><tbody id="sp-pinmap-body"></tbody></table>
+              <p class="hint" id="sp-pinmap-legend"></p>
+              <p class="hint" id="sp-pinmap-foot"></p>
+            </div>
+          </div>
         </div>
         <p class="hint" id="sp-pad-note">TE 撕裂信号暂不暴露（TBD）。灰掉的脚固件会拒：PY00/PY01 在 v1 不支持；PB10~PB13 是 SPI2 的 CS/SCLK/MISO/MOSI；PA30 被板上 Q1 短到地拉不动。</p>
       </fieldset>

@@ -325,24 +325,28 @@ export class SpiBusView {
     ];
     const cell = ([pin, name, role, note]) => {
       const s = sel(pin);
-      const extra = [note, s ? '<< ' + s : ''].filter(Boolean).join(' ');
-      return `${String(pin).padStart(2)} ${M[role] || '·'} ${name.padEnd(5)}${extra ? ' ' + extra : ''}`;
+      const cls = { spi: 'is-spi', vcom: 'is-vcom', aux: 'is-aux', no: 'is-no' }[role] || 'is-plain';
+      return `<td class="p-pin">${pin}</td>` +
+             `<td class="p-name ${cls}"><span class="p-mark">${M[role] || '·'}</span>${name}` +
+             (note ? `<span class="p-note">${note}</span>` : '') +
+             (s ? `<span class="p-sel">&lt;&lt; ${s}</span>` : '') + '</td>';
     };
-    const lines = ['  奇数脚' + ' '.repeat(26) + '偶数脚'];
+    const rows = [];
     for (let i = 0; i < 20; i++){
-      lines.push('  ' + cell(T[i * 2]).padEnd(34) + cell(T[i * 2 + 1]));
+      rows.push('<tr>' + cell(T[i * 2]) + cell(T[i * 2 + 1]) + '</tr>');
     }
-    lines.push('');
-    lines.push('  ★ 桥的信号(SPI2)   ● CDC 虚拟串口(UART2)   ○ 可当辅助脚   ⛔ 不可用   · 电源/地/空脚');
-    lines.push('  << 当前辅助脚：DC=' + (P.PAD_NAME[c.padDc] || '不用') +
-               ' · RST=' + (P.PAD_NAME[c.padRst] || '不用') +
-               ' · CS辅助=' + (P.PAD_NAME[c.padCsAux] || '不用') +
-               ' · BL=' + (P.PAD_NAME[c.padBl] || '不用'));
-    lines.push('  接线：屏/器件的 CS←J3[26] SCLK←J3[13] D0←J3[28] D1←J3[27] D2←J3[10] D3←J3[8]');
-    lines.push('        VCOM ← J3[5](TX,PB08) / J3[3](RX,PB09)     详细说明见 docs/spi-bridge-wiring.md');
-    $('sp-pinmap-pre').textContent = lines.join('\n');
+    $('sp-pinmap-body').innerHTML = rows.join('');
+    $('sp-pinmap-legend').textContent =
+      '★ 桥的信号（SPI2）　● CDC 虚拟串口（UART2）　○ 可当辅助脚　⛔ 不可用　· 电源/地/空脚　<< 当前分配给该脚的辅助线';
+    $('sp-pinmap-foot').textContent =
+      '当前辅助脚：DC=' + (P.PAD_NAME[c.padDc] || '不用') +
+      '　RST=' + (P.PAD_NAME[c.padRst] || '不用') +
+      '　CS 辅助=' + (P.PAD_NAME[c.padCsAux] || '不用') +
+      '　BL=' + (P.PAD_NAME[c.padBl] || '不用') +
+      '　｜　接线：CS←J3[26] SCLK←J3[13] D0←J3[28] D1←J3[27] D2←J3[10] D3←J3[8]，' +
+      'VCOM ← J3[5](TX,PB08) / J3[3](RX,PB09)';
     $('sp-pinmap-sub').textContent = (c.padRst || c.padBl || c.padDc)
-      ? '（◆ 已按当前配置标出辅助脚）' : '（还没读到配置，先用「读取配置」）';
+      ? '（已按当前配置标出辅助脚）' : '（还没读到配置，可先点「读取配置」）';
   }
 
   // ==================================================================== 配置

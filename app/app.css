@@ -471,9 +471,25 @@ fieldset.folded > legend::after{content:' · 已折叠';color:var(--fg2);font-si
 .chips button.on{border-color:var(--acc);background:#1f6feb;color:#fff}
 #pn-img-sum{white-space:pre-wrap}
 
-/* ---- 引脚分配图（SPI 桥页「辅助脚」卡片里的按钮弹出）---- */
-.pinmap{margin-top:8px;border:1px solid var(--line,#3a3a3a);border-radius:6px;background:var(--bg2,#1b1b1b);padding:8px}
-.pinmap-head{display:flex;align-items:center;gap:8px;margin-bottom:6px}
-.pinmap-head .hint{flex:1;margin:0}
-.pinmap pre{margin:0;font-family:ui-monospace,Consolas,monospace;font-size:12px;line-height:1.5;
-  white-space:pre;overflow:auto;max-height:60vh;color:var(--fg,#ddd)}
+/* ---- 引脚分配图：点「引脚分配图」弹出的模态窗（两列表格，40 针全显示）---- */
+.pinmodal{position:fixed;inset:0;z-index:100;background:rgba(0,0,0,.62);
+  display:flex;align-items:center;justify-content:center;padding:24px}
+.pinmodal[hidden]{display:none}
+.pinmodal-box{background:var(--bg2,#1b1b1b);border:1px solid var(--line,#3a3a3a);border-radius:10px;
+  width:min(820px,100%);max-height:88vh;display:flex;flex-direction:column;box-shadow:0 14px 44px rgba(0,0,0,.55)}
+.pinmodal-head{display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--line,#3a3a3a)}
+.pinmodal-head b{font-size:14px}
+.pinmodal-head .hint{flex:1;margin:0}
+.pinmodal-body{padding:8px 14px 14px;overflow:auto}
+.pintab{width:100%;border-collapse:collapse;font-size:13px}
+.pintab td{padding:3px 8px;border-bottom:1px solid rgba(255,255,255,.06);white-space:nowrap}
+.pintab td.p-pin{width:36px;text-align:right;color:var(--fg2,#999);font-family:ui-monospace,Consolas,monospace}
+.pintab td.p-name{font-family:ui-monospace,Consolas,monospace;width:50%}
+.pintab .p-mark{display:inline-block;width:1.3em;text-align:center}
+.pintab .p-note{margin-left:10px;color:var(--fg2,#999);font-size:12px}
+.pintab .p-sel{margin-left:10px;color:#66ccff;font-size:12px}
+.pintab .is-spi{color:#7ee787}
+.pintab .is-vcom{color:#79c0ff}
+.pintab .is-aux{color:#ffd479}
+.pintab .is-no{color:#ff7b72}
+.pintab .is-plain{color:var(--fg2,#999)}
