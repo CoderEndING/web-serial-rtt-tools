@@ -164,7 +164,9 @@ export function gramReadPlan(o = {}){
   const dcs = { ...DCS_READ_DEFAULT, ...(o.dcs || {}) };
   const q = { ...QSPI_READ_DEFAULT, ...(o.qspi || {}) };
 
-  const win = windowItems({ x0, x1, y0, y1 }, g);      // 档 1/2 都走 STEP，固件按档位展开
+  // 开窗：档 0/1 走 STEP（固件按档展开）；档 2 **直接发 XFER**（固件的 STEP 展开编码是错的，见 §11.12）
+  const win = windowItems({ x0, x1, y0, y1 }, g,
+                           { profile: o.profile, qspiWrOpcode: q.wrOpcode, qspiAddrBytes: q.addrLen });
   const chunks = [];
   let off = 0, idx = 0;
   while (off < total){

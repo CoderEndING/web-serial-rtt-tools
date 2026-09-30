@@ -125,6 +125,14 @@ console.log('== 2. 读 GRAM 的计划：切片 / 续读 / CS_HOLD / 地址递增
   const q = R.gramReadPlan({ geometry: G.st77916, profile: 2, x0: 0, y0: 0, x1: 359, y1: 359,
                              qspi: { opcode: 0x0b, addrLen: 3, dummy: 1, lines: 1 } });
   ok(q.chunks.length === Math.ceil(360 * 360 * 2 / R.READ_CHUNK_DEFAULT), `QSPI 整屏：${q.chunks.length} 片`);
+  // 档 2 的开窗也必须是 **XFER**（固件的 STEP 展开编码是错的，见 §11.12）：02 + 00 2A 00 + 坐标
+  {
+    const winQ = q.chunks[0].items.slice(0, 2);
+    const wdv = i => new DataView(winQ[i].payload.buffer, winQ[i].payload.byteOffset, winQ[i].payload.byteLength);
+    ok(winQ[0].type === P.T.XFER && winQ[1].type === P.T.XFER && winQ[0].payload[0] === 0x02 &&
+       wdv(0).getUint32(8, true) === (0x2a << 8) && wdv(1).getUint32(8, true) === (0x2b << 8),
+       `档 2 读回的开窗 = 两条 XFER（02 + 00 2A 00 / 00 2B 00），不走 STEP`);
+  }
   const addrOf = c => new DataView(c.items[c.items.length - 1].payload.buffer,
                                    c.items[c.items.length - 1].payload.byteOffset,
                                    c.items[c.items.length - 1].payload.byteLength).getUint32(8, true);
