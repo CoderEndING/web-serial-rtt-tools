@@ -214,8 +214,8 @@ console.log('== 4. 按屏套用推荐值（档位 + SCLK + 引脚）==');
   ok(applied.cfg.sclkHz === 40000000 && applied.probe.sclk === 40000000, 'ST77916 → SCLK 40 MHz（页面与探针都对）');
   // RST = **PA02**（2026-09-30 实测：PA02 抓得到复位波形、PA31 抓不到）。
   // 这条要紧：「重放前先复位」就发在这个脚上，默认值配错等于没复位。
-  ok(applied.cfg.padDc === 0 && applied.cfg.padRst === 5 && applied.cfg.padBl === 11,
-     `引脚按屏改了：DC=${applied.cfg.padDc}（不用）/ RST=PA02（pad ${applied.cfg.padRst}）/ BL=PA10（pad ${applied.cfg.padBl}）`);
+  ok(applied.cfg.padDc === 0 && applied.cfg.padRst === 5 && applied.cfg.padBl === 13,
+     `引脚按屏改了：DC=${applied.cfg.padDc}（不用）/ RST=PA02（pad ${applied.cfg.padRst}）/ BL=PA31（pad ${applied.cfg.padBl}）`);
   ok(/40 MHz/.test(applied.sum.sclk), `只读摘要显示 SCLK ${applied.sum.sclk}`);
   ok(/RST=PA02/.test(applied.sum.pads), `只读摘要显示引脚「${applied.sum.pads}」`);
   ok(/回读对账一致/.test(applied.log), '套用走的还是回读对账那条路（不靠状态字的 err）');

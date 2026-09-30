@@ -170,9 +170,9 @@ export const PADS = [
   { i: 8, name: 'PA01', j3: 'J3[38]（UART0 RX / log）' },
   { i: 9, name: 'PY00', j3: 'J3[29]（v1 不支持）' },
   { i: 10, name: 'PY01', j3: 'J3[31]（v1 不支持）' },
-  { i: 11, name: 'PA10', j3: 'J3[33]（板载 LED）' },
+  { i: 11, name: 'PA10', j3: 'J3[33]（固件 LED 任务每 50 ms 写它，实测驱动不出持续电平，别选）' },
   { i: 12, name: 'PA30', j3: 'J3[37]（USB0_PWR：被板上 Q1 短到地，拉不动，别用）' },
-  { i: 13, name: 'PA31', j3: 'J3[11]（USB0_ID 网络，可当慢速输出）' },
+  { i: 13, name: 'PA31', j3: 'J3[11]（USB0_ID 网络；实测可当慢速输出，BL 推荐）' },
 ];
 export const PAD_NAME = Object.fromEntries(PADS.map(p => [p.i, p.name]));
 

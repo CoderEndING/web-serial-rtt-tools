@@ -38,16 +38,21 @@ export const PANEL_PRESETS = {
     short: 'ST77916（360×360）',
     profile: { profile: 2, defLines: 1, dcActiveHigh: true, csHoldInStep: true, qspiWrOpcode: 0x02, qspiColorOpcode: 0x32, qspiAddrBytes: 3 },
     /**
-     * RST 用 **PA02（J3[7]）** 而不是 PA31：2026-09-30 实测，同一套流程下 PA02 一次就
-     * 抓到复位波形（LA CH8：低 1000 ms → 高 1000 ms ×2，间隔精确 1000 ms），而 PA31
-     * 反复抓不到预期电平（固件侧 PA31 无特殊处理；怀疑那根线/该脚上的 USB0_ID 网络
-     * —— 100k 上拉 + BAT54A + MOS 栅极 —— 让边沿变缓）。
-     * 这条很要紧：「重放前先复位」就发在这个脚上，默认值配错等于没复位。
+     * RST 用 **PA02（J3[7]）**、BL 用 **PA31（J3[11]）**，两根都经 LA 实测过：
+     *   · PA02：复位脉冲干净（10 ms 低电平，一次就抓到）
+     *   · PA31：BL 电平干净（300 ms 高/低 ×3，实测宽度 327~347 ms）
+     *   · 🚨 **PA10（J3[33]）不能用**：探针跑的是 hpm5301evklite 那份固件（只有它
+     *     `BOARD_HAS_SPI_BRIDGE=1`），其 board.h 里 `LED1_PIN = LED2_PIN = IOC_PAD_PA10`
+     *     且 `LED_TICK_PERIOD_MS = 50` —— LED 任务每 50 ms 写这个脚，实测只有 ~20 ns
+     *     毛刺、驱动不出持续电平（LA 上毛刺周期正好 50 ms，与 LED tick 对上）。
+     *   · 早先"PA31 死活不动"的结论是**测试脚本发错了帧类型**（把 PING 0x05 当 GPIO 0x03
+     *     发）造成的冤案 —— PA31 本身完全正常，别再照那条旧结论排除它。
+     * 「重放前先复位」和「复位并开背光」就发在这两个脚上，默认值配错等于没复位/没背光。
      * ⚠️ AXS15352 那档不能跟着改：它的 DC 占着 PA02。
      */
-    cfg: { sclkHz: 40000000, csPolicy: 0, padDc: 0, padRst: 5 /*PA02 J3[7]*/, padBl: 11 /*PA10 J3[33]*/, padActiveLow: 0x06 },
+    cfg: { sclkHz: 40000000, csPolicy: 0, padDc: 0, padRst: 5 /*PA02 J3[7]*/, padBl: 13 /*PA31 J3[11]*/, padActiveLow: 0x06 },
     geom: 'st77916',
-    note: '档 2：0x02 + 24 bit 地址（00 XX 00，命令在中间字节）+ 参数；像素用 0x32 + 四线。SPI2：CS=J3[26] SCLK=J3[13] D0=J3[28] D1=J3[27] D2=J3[10] D3=J3[8]；RST=PA02 J3[7]（实测抓得到波形，PA31 抓不到）',
+    note: '档 2：0x02 + 24 bit 地址（00 XX 00，命令在中间字节）+ 参数；像素用 0x32 + 四线。SPI2：CS=J3[26] SCLK=J3[13] D0=J3[28] D1=J3[27] D2=J3[10] D3=J3[8]；RST=PA02 J3[7]、BL=PA31 J3[11]（都经 LA 实测；PA10 J3[33] 被固件 LED 任务占用，驱动不出持续电平）',
   },
 };
 
