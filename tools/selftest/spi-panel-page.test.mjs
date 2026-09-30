@@ -117,6 +117,26 @@ console.log('== 1b. 布局（用户 2026-09-30 定的口径）：刷图置顶不
              h: Math.round(card.getBoundingClientRect().height), logH: Math.round(document.getElementById('pn-log').getBoundingClientRect().height) };`);
   ok(log.folded === false && log.logH > 100 && log.btn === '收起',
      `日志**默认展开**（用户 2026-09-30）：卡片 ${log.h}px / 日志区 ${log.logH}px，按钮写着「${log.btn}」`);
+
+  // 表头吸顶（用户 2026-09-30："往下拉表头就上去了，看不到 byte 索引了"）
+  const sticky = await ev(`
+    const wrap = document.getElementById('pn-code-wrap');
+    const th = document.querySelector('#pn-code-tab thead th');
+    const ruler = document.getElementById('pn-code-ruler');
+    const off = () => Math.round(th.getBoundingClientRect().top - wrap.getBoundingClientRect().top);
+    const off0 = off();
+    wrap.scrollTop = wrap.scrollHeight;
+    await new Promise(r => setTimeout(r, 250));
+    const off1 = off();
+    const rulerVisible = ruler.getBoundingClientRect().top >= wrap.getBoundingClientRect().top - 1;
+    const rowVisible = document.querySelectorAll('#pn-code-body tr')[20].getBoundingClientRect().top;
+    wrap.scrollTop = 0;
+    await new Promise(r => setTimeout(r, 100));
+    return { off0, off1, rulerVisible, rowVisible: Math.round(rowVisible),
+             pos: getComputedStyle(th).position, bg: getComputedStyle(th).backgroundColor };`);
+  ok(sticky.pos === 'sticky' && Math.abs(sticky.off0) <= 1 && Math.abs(sticky.off1) <= 1 && sticky.rulerVisible,
+     `表头（含字节标尺）吸顶：滚到底仍在容器顶部（偏移 ${sticky.off0} → ${sticky.off1}px，尺子可见=${sticky.rulerVisible}）`);
+  ok(sticky.bg !== 'rgba(0, 0, 0, 0)', `吸顶表头有不透明背景（${sticky.bg}）—— 不然行会从底下透出来`);
 }
 
 // ==================================================================== 2

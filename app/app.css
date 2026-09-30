@@ -307,6 +307,21 @@ table.sp td{padding:2px 6px;border-bottom:1px solid var(--bg3)}
 /* 解析结果表：行高压紧（矮窗口里表头 + 行距能吃掉一半高度，用户只能看到 1 行） */
 #tab-panel table.sp th{padding:2px 6px;white-space:nowrap}   /* 「延时」这种两字表头别被挤成两行 */
 #tab-panel table.sp td{padding:1px 6px}
+/**
+ * 🚨 表头**吸顶**（用户 2026-09-30："往下拉表头就上去了，看不到 byte 索引了"）：
+ * 表头里挂着**字节序号标尺**（0 1 2 3…），表一滚尺子就没了 —— 参数列那么多格子根本数不清。
+ * 参照 `tools/bmp_sender.html` 的 `.cmdtbl th{position:sticky;top:0}`：
+ *   · `top:0` 相对的是最近的滚动祖先 = `#pn-code-wrap`（`.scroll`），不是视口；
+ *   · **必须给背景色**：不给的话行会从表头底下透出来（position:sticky 不会自动遮挡）；
+ *   · `z-index` 要高过行里的输入框，否则聚焦时 border 会画到表头上面。
+ * 配套：`#pn-code-tab` 的 border-collapse 改成 separate —— collapse 模式下 Chrome 的 sticky
+ * 表头会把下边框"留"在滚动区外（表头看着像浮在半空，没有分隔线）。
+ */
+#pn-code-tab{border-collapse:separate;border-spacing:0}
+#pn-code-tab thead th{
+  position:sticky;top:0;z-index:3;background:var(--bg2);
+  box-shadow:inset 0 -1px 0 var(--line);       /* 代替被 separate 干掉的 border-bottom */
+}
 table.sp tr.ok td{color:var(--ok)}
 table.sp tr.bad td{color:var(--err)}
 #tab-spi .scroll,#tab-panel .scroll{overflow:auto;max-height:200px;border:1px solid var(--line);border-radius:8px;margin-top:6px}

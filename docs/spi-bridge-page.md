@@ -734,6 +734,7 @@ await send('Emulation.clearDeviceMetricsOverride');   // 脚本收尾**必须**�
 | ③ 表 360px | `#pn-code-wrap{height:360px}`（原来只有 120px 下限）；表自己滚（`.scroll`），卡片跟在后面 | §1b（量到 360±2） |
 | ④ 右列滚动 | `#tab-panel .main{overflow-y:auto;overflow-x:hidden}` —— 侧栏本来就有自己的滚动条，两条互不干扰 | §1b（`scrollHeight > clientHeight` 且整页无横向溢出） |
 | 日志默认展开 | `#pn-log-card` 不再带 `folded`（刷屏/重放完第一眼就要看它有没有报错），按钮写「收起」 | §1b（`logH > 100`） |
+| **表头吸顶** | `#pn-code-tab thead th{position:sticky;top:0;background:var(--bg2)}` —— 表头里挂着**字节序号标尺**，表一滚尺子就没了（用户："往下拉表头就上去了，看不到 byte 索引了"）。配套：这张表改 `border-collapse:separate`（collapse 下 sticky 表头的下边框会留在滚动区外），用 `box-shadow` 补分隔线；`z-index:3` 压住行里的输入框 | §1b（滚到底表头仍贴容器顶，偏移恒 1px） |
 | ③ 字节编辑 | **每格一个参数字节**（`input.bx`，直接敲十六进制）+ 表头**字节序号标尺**；点格子开位开关板 | §5b（21 项） |
 | 纯函数 | `app/spi/panel-code.js` 新增 `byteBits/bitsByte/toggleBit/bitsText/bitWeight/BIT_NAMES/setRowByte` | `spi-panel-code.test.mjs` §D |
 | UI 控制器 | `app/spi/bit-editor.js` 的 `BitPopover`（`position:fixed`，滚动时自己跟；Esc/点别处/「完成」都能关） | §5b |
