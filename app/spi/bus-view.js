@@ -338,10 +338,14 @@ export class SpiBusView {
     const cell = ([pin, name, role, note, pad]) => {
       const s = sel(pad);
       const cls = { spi: 'is-spi', vcom: 'is-vcom', aux: 'is-aux', no: 'is-no' }[role] || 'is-plain';
+      /* 配置里把辅助线挂在"已经不能当辅助脚"的脚上（桥信号/CDC/保留脚）＝ 陈旧配置，
+       * 固件会拒；这种就标红 + ⚠，别让人以为接对了 */
+      const stale = !!s && role !== 'aux';
       return `<td class="p-pin">${pin}</td>` +
              `<td class="p-name ${cls}"><span class="p-mark">${M[role] || '·'}</span>${name}` +
              (note ? `<span class="p-note">${note}</span>` : '') +
-             (s ? `<span class="p-sel">&lt;&lt; ${s}</span>` : '') + '</td>';
+             (s ? `<span class="p-sel${stale ? ' is-bad' : ''}">&lt;&lt; ${s}${stale ? ' ⚠ 这根脚已被占用（固件会拒）' : ''}</span>` : '') +
+             '</td>';
     };
     const rows = [];
     for (let i = 0; i < 20; i++){

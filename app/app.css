@@ -493,3 +493,4 @@ fieldset.folded > legend::after{content:' · 已折叠';color:var(--fg2);font-si
 .pintab .is-aux{color:#ffd479}
 .pintab .is-no{color:#ff7b72}
 .pintab .is-plain{color:var(--fg2,#999)}
+.pintab .p-sel.is-bad{color:#ff7b72;font-weight:600}
