@@ -237,9 +237,16 @@ make hw-campaign-hpm ARGS="--cycles=1 --alt=1"   # 冒烟
 **目标类型（SWD/ARM ↔ RISC-V/JTAG）**：探针的目标类型是**全局且粘性**的（HID `0x31` action 10），
 波形页和 RTT 转发页都能切。页面显示的是**探针回报的生效后端**（DEF 的 `flags bit6` / 状态字 0 的 `bit1`），
 不是"你下发的那个" —— 后端拉不起来时探针会自己换一条路重试，所以要以生效值为准。
-切到 RISC-V 后：SWD 时钟档自动置灰（JTAG 忽略它）、计划行的速率提示换成实测分档
-（单变量 ≈2.94 µs / 8 通道 ≈45.6 µs，零丢建议周期 ≥1.5×）、标定里的 blob/clock_delay 不再显示。
-依据：akaLinkPro 的 [`web-handoff-riscv-scope.md`](https://github.com/minichao9901/akaLinkPro)。
+切到 RISC-V 后：时钟档自动置灰、**那一格的名字由「SWD 时钟」改成「JTAG 时钟」**（JTAG 下它是 TCK，
+探针会忽略这个档位）、计划行的速率提示换成实测分档
+（单变量 ≈3.17 µs / 8 通道 ≈36.6 µs，零丢建议周期 ≥1.5×）、标定里的 blob/clock_delay 不再显示。
+数字来源：akaLinkPro 的 [`web-handoff-riscv-scope.md`](https://github.com/minichao9901/akaLinkPro)
+与 `docs/代码审查报告.md`（2026-09-30 第二轮：P1-1 修完单字 4.25 → **3.17 µs**）。
+
+「RTT 控制块 → 芯片」是**一个下拉、两个组**（ARM / RISC-V，见 `<optgroup data-arch>`）：
+选 RISC-V 那颗会自动把目标类型切到 RISC-V/JTAG（RISC-V 只能 JTAG），选 ARM 那颗切回 SWD；
+两块各自记住上次选的那颗（`rtt.ocdTarget` / `rtt.rvChip`）。**ARM 也能走 JTAG** —— 那是桥侧
+你自己的 cfg 的事，这个下拉只管"哪颗芯片 + RAM 窗口"；桥送出去的 OpenOCD target 名永远取 ARM 组那颗。
 
 真机还差探针固件那一步：补丁草稿在 [`tools/probe-firmware/`](tools/probe-firmware/) ——
 `scope_sampler.c/.h`（采样器本体）+ `patch-notes.md`（6 处集成改动，逐段可粘贴）+ 验收清单

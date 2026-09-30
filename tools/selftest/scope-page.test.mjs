@@ -561,10 +561,10 @@ console.log('== 12. 标定值必须跟着变量/时钟失效（否则一个过�
     await sc.bench();                                 // 重新标定 → 又新鲜了
     const refixed = { fresh: sc.benchFresh(), key: sc.benchKeyOf() };
     return { single, afterSingle, stale, refixed };`);
-  ok(r.single.fast === true && r.single.bestUs < 2 && r.single.estUs > 6,
-     `单字 f32 的计划行用快路径实测值（取用 ${r.single.bestUs} µs，模型 ${r.single.estUs} µs）`);
-  ok(/流水快路径/.test(r.single.plan) && !/模型估算 ≈6\.\d+ µs\/样本 → ≈1\d\d kHz/.test(r.single.plan),
-     `计划行不再自相矛盾（不再把 6.7 µs 当主数字）：${r.single.plan.replace(/<[^>]+>/g, '').slice(0, 60)}…`);
+  ok(r.single.fast === true && r.single.bestUs < 2 && r.single.estUs > 4 && r.single.estUs < 5,
+     `单字 f32 的计划行用快路径实测值（取用 ${r.single.bestUs} µs，模型 ${r.single.estUs} µs —— 后者是 akaLinkPro 拟合的每 span 3 次传输 + 1 次 DRW）`);
+  ok(/流水快路径/.test(r.single.plan) && !/模型估算 ≈\d+\.\d+ µs\/样本 → ≈\d+ kHz/.test(r.single.plan),
+     `计划行不再自相矛盾（不把模型那个数当主数字）：${r.single.plan.replace(/<[^>]+>/g, '').slice(0, 60)}…`);
   ok(r.afterSingle.fresh === true, `标定后就地生效（${r.afterSingle.bench?.toFixed?.(3)} µs，建议周期 ${r.afterSingle.rec} µs）`);
   ok(r.stale.fresh === false && /已失效/.test(r.stale.plan),
      `改了变量 → 标定值标为失效并说明原因（${r.stale.why}）`);
@@ -628,6 +628,7 @@ console.log('== 14. RISC-V/JTAG 目标：显示生效后端、置灰 SWD 控件�
     const after = { backend: sc.backend, shown: document.getElementById('sc-backend').textContent,
                     mhz: document.getElementById('sc-mhz').textContent,
                     clockDisabled: document.getElementById('sc-clock').disabled,
+                    clockLabel: document.getElementById('sc-clock-row').querySelector('span').textContent,
                     plan: document.getElementById('sc-plan').innerText.replace(/\\s+/g, ' ') };
     // ② 状态字 0 bit1 这条独立通路（丢弃模式没有 DEF）：直接喂一个假回包
     sc.backend = null;
@@ -639,15 +640,24 @@ console.log('== 14. RISC-V/JTAG 目标：显示生效后端、置灰 SWD 控件�
     sc.hidXfer = async (cmd, data) => { sent = { cmd, data: Array.from(data) }; return Uint8Array.of(0x33, 0x31, 0, 0); };
     document.getElementById('sc-target').value = 'riscv';
     await sc.applyTargetType();
+    const sentRiscv = sent;                     // 记下 RISC-V 那一次（下面还要切回 SWD，别把它覆盖了）
+    const stRiscv = document.getElementById('sc-state').textContent;
+    const labelByDropdown = document.getElementById('sc-clock-row').querySelector('span').textContent;
+    document.getElementById('sc-target').value = 'swd';
+    await sc.applyTargetType();                 // 切回 SWD：那一格的名字要变回去
+    const labelBackSwd = document.getElementById('sc-clock-row').querySelector('span').textContent;
     sc.hidXfer = origXfer;
-    const st = document.getElementById('sc-state').textContent;
     sc.mockProbe.riscv = false;
     sc.backend = null;
     sc._applyBackendUi();
-    return { before, after, viaStatus, sent, st, names: [P.backendName('swd'), P.backendName('riscv')] };`);
+    return { before, after, viaStatus, sent: sentRiscv, st: stRiscv, labelByDropdown, labelBackSwd,
+             names: [P.backendName('swd'), P.backendName('riscv')] };`);
   ok(r.after.backend === 'riscv', `DEF flags bit6 → 页面认到 RISC-V 后端（${r.after.shown}）`);
   ok(/RISC-V\/JTAG/.test(r.after.mhz), `状态栏显示后端而不是 SWD 时钟：${r.after.mhz}`);
   ok(r.after.clockDisabled === true, 'SWD 时钟档在 RISC-V 下被置灰（JTAG 忽略它）');
+  // 用户 2026-09-30：切到 RISC-V/JTAG 后，那一格的名字不能还叫「SWD 时钟」（它在 JTAG 下是 TCK）
+  ok(r.after.clockLabel === 'JTAG 时钟' && r.labelByDropdown === 'JTAG 时钟' && r.labelBackSwd === 'SWD 时钟',
+     `时钟那格的名字跟着目标类型走：生效后端 RISC-V →「${r.after.clockLabel}」· 下拉切 RISC-V →「${r.labelByDropdown}」· 切回 SWD →「${r.labelBackSwd}」`);
   ok(/RISC-V\/JTAG 实测/.test(r.after.plan) && !/周期下限 2 µs/.test(r.after.plan),
      `计划行改成 JTAG 的说法：${r.after.plan.slice(0, 78)}…`);
   ok(/1\.5×/.test(r.after.plan), '并给出"零丢建议周期 ≥ 1.5×"的提示');

@@ -193,6 +193,10 @@ dialog form{margin-top:16px;text-align:right}
 
 /* ---------------- J-Scope 波形页 ---------------- */
 #tab-scope .side .row>span:first-child{width:66px}
+/* 置灰的整行（当前只有"SWD 时钟"这一格：RISC-V/JTAG 下那一档没意义）。
+   🚨 这条不是装饰：view.js 里 `clkRow.classList.toggle('off', riscv)` 早就有了，
+   而 `.off` 一直没有样式 = 切到 JTAG 后那一格**看起来完全正常**（用户会以为它还在起作用）。 */
+#tab-scope .row.off{opacity:.55}
 #tab-scope .row em.unit{flex:none;color:var(--fg2);font-size:11.5px;font-style:normal;width:26px}
 .varlist{
   border:1px solid var(--line);border-radius:6px;background:var(--bg2);
@@ -301,7 +305,7 @@ table.sp{width:100%;border-collapse:collapse;font-family:var(--mono);font-size:1
 table.sp th{color:var(--fg2);text-align:left;padding:3px 6px;border-bottom:1px solid var(--line);font-weight:600}
 table.sp td{padding:2px 6px;border-bottom:1px solid var(--bg3)}
 /* 解析结果表：行高压紧（矮窗口里表头 + 行距能吃掉一半高度，用户只能看到 1 行） */
-#tab-panel table.sp th{padding:2px 6px}
+#tab-panel table.sp th{padding:2px 6px;white-space:nowrap}   /* 「延时」这种两字表头别被挤成两行 */
 #tab-panel table.sp td{padding:1px 6px}
 table.sp tr.ok td{color:var(--ok)}
 table.sp tr.bad td{color:var(--err)}
@@ -311,29 +315,24 @@ fieldset[disabled]{opacity:.62}
 fieldset[disabled] legend::after{content:' · 未实现';color:var(--warn)}
 
 /* ---- 屏页（#panel）----
-   主区三块按**权重弹性分配**：初始化区 3 : 图片区 2 : 日志 1。
-   关键：折叠的块让出全部空间（flex:0 0 auto），**剩下的块自动长大** ——
-   否则会出现"收起初始化区后下面留一大片空白、刷图区还被死高度卡着"这种明显不合理的画面。
+   主区**单列 + 整列纵向滚动**（用户 2026-09-30 定稿）：图片/图案刷屏置顶（最常用、不可收起）→
+   面板初始化 → 日志。解析表固定 360px 之后三块加起来必然高过视口，所以右列自己出滚动条，
+   每块按**自然高度**排、不再互相挤压 —— 老的"三块弹性 3:2:1"只会把上面两块压扁。
    侧栏卡片按 DOM 顺序排（探针 → 屏型号 → 面板档 → 当前生效 → 面板电源/显示）。 */
-#tab-panel .main{gap:8px}
+#tab-panel .main{gap:8px;overflow-y:auto;overflow-x:hidden;padding-right:3px}
 /* 🚨 flex 子项的 min-width 默认是 auto：卡片里只要有不肯收缩的东西（.toolrow.nw 不换行、表格的
    最小内容宽），fieldset 就会被撑到 ~713px —— 920px 视口下整页冒横向滚动条（实测定位）。
    桥页的 .busstack>fieldset 早已加了同款纪律，这里对齐它。 */
-#tab-panel .main>fieldset{min-width:0}
-#tab-panel #pn-code-card{flex:3 1 0;min-height:180px;display:flex;flex-direction:column}
-#tab-panel #pn-code-card.folded{flex:0 0 auto;min-height:0}
-#tab-panel #pn-code-card > *{flex:none}
-#tab-panel #pn-code-card > #pn-code-text,
-#tab-panel #pn-code-card > #pn-code-wrap{flex:1 1 0;height:0}
-/* 文本框允许压到 70px（它本来就滚），解析表不行：矮窗口（920×600）下 70px 只剩 ~1.5 行，
-   观感像坏了。给表 120px 下限，空间不够就让 .main 整体滚动。 */
-#tab-panel #pn-code-card > #pn-code-text{min-height:70px}
-#tab-panel #pn-code-card > #pn-code-wrap{min-height:120px}
-#tab-panel #pn-img-card{flex:2 1 0;min-height:110px;max-height:60%;overflow:auto}
-#tab-panel #pn-img-card.folded{flex:0 0 auto;min-height:0;max-height:none;overflow:visible}
-#tab-panel #pn-log-card{flex:1 1 0;min-height:34px}
-#tab-panel #pn-log-card.folded{flex:0 0 auto;min-height:0}
-#tab-panel #pn-log-card .logbox{height:100%;min-height:92px}
+#tab-panel .main>fieldset{min-width:0;flex:0 0 auto}
+/* 置顶的刷图卡片：常驻展开（legend 里没有收起按钮），也不再限高 —— 它自己就是"一屏里最该看全"的那块 */
+#tab-panel #pn-img-card{max-height:none;overflow:visible}
+/* 解析表固定 360px = 原来 120px 下限的 3 倍（用户口径："现在高度的 3 倍"）。
+   表自己滚（.scroll），不把卡片撑爆。 */
+#tab-panel #pn-code-wrap{height:360px;min-height:360px}
+/* 文本框允许压到 70px（它本来就滚）；给个 118px 的顺手高度，别和 360px 的表抢地方 */
+#tab-panel #pn-code-text{height:118px;min-height:70px}
+/* 日志卡片默认折叠；展开时给个确定高度（父级已不再是 flex:1 的弹性分配） */
+#tab-panel #pn-log-card .logbox{height:190px;min-height:92px}
 /* 拖放区压扁一点：它只是"选图入口"，别占掉命令区的高度（图案按钮就在上面一行） */
 #tab-panel .drop{padding:5px 9px;margin:4px 0;font-size:12px}
 #tab-panel .toolrow{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:0 0 7px}
@@ -375,6 +374,36 @@ fieldset.folded > legend::after{content:' · 已折叠';color:var(--fg2);font-si
 .foldbtn{margin-left:8px;padding:0 6px;font-size:11px}
 #pn-code-body td:nth-child(4){word-break:break-all;white-space:normal;max-width:560px}
 #pn-code-sum.ok{color:var(--ok)} #pn-code-sum.warn{color:var(--warn)} #pn-code-sum.err{color:var(--err)}
+/* 解析表里的字节：**每个字节一个按钮**（点开就是这个字节的 8 个 bit）。
+   等宽 + 紧凑（看着仍像数据），但鼠标上去要亮 —— 不亮就没人知道它能点。 */
+#pn-code-body button.byte{
+  font-family:var(--mono);font-size:11.5px;line-height:1.25;padding:0 4px;margin:0 3px 0 0;
+  background:var(--bg3);border:1px solid var(--line);border-radius:5px;color:var(--fg);
+}
+#pn-code-body button.byte:hover{border-color:var(--acc);color:#fff;background:var(--bg4)}
+#pn-code-body button.byte.open{border-color:var(--acc);box-shadow:inset 0 0 0 1px var(--acc)}
+/* 自动补的两行前缀用虚线边框：一眼区分"你贴的"与"页面补的"（它们同样可点、可改） */
+#pn-code-body tr.auto button.byte{border-style:dashed}
+/* 改过的行留个记号：改的是**这份步骤表**（重放/导出用它），上面的文本框不动 */
+#pn-code-body tr.edited td:nth-child(1)::after{content:' ·改';color:var(--warn)}
+#pn-code-body tr.edited button.byte{border-color:var(--warn)}
+
+/* 位开关板（.bitpop）：跟着被点的字节走。position:fixed —— 放主区里会被 overflow 裁掉 */
+.bitpop{
+  position:fixed;z-index:60;width:268px;padding:7px 10px 9px;background:var(--bg2);
+  border:1px solid var(--acc);border-radius:9px;box-shadow:0 14px 36px #000a;
+}
+.bitpop[hidden]{display:none}
+.bp-head{display:flex;align-items:center;gap:6px;font-family:var(--mono);font-size:12px}
+.bp-head b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.bp-grid{display:grid;grid-template-columns:1fr 1fr;gap:2px 8px;margin-top:6px}
+.bp-grid label{display:flex;align-items:center;gap:4px;font-family:var(--mono);font-size:11.5px;cursor:pointer}
+.bp-grid label .w{color:var(--fg2);min-width:26px;text-align:right}
+.bp-grid label .nm{color:var(--fg2);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.bp-grid label.on .nm{color:var(--acc)}
+.bp-foot{display:flex;align-items:center;gap:6px;margin-top:7px;font-size:11.5px;color:var(--fg2)}
+.bp-foot .num{width:58px;font-family:var(--mono)}
+#pn-bitpop-bin{font-family:var(--mono);letter-spacing:.6px}
 .drop{
   border:2px dashed var(--line);border-radius:9px;padding:9px;text-align:center;
   color:var(--fg2);cursor:pointer;font-size:12.5px;margin:5px 0;transition:.15s;

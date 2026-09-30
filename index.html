@@ -299,49 +299,56 @@
 
       <fieldset>
         <legend>RTT 控制块</legend>
-        <label class="row" id="r-ocd-chip-row"><span>芯片</span>
-          <select id="r-ocd-target" title="换芯片在这里选：RAM 扫描范围自动带出（可手改）。走「本地桥 · OpenOCD」时它同时是 OpenOCD 的目标 cfg；零安装 WebUSB 模式只用到 RAM 范围。列表外的芯片选「自定义 cfg…」">
-            <option value="stm32f103">STM32F1（F103 等）</option>
-            <option value="stm32f0">STM32F0</option>
-            <option value="stm32f2">STM32F2</option>
-            <option value="stm32f3">STM32F3</option>
-            <option value="stm32f4">STM32F4</option>
-            <option value="stm32f7">STM32F7</option>
-            <option value="stm32g0">STM32G0</option>
-            <option value="stm32g4">STM32G4</option>
-            <option value="stm32h7">STM32H7（H743 等）</option>
+        <!-- 芯片：**一个下拉、两个组**（原来按目标类型显示两个下拉，用户 2026-09-30 要求合并）。
+             组归属由 <optgroup data-arch> 决定（view.js 只读 DOM，不维护第二份名单）：
+               · ARM 组：WebUSB 通路固定走 SWD；桥（OpenOCD/J-Link）那条路用哪条传输由你的 cfg 决定
+                 —— **ARM 也能走 JTAG**，所以这里不写死"ARM=SWD"；
+               · RISC-V 组：**只能 JTAG**（选中它会把「目标类型」自动切到 RISC-V/JTAG）。
+             每一组各自记住上次选的那颗（rtt.ocdTarget / rtt.rvChip），来回切不会丢。 -->
+        <label class="row" id="r-chip-row"><span>芯片</span>
+          <select id="r-chip" title="ARM：WebUSB 走 SWD，桥侧走 SWD 还是 JTAG 由你的 OpenOCD cfg 决定；RISC-V：只能 JTAG。换芯片在这里选，RAM 扫描范围自动带出（可手改）。走「本地桥 · OpenOCD」时 ARM 组的名字同时是 OpenOCD 的目标 cfg；零安装 WebUSB 模式只用到 RAM 范围。列表外的芯片选 ARM 组的「自定义 cfg…」">
+            <optgroup label="ARM / Cortex-M（WebUSB 走 SWD · 桥侧 SWD 或 JTAG 由 cfg 定）" data-arch="arm">
+              <option value="stm32f103">STM32F1（F103 等）</option>
+              <option value="stm32f0">STM32F0</option>
+              <option value="stm32f2">STM32F2</option>
+              <option value="stm32f3">STM32F3</option>
+              <option value="stm32f4">STM32F4</option>
+              <option value="stm32f7">STM32F7</option>
+              <option value="stm32g0">STM32G0</option>
+              <option value="stm32g4">STM32G4</option>
+              <option value="stm32h7">STM32H7（H743 等）</option>
               <option value="stm32h7b0">STM32H7B0 / H7A3 / H7B3（H7B0VBT6 KIT）</option>
               <option value="stm32h7a3">STM32H7A3</option>
               <option value="stm32h7b3">STM32H7B3</option>
-            <option value="stm32h5">STM32H5</option>
-            <option value="stm32l0">STM32L0</option>
-            <option value="stm32l1">STM32L1</option>
-            <option value="stm32l4">STM32L4 / L4+</option>
-            <option value="stm32l5">STM32L5</option>
-            <option value="stm32u5">STM32U5</option>
-            <option value="stm32c0">STM32C0</option>
-            <option value="stm32wb">STM32WB</option>
-            <option value="stm32wl">STM32WL</option>
-            <option value="esp32s31">ESP32-S31（板载 USB-JTAG）</option>
-            <option value="esp32">ESP32（Wrover Kit）</option>
-            <option value="custom">自定义 cfg…</option>
+              <option value="stm32h5">STM32H5</option>
+              <option value="stm32l0">STM32L0</option>
+              <option value="stm32l1">STM32L1</option>
+              <option value="stm32l4">STM32L4 / L4+</option>
+              <option value="stm32l5">STM32L5</option>
+              <option value="stm32u5">STM32U5</option>
+              <option value="stm32c0">STM32C0</option>
+              <option value="stm32wb">STM32WB</option>
+              <option value="stm32wl">STM32WL</option>
+              <option value="esp32s31">ESP32-S31（板载 USB-JTAG）</option>
+              <option value="esp32">ESP32（Wrover Kit）</option>
+              <option value="custom">自定义 cfg…</option>
+            </optgroup>
+            <optgroup label="RISC-V（只能 JTAG · 控制块要在非缓存区）" data-arch="riscv">
+              <option value="hpm6800evk">HPM6800EVK（HPM6880）· AXI SRAM 0x01240000</option>
+              <option value="hpm6750evk2">HPM6750EVK2 · AXI SRAM 0x01100000</option>
+              <option value="hpm6750evkmini">HPM6750EVKMINI · AXI SRAM 0x01100000</option>
+              <option value="hpm6300evk">HPM6300EVK · AXI SRAM 0x010C0000</option>
+              <option value="hpm6200evk">HPM6200EVK · AXI SRAM 0x01080000</option>
+              <option value="hpm6e00evk">HPM6E00EVK · AXI SRAM 0x01280000</option>
+              <option value="hpm6p00evk">HPM6P00EVK · AXI SRAM 0x01200000</option>
+              <option value="hpm5e00evk">HPM5E00EVK · AXI SRAM 0x01200000</option>
+              <option value="hpm5300evk">HPM5300EVK · DLM 0x00080000（没有 AXI SRAM）</option>
+              <option value="hpm5301evklite">HPM5301EVKLite · DLM 0x00080000</option>
+              <option value="riscv-other">其它 RISC-V（自己填 RAM 范围）</option>
+            </optgroup>
           </select>
         </label>
-        <label class="row" id="r-rv-chip-row" hidden><span>芯片</span>
-          <select id="r-rv-chip" title="RISC-V 目标（HPM 全系）。它的作用是给出**默认的 RAM 扫描范围** —— RTT 控制块要放在**非缓存**内存里（探针的 SBA 读不旁路 D-Cache，放可缓存区会读到陈旧值），HPM 上就是 SDK 链接脚本里的 AXI_SRAM_NONCACHEABLE 那段。窗口按各系列推导（HPM6800EVK 实测控制块在 0x01240000），**以你的链接脚本为准**；最稳的是点「载入 ELF…」用 _SEGGER_RTT 直接定地址">
-            <option value="hpm6800evk">HPM6800EVK（HPM6880）· AXI SRAM 0x01240000</option>
-            <option value="hpm6750evk2">HPM6750EVK2 · AXI SRAM 0x01100000</option>
-            <option value="hpm6750evkmini">HPM6750EVKMINI · AXI SRAM 0x01100000</option>
-            <option value="hpm6300evk">HPM6300EVK · AXI SRAM 0x010C0000</option>
-            <option value="hpm6200evk">HPM6200EVK · AXI SRAM 0x01080000</option>
-            <option value="hpm6e00evk">HPM6E00EVK · AXI SRAM 0x01280000</option>
-            <option value="hpm6p00evk">HPM6P00EVK · AXI SRAM 0x01200000</option>
-            <option value="hpm5e00evk">HPM5E00EVK · AXI SRAM 0x01200000</option>
-            <option value="hpm5300evk">HPM5300EVK · DLM 0x00080000（没有 AXI SRAM）</option>
-            <option value="hpm5301evklite">HPM5301EVKLite · DLM 0x00080000</option>
-            <option value="riscv-other">其它 RISC-V（自己填 RAM 范围）</option>
-          </select>
-        </label>
+        <p class="hint" id="r-chip-note">RISC-V 的控制块要放<b>非缓存</b>内存（探针的 SBA 读不旁路 D-cache，放可缓存区会读到陈旧值）—— 窗口按各系列链接脚本推导，<b>以你的链接脚本为准</b>；最稳的是点「载入 ELF…」用 <code>_SEGGER_RTT</code> 直接定地址。</p>
         <label class="row"><span>RAM 范围</span><input id="r-range" value="0x20000000-0x20020000"></label>
         <label class="row"><span>地址</span><input id="r-addr" placeholder="留空 = 自动扫描 / 读 ELF"></label>
         <div class="row btnrow">
@@ -1048,6 +1055,41 @@
     </aside>
 
     <section class="main">
+      <!-- 图片/图案刷屏放在**最上面**：刷屏是这一页最高频的动作（用户 2026-09-30 指定），
+           而且它**不提供收起** —— 常驻展开，一到这一页就能直接刷。 -->
+      <fieldset id="pn-img-card">
+        <legend>图片 / 图案刷屏</legend>
+        <div class="row"><span>内置图案</span><div class="chips" id="pn-patterns"></div></div>
+        <div id="pn-drop" class="drop">把 <b>BMP / PNG / JPEG</b> 拖到这里，或点击选择</div>
+        <input type="file" id="pn-img-file" accept="image/*,.bmp" hidden>
+        <div class="imgrow">
+          <div class="canvasbox"><canvas id="pn-canvas" width="240" height="296"></canvas></div>
+          <div class="imginfo">
+            <p class="hint" id="pn-img-info" style="margin-top:0">（还没选图 / 图案）</p>
+            <label class="row"><span>缩放</span>
+              <select id="pn-fit">
+                <option value="fill">铺满（裁剪）</option>
+                <option value="fit">适应（留边）</option>
+                <option value="stretch">拉伸</option>
+                <option value="none">原始尺寸</option>
+              </select></label>
+            <label class="row"><span>开窗 x/y</span><input id="pn-x" class="num" value="0" inputmode="numeric"><input id="pn-y" class="num" value="0" inputmode="numeric"></label>
+            <label class="row"><span>屏幕</span><select id="pn-geom"></select></label>
+            <label class="row"><span>字节序</span>
+              <select id="pn-byteorder" title="RGB565 的字节序。默认「高字节在前」与 MADCTL=0x00(RGB) 是正确组合；颜色不对时**只翻一个**开关（先试 R/B 交换，再试低字节在前）">
+                <option value="be">高字节在前（默认）</option>
+                <option value="le">低字节在前</option>
+              </select></label>
+            <label class="chk"><input type="checkbox" id="pn-swap"> R/B 交换（等价 MADCTL 的 BGR 位）</label>
+            <label class="row"><span>电平</span><input id="pn-level" class="num" value="255" inputmode="numeric" title="255 = 不改；把满量程分量压到这个值，用来做灰阶测试"></label>
+            <div class="row btnrow"><button id="pn-img-send" class="primary">刷这一张</button></div>
+            <p class="hint" id="pn-img-sum" style="margin:0"></p>
+          </div>
+        </div>
+        <p class="hint">预览里的<b>橙色虚线</b>是探针真正下发的对齐窗口（列地址按 4 像素对齐，多出来的列用边缘填充）。
+          每片 492 B，一屏 ST77916 是 <b>527 片</b>；只有最后一片要应答。</p>
+      </fieldset>
+
       <fieldset id="pn-code-card">
           <legend>面板初始化（把 C 数组贴进来 / 载入内置示例）<button class="mini foldbtn" data-fold="pn-code-card">收起</button></legend>
           <div class="toolrow">
@@ -1070,46 +1112,15 @@
             <button id="pn-code-clear" class="mini">清空</button>
           </div>
           <div class="scroll" id="pn-code-wrap">
-            <table class="sp"><thead><tr><th>#</th><th>源行</th><th>命令</th><th>参数</th><th>延时</th><th></th></tr></thead><tbody id="pn-code-body"></tbody></table>
+            <table class="sp"><thead><tr><th title="索引：从 0 开始，重放 / 导出都按这个顺序">#</th><th>源行</th><th title="命令字节（DCS 命令）—— 点它也能改 bit">命令</th><th title="参数字节 —— 点任意一个字节，就能改它的 8 个 bit">参数</th><th>延时</th><th></th></tr></thead><tbody id="pn-code-body"></tbody></table>
           </div>
+          <p class="hint" id="pn-code-bithint" style="margin:5px 0 0">表里<b>每个字节都是按钮</b>：点一下弹出它的 8 个 bit，勾/取消就改了那个字节（也可以直接敲 HEX）。
+            改的是<b>这份步骤表</b>，「重放 / 导出」用的就是改后的值 —— 上面的文本框保持你贴进来的原文不动（点「解析并预览」会按原文重建）。</p>
           <div class="row btnrow">
             <button id="pn-code-play" class="primary" title="按当前面板档把整表编成 STEP 帧发出（档 1：同一 CS 窗口内「命令→翻 DC→参数」；档 2：0x02 + 24 bit 地址 + 参数）。行尾的「单发 / 从此重放」可以只跑其中一段">重放全部</button>
             <button id="pn-code-stop">中止</button>
             <span class="hint" id="pn-code-prog" style="margin:0"></span>
           </div>
-        </fieldset>
-
-        <fieldset id="pn-img-card">
-          <legend>图片 / 图案刷屏<button class="mini foldbtn" data-fold="pn-img-card">收起</button></legend>
-          <div class="row"><span>内置图案</span><div class="chips" id="pn-patterns"></div></div>
-          <div id="pn-drop" class="drop">把 <b>BMP / PNG / JPEG</b> 拖到这里，或点击选择</div>
-          <input type="file" id="pn-img-file" accept="image/*,.bmp" hidden>
-          <div class="imgrow">
-            <div class="canvasbox"><canvas id="pn-canvas" width="240" height="296"></canvas></div>
-            <div class="imginfo">
-              <p class="hint" id="pn-img-info" style="margin-top:0">（还没选图 / 图案）</p>
-              <label class="row"><span>缩放</span>
-                <select id="pn-fit">
-                  <option value="fill">铺满（裁剪）</option>
-                  <option value="fit">适应（留边）</option>
-                  <option value="stretch">拉伸</option>
-                  <option value="none">原始尺寸</option>
-                </select></label>
-              <label class="row"><span>开窗 x/y</span><input id="pn-x" class="num" value="0" inputmode="numeric"><input id="pn-y" class="num" value="0" inputmode="numeric"></label>
-              <label class="row"><span>屏幕</span><select id="pn-geom"></select></label>
-              <label class="row"><span>字节序</span>
-                <select id="pn-byteorder" title="RGB565 的字节序。默认「高字节在前」与 MADCTL=0x00(RGB) 是正确组合；颜色不对时**只翻一个**开关（先试 R/B 交换，再试低字节在前）">
-                  <option value="be">高字节在前（默认）</option>
-                  <option value="le">低字节在前</option>
-                </select></label>
-              <label class="chk"><input type="checkbox" id="pn-swap"> R/B 交换（等价 MADCTL 的 BGR 位）</label>
-              <label class="row"><span>电平</span><input id="pn-level" class="num" value="255" inputmode="numeric" title="255 = 不改；把满量程分量压到这个值，用来做灰阶测试"></label>
-              <div class="row btnrow"><button id="pn-img-send" class="primary">刷这一张</button></div>
-              <p class="hint" id="pn-img-sum" style="margin:0"></p>
-            </div>
-          </div>
-          <p class="hint">预览里的<b>橙色虚线</b>是探针真正下发的对齐窗口（列地址按 4 像素对齐，多出来的列用边缘填充）。
-            每片 492 B，一屏 ST77916 是 <b>527 片</b>；只有最后一片要应答。</p>
         </fieldset>
 
       <fieldset id="pn-log-card" class="folded">
@@ -1126,6 +1137,27 @@
         <span class="hint" style="margin:0">与桥页共享同一次连接 · 方案 <code>docs/spi-bridge-page.md</code></span>
       </div>
     </section>
+  </div>
+
+  <!-- 字节 → 位 的开关板：点解析表里任意一个字节弹出（位改了 = 那个字节改了，立刻生效）。
+       position:fixed 挂在视口上，不会被主区滚动裁掉；切到别的标签页时随 #tab-panel 一起隐藏。 -->
+  <div class="bitpop" id="pn-bitpop" hidden>
+    <div class="bp-head">
+      <b id="pn-bitpop-title">—</b>
+      <span class="spacer"></span>
+      <button class="mini" id="pn-bitpop-close" title="关闭（Esc 或点别处也行）">×</button>
+    </div>
+    <div class="bp-grid" id="pn-bitpop-bits"></div>
+    <div class="bp-foot">
+      <span>HEX</span>
+      <input id="pn-bitpop-hex" class="num" maxlength="4" spellcheck="false" title="也可以直接敲十六进制（0x5A / 5A 都认）">
+      <span class="hint" id="pn-bitpop-bin" style="margin:0">—</span>
+      <span class="spacer"></span>
+      <button class="mini" id="pn-bitpop-zero" title="整个字节清 0">0</button>
+      <button class="mini" id="pn-bitpop-ones" title="整个字节全 1">FF</button>
+      <button class="mini" id="pn-bitpop-inv" title="按位取反">~</button>
+    </div>
+    <p class="hint" id="pn-bitpop-note" style="margin:6px 0 0"></p>
   </div>
 </section>
 

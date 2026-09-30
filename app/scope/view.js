@@ -495,8 +495,8 @@ export class ScopeView {
     const khz = Math.round(plan.estHz / 1000);
     /**
      * 计划行的主数字用 `bestUs`：单字 span 走固件的**流水快路径**时它是实测的 1.55 µs，
-     * 而不是模型那按"3 次传输"算出来的 6.7 µs。老写法把两个数并排写，用户一眼就看出自相矛盾：
-     * 「模型估算 ≈6.7 µs → ≈148 kHz（偏保守：实测 ≈1.6 µs → 600 kHz 量级）」。
+     * 而不是模型那按"每 span 3 次传输 + 每字 1 次 DRW"算出来的 4.47 µs。老写法把两个数并排写，
+     * 用户一眼就看出自相矛盾：「模型估算 ≈6.7 µs → ≈148 kHz（偏保守：实测 ≈1.6 µs → 600 kHz 量级）」。
      */
     const useFast = plan.fastPath;
     const headlineUs = plan.bestUs, headlineHz = plan.bestHz;
@@ -523,25 +523,29 @@ export class ScopeView {
             : ` · <s>已标定 ${this.benchUs.toFixed(3)} µs</s> <b>已失效</b>（那是「${(this._benchKey || {}).vars} @${(this._benchKey || {}).clock} kHz」测的，${this.benchKeyWhy()} —— 重新点「标定真实速率」）`)
       : '';
     /**
-     * RISC-V/JTAG 下计划行的写法：
-     *   · 没有 SWD 那套"3 次传输"模型，也没有 SWD 时钟档 —— 直接给**实测分档**
-     *     （单字 2.94 µs / 8 通道 45.6 µs），并说明零丢建议取 ≥1.5×；
+     * RISC-V/JTAG 下计划行的写法（数字全部来自 akaLinkPro 2026-09-30 的实测，见 P.RISCV_COST）：
+     *   · 没有 SWD 那套"每 span 3 次传输"的模型，也没有 SWD 时钟档 —— 直接给**实测分档**
+     *     （单字 3.17 µs / 8 通道 36.6 µs），再用同一组锚点摊一个"你这套变量大概多少"；
      *   · 顺带把"周期下限 2 µs"（SWD 流水读的下限）换成 JTAG 的说法，否则用户会照着 2 µs 填然后大面积丢拍。
      */
     const rv = P.BACKEND_COST.riscv;
+    const rvEstUs = P.riscvPlanUs(plan);
+    const rvEstHz = rvEstUs > 0 ? 1e6 / rvEstUs : 0;
     const planTxt = riscv
       ? (plan.fastPath
           ? `单字 span：RISC-V/JTAG 实测 ≈${rv.single} µs/样本 → ≈${Math.round(1e6 / rv.single / 1000)} kHz`
           : `RISC-V/JTAG 实测分档：单变量 ≈${rv.single} µs（≈${Math.round(1e6 / rv.single / 1000)} kHz）· `
-            + `8 通道同结构体 ≈${rv.pack8} µs（≈${(1e6 / rv.pack8 / 1000).toFixed(1)} kHz）`) +
+            + `8 通道同结构体 ≈${rv.pack8} µs（≈${(1e6 / rv.pack8 / 1000).toFixed(1)} kHz）· `
+            + `本计划估算 ≈${rvEstUs.toFixed(1)} µs/样本 → ≈${(rvEstHz / 1000).toFixed(1)} kHz`
+            + `（估算 = 1 次 DMI 扫描/字 + 每 span 收尾查错 ≈${P.RISCV_COST.perSpanUs} µs，锚点是上面两档实测）`) +
         '（零丢建议周期 ≥ 1.5× 这个值）'
       : (useFast
           ? `单字 span 走固件**流水快路径**：实测 ≈${headlineUs.toFixed(2)} µs/样本 → ≈${Math.round(headlineHz / 1000)} kHz` +
-            `（保守模型算 ${plan.estUs.toFixed(1)} µs，那是按 3 次传输估的）`
+            `（保守模型算 ${plan.estUs.toFixed(1)} µs —— 每 span 固定 3 次传输 + 每字 1 次 DRW）`
           : `模型估算 ≈${plan.estUs.toFixed(1)} µs/样本 → ≈${khz} kHz` +
             (plan.spans.length === 1 && plan.frameBytes <= 4
               ? '（快路径要求整段正好 4 字节且 4 字节对齐，这个计划用不上）'
-              : '（模型按 3 次传输估，偏保守；真值以「标定真实速率」为准）'));
+              : `（@60 MHz 的实测拟合：每 span 固定 ${P.COST.perBlockUs} µs + 每字节 ${P.COST.perByteUs} µs；真值以「标定真实速率」为准）`));
     $('sc-plan').innerHTML = vars.length
       ? `读计划：${plan.spans.length} 个 span / 帧 ${plan.frameBytes} B · ` + planTxt +
         (!riscv && plan.saved > 0.15 ? `（合并省了 ${(plan.saved * 100).toFixed(0)}%）` : '') +
@@ -824,6 +828,16 @@ export class ScopeView {
     }
     const clkRow = $('sc-clock-row');
     if (clkRow) clkRow.classList.toggle('off', riscv);
+    /**
+     * 那一格的**名字**要跟着目标类型改（用户 2026-09-30）：同一个档位在 SWD 下是 SWD 时钟，
+     * 在 RISC-V/JTAG 下是 **JTAG 时钟（TCK）** —— 名字不改的话，切到 JTAG 后用户会以为
+     * "还有个 SWD 时钟在起作用"（探针其实会忽略它）。
+     * 跟**请求的目标类型**走（`sc-target` 一选就变），生效后端不一致时上面那行「生效后端」会报警；
+     * 与 RTT Viewer 页同一套口径（那边叫 JTAG TCK）。
+     */
+    const wantRiscv = this.targetRiscv == null ? riscv : this.targetRiscv;
+    const clkLbl = clkRow?.querySelector('span');
+    if (clkLbl) clkLbl.textContent = wantRiscv ? 'JTAG 时钟' : 'SWD 时钟';
     this._applyMhzUi();                     // 🚨 立刻改这一格，别等下一次统计刷新（否则会短暂显示旧的 "SWD xx MHz"）
     this.updatePlan();                      // 计划行的速率/建议周期按后端分档
   }

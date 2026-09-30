@@ -716,6 +716,39 @@ await send('Emulation.clearDeviceMetricsOverride');   // 脚本收尾**必须**�
 
 ---
 
+## 11.7 屏页改版（2026-09-30：刷图置顶 + 解析表 ×3 + 字节→位 开关板）
+
+用户口径（原话）：
+1. 图片/图案刷屏 panel 调到**最上面**（最常用，要顺手），并且**去掉收起**；
+2. 面板初始化**调到下面**；
+3. 面板初始化里那张"一条一条的"表**高度 ×3**，并且"参考初始化命令的编辑方式：**带标题 index 索引，
+   每个 byte 可以展开为二进制 bit 解析**"（补充："点击后弹出二进制 bit，每个 bit 可以 toggle 它，
+   改完后那个 byte 就改了"）；
+4. 这样一来一屏放不下 ⇒ 主区**右边加滚动条**。
+
+落地方式：
+
+| 项 | 做法 | 钉住它的自测 |
+|---|---|---|
+| ① 顺序 + 去收起 | `index.html` 里把 `#pn-img-card` 挪到 `#pn-code-card` 前面，legend 里不再有 `.foldbtn`；`.main>fieldset{flex:0 0 auto}`（按自然高度排，不再三块弹性挤压） | `spi-panel-page.test.mjs` §1b |
+| ③ 表 360px | `#pn-code-wrap{height:360px}`（原来只有 120px 下限）；表自己滚（`.scroll`），卡片跟在后面 | §1b（量到 360±2） |
+| ④ 右列滚动 | `#tab-panel .main{overflow-y:auto;overflow-x:hidden}` —— 侧栏本来就有自己的滚动条，两条互不干扰 | §1b（`scrollHeight > clientHeight` 且整页无横向溢出） |
+| ③ byte → bit | 表里**每个字节都是按钮**（`button.byte[data-i][data-k]`），点开浮板 `#pn-bitpop`：8 个 bit 各一个勾选框（带位权，已知命令还带位名）、HEX 直填、`0 / FF / ~` 三个快捷键；勾一下就 `setRowByte()` 写回那一行并重绘单元格 | §5b（21 项：弹出/位名/勾 bit3→0x08/摘要"已改 N 行"/线上真发 36 08/重新解析回滚） |
+| 纯函数 | `app/spi/panel-code.js` 新增 `byteBits/bitsByte/toggleBit/bitsText/bitWeight/BIT_NAMES/setRowByte` | `spi-panel-code.test.mjs` §D |
+| UI 控制器 | `app/spi/bit-editor.js` 的 `BitPopover`（`position:fixed`，主区滚动裁不到它；Esc/点别处/再点同一字节都能关） | §5b |
+
+三条**语义约定**（用户会踩，所以写进注释与自测）：
+1. **改的是"这份步骤表"，不回写文本框** —— 重放/导出用改后的值，上面贴的原文一个字都不动
+   （原文是用户的资产，页面不偷偷改它）；想丢弃改动就再点一次「解析并预览」（按原文重建）；
+2. 自动补的 MADCTL/COLMOD 两行**同样可点可改**（它们本来就是要发出去的字节），行首用虚线边框区分；
+3. `setRowByte` **必须换一个新的 `Uint8Array`**：`REQUIRED_PREFIX` 的 `data` 是模块级共享常量，
+   原地改会把"出厂值"一起污染（自测里专门钉了这条）。
+
+> 位名只给**有把握**的两条命令（0x36 MADCTL / 0x3A COLMOD，MIPI DCS 常见排法，界面里也写明了
+> "常见排法"）；其余命令只显示 bit7…bit0 与位权 —— 猜错位名比不标更糟。
+
+---
+
 ## 12. 已拍板与 TBD
 
 **已拍板**：见 §0（9 条），本轮不再有悬空问题。

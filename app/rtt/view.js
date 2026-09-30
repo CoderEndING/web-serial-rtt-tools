@@ -82,6 +82,33 @@ const RISCV_RAM = {
 /** 选「其它 RISC-V」时的兜底窗口（HPM 最常见的非缓存区起点） */
 const RISCV_RAM_FALLBACK = '0x01240000-0x01250000';
 
+/**
+ * 「芯片」下拉（`#r-chip`）—— **一个下拉、两个组**（用户 2026-09-30：原来按目标类型换着显示的
+ * 两个下拉合并成一个）。组的归属**只认 HTML 里的 `<optgroup data-arch="arm|riscv">`**：
+ * 以后加芯片只改 index.html，这里不用维护第二份名单。
+ *
+ * 两条口径（用户强调过"ARM 也能走 JTAG"）：
+ *   · **ARM 组**：WebUSB 通路固定 SWD；桥（OpenOCD/J-Link）走哪条传输由**你自己的 cfg** 决定 ——
+ *     所以这里不写"ARM = SWD"这种话，只保证桥送出去的 target 名取的是 ARM 组那颗；
+ *   · **RISC-V 组**：**只能 JTAG**，选中它就把「目标类型」切到 RISC-V/JTAG
+ *     （否则会出现"选了 HPM 却还在走 SWD"这种错配）。
+ */
+const chipSel = () => document.getElementById('r-chip');
+const chipArchOf = id => {
+  const o = [...(chipSel()?.options || [])].find(x => x.value === id);
+  return o?.parentElement?.dataset?.arch || 'arm';
+};
+/** 当前 ARM 组那颗（桥的 OpenOCD target 用它；选的是 RISC-V 时回退到上次选过的 ARM 那颗）*/
+const armChipId = () => {
+  const v = chipSel()?.value || '';
+  return chipArchOf(v) === 'arm' ? v : (store.get('rtt.ocdTarget', '') || 'stm32f103');
+};
+/** 当前 RISC-V 组那颗（RAM 窗口用它；选的是 ARM 时回退到上次选过的 RISC-V 那颗）*/
+const rvChipId = () => {
+  const v = chipSel()?.value || '';
+  return chipArchOf(v) === 'riscv' ? v : (store.get('rtt.rvChip', '') || 'hpm6800evk');
+};
+
 export class RttView {
   constructor(){
     this.probe = null;
@@ -118,7 +145,8 @@ export class RttView {
     store.bind($('r-addr'), 'rtt.addr');
     store.bind($('r-poll'), 'rtt.poll');
     store.bind($('r-eol'), 'rtt.eol');
-    store.bind($('r-ocd-target'), 'rtt.ocdTarget');
+    // 芯片（合并后的 `#r-chip`）不再用 store.bind：两块选项各有自己的键，
+    // 由下面 applyTarget() / change 处理器显式读写（rtt.ocdTarget = ARM 组那颗、rtt.rvChip = RISC-V 组那颗）
     store.bind($('r-ocd-cfgs'), 'rtt.ocdCfgs');
     store.bind($('r-ocd-speed'), 'rtt.ocdSpeed');
     // 老版本这里是自由输入框，localStorage 里可能存着候选之外的值（4000/8000…）：补个选项，别悄悄改掉它
@@ -138,7 +166,6 @@ export class RttView {
      * 换成 JLinkRTTLogger 落文件 + 桥 tail（~1463 KB/s）。默认**关**——勾上就没有下行了。
      */
     store.bind($('r-jlink-fast'), 'rtt.jlinkFast', 'checked');
-    $('r-ocd-target').addEventListener('change', () => this._applyOcdTarget(true));
     this._applyOcdTarget(false);      // 只同步自定义行的显隐；RAM 范围是用户存过的值，别在加载时覆盖
     // 「选择…」：列出桥所在机器的 OpenOCD cfg 让你挑（浏览器拿不到本地文件路径，列表只能由桥给）
     $('r-ocd-cfgs-pick').addEventListener('click', async () => {
@@ -179,6 +206,7 @@ export class RttView {
      *   · RAM 扫描范围（RISC-V 板子的 RTT 控制块一般在 AXI SRAM，不在 0x20000000）→ 给常见默认值；
      *   · SWD 时钟那格的**含义变成 JTAG TCK**（DAP_SWJ_Clock），标签改掉。
      */
+    const chip = chipSel();                 // 合并后的芯片下拉（ARM 组 + RISC-V 组，见文件头的辅助函数）
     const applyTarget = () => {
       const rv = $('r-target').value === 'riscv';
       const clkLbl = $('r-usb-clock')?.closest('label')?.querySelector('span');
@@ -192,21 +220,41 @@ export class RttView {
         ? 'RISC-V 下没有 Cortex-M 的 DHCSR/AIRCR 复位语义（探针的 RISC-V 引擎只管 halt/resume）—— 要复位就按板子上的复位键'
         : '复位目标（AIRCR.SYSRESETREQ；探针没接 NRST 时靠软复位）';
       /**
-       * 芯片那两格**按目标类型换一个**：STM32 那份同时是「本地桥 · OpenOCD」的目标 cfg，
-       * RISC-V 那份只用来带出 RAM 范围（HPM 的控制块在 AXI SRAM，不在 0x20000000）。
-       * 分成两个下拉而不是塞进一个列表：桥后端送出去的 target 名字不能被 RISC-V 的 id 污染。
+       * 芯片下拉跟着目标类型走：切到 RISC-V/JTAG 就选中 RISC-V 组里上次那颗，切回 SWD 就选 ARM 组那颗。
+       * 合并成一个下拉 ≠ 把两边的语义搅在一起：**桥送出去的 OpenOCD target 名永远取 ARM 组那颗**
+       * （`armChipId()`），RISC-V 的 id 不会被当成 OpenOCD 预设名发出去。
+       * ⚠️ 这里**无条件赋值**：下拉的默认值是"第一个选项"（stm32f103），不是用户存过的那颗 ——
+       *    加个"已经在对的组里就不动"的判断，加载时就会显示成 stm32f103（而不是存的 custom）。
+       *    从下拉那头切过来时也不会被覆盖：处理器先写 store 再切目标类型，这里读到的就是刚选的那颗。
        */
-      $('r-ocd-chip-row').hidden = rv;
-      $('r-rv-chip-row').hidden = !rv;
-      $('r-range').value = rv ? (RISCV_RAM[$('r-rv-chip').value] || RISCV_RAM_FALLBACK)
-                              : (OCD_RAM[$('r-ocd-target').value] || $('r-range').value);
+      if (chip) chip.value = rv ? (store.get('rtt.rvChip', '') || 'hpm6800evk')
+                                : (store.get('rtt.ocdTarget', '') || 'stm32f103');
+      $('r-range').value = rv ? (RISCV_RAM[rvChipId()] || RISCV_RAM_FALLBACK)
+                              : (OCD_RAM[armChipId()] || $('r-range').value);
+      this._applyOcdTarget(false);
     };
     applyTarget();
     store.bind($('r-target'), 'rtt.target');
-    $('r-target').addEventListener('change', () => { applyTarget(); if (this.probe || this.bridge) this.disconnect(); });
-    store.bind($('r-rv-chip'), 'rtt.rvChip');
-    $('r-rv-chip').addEventListener('change', () => { $('r-range').value = RISCV_RAM[$('r-rv-chip').value] || RISCV_RAM_FALLBACK; });
-    if (!$('r-rv-chip').value) $('r-rv-chip').value = 'hpm6800evk';    // 没存过就给 HPM6800EVK（本机那块）
+    const onTargetChanged = () => { applyTarget(); if (this.probe || this.bridge) this.disconnect(); };
+    $('r-target').addEventListener('change', onTargetChanged);
+    /**
+     * 合并后的芯片下拉：换芯片 = ① 记到**那一组自己的键**（两块各自记住上次选的）
+     * ② RAM 窗口跟着换 ③ 跨组时把目标类型也切过去。
+     * RISC-V 只能 JTAG ⇒ 选 RISC-V 那颗就切 RISC-V/JTAG；选 ARM 那颗切回 SWD
+     * （桥侧对 ARM 用 JTAG 是**你自己的 cfg** 的事，这个下拉不管传输）。
+     */
+    chip?.addEventListener('change', () => {
+      const id = chip.value, arch = chipArchOf(id);
+      store.set(arch === 'riscv' ? 'rtt.rvChip' : 'rtt.ocdTarget', id);
+      const wantRv = arch === 'riscv';
+      if (wantRv !== ($('r-target').value === 'riscv')){
+        $('r-target').value = wantRv ? 'riscv' : 'swd';
+        onTargetChanged();
+      } else {
+        $('r-range').value = wantRv ? (RISCV_RAM[id] || RISCV_RAM_FALLBACK) : (OCD_RAM[id] || $('r-range').value);
+        this._applyOcdTarget(true);
+      }
+    });
 
     // ---------- 连接按钮 ----------
     $('r-usb-connect').addEventListener('click', () => this.connectProbe());
@@ -290,10 +338,13 @@ export class RttView {
     apply(el.checked);
   }
 
-  /** 桥后端的「目标」下拉变化：显示/隐藏自定义 cfg 输入；选系列时把 RAM 范围填成常见值 */
+  /** 芯片下拉变化：显示/隐藏自定义 cfg 输入；选系列时把 RAM 范围填成常见值 */
   _applyOcdTarget(applyRange){
-    const t = $('r-ocd-target').value;
+    const t = armChipId();                  // 合并后的下拉里 ARM 组那颗（「自定义 cfg…」也在这组）
     const custom = t === 'custom';
+    // 「非缓存区」那段提醒只对 RISC-V 有意义（ARM 的 RTT 缓冲放普通 RAM 就行），别让它一直占地方
+    const note = $('r-chip-note');
+    if (note) note.hidden = chipArchOf(chipSel()?.value || '') !== 'riscv';
     $('r-ocd-custom-cfgs-row').hidden = !custom;
     $('r-ocd-cfgs-hint').hidden = !custom;
     $('r-ocd-custom-speed-row').hidden = !custom;
@@ -383,6 +434,11 @@ export class RttView {
         this.stream = false;
         toast('模拟目标已启动（内存里有个假 RTT 控制块）', 'ok');
       } else {
+        // 芯片下拉里选的是 RISC-V 那颗时，别把它的 id 当 OpenOCD 预设名发给桥（桥那边没有这个预设）
+        if (chipArchOf(chipSel()?.value || '') === 'riscv'){
+          throw new Error('这一颗是 RISC-V：桥（OpenOCD / J-Link）那条路要你自己给目标 cfg —— '
+            + '改选 ARM 组的「自定义 cfg…」并填 cfg 列表；RISC-V 推荐走「调试后端 → WebUSB」那条零安装的路');
+        }
         const bc = new BridgeClient($('r-bridge-url').value);
         await bc.connect({ version: 1 });
         const backend = b === 'bridge-openocd' ? 'openocd' : 'jlink';
@@ -391,7 +447,7 @@ export class RttView {
         // J-Link 仍走自己的参数。
         const cfg = {
           openocd: store.get('rtt.ocdPath', ''),
-          target: $('r-ocd-target').value,
+          target: armChipId(),
         };
         if (cfg.target === 'custom'){
           cfg.cfgs = String($('r-ocd-cfgs').value || '').split(/[,\s;]+/).map(s => s.trim()).filter(Boolean);

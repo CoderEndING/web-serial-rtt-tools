@@ -26,17 +26,49 @@ for (const [name, s] of Object.entries(SCALARS)) TYPES[s.code] = { name, ...s };
 export const typeInfo = code => TYPES[code] || null;
 export { SCALARS };                    // 页面算帧长/画图都要用，从这里转出去省一次 import
 
-/** 采样计划/速率模型（由固件 bench 的 3434 KB/s @45 MHz 反推；见文档 §6.1）
- *  —— 只是**估算**，页面显示时要说清楚，真值由 M0 标定给。
- *  `fastWordUs` 例外：它是**实测值**（单字流水读路径，见 planReads 的注释）。 */
-export const COST = { perBlockUs: 5.6, perByteUs: 0.284, refMhz: 45, fastWordUs: 1.55 };
+/**
+ * 采样计划 / 速率模型。
+ *
+ * **SWD 侧按 akaLinkPro 最新拟合重算**（2026-09-30；那边 README §scope 与 `Custom HID Protocol.md` §16）：
+ *   每次 SWD 传输的实测成本 = `36.2 × 指令/bit + 184 周期`，60 MHz 档 = **401 周期 = 1.115 µs**；
+ *   一次 span 块读是 **N + 3 次传输**（TAR 写 + prime 读 + N×DRW + RDBUFF 读，N = 字数）
+ *   ⇒ 每 span 固定 **3 × 1.115 = 3.35 µs**，每字节 **1.115 / 4 = 0.279 µs**。
+ *   真机锚点（F103 @60 MHz）与这个式子的偏差：单字 4.503 vs 4.47、2 字 5.82 vs 5.58、
+ *   4 字 7.96 vs 7.81、6 字 10.30 vs 10.05、8 字 12.65 vs 12.28 —— 全在 +1~4%（模型略保守）。
+ *   `fastWordUs` 是**实测值**（单字流水读快路径，见 planReads 的注释）。
+ */
+export const COST = { perBlockUs: 3.35, perByteUs: 0.279, refMhz: 60, fastWordUs: 1.55 };
+
+/**
+ * 单个 span 的读缓冲上限 = 固件 `SCOPE_SPAN_MAX`（8 个 f64 = 64 B）。
+ * 🚨 合并时必须一起带上：漏了它，网页会把固件其实拆成两个的 span 算成一个 ——
+ *    DEF 包里回报的 span 数就对不上（页面对账会报"两边合并规则不一致"）。
+ */
+export const SPAN_MAX_BYTES = 64;
+
+/**
+ * RISC-V/JTAG 侧的**实测**基线（akaLinkPro 2026-09-30 第二轮审查后的数字）：
+ *   · `singleWordUs` = **3.17 µs** —— 单变量快路径（SBA 抱固定地址 + posted 扫描，每拍 1 次 DMI 扫描）。
+ *     P1-1 修掉"每 32 拍静默毁一个样本"之后实测 3.17 µs（修之前 4.25 µs）⇒ ≈315 kHz，
+ *     已经贴着一次 54 TCK 扫描（≈2.7 µs）的时序下限；
+ *   · `pack8Us` = **36.6 µs** —— 8 通道连续 u32（32 B 一个 span，含收尾那 2 次查 SBCS 的扫描）⇒ ≈27.3 kHz；
+ *   · `perSpanUs`/`perByteUs` 就按这两个锚点摊出来（块读每个字约一次扫描 ≈2.9 µs，
+ *     8 字那份摊到 0.96 µs/B）—— 只用来给"你这套变量在 JTAG 下大概多少"，真值仍以标定为准。
+ */
+export const RISCV_COST = { singleWordUs: 3.17, pack8Us: 36.6, perSpanUs: 5.8, perByteUs: 0.96 };
+
+/** JTAG 下的每样本耗时估算（µs）。锚点见 RISCV_COST；`plan` 出自 planReads()。 */
+export const riscvPlanUs = plan =>
+  plan.spans.length * RISCV_COST.perSpanUs + plan.frameBytes * RISCV_COST.perByteUs;
 
 // ---------------------------------------------------------------- 采样计划
 /**
  * 把变量列表排成"读计划"：地址排序 → 相邻的合并进同一个 span。
  *
  * 合并的判据（唯一解）：多读 gap 个字节的代价 < 省下的那次块固定开销
- *    gap × perByteUs < perBlockUs  →  gap < 19.7 B（45 MHz 下）
+ *    gap × perByteUs < perBlockUs  →  gap ≤ 12 B（@60 MHz 的模型推出来的）
+ * 这就是固件里的 `SCOPE_MERGE_GAP = 12`（`scope_sampler.c`，注释写明"与网页 planReads() 同源"）——
+ * 两边必须给同一个答案：DEF 包里回报的跨度数会跟这里的 `spans.length` 对账。
  * 所以"把被采样的量放进同一个结构体"能快好几倍，而散落变量只能各读各的。
  *
  * @param {Array<{name,addr,size,scalar}>} vars
@@ -44,6 +76,7 @@ export const COST = { perBlockUs: 5.6, perByteUs: 0.284, refMhz: 45, fastWordUs:
  */
 export function planReads(vars, opts = {}){
   const maxGap = opts.maxGapBytes ?? Math.floor(COST.perBlockUs / COST.perByteUs);
+  const maxSpan = opts.maxSpanBytes ?? SPAN_MAX_BYTES;
   const list = [...vars].sort((a, b) => a.addr - b.addr);
   const spans = [];
   let frameBytes = 0;
@@ -51,7 +84,8 @@ export function planReads(vars, opts = {}){
     frameBytes += v.size;
     const last = spans[spans.length - 1];
     const start = v.addr, end = v.addr + v.size;
-    if (last && start - last.end <= maxGap){
+    // 两个条件都要：间隙够近（省一次块固定开销）**且**并完不超过固件的 span 缓冲上限
+    if (last && start - last.end <= maxGap && (end - last.start) <= maxSpan){
       last.end = Math.max(last.end, end);
       last.len = last.end - last.start;
       last.vars.push(v);
@@ -65,9 +99,9 @@ export function planReads(vars, opts = {}){
    * 固件有条**单字流水读**快路径（`s_pipe_ok`）：只有一个 span、4 字节对齐、整段正好 4 字节、
    * 且变量在内存与帧里都连续时，每拍**只发一次 DRW 读**、拿回来的值是上一拍的结果（AHB-AP 读是 posted 的）。
    * 判据与固件 `scope_span_is_direct()` + `s_nspans == 1 && len == 4` 一一对应，改一边别忘了另一边。
-   * 实测（2026-10，F103 + akaLinkPro @60 MHz）：单字 f32 = **1.53 µs/样本**（复测 1.533），
-   * 而模型那 6.74 µs 是按"3 次传输"算的 —— 拿模型当"能不能跑某个周期"的依据会把人吓退：
-   * 用户就被"建议周期 ≥ 11 µs"挡住过，而他实测 3 µs 零丢、318.8 kHz。
+   * 实测（2026-09/10，F103 + akaLinkPro @60 MHz，两轮都在 1.548~1.588 µs）：单字 f32 = **1.55 µs/样本**
+   * ⇒ 629~646 kHz；而模型那条路（3 次传输 + 1 次 DRW ≈ 4.47 µs）是给"没有快路径"的配置用的 ——
+   * 拿模型当"能不能跑某个周期"的依据会把人吓退：用户就被"建议周期 ≥ 11 µs"挡住过，而他实测 3 µs 零丢。
    */
   const sp0 = spans.length === 1 ? spans[0] : null;
   const fastPath = !!sp0 && (sp0.start & 3) === 0 && (sp0.end - sp0.start) === 4 &&
@@ -328,14 +362,16 @@ export const BACKEND = { SWD: 'swd', RISCV: 'riscv' };
 export const backendName = b => (b === BACKEND.RISCV ? 'RISC-V/JTAG' : b === BACKEND.SWD ? 'SWD/ARM' : '未知');
 
 /**
- * 每样本耗时的**实测**基线（µs，来自 web-handoff-riscv-scope.md 与本站实测）：
- *   · `single` = 单变量 u32 走流水快路径；
- *   · `pack8`  = 8 个同结构体成员（32 B 一个 span）。
+ * 每样本耗时的**实测**基线（µs）——数字全部来自 akaLinkPro 的最新真机记录
+ * （`README.md` §scope / §RISC-V、`docs/代码审查报告.md` 第二轮回归表，2026-09-30）：
+ *   · SWD @60 MHz：单字 1.548~1.588（取 1.55）、pack 8 通道 32 B 11.193~11.234（取 11.19）；
+ *   · RISC-V/JTAG：单字 3.17（P1-1 修完的复测值，修之前是 4.25）、8 通道 32 B 36.6。
  * 零丢拍的周期建议取 **≥ 1.5×** 这个值（探针侧还有组帧与 USB 的开销）。
+ * ⚠️ 换数字时**两边一起改**：`docs/scope-page.md` 与页面文案都引用这里。
  */
 export const BACKEND_COST = {
-  swd:   { single: 1.588, pack8: 11.19, clock: '60 MHz' },
-  riscv: { single: 2.937, pack8: 45.64, clock: 'JTAG（时钟由 DMI 旋钮定）' },
+  swd:   { single: 1.55, pack8: 11.19, clock: '60 MHz' },
+  riscv: { single: RISCV_COST.singleWordUs, pack8: RISCV_COST.pack8Us, clock: 'JTAG（时钟由 DMI 旋钮定）' },
 };
 
 /** 全局目标类型切换（HID **0x31** action 10，不是 0x32！）——与 RTT-over-JTAG 共用同一个开关。

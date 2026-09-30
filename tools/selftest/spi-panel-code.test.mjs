@@ -324,5 +324,42 @@ console.log('== B4. 整屏刷端到端（无浏览器）：拼帧 → 打包 →
   ok(pxFrames.length === 0 || true, '（wire 只记了 tx，像素帧的字节数由 bytes_tx 对账）');
 }
 
+// ==================================================================== D
+console.log('== D. 字节 ↔ 位（解析表里"点字节改 bit"的纯逻辑）==');
+{
+  ok(eqArr(C.byteBits(0x55), [1, 0, 1, 0, 1, 0, 1, 0]), `0x55 → 10101010 逐位对上（${C.byteBits(0x55).join('')}）`);
+  ok(eqArr(C.byteBits(0x80), [0, 0, 0, 0, 0, 0, 0, 1]), '0x80 → 只有 bit7 = 1（位号从 0 起、低位在前）');
+  ok(C.bitsByte(C.byteBits(0xa5)) === 0xa5, '位数组 → 字节 往返相等');
+  ok(C.bitsByte([1, 1, 1, 1, 1, 1, 1, 1, 1, 1]) === 0xff, '多出来的位忽略（不外溢）');
+  ok(C.toggleBit(0x00, 3) === 0x08 && C.toggleBit(0xff, 0) === 0xfe, 'toggleBit：置起 bit3 / 清掉 bit0');
+  ok(C.bitsText(0x0f) === '00001111' && C.bitWeight(7) === 128 && C.bitWeight(0) === 1, '二进制文本 bit7 在左 + 位权');
+
+  // 改字节：必须换一个新的 Uint8Array（共享常量不许被原地污染）
+  const shared = Uint8Array.of(0x00);
+  const row = { cmd: 0x36, data: shared, delayMs: 0 };
+  C.setRowByte(row, 0, 0x08);
+  ok(row.data[0] === 0x08 && row.edited === true, 'setRowByte 改参数：值变了、标了 edited');
+  ok(shared[0] === 0x00 && row.data !== shared, '原数组没被原地改（换新数组 —— REQUIRED_PREFIX 的 data 是共享常量）');
+  C.setRowByte(row, 'cmd', 0x3a);
+  ok(row.cmd === 0x3a, 'setRowByte 也能改命令字节');
+  const before = row.data;
+  C.setRowByte(row, 9, 0x11);
+  ok(row.data === before, '参数下标越界 = 不动（不抛错、不悄悄加长）');
+
+  // 位名：只认有把握的两条
+  ok(/MADCTL/.test(C.bitNamesFor(0x36)?.name || '') && String(C.bitNamesFor(0x36).bits[3]).includes('BGR'),
+     `0x36 有 MADCTL 的位名（bit3 = ${C.bitNamesFor(0x36).bits[3]}）`);
+  ok(/COLMOD/.test(C.bitNamesFor(0x3a)?.name || ''), '0x3A 有 COLMOD 的位名');
+  ok(C.bitNamesFor(0xce) === null, '没把握的命令返回 null（界面只显示位号与位权，不瞎标）');
+
+  // 改完的字节要真的进到**要发出去的 STEP 帧**里（"改了就生效"的最终判据）
+  const rows = C.parsePanelCode('{0x36, (uint8_t[]){0x00}, 1, 0},\n{0x29, NULL, 0, 0},').rows;
+  C.setRowByte(rows[0], 0, 0x08);
+  const items = C.rowsToItems(rows, { rspAll: true });
+  ok(items[0].payload[0] === 0x36 && items[0].payload[1] === 1 && items[0].payload[4] === 0x08,
+     '改过的参数进到 STEP 帧载荷里（cmd=0x36 / n=1 / param=0x08）');
+  ok(/0x08/.test(C.rowsToC(rows)), '导出的 C 用的也是改后的值');
+}
+
 console.log(`\n${fail ? '❌' : '✅'} spi-panel-code.test: ${pass} 通过 / ${fail} 失败`);
 process.exit(fail ? 1 : 0);

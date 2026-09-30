@@ -17,6 +17,7 @@ import { $, setStatus } from '../ui/dom.js';
 import * as P from './protocol.js';
 import * as C from './panel-code.js';
 import * as I from './image.js';
+import { BitPopover } from './bit-editor.js';
 import { fmtBytes } from './session.js';
 
 /** 两块目标屏的推荐值。`short` 是侧栏下拉用的短名（长名字会把 300px 宽的侧栏撑爆 → 字被裁）*/
@@ -62,6 +63,9 @@ export class SpiPanelView {
     this.src = null;           // 当前图片/图案：{ w, h, rgba, name }
     this.patternKind = null;
     this.unsub = null;
+    /** 解析表里的"字节 → 位"开关板（点字节弹出，改位即改那个字节） */
+    this.bitpop = new BitPopover({ onEdit: (row, i, k, v) => this.onByteEdit(row, i, k, v) });
+    this._sum = null;          // 摘要的原始文案（改过字节后要在后面补一句"已改 N 行"）
   }
 
   init(){
@@ -92,15 +96,26 @@ export class SpiPanelView {
     $('pn-code-prefix').addEventListener('change', () => this.parseCode());
     $('pn-code-play').addEventListener('click', () => this.playRows(0, (this.effectiveRows || this.rows).length - 1));
     $('pn-code-stop').addEventListener('click', () => { this.playAbort = true; });
-    $('pn-code-clear').addEventListener('click', () => { $('pn-code-text').value = ''; this.rows = []; this.renderCodeTable([]); this.setCodeSummary('已清空'); });
+    $('pn-code-clear').addEventListener('click', () => { $('pn-code-text').value = ''; this.rows = []; this.bitpop.close(); this.renderCodeTable([]); this.setCodeSummary('已清空'); });
     for (const [id, kind] of [['pn-code-c', 'c'], ['pn-code-json', 'json'], ['pn-code-text-out', 'text']]) $(id).addEventListener('click', () => this.exportRows(kind));
     $('pn-code-body').addEventListener('click', e => {
+      // ① 字节按钮（命令字节 / 每个参数字节）→ 弹出它的 8 个 bit；再点同一个就收起来
+      const chip = e.target.closest('button.byte');
+      if (chip){
+        const i = +chip.dataset.i;
+        const k = chip.dataset.k === 'cmd' ? 'cmd' : +chip.dataset.k;
+        if (this.bitpop.isOpen && this.bitpop.index === i && this.bitpop.k === k){ this.bitpop.close(); return; }
+        this.bitpop.open({ row: (this.effectiveRows || this.rows)[i], index: i, k, at: chip.getBoundingClientRect() });
+        return;
+      }
+      // ② 行尾的「单发 / 从此重放」
       const btn = e.target.closest('button[data-act]');
       if (!btn) return;
       const i = +btn.dataset.i, act = btn.dataset.act;
       if (act === 'one') this.playRows(i, i);
       else if (act === 'from') this.playRows(i, (this.effectiveRows || this.rows).length - 1);
     });
+    this.bitpop.init();
 
     // 图片 / 图案
     this.buildPatternChips();
@@ -252,6 +267,7 @@ export class SpiPanelView {
   }
 
   parseCode(){
+    this.bitpop.close();          // 行对象要整批重建：位开关板指着的那一行已经作废
     const text = $('pn-code-text').value;
     const r = C.parsePanelCode(text);
     this.parsed = r;
@@ -277,39 +293,68 @@ export class SpiPanelView {
   }
 
   setCodeSummary(text, kind){
-    const el = $('pn-code-sum');
-    el.textContent = text;
-    el.className = 'hint';
-    if (kind) el.classList.add(kind);
-    el.style.color = kind === 'err' ? 'var(--err)' : kind === 'warn' ? 'var(--warn)' : kind === 'ok' ? 'var(--ok)' : '';
+    this._sum = { text, kind };
+    this.renderSum();
   }
 
+  /** 摘要 = 解析结果 + "已改 N 行"（改过字节后一眼知道表格与文本框不再一致）*/
+  renderSum(){
+    const el = $('pn-code-sum');
+    if (!el || !this._sum) return;
+    const rows = this.effectiveRows || this.rows;
+    const n = rows.filter(r => r.edited).length;
+    el.textContent = this._sum.text + (n ? ` · 已改 ${n} 行（按改后的值重放/导出）` : '');
+    el.className = 'hint';
+    if (this._sum.kind) el.classList.add(this._sum.kind);
+    el.style.color = this._sum.kind === 'err' ? 'var(--err)' : this._sum.kind === 'warn' ? 'var(--warn)' : this._sum.kind === 'ok' ? 'var(--ok)' : '';
+  }
+
+  /** 表格里的一个字节 = 一个按钮：点开是它的 8 个 bit（`bit-editor.js`）*/
   renderCodeTable(rows){
     const body = $('pn-code-body');
-    if (!rows.length){ body.innerHTML = '<tr><td colspan="6" style="color:var(--fg2)">（还没有内容 —— 贴代码后点「解析并预览」）</td></tr>'; return; }
+    if (!rows.length){
+      body.innerHTML = '<tr><td colspan="6" style="color:var(--fg2)">（还没有内容 —— 贴代码后点「解析并预览」）</td></tr>';
+      this.bitpop.close();
+      return;
+    }
     body.innerHTML = rows.map((r, i) => {
-      const hex = [...r.data].map(v => v.toString(16).padStart(2, '0')).join(' ');
       const isAuto = !!r.auto;
-      return `<tr${isAuto ? ' class="auto"' : ''}><td>${i}</td><td style="color:var(--fg2)">${isAuto ? '补' : (r.line || '')}</td>` +
-        `<td>0x${r.cmd.toString(16).padStart(2, '0')}</td>` +
-        `<td style="color:${r.data.length ? 'inherit' : 'var(--fg2)'}">${r.data.length ? hex : '（无参数）'}` +
-        `${isAuto ? ` <span style="color:var(--warn)">← ${r.name}</span>` : ''}</td>` +
+      const cls = [isAuto ? 'auto' : '', r.edited ? 'edited' : ''].filter(Boolean).join(' ');
+      const params = r.data.length
+        ? [...r.data].map((v, j) => byteChip(i, j, v)).join('')
+        : '<span style="color:var(--fg2)">（无参数）</span>';
+      return `<tr${cls ? ` class="${cls}"` : ''} title="#${i} · 命令 0x${hx(r.cmd)} + ${r.data.length} 参数字节 · 延时 ${r.delayMs || 0} ms">` +
+        `<td>${i}</td><td style="color:var(--fg2)">${isAuto ? '补' : (r.line || '')}</td>` +
+        `<td>${byteChip(i, 'cmd', r.cmd)}</td>` +
+        `<td>${params}${isAuto ? ` <span style="color:var(--warn)">← ${r.name}</span>` : ''}</td>` +
         `<td>${r.delayMs || ''}</td>` +
         `<td><button class="mini" data-act="one" data-i="${i}">单发</button> ` +
         `<button class="mini" data-act="from" data-i="${i}">从此重放</button></td></tr>`;
     }).join('');
+    if (this.bitpop.isOpen) this.bitpop.render({ keepHex: true });   // 行数据可能刚被改过：弹窗跟着刷新
+    this.bitpop.markChip();
+  }
+
+  /** 位开关板改了某个字节（bit-editor.js 的回调）：重绘表格 + 摘要 + 记一条日志 */
+  onByteEdit(row, i, k, v){
+    this.renderCodeTable(this.effectiveRows || this.rows);
+    this.renderSum();
+    const what = k === 'cmd' ? '命令' : `参数[${k}]`;
+    this.session.log('i', `第 ${i} 行「${what}」改成 0x${hx(v)}（重放/导出按改后的值，文本框不动）`, this.tag);
   }
 
   exportRows(kind){
-    if (!this.rows.length){ this.session.log('w', '还没有解析出内容', this.tag); return; }
-    const text = kind === 'c' ? C.rowsToC(this.rows) : kind === 'json' ? C.rowsToJson(this.rows) : C.rowsToText(this.rows);
+    // 导出的就是**表格里现在这份**：含自动补的前缀、含刚用位开关板改过的字节
+    const rows = this.effectiveRows || this.rows;
+    if (!rows.length){ this.session.log('w', '还没有解析出内容', this.tag); return; }
+    const text = kind === 'c' ? C.rowsToC(rows) : kind === 'json' ? C.rowsToJson(rows) : C.rowsToText(rows);
     const name = kind === 'c' ? 'panel_init.c' : kind === 'json' ? 'panel_init.json' : 'panel_init.txt';
     try {
       const url = URL.createObjectURL(new Blob([text], { type: 'text/plain' }));
       const a = document.createElement('a');
       a.href = url; a.download = name; a.click();
       setTimeout(() => URL.revokeObjectURL(url), 5000);
-      this.session.log('g', `已导出 ${name}（${this.rows.length} 条）`, this.tag);
+      this.session.log('g', `已导出 ${name}（${rows.length} 条）`, this.tag);
     } catch (e){ this.session.log('e', '导出失败：' + (e?.message || e), this.tag); }
   }
 
@@ -611,6 +656,9 @@ export class SpiPanelView {
       preset: $('pn-preset')?.value || null,
       geom: $('pn-geom')?.value || null,
       rows: this.rows.length,
+      tableRows: (this.effectiveRows || []).length,      // 表格行数（含自动补的前缀）
+      editedRows: (this.effectiveRows || []).filter(r => r.edited).length,   // 被位开关板改过的行
+      bitpopOpen: this.bitpop.isOpen,
       parseErrors: this.parsed?.errors?.length ?? 0,
       source: this.src ? `${this.src.name} ${this.src.w}×${this.src.h}` : null,
       lastRun: this.lastRun || null,          // 最近一次刷图的客观数字（脚本/自检直接读，别去解析日志）
@@ -618,6 +666,13 @@ export class SpiPanelView {
     };
   }
 }
+
+/** 表格里的字节文本（小写两位十六进制，与老的纯文本渲染一致）*/
+const hx = v => (v & 0xff).toString(16).padStart(2, '0');
+
+/** 一个字节一个按钮：点开就是它的 8 个 bit（`data-i` = 行、`data-k` = 'cmd' 或参数下标）*/
+const byteChip = (i, k, v) =>
+  `<button class="byte" data-i="${i}" data-k="${k}" title="0x${hx(v)} = ${C.bitsText(v)} —— 点开改这 8 个 bit">0x${hx(v)}</button>`;
 
 /** "0x2C" / "2c" → 44；空/非法 → fallback（面板档那两个 opcode 用）*/
 function parseHexByteSafe(s, fallback = 0){

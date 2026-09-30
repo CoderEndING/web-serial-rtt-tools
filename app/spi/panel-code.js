@@ -314,3 +314,66 @@ export function rowsToText(rows){
   return rows.map(r => `${h2(r.cmd)}${r.data.length ? ' ' + [...r.data].map(v => v.toString(16).toUpperCase().padStart(2, '0')).join(' ') : ''}` +
     (r.delayMs ? `  ${r.delayMs}ms` : '')).join('\n');
 }
+
+// ============================================================================
+// 字节 ↔ 位（解析表里"点字节改 bit"用；纯函数，Node 自测直接打）
+// ============================================================================
+
+/** 字节 → 8 个位（索引 = 位号 0..7：`bits[0]` 是最低位、`bits[7]` 是最高位）*/
+export const byteBits = v => Array.from({ length: 8 }, (_, i) => (v >> i) & 1);
+
+/** 8 个位 → 字节（位号 ≥ 8 的忽略；缺的当 0）*/
+export const bitsByte = bits => bits.reduce((v, on, i) => (on && i < 8 ? v | (1 << i) : v), 0) & 0xff;
+
+/** 翻转一位（位号 0..7）*/
+export const toggleBit = (v, i) => (v ^ (1 << i)) & 0xff;
+
+/** 8 位二进制文本，bit7 在左（弹窗标题/日志用，一眼看清哪几位是 1）*/
+export const bitsText = v => (v & 0xff).toString(2).padStart(8, '0');
+
+/** 位号 → 位权（bit7 = 128 … bit0 = 1）*/
+export const bitWeight = i => 1 << i;
+
+/**
+ * **已知命令**的位名 —— 只写有把握的：
+ *   0x36 MADCTL / 0x3A COLMOD 按 MIPI DCS 的常见排法（ST77916 与多数 MIPI 屏一致；
+ *   AXS15352 的厂家表里这两条也走 MIPI 语义，见 panel-view.js 的 REQUIRED_PREFIX）。
+ * 没列出来的命令**不猜**：只给 bit7…bit0 与位权 —— 猜错位名比不标更糟。
+ */
+export const BIT_NAMES = {
+  0x36: {
+    name: 'MADCTL（内存访问控制）',
+    bits: { 7: 'MY 行序', 6: 'MX 列序', 5: 'MV 行列交换', 4: 'ML 垂直刷新序', 3: 'BGR', 2: 'MH 水平刷新序' },
+    note: 'bit7~bit2 按 MIPI DCS 常见排法，bit1/bit0 保留。RGB 顺序 = 0x00，BGR = 0x08。',
+  },
+  0x3a: {
+    name: 'COLMOD（像素格式）',
+    bits: { 6: 'RGB 口色深 b6', 5: 'RGB 口色深 b5', 4: 'RGB 口色深 b4',
+            3: '控制口色深 b3', 2: '控制口色深 b2', 1: '控制口色深 b1', 0: '控制口色深 b0' },
+    note: 'RGB565/16bpp = 0x55（RGB 口 101 + 控制口 0101）。低 3 位 = 控制口色深，高 3 位 = RGB 口色深。',
+  },
+};
+
+/** 这条命令的位名表（没有就返回 null —— 界面上只显示位号与位权）*/
+export const bitNamesFor = cmd => BIT_NAMES[(cmd | 0) & 0xff] || null;
+
+/**
+ * 改一条步骤里的**一个字节**：`k` = `'cmd'` 或参数下标（0 起）。原地改这一行并返回它。
+ *
+ * 🚨 参数是 `Uint8Array`，**必须换一个新数组**：自动补的那两条前缀（REQUIRED_PREFIX）的
+ *    `data` 是模块级共享的，原地改会连常量一起污染 —— "下次解析"就再也回不到出厂值了。
+ */
+export function setRowByte(row, k, val){
+  const v = val & 0xff;
+  if (!row) return row;
+  if (k === 'cmd') row.cmd = v;
+  else {
+    const j = k | 0;
+    if (!(j >= 0 && j < row.data.length)) return row;
+    const next = Uint8Array.from(row.data);
+    next[j] = v;
+    row.data = next;
+  }
+  row.edited = true;
+  return row;
+}

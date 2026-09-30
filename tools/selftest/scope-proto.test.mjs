@@ -52,10 +52,18 @@ console.log('== 1. 采样计划（读计划 = 速率的最大杠杆）==');
   ok(p2.naiveUs > p2.estUs, '朴素写法（每个变量一次块读）一定更慢');
   ok(P.planReads([]).estHz === 0, '空计划不炸');
 
-  // 合并阈值：间隙 19 B 内合并、20 B 就不合并（COST 模型推出来的）
+  // 合并阈值：与固件 `SCOPE_MERGE_GAP = 12` 同源（网页算错 → DEF 里回报的 span 数就对不上）
   const mk = gap => P.planReads([{ name: 'a', addr: 0x20000000, size: 4, scalar: 'u32' },
                                  { name: 'b', addr: 0x20000000 + 4 + gap, size: 4, scalar: 'u32' }]).spans.length;
   ok(mk(8) === 1 && mk(30) === 2, '间隙 8 B 合并 / 30 B 不合并');
+  ok(mk(12) === 1 && mk(13) === 2 && Math.floor(P.COST.perBlockUs / P.COST.perByteUs) === 12,
+     `合并阈值 = 12 B（固件 SCOPE_MERGE_GAP 同值；gap 12 并、13 不并）`);
+  // 单个 span 不许超过固件的读缓冲（SCOPE_SPAN_MAX = 64 B），否则"网页 1 个 span / 探针 2 个"
+  const longSpan = P.planReads([{ name: 'a', addr: 0x20000000, size: 8, scalar: 'f64' },
+                                { name: 'b', addr: 0x20000040, size: 8, scalar: 'f64' },
+                                { name: 'c', addr: 0x20000080, size: 8, scalar: 'f64' }]);
+  ok(longSpan.spans.length === 3 && longSpan.spans.every(s => s.len <= P.SPAN_MAX_BYTES),
+     `超长跨度被 64 B 上限切开（${longSpan.spans.length} 个 span，各 ${longSpan.spans.map(s => s.len).join('/')} B）`);
   ok(P.planHash(pack) === P.planHash([...pack].reverse()), '计划指纹与变量顺序无关');
   ok(P.planHash(pack) !== P.planHash(mixed), '不同计划指纹不同');
 
@@ -77,11 +85,20 @@ console.log('== 1. 采样计划（读计划 = 速率的最大杠杆）==');
      `RISC-V ${P.BACKEND_COST.riscv.single}/${P.BACKEND_COST.riscv.pack8} µs`);
   ok(P.backendName('riscv') === 'RISC-V/JTAG' && P.backendName('swd') === 'SWD/ARM', '后端显示名');
 
-  // 单字流水读快路径：模型按"3 次传输"算 6.7 µs，实测只要 1.53 µs —— 计划行必须用后者，
-  // 否则一个能跑的周期会被说成跑不动（用户被"建议周期 ≥ 11 µs"挡在 3 µs 门外，而他实测零丢）
+  // 单字流水读快路径：模型（每 span 3 次传输 + 每字 1 次 DRW = 4.47 µs）与实测（1.55 µs）差 3 倍 ——
+  // 计划行必须用后者，否则一个能跑的周期会被说成跑不动（用户被"建议周期 ≥ 11 µs"挡在 3 µs 门外，
+  // 而他实测零丢）。模型自己也要跟 akaLinkPro 的真机锚点对齐（见下一条）。
   const one4 = P.planReads([{ name: 'f_sin', addr: 0x20001014, size: 4, scalar: 'f32' }]);
-  ok(one4.fastPath === true && one4.estUs > 6 && one4.bestUs < 2,
+  ok(one4.fastPath === true && one4.estUs > 4 && one4.estUs < 5 && one4.bestUs < 2,
      `单字 f32 走快路径：模型 ${one4.estUs.toFixed(2)} µs / 取用 ${one4.bestUs.toFixed(2)} µs（≈${Math.round(one4.bestHz / 1000)} kHz）`);
+  // 模型 vs akaLinkPro 真机（F103 @60 MHz）：单字 4.503、2 字 5.82、4 字 7.96、6 字 10.30、8 字 12.65 µs
+  const near5 = (got, want, tol = 0.05) => Math.abs(got - want) / want <= tol;
+  const spanUs = words => P.planReads(Array.from({ length: words }, (_, i) =>
+    ({ name: `w${i}`, addr: 0x20000000 + i * 4, size: 4, scalar: 'u32' }))).estUs;
+  ok(near5(spanUs(1), 4.503) && near5(spanUs(2), 5.82) && near5(spanUs(4), 7.96) &&
+     near5(spanUs(6), 10.30) && near5(spanUs(8), 12.65),
+     `模型贴住真机锚点：1/2/4/6/8 字 = ${[1, 2, 4, 6, 8].map(w => spanUs(w).toFixed(2)).join(' / ')} µs` +
+     '（实测 4.50 / 5.82 / 7.96 / 10.30 / 12.65）');
   const one4b = P.planReads([{ name: 'f_sin', addr: 0x20001014, size: 4, scalar: 'f32' }], { fastWordUs: 1.758 });
   ok(one4b.bestUs === 1.758, '快路径成本可覆盖（不同 SWD 时钟档）');
   ok(P.planReads([{ name: 'u_ramp', addr: 0x20001020, size: 2, scalar: 'u16' }]).fastPath === false,
