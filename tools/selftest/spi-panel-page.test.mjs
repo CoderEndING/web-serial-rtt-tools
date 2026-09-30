@@ -423,14 +423,17 @@ console.log('== 6. 重放：整表下发 + 单发（假探针逐帧对账）==')
     document.getElementById('pn-code-play').click();
     for (let i = 0; i < 200 && s.busy; i++) await new Promise(r => setTimeout(r, 100));
     await new Promise(r => setTimeout(r, 300));
-    return { enabled: s.enabled, profile: s.profile?.profile, geom: document.getElementById('pn-geom').value,
+    return { wireLog: p.wireLog.slice(0, 3),
+             enabled: s.enabled, profile: s.profile?.profile, geom: document.getElementById('pn-geom').value,
              framesOk: p.stats.framesOk, framesErr: p.stats.framesErr,
              bytesTx: p.stats.bytesTx, ms: performance.now() - t0,
              prog: document.getElementById('pn-code-prog').textContent,
              log: document.getElementById('pn-log').textContent };`);
+  ok(replay.wireLog[0] === 'RESET low=10ms post=120ms' && replay.wireLog[1] === 'GPIO bl=1',
+     `重放第一批就是"复位 → 开背光"（实测「${replay.wireLog.slice(0, 2).join(' | ')}」）`);
   ok(replay.enabled === true, '桥已使能（未使能时帧只会被 NAK）');
   ok(replay.profile === 2 && replay.geom === 'st77916', `已套用 ST77916：档 2 + 几何 st77916（实测 档${replay.profile} / ${replay.geom}）`);
-  ok(replay.framesOk === 194 && replay.framesErr === 0, `192 条 + 2 条自动前缀全部执行成功（frames_ok=${replay.framesOk} err=${replay.framesErr}）`);
+  ok(replay.framesOk === 196 && replay.framesErr === 0, `重放前置 2 帧（RST + 背光）+ 192 条 + 2 条自动前缀 = 196 帧全成功（frames_ok=${replay.framesOk} err=${replay.framesErr}）`);
   ok(replay.bytesTx >= 215, `线上字节 ≥ 参数字节 215（实测 ${replay.bytesTx}，含每条 4 B STEP 头与档 2 的 4 B 前缀）`);
   ok(/完成/.test(replay.prog), `进度行收尾：「${replay.prog}」`);
 
@@ -442,7 +445,7 @@ console.log('== 6. 重放：整表下发 + 单发（假探针逐帧对账）==')
     for (let i = 0; i < 60 && s.busy; i++) await new Promise(r => setTimeout(r, 100));
     await new Promise(r => setTimeout(r, 200));
     return { framesOk: p.stats.framesOk, wire: p.wire.map(w => [...w].map(b => b.toString(16).padStart(2, '0')).join(' ')) };`);
-  ok(one.framesOk === 1 && one.wire.length === 1, `「单发」只发一条（${one.framesOk} 帧）`);
+  ok(one.framesOk === 3 && one.wire.length === 1, `「单发」= 前置 2 帧 + 目标那 1 帧（${one.framesOk} 帧，其中数据帧 ${one.wire.length} 条）`);
   ok(one.wire[0] === '02 f2 00 00 28', `档 2 展开正确：0x02 + 命令字 0xF2 + 24bit 地址(0) + 参数 0x28（实测 ${one.wire[0]}）`);
 
   // 前两行必须是自动补的 0x36/0x3A（AXS15352 缺了会全黑）
@@ -455,6 +458,39 @@ console.log('== 6. 重放：整表下发 + 单发（假探针逐帧对账）==')
   ok(prefix[0].cmd === '36' && prefix[0].p0 === '00' && /MADCTL/.test(prefix[0].txt) &&
      prefix[1].cmd === '3a' && prefix[1].p0 === '55' && /COLMOD/.test(prefix[1].txt),
      `表格最前面两行是自动补的 MADCTL/COLMOD：「0x${prefix[0].cmd} 0x${prefix[0].p0} ${prefix[0].txt.slice(0, 22)}」/「0x${prefix[1].cmd} 0x${prefix[1].p0}」`);
+
+  /**
+   * 重放前的「复位 + 开背光」（默认勾上）：
+   * ① 勾着 → 每条重放路径（整表 / 单发 / 从此重放）都先发 RST 脉冲 + 背光开，且**排在最前面**；
+   * ② 取消勾选 → 之前的行为一字不差地回来（只有数据帧，不多打扰屏）。
+   * 复用同一个「单发」按钮 = 三条路径共用 `playRows`，验一条就够。
+   */
+  const pre = await ev(`
+    const s = window.__tools.spiSession, p = s.mockProbe;
+    const fire = async () => {
+      p.resetState();
+      document.querySelector('#pn-code-body button[data-act="one"][data-i="3"]').click();
+      for (let i = 0; i < 60 && s.busy; i++) await new Promise(r => setTimeout(r, 100));
+      await new Promise(r => setTimeout(r, 250));
+      return { ok: p.stats.framesOk, err: p.stats.framesErr, types: p.wire.map(w => [...w].map(b => b.toString(16).padStart(2, '0')).join(' ')),
+               actions: p.wireLog.filter(x => /RESET|GPIO|STEP/.test(x)), delays: p.delays };
+    };
+    const chk = document.getElementById('pn-replay-prereset');
+    const defaultOn = chk.checked;
+    const on = await fire();
+    chk.checked = false;
+    const off = await fire();
+    chk.checked = true;
+    return { defaultOn, on, off };`);
+  ok(pre.defaultOn === true, '「重放前先复位 + 开背光」默认就是勾上的');
+  ok(pre.on.actions.slice(0, 2).join(' | ') === 'RESET low=10ms post=120ms | GPIO bl=1' &&
+     pre.on.actions[2]?.startsWith('STEP cmd=0xf2'),
+     `勾着：复位 → 开背光 → 再发数据，顺序对（实测「${pre.on.actions.join(' | ')}」）`);
+  ok(pre.on.delays.includes(130) && pre.on.err === 0,
+     `复位时序沿用那一行的 10 / 120（登记 ${pre.on.delays.join(',')}）`);
+  ok(pre.off.actions.length === 1 && pre.off.actions[0].startsWith('STEP cmd=0xf2') && pre.off.err === 0,
+     `取消勾选 → 只发数据那条，不碰 RST/BL（实测「${pre.off.actions.join(' | ')}」）`);
+  ok(pre.off.ok === 1 && pre.on.ok === 3, `取消勾选后帧数从 ${pre.on.ok} 回到 ${pre.off.ok}（前置 2 帧真的没了）`);
 }
 
 // ==================================================================== 7
@@ -495,6 +531,7 @@ console.log('== 7. 图片 / 图案刷屏 ==');
              bytesTx: p.stats.bytesTx - before, geom: document.getElementById('pn-geom').value,
              log: document.getElementById('pn-log').textContent };`);
   ok(send.geom === 'st77916', '屏幕几何跟着"套用推荐值"切到了 ST77916');
+  // 刷图**不**走重放前置（见 §8 那条），所以这里是 2 条开窗 + 527 片像素，没有 RST/BL
   ok(send.framesOk === 529 && send.framesErr === 0, `整屏 529 帧全成功（2 条开窗 + 527 片像素，实测 ${send.framesOk}）`);
   // 开窗在档 2 是两条 XFER（opcode + 00 XX 00 + 4 字节坐标），所以是 2×4 而不是老写法两条 STEP 的 16
   ok(send.bytesTx === 259200 + 8, `线上字节 = 像素 259200 + 开窗 8（QSPI 两条 XFER 各 4 字节坐标，实测 ${send.bytesTx}）`);
@@ -538,6 +575,69 @@ console.log('== 8. 面板电源 / 显示 4 个命令 + RST 脉冲 ==');
     await new Promise(r => setTimeout(r, 500));
     return { delays: p.delays, log: document.getElementById('pn-log').textContent };`);
   ok(rst.delays.includes(130), `RST 脉冲 = 拉低 10 ms + 释放后等 120 ms（登记 ${rst.delays.join(',')}）`);
+
+  /**
+   * 「复位并开背光」一键按钮：= RST 脉冲 + 开背光两条，顺序不能反
+   * （背光必须在复位时序走完、屏内部初始化稳下来之后才点亮）。
+   */
+  const both = await ev(`
+    const p = window.__tools.spiSession.mockProbe;
+    p.resetState();
+    document.getElementById('pn-rst-low').value = '12';
+    document.getElementById('pn-rst-post').value = '130';
+    document.getElementById('pn-rst-bl').click();
+    await new Promise(r => setTimeout(r, 900));
+    return { ok: p.stats.framesOk, err: p.stats.framesErr, delays: p.delays, pins: p.pins,
+             log: p.wireLog.filter(x => /RESET|GPIO/.test(x)),
+             pageLog: document.getElementById('pn-log').textContent };`);
+  ok(both.ok === 2 && both.err === 0, `一键 = 2 帧（RST + 背光开），实测 ${both.ok} 帧 / ${both.err} 错`);
+  ok(both.log.join(' | ') === 'RESET low=12ms post=130ms | GPIO bl=1',
+     `先复位后开背光，顺序与参数都对（实测「${both.log.join(' | ')}」）`);
+  ok(both.delays.includes(142), `延时按填的数字登记 12+130=142 ms（登记 ${both.delays.join(',')}）`);
+  // ST77916 档里 padActiveLow=0x06 = bit1(RST) + bit2(CS) 低有效，**BL 不在内**（bit3）
+  // → 开背光（逻辑 1）就是物理高；复位结束后 RST 也回到无效=高
+  ok(both.pins.bl === 1 && both.pins.rst === 1,
+     `物理电平按电平表来：BL 不在低有效位图里 → 开背光=高（pins.bl=${both.pins.bl} rst=${both.pins.rst}）`);
+
+  /**
+   * 没配 RST 脚（协议里 **0 = （不用）**，见 protocol.PADS[0]）时必须**跳过复位但照常开背光**，
+   * 并在日志里说清原因 —— 这条挡的是"重放前悄悄什么都没做、用户以为复位过了"这种最坑的静默失败。
+   *
+   * 🚨 `applyConfig` 里是一串 HID 往返（4 条 PIN_CFG + SET_CFG + 回读），必须 **await + 等回读到**，
+   *    否则下面读到的还是旧 padRst，"跳过"分支根本不会走（本文件踩过：只 sleep 300 ms 不够）。
+   */
+  const noRst = await ev(`
+    const s = window.__tools.spiSession, p = s.mockProbe;
+    const c0 = { ...s.cfg };
+    await s.applyConfig({ ...c0, padRst: 0 }, 'panel');
+    const applied = s.cfg.padRst;                       // 回读对账：真变成 0 了才继续
+    p.resetState();
+    document.getElementById('pn-log').innerHTML = '';
+    const sent = await window.__tools.panel.resetAndBacklight();
+    await new Promise(r => setTimeout(r, 400));
+    const log = p.wireLog.filter(x => /RESET|GPIO/.test(x));
+    const pageLog = document.getElementById('pn-log').textContent;
+    await s.applyConfig(c0, 'panel');
+    return { sent, log, pageLog, applied, rstBack: s.cfg.padRst };`);
+  ok(noRst.applied === 0, `（前置条件）padRst 确实写进了 0 =「不用」（实测 ${noRst.applied}）`);
+  ok(noRst.sent === true && noRst.log.join(' | ') === 'GPIO bl=1',
+     `RST 脚没配 → 跳过复位、背光照开（实测「${noRst.log.join(' | ')}」）`);
+  ok(/跳过复位/.test(noRst.pageLog) && /pad 0/.test(noRst.pageLog),
+     `日志明确告警"跳过复位"并给出原因（「${(noRst.pageLog.match(/[^\n]*跳过复位[^\n]*/) || [''])[0]}」）`);
+  ok(noRst.rstBack === 13, `测完把 padRst 还原成 ${noRst.rstBack}（不脏化后续用例）`);
+
+  /**
+   * 「刷这一张」**不**走重放前置（用户 2026-09-30 只点名了重放）：刷屏是高频动作，
+   * 每刷一次就复位会闪。要复位就走上面那个一键按钮 —— 这条把"范围"钉死，防止以后被顺手扩大。
+   */
+  const blOffset = await ev(`
+    const s = window.__tools.spiSession, p = s.mockProbe;
+    p.resetState();
+    document.getElementById('pn-img-send').click();
+    for (let i = 0; i < 300 && s.busy; i++) await new Promise(r => setTimeout(r, 100));
+    await new Promise(r => setTimeout(r, 400));
+    return { host: p.wireLog.filter(x => /RESET|GPIO/.test(x)).length, ok: p.stats.framesOk };`);
+  ok(blOffset.host === 0, `刷图路径不发 RST/BL（实测 ${blOffset.host} 条 —— 前置只管重放那三条路）`);
 }
 
 // ==================================================================== 9

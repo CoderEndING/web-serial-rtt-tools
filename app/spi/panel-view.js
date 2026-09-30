@@ -217,6 +217,7 @@ export class SpiPanelView {
 
     // 面板电源 / 显示：4 个独立命令（上电 11h / 开显示 29h / 关显示 28h / 下电 10h）+ RST 脉冲
     $('pn-rst-send').addEventListener('click', () => this.sendResetPulse());
+    $('pn-rst-bl').addEventListener('click', () => this.resetAndBacklight());
     for (const [id, cmd, delayMs, label] of [
       ['pn-pwr-on', 0x11, 120, '上电 11h（sleep out）'],
       ['pn-disp-on', 0x29, 0, '开显示 29h'],
@@ -325,7 +326,7 @@ export class SpiPanelView {
     $('pn-enable').disabled = !c; $('pn-disable').disabled = !c;
     $('pn-preset-apply').disabled = !c;
     const canSend = d && !busy;
-    for (const id of ['pn-code-play', 'pn-img-send', 'pn-rst-send', 'pn-pwr-on', 'pn-disp-on', 'pn-disp-off', 'pn-pwr-off']) $(id).disabled = !canSend;
+    for (const id of ['pn-code-play', 'pn-img-send', 'pn-rst-send', 'pn-rst-bl', 'pn-pwr-on', 'pn-disp-on', 'pn-disp-off', 'pn-pwr-off']) $(id).disabled = !canSend;
     $('pn-code-stop').disabled = !busy;
     $('pn-code-parse').disabled = false;
     // 动画：有源 + 端点就绪 + 不忙 才能播；播放中「播放」变灰、「停止」可用
@@ -504,6 +505,8 @@ export class SpiPanelView {
     if (s.busy) return;
     const a = Math.max(0, Math.min(start, rows.length - 1));
     const b = Math.max(a, Math.min(end, rows.length - 1));
+    // 复位 + 开背光：必须在 setBusy(true) **之前**跑完（这两条自己也要走 sendFrames，忙碌时会被拒）
+    await this.replayPrelude();
     const items = C.rowsToItems(rows, { start: a, end: b });
     const totalBytes = rows.slice(a, b + 1).reduce((n, r) => n + r.data.length, 0);
 
@@ -1010,6 +1013,66 @@ export class SpiPanelView {
       flags: P.F.RSP,
       label: label || `STEP 0x${cmd.toString(16)}`,
     }], { tag: this.tag }));
+  }
+
+  /** 辅助脚写。`level` 是**逻辑**电平（1 = 有效），极性取反在固件侧做（与桥页同一套语义）*/
+  async sendGpio(line, level, label, { quiet = false } = {}){
+    await this.wrap(() => this.session.sendFrames([{
+      type: P.T.GPIO,
+      payload: P.gpioPayload(line, level),
+      flags: P.F.RSP, label,
+    }], { tag: this.tag, quiet }));
+  }
+
+  /**
+   * pad 是否"没用上"。🚨 协议里 **0 = （不用）**（见 `protocol.PADS[0]`），不是 0xFF ——
+   * 按 0xFF 判会漏掉真机的"不用"，那样重放前会照发复位脉冲到一个没配的脚上。
+   * 0xFF 一并留着：老配置/手写值见过它，多认一个不吃亏。
+   */
+  static isPadUnused(pad){ return pad == null || pad === 0 || pad === 0xff; }
+
+  /**
+   * 一键：RST 脉冲 → 开背光。
+   *
+   * 顺序不能反：RST 释放后的 post 延时（默认 120 ms）就是屏内部初始化/上电稳的时间，
+   * 背光在这之后点亮才看得见东西；反过来先开背光只会先闪一下白。
+   *
+   * `quiet` 给重放前置用：重放时不想为这两条再刷两行"上电/下电"式的日志。
+   */
+  async resetAndBacklight({ quiet = false } = {}){
+    const s = this.session, c = s.cfg;
+    if (!c){ s.log('w', '还没读到桥的引脚配置（先「连接探针」）—— 不知道 RST/BL 脚，跳过', this.tag); return false; }
+    let did = false;
+    if (SpiPanelView.isPadUnused(c.padRst)){
+      s.log('w', `桥里 RST 脚配的是「不用」（pad ${c.padRst}）—— 跳过复位。到「SPI/QSPI 桥」页把 RST 脚配上再试`, this.tag);
+    } else {
+      const low = Math.max(0, +$('pn-rst-low').value || 0);
+      const post = Math.max(0, +$('pn-rst-post').value || 0);
+      await this.wrap(() => s.sendFrames([{
+        type: P.T.RESET,
+        payload: P.resetPayload(low, post),
+        flags: P.F.RSP, label: `RST 脉冲 ${low}+${post}ms`,
+      }], { tag: this.tag, quiet }));
+      // 主机侧这一步是"发完就返回"（非阻塞）；屏那边要按 low+post 走完复位时序，
+      // 所以紧跟的 GPIO 帧在固件队列里天然排在复位之后 —— 这里不需要再 sleep。
+      did = true;
+    }
+    if (SpiPanelView.isPadUnused(c.padBl)){
+      s.log('w', `桥里 BL 脚配的是「不用」（pad ${c.padBl}）—— 跳过开背光`, this.tag);
+    } else {
+      await this.sendGpio(P.LINE.BL, 1, '背光开', { quiet });
+      did = true;
+    }
+    return did;
+  }
+
+  /**
+   * 重放前的护栏：**勾了才做**。返回是否真的发了东西（自测直接读它，不用解析日志）。
+   * 注意 `quiet` 只压掉"发送中"那些行，跳过时的告警仍然会打 —— 那是要让人看见的。
+   */
+  replayPrelude(){
+    if (!$('pn-replay-prereset')?.checked) return Promise.resolve(false);
+    return this.resetAndBacklight({ quiet: true });
   }
 
   // ==================================================================== 生命周期

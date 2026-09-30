@@ -972,7 +972,11 @@
           <button id="pn-pwr-off" title="发 STEP 0x10（sleep in）—— 进入睡眠（最省电），之后要 11h 才能唤醒">下电 10h</button>
         </div>
         <div class="row"><span>RST 脉冲</span><input id="pn-rst-low" class="num" value="10" inputmode="numeric" title="把面板 RST 脚拉低多久（毫秒）"><input id="pn-rst-post" class="num" value="120" inputmode="numeric" title="RST 释放之后再等多久（毫秒）"><button id="pn-rst-send" class="mini">发</button></div>
-        <p class="hint"><b>RST 脉冲</b>两个数字：<b>前一个</b> = 把面板 RST 脚拉低几毫秒，<b>后一个</b> = 释放之后再多等几毫秒（默认 10 / 120，多数屏厂规值）。走辅助 RST 脚（pad 与有效电平在桥页配），全程非阻塞。</p>
+        <div class="row btnrow">
+          <button id="pn-rst-bl" title="一键：发 RST 脉冲（上面那两个数字）→ 等复位走完 → 开背光。出图全黑时第一件事就是按这个">复位并开背光</button>
+        </div>
+        <label class="chk" title="勾上后：任何「重放 / 单发 / 从此重放」在真正发数据之前，都先按上面的数字补一个 RST 脉冲，再开背光 —— 面板每次重放都从确定的复位态起步（多数屏厂初始化时序的第一个要求）。没配 RST 脚时自动跳过并告警，不挡重放"><input type="checkbox" id="pn-replay-prereset" checked> 重放前先复位 + 开背光</label>
+        <p class="hint"><b>RST 脉冲</b>两个数字：<b>前一个</b> = 把面板 RST 脚拉低几毫秒，<b>后一个</b> = 释放之后再多等几毫秒（默认 10 / 120，多数屏厂规值）。走辅助 RST 脚（pad 与有效电平在桥页配），全程非阻塞。这段时间计在重放耗时之外。</p>
       </fieldset>
     </aside>
 
