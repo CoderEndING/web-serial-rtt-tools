@@ -34,5 +34,9 @@ python tools/dev/make-anim-samples.py --out D:\some\dir
 （自带 ffmpeg 7.1，编 H.264 / VP9；不需要系统装 ffmpeg）。生成脚本在 `tools/dev/make-anim-samples.py`，
 每个素材的"看什么"都写在函数注释里 —— **改图案时连带改这张表**。
 
+生成是**可复现**的（连跑两遍字节一致，不需要 `git add` 刷一遍）：Pillow 那三条天生确定；
+视频那两条加了 `-fflags/-flags +bitexact`（matroska 默认会写 DateUTC 之类的元数据，
+不然每次重造 WebM 都会"看起来被改过"）并在 VP9 上钉了 `-threads 1`。
+
 素材合计 ~1.2 MB，随仓库一起走（不进 GitHub Pages：部署只拷 `index.html app docs`，
 线上页面从本地磁盘选文件即可，页面不需要能 fetch 它们）。

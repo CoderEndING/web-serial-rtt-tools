@@ -294,9 +294,14 @@ def main(argv=None):
     note('count-cube-240x296.apng', 'APNG · 帧号+秒针+立方体 · 查帧序/丢帧')
 
     # ⑤ 棋盘斜移（WebM / VP9 · 360×360）
+    #    🚨 `-fflags/-flags +bitexact` 是**为了可复现**：matroska 封装默认会写 DateUTC（当前时间）
+    #    之类的元数据，同一份帧跑两遍字节就不一样 —— 那样每次 `make samples-anim` 都会在 git 里
+    #    显示"素材被改了"（2026-09-30 实测踩到；MP4 那路天生确定）。`-threads 1` 顺手也钉住，
+    #    免得将来 VP9 多线程再引入不确定性。
     f = list(frames_checker_scroll(360, 360, 75))
     save_video(f, out / 'checker-scroll-360x360.webm', 25, 'libvpx-vp9',
-               ['-b:v', '0', '-crf', '34', '-row-mt', '1', '-cpu-used', '4'])
+               ['-b:v', '0', '-crf', '34', '-row-mt', '0', '-threads', '1', '-cpu-used', '4',
+                '-fflags', '+bitexact', '-flags', '+bitexact'])
     note('checker-scroll-360x360.webm', 'WebM/VP9 · 棋盘斜移+边框十字 · 查撕裂')
 
     # ⑥ 立方体 + 秒针（MP4 / H.264 · 360×360，4 秒）

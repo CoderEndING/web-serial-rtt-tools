@@ -558,34 +558,54 @@ console.log('== 9b. 动画 / 视频：录一段 WebM 当源 → 逐帧整屏刷�
   // ① 源：页面里现录一段（canvas.captureStream + MediaRecorder），不依赖任何外部素材
   //    🚨 用 `captureStream(0)` + `track.requestFrame()` 手动推帧：自动帧率那条路在
   //    "画布不在 DOM 里 / 窗口被遮住"时会一帧都录不到（实测只录出 110 字节的裸头）。
-  const rec = await ev(`
-    const cv = document.createElement('canvas'); cv.width = 96; cv.height = 120;
-    cv.style.cssText = 'position:fixed;right:6px;bottom:6px;width:96px;height:120px;z-index:9';
-    document.body.appendChild(cv);
-    const ctx = cv.getContext('2d');
-    const stream = cv.captureStream(0);
-    const track = stream.getVideoTracks()[0];
-    const chunks = [];
-    const rec = new MediaRecorder(stream, { mimeType: 'video/webm' });
-    rec.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
-    const stopped = new Promise(r => { rec.onstop = r; });
-    rec.start();
-    for (let i = 0; i < 10; i++){
-      ctx.fillStyle = i % 2 ? '#ff0000' : '#0000ff';
-      ctx.fillRect(0, 0, 96, 120);
-      ctx.fillStyle = '#00ff00';
-      ctx.fillRect(i * 8, 40, 16, 16);
-      track.requestFrame();
-      await new Promise(r => setTimeout(r, 80));
-    }
-    rec.stop();
-    await stopped;
-    track.stop();
-    cv.remove();
-    const blob = new Blob(chunks, { type: 'video/webm' });
-    window.__animFile = new File([blob], 'selftest.webm', { type: 'video/webm' });
-    return { bytes: blob.size, chunks: chunks.length };`);
-  ok(rec.bytes > 500, `页面里现录了一段 WebM 当测试素材（${rec.bytes} 字节 / ${rec.chunks} 块）`);
+  //    🚨 而且**录出来"有字节"不等于"能播"**：偶发（机器忙时）会录出一个浏览器解不开的 blob，
+  //    下游就变成"加载失败：读视频元数据超时"—— 2026-09-30 全量自测扫的时候撞到过（7 条连带失败），
+  //    单跑又全绿。所以这里当场用 `<video>` 自检一遍，不能播就**重录**（最多 3 次），
+  //    别让"素材没录好"伪装成"页面坏了"。
+  let rec = null;
+  for (let attempt = 1; attempt <= 3; attempt++){
+    rec = await ev(`
+      const cv = document.createElement('canvas'); cv.width = 96; cv.height = 120;
+      cv.style.cssText = 'position:fixed;right:6px;bottom:6px;width:96px;height:120px;z-index:9';
+      document.body.appendChild(cv);
+      const ctx = cv.getContext('2d');
+      const stream = cv.captureStream(0);
+      const track = stream.getVideoTracks()[0];
+      const chunks = [];
+      const rec = new MediaRecorder(stream, { mimeType: 'video/webm' });
+      rec.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
+      const stopped = new Promise(r => { rec.onstop = r; });
+      rec.start();
+      for (let i = 0; i < 10; i++){
+        ctx.fillStyle = i % 2 ? '#ff0000' : '#0000ff';
+        ctx.fillRect(0, 0, 96, 120);
+        ctx.fillStyle = '#00ff00';
+        ctx.fillRect(i * 8, 40, 16, 16);
+        track.requestFrame();
+        await new Promise(r => setTimeout(r, 80));
+      }
+      rec.stop();
+      await stopped;
+      track.stop();
+      cv.remove();
+      const blob = new Blob(chunks, { type: 'video/webm' });
+      window.__animFile = new File([blob], 'selftest.webm', { type: 'video/webm' });
+      // 自检：这个 blob 到底能不能被 <video> 解析出元数据？
+      const probe = document.createElement('video');
+      probe.muted = true; probe.playsInline = true;
+      probe.src = URL.createObjectURL(blob);
+      const playable = await new Promise(res => {
+        const t = setTimeout(() => res(false), 5000);
+        probe.addEventListener('loadedmetadata', () => { clearTimeout(t); res(probe.videoWidth > 0); });
+        probe.addEventListener('error', () => { clearTimeout(t); res(false); });
+      });
+      probe.removeAttribute('src');
+      return { bytes: blob.size, chunks: chunks.length, playable };`);
+    if (rec.playable && rec.bytes > 500) break;
+    console.log(`  ↻ 录出来的 WebM 不能被浏览器解析（${rec.bytes} 字节 / playable=${rec.playable}），重录第 ${attempt} 次`);
+  }
+  ok(rec.bytes > 500 && rec.playable === true,
+     `页面里现录了一段 WebM 当测试素材（${rec.bytes} 字节 / ${rec.chunks} 块 / 元数据可读=${rec.playable}）`);
 
   const loaded = await ev(`
     const input = document.getElementById('pn-anim-input');
