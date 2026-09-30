@@ -167,7 +167,7 @@ export class MockSpiProbe {
     /** 配置块：默认值照固件 spi_bridge.c:1365-1382 */
     this.cfg = {
       sclkHz: 0, mode: 0, bits: 8, csPolicy: 0, txDmaThreshold: 100,
-      padDc: 1 /*PB11*/, padRst: 2 /*PB12*/, padCsAux: 4 /*PB10*/, padBl: 3 /*PB13*/, padTe: 4,
+      padDc: 5 /*PA02*/, padRst: 13 /*PA31*/, padCsAux: 0, padBl: 11 /*PA10*/, padTe: 0,
       padActiveLow: 0x06 /*RST+CS 低有效*/, padLowRaw: 0x06, flags: CFG_FLAG.CLEAR_ON_ENABLE,
       reserved0: 0, outRingKb: 16, inRingKb: 8, maxFrameBytes: FRAME_MAX,
     };
@@ -338,8 +338,13 @@ export class MockSpiProbe {
   _clear(){ this.queue = []; this.rsps = []; this.blockUntil = 0; this.cs = false; }
 
   _padOk(pad){
-    const quad = this.profile.profile === 2;
-    if (quad && (pad === 12 || pad === 13)) return false;   // PA30/PA31 被 quad 占了
+    /* 与固件 sb_pad_ok()/sb_cfg_validate() 对齐（2026-09-30 SPI2 迁移后）：
+     *   · PB10~PB13（1~4）= SPI2 的 SCLK/MISO/MOSI/CS，固定脚不能当辅助脚；
+     *   · PA30（12）= USB0_PWR 网络，被板上 Q1 常态短到地，别用；
+     *   · PA31（13）现在是自由脚（当年 quad 下占用它的规则已删）。
+     * 9/10 = PY00/PY01 不在 pad 表里（s_pad_table 为 0），由调用方按"表里没有"处理。 */
+    if (pad === 1 || pad === 2 || pad === 3 || pad === 4) return false;
+    if (pad === 12) return false;
     return true;
   }
 

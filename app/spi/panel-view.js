@@ -29,17 +29,17 @@ export const PANEL_PRESETS = {
     label: '天马 2P01 / AXS15352（240×296 · 4 线 SPI + DC）',
     short: 'AXS15352（240×296）',
     profile: { profile: 1, defLines: 1, dcActiveHigh: true, csHoldInStep: true, qspiWrOpcode: 0x02, qspiColorOpcode: 0x32, qspiAddrBytes: 3 },
-    cfg: { sclkHz: 40000000, csPolicy: 0, padDc: 1 /*PB11*/, padRst: 2 /*PB12*/, padBl: 3 /*PB13*/, padActiveLow: 0x06 },
+    cfg: { sclkHz: 40000000, csPolicy: 0, padDc: 5 /*PA02 J3[7]*/, padRst: 13 /*PA31 J3[11]*/, padBl: 11 /*PA10 J3[33]*/, padActiveLow: 0x06 },
     geom: 'axs15352',
-    note: '档 1：同一 CS 窗口内「命令 → 翻 DC → 参数」',
+    note: '档 1：同一 CS 窗口内「命令 → 翻 DC → 参数」。2026-09-30 起桥在 SPI2：SCLK=J3[13] MOSI=J3[28] CS=J3[26]',
   },
   st77916: {
     label: 'ST77916（圆屏 360×360 · QSPI 四线）',
     short: 'ST77916（360×360）',
     profile: { profile: 2, defLines: 1, dcActiveHigh: true, csHoldInStep: true, qspiWrOpcode: 0x02, qspiColorOpcode: 0x32, qspiAddrBytes: 3 },
-    cfg: { sclkHz: 40000000, csPolicy: 0, padDc: 0, padRst: 2 /*PB12*/, padBl: 3 /*PB13*/, padActiveLow: 0x06 },
+    cfg: { sclkHz: 40000000, csPolicy: 0, padDc: 0, padRst: 13 /*PA31 J3[11]*/, padBl: 11 /*PA10 J3[33]*/, padActiveLow: 0x06 },
     geom: 'st77916',
-    note: '档 2：0x02 + 24 bit 地址(=命令字<<16) + 参数；像素用 0x32 + 四线',
+    note: '档 2：0x02 + 24 bit 地址（00 XX 00，命令在中间字节）+ 参数；像素用 0x32 + 四线。SPI2：CS=J3[26] SCLK=J3[13] D0=J3[28] D1=J3[27] D2=J3[10] D3=J3[8]',
   },
 };
 

@@ -212,10 +212,10 @@ console.log('== 4. 按屏套用推荐值（档位 + SCLK + 引脚）==');
              sum: { sclk: document.getElementById('pn-sum-sclk').textContent, pads: document.getElementById('pn-sum-pads').textContent } };`);
   ok(applied.prof.profile === 2, 'ST77916 → 档 2（qspi）');
   ok(applied.cfg.sclkHz === 40000000 && applied.probe.sclk === 40000000, 'ST77916 → SCLK 40 MHz（页面与探针都对）');
-  ok(applied.cfg.padDc === 0 && applied.cfg.padRst === 2 && applied.cfg.padBl === 3,
+  ok(applied.cfg.padDc === 0 && applied.cfg.padRst === 13 && applied.cfg.padBl === 11,
      `引脚按屏改了：DC=${applied.cfg.padDc}（不用）/ RST=PB12 / BL=PB13`);
   ok(/40 MHz/.test(applied.sum.sclk), `只读摘要显示 SCLK ${applied.sum.sclk}`);
-  ok(/RST=PB12/.test(applied.sum.pads), `只读摘要显示引脚「${applied.sum.pads}」`);
+  ok(/RST=PA31/.test(applied.sum.pads), `只读摘要显示引脚「${applied.sum.pads}」`);
   ok(/回读对账一致/.test(applied.log), '套用走的还是回读对账那条路（不靠状态字的 err）');
 
   const back = await ev(`
@@ -224,8 +224,8 @@ console.log('== 4. 按屏套用推荐值（档位 + SCLK + 引脚）==');
     await new Promise(r => setTimeout(r, 900));
     const s = window.__tools.spiSession;
     return { prof: s.profile.profile, sclk: s.cfg.sclkHz, dc: s.cfg.padDc };`);
-  ok(back.prof === 1 && back.sclk === 40000000 && back.dc === 1,
-     `换回 AXS15352 → 档 1 + 40 MHz + DC=PB11（实测 ${back.prof}/${back.sclk}/${back.dc}）`);
+  ok(back.prof === 1 && back.sclk === 40000000 && back.dc === 5,
+     `换回 AXS15352 → 档 1 + 40 MHz + DC=PA02（实测 ${back.prof}/${back.sclk}/${back.dc}）`);
 }
 
 // ==================================================================== 5
