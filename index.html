@@ -697,12 +697,13 @@
       <fieldset>
         <legend>桥配置（HID 0x35）</legend>
         <label class="row"><span>SCLK</span><select id="sp-sclk" title="5301EVKLite 上限 75 MHz。固件按模块时钟整数分频，实际生效值可能不等于请求值 —— 下面「实际 SCLK」会回读"></select></label>
-        <label class="row"><span>模式</span><select id="sp-mode" title="CPOL/CPHA">
-          <option value="0">0 · CPOL=0 CPHA=0</option>
-          <option value="1">1 · CPOL=0 CPHA=1</option>
-          <option value="2">2 · CPOL=1 CPHA=0</option>
-          <option value="3">3 · CPOL=1 CPHA=1</option>
+        <label class="row"><span>模式</span><select id="sp-mode" title="标准 SPI 模式号 = CPOL&lt;&lt;1 | CPHA。CPHA=0 在**前导沿**采样（SCLK 空闲低时就是上升沿），CPHA=1 在**后沿**采样。屏一般要 mode 0：屏在上升沿采样，主机在下降沿换数据。">
+          <option value="0">0 · CPOL=0 CPHA=0（前导沿=上升沿采样，屏常用）</option>
+          <option value="1">1 · CPOL=0 CPHA=1（后沿=下降沿采样）</option>
+          <option value="2">2 · CPOL=1 CPHA=0（空闲高，前导沿=下降沿采样）</option>
+          <option value="3">3 · CPOL=1 CPHA=1（空闲高，后沿=上升沿采样）</option>
         </select></label>
+        <p class="hint" style="margin:0">📌 2026-09-30 之前的老固件把 CPHA 选反了（那时 mode 0 出来的是标准 mode 1）；akaLinkPro 侧已修（commit e7bc24f）。<b>新固件：屏用 0；没修的旧固件：屏用 1</b> —— 拿不准就用 LA 量一下数据换在哪个沿（下降沿换=标准 mode 0）。</p>
         <label class="row"><span>CS 策略</span><select id="sp-cs" title="按固件实现：0/2 = PB10 作 GPIO CS（软件拉/放）、1 = 辅助脚作 GPIO CS、3 = 硬件 CS0。proto.h 的注释在这条上是反的"></select></label>
         <label class="row"><span>DMA 阈值</span><input id="sp-thr" class="num" value="100" inputmode="numeric" title="数据相位 ≥ 阈值走 DMA。⚠️ 当前固件是 P1：全部走轮询（tx_dma 恒 0），这个值先存着"></label>
         <label class="chk"><input type="checkbox" id="sp-clear" checked> 使能时先清环 / 复位状态机</label>
