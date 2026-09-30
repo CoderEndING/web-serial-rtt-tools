@@ -143,11 +143,12 @@ export const statusText = w => {
 export const CFG_LEN = 32;
 export const PROFILE_LEN = 16;
 
-/** CS 策略：**按 spi_bridge.c:483-499 的实现**（proto.h 的注释是反的，别照抄）*/
+/** CS 策略：**按 spi_bridge.c 的实现**（proto.h 的注释是反的，别照抄）。
+ *  默认那条的固定脚 2026-09-30 起是 **PB10**（SPI2 的 CS0），不再是 PA26。 */
 export const CS_POLICY = [
-  { v: 0, label: '0 · PA26 作 GPIO CS（默认，软件拉/放）' },
+  { v: 0, label: '0 · PB10 作 GPIO CS（默认，软件拉/放）' },
   { v: 1, label: '1 · 辅助脚作 GPIO CS（多器件）' },
-  { v: 2, label: '2 · 手动（PA26 作 GPIO，由 CS 帧控制）' },
+  { v: 2, label: '2 · 手动（PB10 作 GPIO，由 CS 帧控制）' },
   { v: 3, label: '3 · 硬件 CS0（每次事务自动，时序由 TIMING 定）' },
 ];
 

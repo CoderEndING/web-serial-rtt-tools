@@ -118,7 +118,7 @@ console.log('== 3. 配置：读取 → 改写 → 回读对账 ==');
   const def = await ev(`return { sclk: document.getElementById('sp-sclk').value, cs: document.getElementById('sp-cs').value,
     dc: document.getElementById('sp-pad-dc').value, rst: document.getElementById('sp-pad-rst').value }`);
   ok(def.sclk === '0', `默认 SCLK = 板级默认（select=${def.sclk}）`);
-  ok(def.dc === '1' && def.rst === '2', `默认辅助脚 DC=PB11 / RST=PB12（${def.dc}/${def.rst}）`);
+  ok(def.dc === '5' && def.rst === '13', `默认辅助脚 DC=PA02 / RST=PA31（${def.dc}/${def.rst}）`);
 
   const applied = await ev(`
     document.getElementById('sp-sclk').value = '40000000';

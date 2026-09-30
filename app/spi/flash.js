@@ -14,9 +14,10 @@
  * CS 一直摁着 = flash 内部地址计数器自己往前跑，这才是"连续读"，也是测速该走的路径。
  *
  * 接线（全在 J3 排针，板上那颗 NOR 挂在 XPI0 的 PX 专用脚上，**桥够不着也动不得**）：
- *   CS  ← J3[24] PA26      SCLK ← J3[23] PA27
- *   IO0 ← J3[19] PA29      IO1  ← J3[21] PA28
- *   IO2 ← J3[37] PA30      IO3  ← J3[11] PA31（四线才接）
+ * 2026-09-30 起桥在 SPI2：
+ *   CS  ← J3[26] PB10      SCLK ← J3[13] PB11
+ *   IO0 ← J3[28] PB13      IO1  ← J3[27] PB12
+ *   IO2 ← J3[10] PB14      IO3  ← J3[8]  PB15（四线才接）
  *   VCC/GND 按模块电压，WP#/HOLD# 上拉（或按模块要求）
  */
 import { F, TC, XFER_TX_MAX, delayPayload, linesToTcfg, xferPayload, T } from './protocol.js';

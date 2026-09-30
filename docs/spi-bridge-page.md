@@ -64,7 +64,7 @@
 | 同设备的其它 0xFF 接口 | WebUSB 平台接口（class `0xFF`、**0 个端点**）→ 不能用"class 0xFF"单独认接口 | `usb_composite.c:341` |
 
 > ⚠️ **两处必须按实测代码走、不能照 proto.h 注释的字面**（见 §10.1）：
-> 1. `cs_policy` 的真实语义是 `0/2 = PA26 作 GPIO CS（软件拉/放）`、`1 = 辅助脚作 GPIO CS`、`3 = 硬件 CS0`（`spi_bridge.c:483-499`）；proto.h 的注释写成"0=硬件 CS0 自动；1=辅助 CS 自动；2=手动"，与实现不符。
+> 1. `cs_policy` 的真实语义是 `0/2 = PB10 作 GPIO CS（软件拉/放）`、`1 = 辅助脚作 GPIO CS`、`3 = 硬件 CS0`（`spi_bridge.c:483-499`）；proto.h 的注释写成"0=硬件 CS0 自动；1=辅助 CS 自动；2=手动"，与实现不符。
 > 2. STATUS 的计数器顺序：`res[36] = 实际 SCLK`、`res[40] = frames_err`（`spi_bridge.c:1469-1481`），与 `sb_stats_t` 结构体顺序（`frames_err` 排第二）不符。
 
 ### 2.2 HID 控制面 `0x35`（响应形状按实现核对过）
@@ -343,7 +343,7 @@ C 表行 + 非 XFER 帧混着发、语法错**一条都不发**且错误表带�
 make spi-hw                                # 默认 AXS15352 / 40 MHz
 make spi-hw ARGS="--sclk=20,40,60,75"      # 逐档 SCLK 对比吞吐
 make spi-hw ARGS="--panel=st77916"         # 换 ST77916（档 2，QSPI）
-make spi-hw ARGS=--loop                    # 先跑回环自检（要 J3[19]↔J3[21] 跳线）
+make spi-hw ARGS=--loop                    # 先跑回环自检（要 J3[28]↔J3[27] 跳线）
 ```
 
 实测（天马 2P01 / AXS15352：面板初始化 32 帧 + 整屏 292 帧，**全部零错误，屏上出 8 条彩条**）：
@@ -542,16 +542,16 @@ make spi-hw ARGS=--loop                    # 先跑回环自检（要 J3[19]↔J
 
 | 层 | 能否配 | 固件事实（`spi_bridge.c` / `boards/hpm5301evklite/pinmux.c`） |
 |---|---|---|
-| **SCLK / MOSI / MISO** | ❌ 写死 | `pinmux.c:198-200`：SCLK=PA27、MISO=PA28、MOSI=PA29；四线时 DAT2/DAT3=PA30/PA31。协议里没有改这四根的字段 |
-| **CS 从哪来** | ✅ 4 档 | `cs_policy`：0=PA26 GPIO（固件每帧自动开 CS 窗口）／1=用「CS 辅助」那根脚／2=手动（只有 CS 帧能拉放）／3=硬件 CS0。`cs_policy=3` **不支持面板档 1**（需要"一个 CS 窗口内翻 DC"） |
+| **SCLK / MOSI / MISO** | ❌ 写死 | `pinmux.c` 的 `init_spi2_bridge_pins()`：SCLK=PB11、MISO=PB12、MOSI=PB13；四线时 DAT2/DAT3=PB14/PB15（CS=PB10）。协议里没有改这四根的字段 |
+| **CS 从哪来** | ✅ 4 档 | `cs_policy`：0=PB10 GPIO（固件每帧自动开 CS 窗口）／1=用「CS 辅助」那根脚／2=手动（只有 CS 帧能拉放）／3=硬件 CS0。`cs_policy=3` **不支持面板档 1**（需要"一个 CS 窗口内翻 DC"） |
 | **辅助脚 DC/RST/CS辅助/BL/TE** | ✅ 真配 | 协议里是 pad 索引 `1..13` → IOC pad 表（`:280-295`）；使能时 `sb_apply_aux_pins()` 真把它们配成 GPIO：DC 输出=0、RST 输出=复位无效电平、BL 输出=**关背光**、TE 输入+上拉；CS 辅助在 `sb_spi_hw_init()` 里配成输出、空闲=无效电平 |
 | **有效电平** | ✅ 真配 | `pad_active_low` bit0 DC/bit1 RST/bit2 CS/bit3 BL：GPIO 写入取反（`:1399`）、CS 断言极性（`:391`）、RST/BL 初值（`:1831`） |
 
 生效时机：**使能那一刻应用**；已使能时可用 `PIN_CFG(5)` 立刻重配。
-`ENABLE 0` **不还原引脚**（PA26 会一直留在 SPI 状态直到探针重启，不影响 RTT/CDC）。
+`ENABLE 0` **不还原引脚**（PB10 会一直留在 SPI 状态直到探针重启，不影响 RTT/CDC）。
 
 **固件真的会拒的三种选择**（`sb_pad_ok` + `sb_cfg_validate`，`:1754-1816`）：`PY00/PY01`（表里写死 0，v1 不支持）／
-任何撞 PA26~PA29 的辅助脚／qspi 档下的 PA30/PA31。→ 页面下拉现在把这些项**灰掉**并在提示里写明原因，
+任何撞 PB10~PB15（SPI2 固定脚）或 PA30（被 Q1 短到地）的辅助脚。→ 页面下拉现在把这些项**灰掉**并在提示里写明原因，
 但**只是提前告知**：真发下去固件仍会回 `RANGE(4)`，那是最后一道闸（回读对账会把它暴露出来）。
 
 > 另外核实到一处固件细节：`PIN_CFG(5)` 的 `req[6]`（有效电平）**固件没读**，只用了 `req[4]=line` 与 `req[5]=pad`。
@@ -598,9 +598,9 @@ XFER 的 key：`cmd= tx= rx= addr= addrl= dummy= lines=`；开关（不带值）
 而且固件就跑在它上面 —— 所以测的必须是**外接**到 J3 的 flash：
 
 ```
-CS   ← J3[24] PA26      SCLK ← J3[23] PA27
-IO0  ← J3[19] PA29      IO1  ← J3[21] PA28
-IO2  ← J3[37] PA30      IO3  ← J3[11] PA31（四线才接）
+CS   ← J3[26] PB10      SCLK ← J3[13] PB11
+IO0  ← J3[28] PB13      IO1  ← J3[27] PB12
+IO2  ← J3[10] PB14      IO3  ← J3[8]  PB15（四线才接）
 VCC/GND 按模块电压，WP# 与 HOLD# 上拉到 VCC
 ```
 
@@ -934,7 +934,7 @@ make samples-anim        # = python tools/dev/make-anim-samples.py → samples/a
    整屏读会被拖到几分钟）。固件侧 `rx_len ≤ SB_FRAME_MAX(504)` 是放行的，所以只有真机会撞。
    → `READ_CHUNK_MAX = 503`、默认片长 500（`panel-read.js` 顶部注释 + `transport.js` 纪律第 4 条）。
 2. **屏上不一定有 MISO**：本机这块 AXS15352 **SDO 根本没接**（`akaLinkPro/docs/spi-bridge-wiring.md`：
-   "这块屏没有 MISO，J3[21] 空着"）→ 读回来的永远是 `00`。这不是读的 bug；接一块带 SDO 的屏（或
+   "这块屏没有 MISO，J3[27] 空着"）→ 读回来的永远是 `00`。这不是读的 bug；接一块带 SDO 的屏（或
    ST77916 的 D1）才有真数据。**判断方法**：先读 `04h` RDDID —— 有 MISO 的屏会回非零 ID。
 3. **读到的字节序/R/B 要与写侧同一套口径**：默认"高字节在前、不交换"；不对时先只翻一个（页面上的
    「字节序 / R/B 交换」两个开关），别一起翻。

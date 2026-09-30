@@ -621,7 +621,7 @@ XFER 的 key：cmd= tx= rx= addr= addrl= dummy= lines=
 export const DSL_SAMPLES = [
   {
     name: 'NOR：读 ID + SFDP + 状态',
-    text: `# 外接 SPI NOR 的最小连通性检查（1 线，CS = J3[24] / SCLK = J3[23]）
+    text: `# 外接 SPI NOR 的最小连通性检查（1 线，CS = J3[26]/PB10，SCLK = J3[13]/PB11）
 0x9F rx=3                 # JEDEC ID：厂商 / 类型 / 容量
 0x5A addr=0 addrl=3 dummy=1 rx=8   # SFDP 头（签名应为 "SFDP"）
 0x05 rx=1                 # 状态寄存器 1（bit0 = BUSY，bit1 = WEL）`,

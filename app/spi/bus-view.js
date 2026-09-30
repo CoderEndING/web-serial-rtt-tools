@@ -86,6 +86,9 @@ export class SpiBusView {
     $('sp-bl-on').addEventListener('click', () => this.sendGpio(P.LINE.BL, 1, '背光开'));
     $('sp-bl-off').addEventListener('click', () => this.sendGpio(P.LINE.BL, 0, '背光关'));
     $('sp-pin-rst-send').addEventListener('click', () => this.sendRstPulse());
+    /* 引脚分配图：点一下弹出 J3 40 针的分配（桥的信号 / CDC 串口 / 可当辅助脚的 / 不能用的）*/
+    $('sp-pinmap-btn').addEventListener('click', () => this.togglePinMap());
+    $('sp-pinmap-close').addEventListener('click', () => { $('sp-pinmap').hidden = true; });
 
     // 使能 / 收尾
     $('sp-enable').addEventListener('click', () => this.setEnabled(true));
@@ -270,6 +273,76 @@ export class SpiBusView {
     notes.push('PA30 是 USB0_PWR 网络，被板上 Q1 常态短到地，拉不动（已灰）');
     notes.push('PY00/PY01 在 v1 不支持（已灰）');
     $('sp-pad-note').textContent = 'TE 撕裂信号暂不暴露（TBD）。' + notes.join('；') + '。';
+  }
+
+  // ------------------------------------------------------------ 引脚分配图
+
+  togglePinMap(){
+    const box = $('sp-pinmap');
+    box.hidden = !box.hidden;
+    if (!box.hidden) this.renderPinMap();
+  }
+
+  /**
+   * 画 J3 40 针的引脚分配（2026-09-30 SPI2/UART2 迁移后的接法）。
+   * 标记：★ 桥的信号（SPI2） ● CDC 虚拟串口（UART2） ○ 可当辅助脚 ⛔ 不可用 · 电源/地/空脚
+   *       ◆ 当前在这根脚上的辅助线（DC/RST/CS辅助/BL/TE）
+   */
+  renderPinMap(){
+    const c = this.session.cfg || {};
+    const sel = pad => {
+      const n = [];
+      if (c.padDc === pad) n.push('DC');
+      if (c.padRst === pad) n.push('RST');
+      if (c.padCsAux === pad) n.push('CS_AUX');
+      if (c.padBl === pad) n.push('BL');
+      if (c.padTe === pad) n.push('TE');
+      return n.join('/');
+    };
+    const M = { spi: '★', vcom: '●', aux: '○', no: '⛔', pwr: '·', gnd: '·', nc: '·' };
+    /* [J3 脚, pad/label, 角色, 备注（ASCII，保证等宽对齐）] */
+    const T = [
+      [1, '3V3', 'pwr', ''], [2, '5V0', 'pwr', ''],
+      [3, 'PB09', 'vcom', 'VCOM RX (UART2)'], [4, '5V0', 'pwr', ''],
+      [5, 'PB08', 'vcom', 'VCOM TX (UART2)'], [6, 'GND', 'gnd', ''],
+      [7, 'PA02', 'aux', ''], [8, 'PB15', 'spi', 'D3 / IO3'],
+      [9, 'GND', 'gnd', ''], [10, 'PB14', 'spi', 'D2 / IO2'],
+      [11, 'PA31', 'aux', 'USB0_ID net'], [12, 'NC', 'nc', ''],
+      [13, 'PB11', 'spi', 'SCLK'], [14, 'GND', 'gnd', ''],
+      [15, 'NC', 'nc', ''], [16, 'NC', 'nc', ''],
+      [17, '3V3', 'pwr', ''], [18, 'NC', 'nc', ''],
+      [19, 'PA29', 'no', 'USB0_OC net'], [20, 'GND', 'gnd', ''],
+      [21, 'PA28', 'aux', ''], [22, 'NC', 'nc', ''],
+      [23, 'PA27', 'aux', ''], [24, 'PA26', 'aux', ''],
+      [25, 'GND', 'gnd', ''], [26, 'PB10', 'spi', 'CS'],
+      [27, 'PB12', 'spi', 'D1 / MISO'], [28, 'PB13', 'spi', 'D0 / MOSI'],
+      [29, 'PY00', 'no', 'PIOC domain'], [30, 'GND', 'gnd', ''],
+      [31, 'PY01', 'no', 'PIOC domain'], [32, 'PA09', 'aux', 'USER key'],
+      [33, 'PA10', 'aux', 'board LED'], [34, 'GND', 'gnd', ''],
+      [35, 'NC', 'nc', ''], [36, 'PA00', 'no', 'log UART0'],
+      [37, 'PA30', 'no', 'USB0_PWR + Q1'], [38, 'PA01', 'no', 'log UART0'],
+      [39, 'GND', 'gnd', ''], [40, 'NC', 'nc', ''],
+    ];
+    const cell = ([pin, name, role, note]) => {
+      const s = sel(pin);
+      const extra = [note, s ? '<< ' + s : ''].filter(Boolean).join(' ');
+      return `${String(pin).padStart(2)} ${M[role] || '·'} ${name.padEnd(5)}${extra ? ' ' + extra : ''}`;
+    };
+    const lines = ['  奇数脚' + ' '.repeat(26) + '偶数脚'];
+    for (let i = 0; i < 20; i++){
+      lines.push('  ' + cell(T[i * 2]).padEnd(34) + cell(T[i * 2 + 1]));
+    }
+    lines.push('');
+    lines.push('  ★ 桥的信号(SPI2)   ● CDC 虚拟串口(UART2)   ○ 可当辅助脚   ⛔ 不可用   · 电源/地/空脚');
+    lines.push('  << 当前辅助脚：DC=' + (P.PAD_NAME[c.padDc] || '不用') +
+               ' · RST=' + (P.PAD_NAME[c.padRst] || '不用') +
+               ' · CS辅助=' + (P.PAD_NAME[c.padCsAux] || '不用') +
+               ' · BL=' + (P.PAD_NAME[c.padBl] || '不用'));
+    lines.push('  接线：屏/器件的 CS←J3[26] SCLK←J3[13] D0←J3[28] D1←J3[27] D2←J3[10] D3←J3[8]');
+    lines.push('        VCOM ← J3[5](TX,PB08) / J3[3](RX,PB09)     详细说明见 docs/spi-bridge-wiring.md');
+    $('sp-pinmap-pre').textContent = lines.join('\n');
+    $('sp-pinmap-sub').textContent = (c.padRst || c.padBl || c.padDc)
+      ? '（◆ 已按当前配置标出辅助脚）' : '（还没读到配置，先用「读取配置」）';
   }
 
   // ==================================================================== 配置
@@ -624,13 +697,13 @@ export class SpiBusView {
 
   flWiring(){
     this.flOut([
-      '外接 SPI NOR 接线（探针 J3 排针）：',
-      '  CS   ← J3[24]  PA26（CS 策略 0 = 固件自动拉/放）',
-      '  SCLK ← J3[23]  PA27',
-      '  IO0  ← J3[19]  PA29（1 线时的 MOSI）',
-      '  IO1  ← J3[21]  PA28（1 线时的 MISO）',
-      '  IO2  ← J3[37]  PA30（四线才接）',
-      '  IO3  ← J3[11]  PA31（四线才接）',
+      '外接 SPI NOR 接线（探针 J3 排针，2026-09-30 起桥在 SPI2）：',
+      '  CS   ← J3[26]  PB10（CS 策略 0 = 固件自动拉/放）',
+      '  SCLK ← J3[13]  PB11',
+      '  IO0  ← J3[28]  PB13（1 线时的 MOSI）',
+      '  IO1  ← J3[27]  PB12（1 线时的 MISO）',
+      '  IO2  ← J3[10]  PB14（四线才接）',
+      '  IO3  ← J3[8]   PB15（四线才接）',
       '  VCC / GND 按模块电压；WP# 与 HOLD# 上拉到 VCC',
       '',
       '四线读还要器件侧 QE=1（多数片子是 SR2 的 bit1）：先「读状态」看一眼。',
@@ -858,7 +931,7 @@ export class SpiBusView {
   // ==================================================================== 回环自检
 
   /**
-   * MOSI↔MISO 跳线回环扫描（J3[19]-J3[21]）：
+   * MOSI↔MISO 跳线回环扫描（J3[28]-J3[27]，SPI2）：
    * 每个长度都跑 tx_len == rx_len 的全双工读回并逐字节比对；
    * `FORCE_DMA` 那一档用来对照（P1 固件两条路径都计入 tx_poll，见方案 §2.3 第 7 条）。
    */
@@ -877,7 +950,7 @@ export class SpiBusView {
     const t0 = performance.now();
     const rows = [];
     s.log('i', `回环自检开始：${lines} 线 · ${lens.length} 个长度 × ${modes.length} 种路径` +
-      (s.usingMock ? '（假探针：读回 = 发出去的字节）' : '（真机需要 J3[19]↔J3[21] 跳线）'), this.tag);
+      (s.usingMock ? '（假探针：读回 = 发出去的字节）' : '（真机需要 J3[28]↔J3[27] 跳线）'), this.tag);
     try {
       for (const len of lens){
         for (const [name, force] of modes){

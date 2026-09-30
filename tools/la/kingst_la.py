@@ -615,6 +615,153 @@ def add_common(p):
     p.add_argument("--gap", type=float, default=2e-6, help="事务/突发间隔阈值（秒），默认 2us")
 
 
+def cmd_spi(init, tracks, a) -> int:
+    """按 CS 窗口解 SPI / QSPI（单线按字节、四线按 nibble），并标注 QSPI 命令帧的地址形状。
+
+    为什么单独写：SPI/QSPI 屏（AXS15352 / ST77916）的线上协议是"CS 窗口 = 一条事务"，
+    窗口内先是 opcode + 24 bit 地址（QSPI 命令帧），再是 1 线参数或 4 线像素。
+    Socket API 挂不了解析器，所以这里自己解 —— 重点是把 **AD[23:0] 里命令字落在哪个字节** 标出来：
+    ST77916 手册 §8.8.5.1 要求 `00 XX 00`（中间字节），写成 `XX 00 00` 或 `00 00 XX` 都要能一眼看见。
+    """
+    cs_ch, clk_ch = a.cs, a.clk
+    d_chs = [a.d0] + [c for c in (a.d1, a.d2, a.d3) if c is not None]
+    edge_want = getattr(a, "edge", "auto")
+    if edge_want == "rising":
+        sample_edge = 1
+    elif edge_want == "falling":
+        sample_edge = 0
+    else:
+        sample_edge = None                        # auto：下面按"哪一沿解出来更像整字节"选
+
+    chans = set([cs_ch, clk_ch] + d_chs)
+    events = []
+    for ch in chans:
+        for (t, lv) in tracks.get(ch, []):
+            events.append((t, ch, lv))
+    events.sort(key=lambda e: e[0])
+    if not events:
+        print("CSV 里这几个通道都没有跳变 —— 通道号对不上？（--cs/--clk/--d0…）")
+        print("提示：先用 `list` 或 `stats` 看每个通道的跳变数。")
+        return 1
+
+    t0 = events[0][0]
+    windows = []
+    cur = None
+    for (t, ch, lv) in events:
+        if ch != cs_ch:
+            continue
+        if lv == 0 and cur is None:
+            cur = {"t0": t, "samples": []}
+        elif lv == 1 and cur is not None:
+            cur["t1"] = t
+            windows.append(cur)
+            cur = None
+    if cur is not None:                              # 末尾还没抬 CS：也算一个窗口
+        cur["t1"] = events[-1][0]
+        windows.append(cur)
+
+    quad_any = False
+    for w in windows:
+        # **逐窗口**判四线：只有当 D1-D3 在这个 CS 窗口里有跳变，才按 nibble 解（否则单线字节）
+        w["quad"] = any(w["t0"] <= t <= w["t1"] for ch in d_chs[1:] for (t, _lv) in tracks.get(ch, []))
+        quad_any = quad_any or w["quad"]
+
+    def collect(edge):
+        for w in windows:
+            w.setdefault("byedge", {})[edge] = [
+                (t, [level_at(tracks.get(ch, []), t, init.get(ch, 0)) for ch in d_chs])
+                for (t, ch, lv) in events
+                if ch == clk_ch and w["t0"] < t < w["t1"] and lv == edge
+            ]
+
+    def score(edge):
+        """哪一沿更像"真事务"：① 位宽是 8 的倍数的窗口比例；② **首字节稳定性** ——
+        真实命令帧的首字节是固定 opcode（QSPI 的 02h），错半拍时首字节五花八门。
+        只看 ① 分不出来（两沿都可能是 40 bit 整字节），必须靠 ②。"""
+        firsts, good, tot = {}, 0, 0
+        for w in windows:
+            smp = w.get("byedge", {}).get(edge) or []
+            if not smp:
+                continue
+            tot += 1
+            if len(smp) % 8:
+                continue
+            good += 1
+            bits = [b[0] for (_t, b) in smp]
+            first = int("".join(str(x) for x in bits[:8]), 2)
+            firsts[first] = firsts.get(first, 0) + 1
+        if not tot:
+            return 0.0, 0, 0
+        stable = max(firsts.values()) / tot if firsts else 0.0
+        return 0.5 * (good / tot) + 0.5 * stable, good, tot
+
+    if sample_edge is None:
+        collect(1); collect(0)
+        s_up, s_dn = score(1), score(0)
+        sample_edge = 1 if s_up[0] >= s_dn[0] else 0
+        if abs(s_up[0] - s_dn[0]) > 0.1:
+            print(f"⚠️ 两沿差别明显（打分 上升 {s_up[0]:.2f} vs 下降 {s_dn[0]:.2f}；"
+                  f"整字节窗口 上升 {s_up[1]}/{s_up[2]} · 下降 {s_dn[1]}/{s_dn[2]}）"
+                  f"→ 按**{'上升' if sample_edge else '下降'}沿**解。"
+                  f"若与预期不符，多半是 LA 的 CLK/D0 **通道间延时**（半周期量级）—— "
+                  f"换 `--edge rising|falling`，或把两根杜邦线等长/换个地")
+    else:
+        collect(sample_edge)
+
+    for w in windows:
+        w["samples"] = w.get("byedge", {}).get(sample_edge) or []
+
+    print(f"CS 窗口 {len(windows)} 个 · 通道 CS=CH{cs_ch} CLK=CH{clk_ch} D0..=CH{','.join(str(c) for c in d_chs)}"
+          f" · 取样沿={'上升' if sample_edge else '下降'}"
+          f" · 其中四线窗口 {sum(1 for w in windows if w['quad'])} 个（D1-D3 有跳变）")
+    shown = 0
+    for i, w in enumerate(windows):
+        if shown >= a.max:
+            print(f"… 还有 {len(windows) - i} 个窗口没打印（--max 调大）")
+            break
+        smp = w["samples"]
+        if not smp:
+            print(f"CS#{i:<4} +{(w['t0']-t0)*1e3:9.4f} ms  （窗口里没有时钟沿：{(w['t1']-w['t0'])*1e6:.1f} µs）")
+            shown += 1
+            continue
+        quad = w["quad"]
+        if quad:
+            nib = [(b[0] | (b[1] << 1) | (b[2] << 2) | (b[3] << 3)) for (_t, b) in smp]
+            body = " ".join(f"{n:x}" for n in nib)
+            note = f"四线 nibble ×{len(nib)}"
+        else:
+            bits = [b[0] for (_t, b) in smp]
+            by = [int("".join(str(x) for x in bits[k:k + 8]), 2) for k in range(0, len(bits) - len(bits) % 8, 8)]
+            body = " ".join(f"{v:02x}" for v in by)
+            note = f"单线 {len(by)} B（{len(bits)} bit）"
+            if len(bits) % 8:
+                note += f" · 末尾 {len(bits) % 8} bit 不成字节"
+            # QSPI 命令帧的形状判定：opcode + 24 bit 地址
+            if len(by) >= 4:
+                ad = (by[1] << 16) | (by[2] << 8) | by[3]
+                if by[1] == 0 and by[3] == 0 and by[2] != 0:
+                    note += f" · opcode=0x{by[0]:02x} AD=0x{ad:06x} → 命令 0x{by[2]:02x} ✓（00 XX 00）"
+                elif by[2] == 0 and by[3] == 0 and by[1] != 0:
+                    note += (f" · ⚠️ opcode=0x{by[0]:02x} AD=0x{ad:06x} → 命令字在**最高**字节"
+                             f"（手册要 00 XX 00，即 0x00{by[1]:02x}00）")
+                elif by[1] == 0 and by[2] == 0 and by[3] != 0:
+                    note += (f" · ⚠️ opcode=0x{by[0]:02x} AD=0x{ad:06x} → 命令字在**最低**字节"
+                             f"（手册要 00 XX 00，即 0x00{by[3]:02x}00）")
+                else:
+                    note += f" · opcode=0x{by[0]:02x} AD=0x{ad:06x}"
+        head = body if len(body) <= a.width else body[:a.width] + " …"
+        print(f"CS#{i:<4} +{(w['t0']-t0)*1e3:9.4f} ms  {head}   [{note}]")
+        if getattr(a, "bits", 0) and i < a.bits:
+            if quad:
+                bs = "".join(format(n, "x") for n in nib)
+            else:
+                bs = "".join(str(b[0]) for (_t, b) in smp)
+            grp = " ".join(bs[k:k + 8] for k in range(0, len(bs), 8))
+            print(f"          位: {grp}   （窗口 {(w['t1']-w['t0'])*1e6:.2f} µs，{len(smp)} 个时钟沿）")
+        shown += 1
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="金沙滩逻辑分析仪：采集 + 分析 + SWD 解码（只用标准库）")
     sub = ap.add_subparsers(dest="action", required=True)
@@ -665,6 +812,22 @@ def main() -> int:
             p.add_argument("--max", type=int, default=40)
         if name == "list":
             p.add_argument("--max", type=int, default=200)
+
+    s = sub.add_parser("spi", help="按 CS 窗口解 SPI/QSPI（单线字节 / 四线 nibble），标注 QSPI 地址形状")
+    s.add_argument("csv")
+    s.add_argument("--cs", type=int, default=0, help="CS 通道（默认 0）")
+    s.add_argument("--clk", type=int, default=1, help="SCK 通道（默认 1）")
+    s.add_argument("--d0", type=int, default=2, help="数据线 0（默认 2；单线时就是 MOSI）")
+    s.add_argument("--d1", type=int, default=3)
+    s.add_argument("--d2", type=int, default=4)
+    s.add_argument("--d3", type=int, default=5)
+    s.add_argument("--edge", default="auto", choices=["auto", "rising", "falling"], help="按哪个时钟沿取样。auto（默认）= 两沿都解一遍，挑更像整字节的那个 —— LA 的 CLK/D0 通道间常有半周期延时，这时该用 falling")
+    s.add_argument("--max", type=int, default=60, help="最多打印多少个 CS 窗口")
+    s.add_argument("--width", type=int, default=160, help="每个窗口最多打印多少字符的 hex")
+
+    s.add_argument("--bits", type=int, default=0, help="顺带打印前 N 个窗口的原始采样位")
+
+    
 
     args = ap.parse_args()
 
@@ -769,6 +932,8 @@ def main() -> int:
         for ch in sorted(tracks):
             stats(tracks[ch], ch)
         return 0
+    if args.action == "spi":
+        return cmd_spi(init, tracks, args)
     return {"freq": cmd_freq, "burst": cmd_burst, "detail": cmd_detail,
             "decode": cmd_decode, "list": cmd_list}[args.action](init, tracks, args)
 

@@ -470,3 +470,10 @@ fieldset.folded > legend::after{content:' · 已折叠';color:var(--fg2);font-si
 .chips button{padding:2px 8px;font-size:11.5px}
 .chips button.on{border-color:var(--acc);background:#1f6feb;color:#fff}
 #pn-img-sum{white-space:pre-wrap}
+
+/* ---- 引脚分配图（SPI 桥页「辅助脚」卡片里的按钮弹出）---- */
+.pinmap{margin-top:8px;border:1px solid var(--line,#3a3a3a);border-radius:6px;background:var(--bg2,#1b1b1b);padding:8px}
+.pinmap-head{display:flex;align-items:center;gap:8px;margin-bottom:6px}
+.pinmap-head .hint{flex:1;margin:0}
+.pinmap pre{margin:0;font-family:ui-monospace,Consolas,monospace;font-size:12px;line-height:1.5;
+  white-space:pre;overflow:auto;max-height:60vh;color:var(--fg,#ddd)}

@@ -703,7 +703,7 @@
           <option value="2">2 · CPOL=1 CPHA=0</option>
           <option value="3">3 · CPOL=1 CPHA=1</option>
         </select></label>
-        <label class="row"><span>CS 策略</span><select id="sp-cs" title="按固件实现：0/2 = PA26 作 GPIO CS（软件拉/放）、1 = 辅助脚作 GPIO CS、3 = 硬件 CS0。proto.h 的注释在这条上是反的"></select></label>
+        <label class="row"><span>CS 策略</span><select id="sp-cs" title="按固件实现：0/2 = PB10 作 GPIO CS（软件拉/放）、1 = 辅助脚作 GPIO CS、3 = 硬件 CS0。proto.h 的注释在这条上是反的"></select></label>
         <label class="row"><span>DMA 阈值</span><input id="sp-thr" class="num" value="100" inputmode="numeric" title="数据相位 ≥ 阈值走 DMA。⚠️ 当前固件是 P1：全部走轮询（tx_dma 恒 0），这个值先存着"></label>
         <label class="chk"><input type="checkbox" id="sp-clear" checked> 使能时先清环 / 复位状态机</label>
         <div class="row btnrow">
@@ -733,7 +733,12 @@
           <button id="sp-bl-off" title="把 BL 脚置成「无效」电平 = 关背光">背光关</button>
         </div>
         <div class="row"><span>RST 脉冲</span><input id="sp-pin-rst-low" class="num" value="10" inputmode="numeric" title="把 RST 脚拉低几毫秒"><input id="sp-pin-rst-post" class="num" value="120" inputmode="numeric" title="释放后再等几毫秒"><button id="sp-pin-rst-send" class="mini">发</button></div>
-        <p class="hint" id="sp-pad-note">TE 撕裂信号暂不暴露（TBD）。灰掉的脚固件会拒：PY00/PY01 在 v1 不支持；qspi 档下 PA30/PA31 是 IO2/IO3。</p>
+        <div class="row btnrow"><button id="sp-pinmap-btn" title="按当前档位画出 J3 40 针的引脚分配：桥的信号 / CDC 虚拟串口 / 能当辅助脚的 / 不能用的">引脚分配图</button></div>
+        <div id="sp-pinmap" class="pinmap" hidden>
+          <div class="pinmap-head"><b>J3 引脚分配</b><span class="hint" id="sp-pinmap-sub"></span><button id="sp-pinmap-close" class="mini">关闭</button></div>
+          <pre id="sp-pinmap-pre"></pre>
+        </div>
+        <p class="hint" id="sp-pad-note">TE 撕裂信号暂不暴露（TBD）。灰掉的脚固件会拒：PY00/PY01 在 v1 不支持；PB10~PB13 是 SPI2 的 CS/SCLK/MISO/MOSI；PA30 被板上 Q1 短到地拉不动。</p>
       </fieldset>
 
       <fieldset>
@@ -845,7 +850,7 @@
               <button id="sp-fl-fill" class="mini">填递增图案</button>
               <label class="row" style="margin-left:auto"><span style="width:auto">页间等 tPP</span><input id="sp-fl-tpp" class="num" value="3" inputmode="numeric"><span>ms</span></label>
             </div>
-            <p class="hint">外接 flash 接在 J3：<code>CS=J3[24]</code> <code>SCLK=J3[23]</code> <code>IO0=J3[19]</code> <code>IO1=J3[21]</code>，四线再加 <code>IO2=J3[37]</code> <code>IO3=J3[11]</code>。板上那颗 NOR 在 XPI0 的 PX 专用脚上，桥够不着。</p>
+            <p class="hint">外接 flash 接在 J3：<code>CS=J3[26]</code> <code>SCLK=J3[13]</code> <code>IO0=J3[28]</code> <code>IO1=J3[27]</code>，四线再加 <code>IO2=J3[10]</code> <code>IO3=J3[8]</code>。板上那颗 NOR 在 XPI0 的 PX 专用脚上，桥够不着。</p>
         </fieldset>
 
         <fieldset id="sp-loop-card">
@@ -861,7 +866,7 @@
             <button id="sp-lb-cancel" class="mini">中止</button>
             <span class="hint" id="sp-lb-sum" style="margin:0">未跑</span>
           </div>
-          <p class="hint">每个长度原样发出去、再原样读回来逐字节比对（真机要 J3[19]↔J3[21] 跳线；没接就会 FAIL —— 那正是它的用处）。</p>
+          <p class="hint">每个长度原样发出去、再原样读回来逐字节比对（真机要 J3[28]↔J3[27] 跳线；没接就会 FAIL —— 那正是它的用处）。</p>
           <div class="scroll"><table class="sp"><thead><tr><th>长度</th><th>路径</th><th>结果</th><th>说明</th></tr></thead><tbody id="sp-lb-body"></tbody></table></div>
         </fieldset>
       </div>
