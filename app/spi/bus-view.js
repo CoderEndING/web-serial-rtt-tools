@@ -11,6 +11,8 @@
  */
 import { $, setStatus, appendLogLine } from '../ui/dom.js';
 import { yieldTask, waitMs } from '../core/pace.js';
+import { store } from '../core/store.js';
+import { PANEL_PRESETS } from './panel-view.js';   // 「引脚分配图」的默认脚位取自屏型号推荐值
 import * as P from './protocol.js';
 import * as D from './frames-dsl.js';
 import * as FL from './flash.js';
@@ -294,17 +296,41 @@ export class SpiBusView {
    *    不是 J3 脚号 —— 表格每行末尾那个数字才是 pad 索引（0 = 这根脚不在 pad 表里）。
    *    曾经拿 J3 脚号去比过，结果 "DC=PA02(index 5)" 被标到了 J3[5]（PB08）上。
    */
+  /**
+   * 未配置时图上先标出来的**推荐脚位**。
+   *
+   * 来源 = 屏页当前选的屏型号（`panel.preset`，屏页用 `store.bind` 落的）的推荐值 `cfg`，
+   * 也就是「套用推荐值」之后会变成的样子。
+   * 用户 2026-09-30 的原话：**接线在配置之前** —— 所以这张图不能等配置，勾没勾都得看得见。
+   */
+  defaultAuxPads(){
+    const key = store.get('panel.preset', 'st77916');
+    const k = PANEL_PRESETS[key] ? key : 'st77916';
+    const cfg = PANEL_PRESETS[k].cfg || {};
+    return { dc: cfg.padDc | 0, rst: cfg.padRst | 0, csAux: cfg.padCsAux | 0,
+             bl: cfg.padBl | 0, te: cfg.padTe | 0, model: k };
+  }
+
   renderPinMap(){
     const c = this.session.cfg || {};
+    const dflt = this.defaultAuxPads();
+    /* [线名, 配置里的值, 该屏型号的推荐脚位] */
+    const LINES = [
+      ['DC', c.padDc, dflt.dc], ['RST', c.padRst, dflt.rst], ['CS_AUX', c.padCsAux, dflt.csAux],
+      ['BL', c.padBl, dflt.bl], ['TE', c.padTe, dflt.te],
+    ];
+    /**
+     * 这根 pad 上挂了什么线：
+     *   · `now` = 配置里**真的配了**的（实心显示）
+     *   · `dft` = 这条线**还没配**、但按推荐脚位该在这根脚上（虚线 +「（默认）」，供接线的人看）
+     * 两条规矩：**配过的线不再显示它的默认位置**（你已经在别处配了它）；
+     * 一根脚上**不同时**出实心和虚线（这根脚的接线已经定下来了，别再让人犹豫）。
+     */
     const sel = pad => {
-      const n = [];
-      if (!pad) return '';
-      if (c.padDc === pad) n.push('DC');
-      if (c.padRst === pad) n.push('RST');
-      if (c.padCsAux === pad) n.push('CS_AUX');
-      if (c.padBl === pad) n.push('BL');
-      if (c.padTe === pad) n.push('TE');
-      return n.join('/');
+      if (!pad) return { now: '', dft: '' };
+      const now = LINES.filter(([, v]) => v === pad).map(([n]) => n).join('/');
+      const dft = now ? '' : LINES.filter(([, v, d]) => !v && d === pad).map(([n]) => n).join('/');
+      return { now, dft };
     };
     const M = { spi: '★', vcom: '●', aux: '○', no: '⛔', pwr: '·', gnd: '·', nc: '·' };
     /* [J3 脚, pad 名/标签, 角色, 备注, 协议 pad 索引（0 = 不在辅助脚表里）] */
@@ -331,15 +357,16 @@ export class SpiBusView {
       [39, 'GND', 'gnd', '', 0], [40, 'NC', 'nc', '', 0],
     ];
     const cell = ([pin, name, role, note, pad]) => {
-      const s = sel(pad);
+      const { now, dft } = sel(pad);
       const cls = { spi: 'is-spi', vcom: 'is-vcom', aux: 'is-aux', no: 'is-no' }[role] || 'is-plain';
       /* 配置里把辅助线挂在"已经不能当辅助脚"的脚上（桥信号/CDC/保留脚）＝ 陈旧配置，
        * 固件会拒；这种就标红 + ⚠，别让人以为接对了 */
-      const stale = !!s && role !== 'aux';
+      const stale = !!now && role !== 'aux';
       return `<td class="p-pin">${pin}</td>` +
              `<td class="p-name ${cls}"><span class="p-mark">${M[role] || '·'}</span>${name}` +
              (note ? `<span class="p-note">${note}</span>` : '') +
-             (s ? `<span class="p-sel${stale ? ' is-bad' : ''}">&lt;&lt; ${s}${stale ? ' ⚠ 这根脚已被占用（固件会拒）' : ''}</span>` : '') +
+             (now ? `<span class="p-sel${stale ? ' is-bad' : ''}">&lt;&lt; ${now}${stale ? ' ⚠ 这根脚已被占用（固件会拒）' : ''}</span>` : '') +
+             (dft ? `<span class="p-sel is-dflt">&lt;&lt; ${dft}（默认）</span>` : '') +
              '</td>';
     };
     const rows = [];
@@ -348,17 +375,22 @@ export class SpiBusView {
     }
     $('sp-pinmap-body').innerHTML = rows.join('');
     $('sp-pinmap-legend').textContent =
-      '★ 桥的信号（SPI2）　● CDC 虚拟串口（UART2）　○ 可当辅助脚　⛔ 不可用　· 电源/地/空脚　<< 当前分配给该脚的辅助线';
+      '★ 桥的信号（SPI2）　● CDC 虚拟串口（UART2）　○ 可当辅助脚　⛔ 不可用　· 电源/地/空脚　' +
+      '<< 实心＝当前配置　<< 虚线（默认）＝未配置，按屏型号推荐值先标出来的位置';
+    const show = (v, d) => v ? (P.PAD_NAME[v] || ('pad' + v))
+                             : d ? (P.PAD_NAME[d] || ('pad' + d)) + '（默认）' : '不用';
     $('sp-pinmap-foot').textContent =
-      '当前辅助脚：DC=' + (P.PAD_NAME[c.padDc] || '不用') +
-      '　RST=' + (P.PAD_NAME[c.padRst] || '不用') +
-      '　CS 辅助=' + (P.PAD_NAME[c.padCsAux] || '不用') +
-      '　BL=' + (P.PAD_NAME[c.padBl] || '不用') +
+      '辅助脚：DC=' + show(c.padDc, dflt.dc) +
+      '　RST=' + show(c.padRst, dflt.rst) +
+      '　CS 辅助=' + show(c.padCsAux, dflt.csAux) +
+      '　BL=' + show(c.padBl, dflt.bl) +
+      '　TE=' + show(c.padTe, dflt.te) +
       '　｜　接线：CS←J3[26] SCLK←J3[13] D0←J3[28] D1←J3[27] D2←J3[10] D3←J3[8]，' +
       'VCOM ← J3[5](TX,PB08) / J3[3](RX,PB09)';
-    $('sp-pinmap-sub').textContent = (c.padRst || c.padBl || c.padDc)
-      ? '（已按当前配置标出辅助脚：<< 后面就是线名）'
-      : '（配置里四条辅助线现在都是「不用」—— 换了屏型号记得「套用推荐值」）';
+    const modelName = PANEL_PRESETS[dflt.model]?.short || dflt.model;
+    $('sp-pinmap-sub').textContent = (c.padRst || c.padBl || c.padDc || c.padCsAux || c.padTe)
+      ? `（实心 << 是当前配置；虚线 << 是没配的那几条线按「${modelName}」推荐值先标的位置）`
+      : `（四条辅助线现在都是「不用」—— 图上已按「${modelName}」的推荐脚位先标好（虚线 <<），照着接线，接完点「套用推荐值」即可）`;
   }
 
   // ==================================================================== 配置

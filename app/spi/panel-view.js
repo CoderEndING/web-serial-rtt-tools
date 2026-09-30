@@ -108,6 +108,9 @@ export class SpiPanelView {
     $('pn-prof-get').addEventListener('click', () => this.wrap(() => s.loadProfile({ tag: this.tag })));
     $('pn-prof-set').addEventListener('click', () => this.applyProfile());
     $('pn-preset').addEventListener('change', () => this.fillPresetNote());
+    /* 屏型号落 store：桥页的「引脚分配图」要拿它当**未配置时的默认脚位**（先接线后配置的人靠这个）。*/
+    store.bind($('pn-preset'), 'panel.preset');
+    this.fillPresetNote();
     $('pn-preset-apply').addEventListener('click', () => this.applyPreset());
 
     // 面板初始化代码
