@@ -667,6 +667,48 @@ console.log('== 14. RISC-V/JTAG 目标：显示生效后端、置灰 SWD 控件�
   ok(/RISC-V\/JTAG/.test(r.st), `切完给了明确回执：${r.st.slice(0, 60)}`);
 }
 
+// ==================================================================== 15
+console.log('== 15. 用户现场口径：**没连探针**时切目标类型，界面必须立刻变（不能"切了没反应"）==');
+{
+  const r = await ev(`
+    const sc = window.__tools.scope;
+    // 断开一切（这一段就是要验"探针不在线"的情形）
+    document.getElementById('sc-mock').checked = false;
+    document.getElementById('sc-mock').dispatchEvent(new Event('change'));
+    await new Promise(r2 => setTimeout(r2, 500));
+    sc.setBackend(null, '测试');                   // 后端未知 = 刚打开页面的样子
+    sc.backend = null; sc._reportedAt = 0; sc._askedAt = 0;
+    sc.targetRiscv = null;
+    const sel = document.getElementById('sc-target');
+    sel.value = 'swd'; await sc.applyTargetType();
+    const before = { label: document.getElementById('sc-clock-row').querySelector('span').textContent,
+                     disabled: document.getElementById('sc-clock').disabled,
+                     plan: document.getElementById('sc-plan').innerText.replace(/\\s+/g, ' '),
+                     backendLine: document.getElementById('sc-backend').textContent,
+                     mhz: document.getElementById('sc-mhz').textContent };
+    sel.value = 'riscv'; await sc.applyTargetType();      // ← 用户这一步"切换了"
+    const after = { label: document.getElementById('sc-clock-row').querySelector('span').textContent,
+                    disabled: document.getElementById('sc-clock').disabled,
+                    plan: document.getElementById('sc-plan').innerText.replace(/\\s+/g, ' '),
+                    backendLine: document.getElementById('sc-backend').textContent,
+                    mhz: document.getElementById('sc-mhz').textContent };
+    sel.value = 'swd'; await sc.applyTargetType();        // 切回来也要跟着回去
+    const back = { label: document.getElementById('sc-clock-row').querySelector('span').textContent,
+                   disabled: document.getElementById('sc-clock').disabled,
+                   plan: document.getElementById('sc-plan').innerText.replace(/\\s+/g, ' ') };
+    return { before, after, back };`);
+  ok(r.before.label === 'SWD 时钟' && r.before.disabled === false && /模型估算/.test(r.before.plan),
+     `未连探针时默认按 SWD 显示（「${r.before.label}」/「${r.before.mhz}」）`);
+  ok(r.after.label === 'JTAG 时钟' && r.after.disabled === true,
+     `切到 RISC-V/JTAG → 那一格当场改名「${r.after.label}」并置灰（用户要的就是这个）`);
+  ok(/RISC-V\/JTAG 实测/.test(r.after.plan) && !/模型估算/.test(r.after.plan) && /3\.17 µs/.test(r.after.plan),
+     `读计划当场换成 JTAG 的实测数据：${r.after.plan.slice(0, 60)}…`);
+  ok(/未开始/.test(r.after.backendLine) && /RISC-V\/JTAG/.test(r.after.backendLine),
+     `「生效后端」仍诚实地说还没开始、并记住你选的是哪条路：「${r.after.backendLine}」`);
+  ok(r.back.label === 'SWD 时钟' && r.back.disabled === false && /模型估算/.test(r.back.plan),
+     `切回 SWD 也立刻回去（${r.back.label}）`);
+}
+
 console.log(`\n${fail ? '❌' : '✅'} scope-page.test: ${pass} 通过 / ${fail} 失败`);
 ws.close();
 process.exit(fail ? 1 : 0);

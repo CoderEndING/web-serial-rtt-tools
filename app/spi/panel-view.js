@@ -99,21 +99,53 @@ export class SpiPanelView {
     $('pn-code-clear').addEventListener('click', () => { $('pn-code-text').value = ''; this.rows = []; this.bitpop.close(); this.renderCodeTable([]); this.setCodeSummary('已清空'); });
     for (const [id, kind] of [['pn-code-c', 'c'], ['pn-code-json', 'json'], ['pn-code-text-out', 'text']]) $(id).addEventListener('click', () => this.exportRows(kind));
     $('pn-code-body').addEventListener('click', e => {
-      // ① 字节按钮（命令字节 / 每个参数字节）→ 弹出它的 8 个 bit；再点同一个就收起来
-      const chip = e.target.closest('button.byte');
-      if (chip){
-        const i = +chip.dataset.i;
-        const k = chip.dataset.k === 'cmd' ? 'cmd' : +chip.dataset.k;
-        if (this.bitpop.isOpen && this.bitpop.index === i && this.bitpop.k === k){ this.bitpop.close(); return; }
-        this.bitpop.open({ row: (this.effectiveRows || this.rows)[i], index: i, k, at: chip.getBoundingClientRect() });
+      // ① 点参数字节格子 → 开「位开关板」（命令字节那格只用来敲十六进制，与参考页一致）
+      const cell = e.target.closest('input.bx');
+      if (cell && !cell.classList.contains('cmd')){
+        const i = +cell.dataset.i;
+        this.bitpop.open({
+          row: (this.effectiveRows || this.rows)[i],
+          base: (this.baseRows || [])[i] || null,
+          index: i, k: +cell.dataset.b, anchor: cell,
+        });
         return;
       }
-      // ② 行尾的「单发 / 从此重放」
+      // ② 行尾的「单发 / 从此重放 / 改回」
       const btn = e.target.closest('button[data-act]');
       if (!btn) return;
       const i = +btn.dataset.i, act = btn.dataset.act;
       if (act === 'one') this.playRows(i, i);
       else if (act === 'from') this.playRows(i, (this.effectiveRows || this.rows).length - 1);
+      else if (act === 'revert') this.revertRow(i);
+    });
+    /**
+     * 改字节：**手打十六进制**与位开关板走同一条路（都落到 `setRowByte`），
+     * 所以"脏标记 / 改回 / 导出 / 重放"全都不用特殊照顾（参考页也是这么做的）。
+     * `change` 而不是 `input`：输入框里敲到一半（"5"）不该立刻当 0x05 提交。
+     */
+    $('pn-code-body').addEventListener('change', e => {
+      const cell = e.target.closest?.('input.bx');
+      if (!cell) return;
+      const i = +cell.dataset.i;
+      const row = (this.effectiveRows || this.rows)[i];
+      if (!row) return;
+      const isCmd = cell.classList.contains('cmd');
+      const k = isCmd ? 'cmd' : +cell.dataset.b;
+      const t = String(cell.value).trim().replace(/^0x/i, '');
+      if (!/^[0-9a-f]{1,2}$/i.test(t)){
+        this.session.log('e', `第 ${i} 行：'${cell.value}' 不是一个字节（要 00~FF 的十六进制）`, this.tag);
+        cell.classList.add('bad');
+        setTimeout(() => cell.classList.remove('bad'), 1500);
+        cell.value = hx(isCmd ? row.cmd : row.data[k]);      // 还原成模型里的值
+        return;
+      }
+      const v = parseInt(t, 16);
+      if (v !== (isCmd ? row.cmd : row.data[k])){
+        C.setRowByte(row, k, v);
+        this.onByteEdit(row, i, k, v);
+      } else {
+        cell.value = hx(v);                                   // 只是大小写/前导零不同：规范化显示
+      }
     });
     this.bitpop.init();
 
@@ -274,6 +306,9 @@ export class SpiPanelView {
     this.rows = r.rows;
     const withPrefix = $('pn-code-prefix').checked && r.rows.length > 0;
     this.effectiveRows = withPrefix ? [...REQUIRED_PREFIX.map(x => ({ ...x })), ...r.rows] : r.rows;
+    // 原值快照：表格里的"脏标记 / 改回 / 恢复原值 / 哪些位动过"全靠它比对（不是靠一个粘住的 flag ——
+    // 改回原值就该自己变干净）。深拷贝 data，别和行共享同一个 Uint8Array。
+    this.baseRows = this.effectiveRows.map(r2 => ({ ...r2, data: Uint8Array.from(r2.data) }));
     this.renderCodeTable(this.effectiveRows);
     const bits = [`认出 ${r.stats.rows} 条`, `${r.stats.paramsBytes} 参数字节`, `累计延时 ${r.stats.delayMs} ms`,
                   `格式 ${r.format}`];
@@ -297,19 +332,33 @@ export class SpiPanelView {
     this.renderSum();
   }
 
+  /** 这一行和"解析出来的原值"是否不同（指纹比对：改回原值就自己变干净）*/
+  rowDirty(i){
+    const r = (this.effectiveRows || [])[i], b = (this.baseRows || [])[i];
+    if (!r || !b) return false;
+    return fingerprint(r) !== fingerprint(b);
+  }
+
+  dirtyCount(){
+    const rows = this.effectiveRows || this.rows;
+    let n = 0;
+    for (let i = 0; i < rows.length; i++) if (this.rowDirty(i)) n++;
+    return n;
+  }
+
   /** 摘要 = 解析结果 + "已改 N 行"（改过字节后一眼知道表格与文本框不再一致）*/
   renderSum(){
     const el = $('pn-code-sum');
     if (!el || !this._sum) return;
-    const rows = this.effectiveRows || this.rows;
-    const n = rows.filter(r => r.edited).length;
+    const n = this.dirtyCount();
     el.textContent = this._sum.text + (n ? ` · 已改 ${n} 行（按改后的值重放/导出）` : '');
     el.className = 'hint';
     if (this._sum.kind) el.classList.add(this._sum.kind);
     el.style.color = this._sum.kind === 'err' ? 'var(--err)' : this._sum.kind === 'warn' ? 'var(--warn)' : this._sum.kind === 'ok' ? 'var(--ok)' : '';
   }
 
-  /** 表格里的一个字节 = 一个按钮：点开是它的 8 个 bit（`bit-editor.js`）*/
+  /** 表格：命令字节与每个参数字节都是**可编辑的十六进制格子**（照 `tools/bmp_sender.html`）。
+   *  点参数字节 → 位开关板；直接敲 → 改值。两者都走 `setRowByte`。 */
   renderCodeTable(rows){
     const body = $('pn-code-body');
     if (!rows.length){
@@ -319,20 +368,46 @@ export class SpiPanelView {
     }
     body.innerHTML = rows.map((r, i) => {
       const isAuto = !!r.auto;
-      const cls = [isAuto ? 'auto' : '', r.edited ? 'edited' : ''].filter(Boolean).join(' ');
+      const cls = [isAuto ? 'auto' : '', this.rowDirty(i) ? 'dirty' : ''].filter(Boolean).join(' ');
       const params = r.data.length
-        ? [...r.data].map((v, j) => byteChip(i, j, v)).join('')
+        ? [...r.data].map((v, j) =>
+            `<input class="bx" data-i="${i}" data-b="${j}" maxlength="2" spellcheck="false" value="${hx(v)}"` +
+            ` title="第 ${j} 字节 · 0x${hx(v)} = ${C.bitsText(v)} —— 直接敲十六进制改它；点一下开位开关板">`).join(' ')
         : '<span style="color:var(--fg2)">（无参数）</span>';
-      return `<tr${cls ? ` class="${cls}"` : ''} title="#${i} · 命令 0x${hx(r.cmd)} + ${r.data.length} 参数字节 · 延时 ${r.delayMs || 0} ms">` +
+      const acts = `<button class="mini" data-act="one" data-i="${i}">单发</button> ` +
+        `<button class="mini" data-act="from" data-i="${i}">从此重放</button>` +
+        (this.rowDirty(i) ? ` <button class="mini" data-act="revert" data-i="${i}" title="这一行改回解析出来的原值">改回</button>` : '');
+      return `<tr${cls ? ` class="${cls}"` : ''}>` +
         `<td>${i}</td><td style="color:var(--fg2)">${isAuto ? '补' : (r.line || '')}</td>` +
-        `<td>${byteChip(i, 'cmd', r.cmd)}</td>` +
-        `<td>${params}${isAuto ? ` <span style="color:var(--warn)">← ${r.name}</span>` : ''}</td>` +
+        `<td><input class="bx cmd" data-i="${i}" maxlength="2" spellcheck="false" value="${hx(r.cmd)}" title="命令字节（DCS 命令）—— 直接敲十六进制"></td>` +
+        `<td class="params">${params}${isAuto ? ` <span style="color:var(--warn)">← ${r.name}</span>` : ''}</td>` +
         `<td>${r.delayMs || ''}</td>` +
-        `<td><button class="mini" data-act="one" data-i="${i}">单发</button> ` +
-        `<button class="mini" data-act="from" data-i="${i}">从此重放</button></td></tr>`;
+        `<td class="acts">${acts}</td></tr>`;
     }).join('');
-    if (this.bitpop.isOpen) this.bitpop.render({ keepHex: true });   // 行数据可能刚被改过：弹窗跟着刷新
-    this.bitpop.markChip();
+    this.drawRuler();
+    this.bitpop.reattach();       // 整表重建 → 把弹窗的锚点找回来（找不到就自己关掉）
+    if (this.bitpop.isOpen) this.bitpop.render();
+  }
+
+  /** 表头那行"字节序号标尺"：按当前**最长的那一行**生成（0 1 2 3 …）
+   *  ⚠️ 每个 span 的宽度必须和 `.bx` 格子一致（都 25px、都用空格分隔），否则会越往后越偏。 */
+  drawRuler(){
+    const el = $('pn-code-ruler');
+    if (!el) return;
+    const maxb = (this.effectiveRows || []).reduce((m, r) => Math.max(m, r.data.length), 0);
+    const parts = [];
+    for (let i = 0; i < maxb; i++) parts.push(`<span>${i}</span>`);
+    el.innerHTML = parts.join(' ');
+  }
+
+  /** 只把一行改回原值（表格里手改错了不用整表重解析）*/
+  revertRow(i){
+    const b = (this.baseRows || [])[i];
+    if (!b || !(this.effectiveRows || [])[i]) return;
+    this.effectiveRows[i] = { ...b, data: Uint8Array.from(b.data) };
+    this.renderCodeTable(this.effectiveRows);
+    this.renderSum();
+    this.session.log('i', `第 ${i} 行已改回解析出来的原值（0x${hx(b.cmd)}）`, this.tag);
   }
 
   /** 位开关板改了某个字节（bit-editor.js 的回调）：重绘表格 + 摘要 + 记一条日志 */
@@ -657,7 +732,7 @@ export class SpiPanelView {
       geom: $('pn-geom')?.value || null,
       rows: this.rows.length,
       tableRows: (this.effectiveRows || []).length,      // 表格行数（含自动补的前缀）
-      editedRows: (this.effectiveRows || []).filter(r => r.edited).length,   // 被位开关板改过的行
+      editedRows: this.dirtyCount(),                     // 与原值不同的行（表格里手改或位开关板改的）
       bitpopOpen: this.bitpop.isOpen,
       parseErrors: this.parsed?.errors?.length ?? 0,
       source: this.src ? `${this.src.name} ${this.src.w}×${this.src.h}` : null,
@@ -670,9 +745,9 @@ export class SpiPanelView {
 /** 表格里的字节文本（小写两位十六进制，与老的纯文本渲染一致）*/
 const hx = v => (v & 0xff).toString(16).padStart(2, '0');
 
-/** 一个字节一个按钮：点开就是它的 8 个 bit（`data-i` = 行、`data-k` = 'cmd' 或参数下标）*/
-const byteChip = (i, k, v) =>
-  `<button class="byte" data-i="${i}" data-k="${k}" title="0x${hx(v)} = ${C.bitsText(v)} —— 点开改这 8 个 bit">0x${hx(v)}</button>`;
+/** 一行的指纹（命令 + 延时 + 全部参数）：与解析时的原值快照比 → 脏标记 / 「改回」/「恢复原值」
+ *  🚨 用指纹而不是一个"改过"的 flag：改成原值再改回来，那一行就该自己变干净。 */
+const fingerprint = r => `${r.cmd}|${r.delayMs | 0}|${[...r.data].join(',')}`;
 
 /** "0x2C" / "2c" → 44；空/非法 → fallback（面板档那两个 opcode 用）*/
 function parseHexByteSafe(s, fallback = 0){

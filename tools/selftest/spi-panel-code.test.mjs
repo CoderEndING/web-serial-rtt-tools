@@ -338,13 +338,14 @@ console.log('== D. 字节 ↔ 位（解析表里"点字节改 bit"的纯逻辑�
   const shared = Uint8Array.of(0x00);
   const row = { cmd: 0x36, data: shared, delayMs: 0 };
   C.setRowByte(row, 0, 0x08);
-  ok(row.data[0] === 0x08 && row.edited === true, 'setRowByte 改参数：值变了、标了 edited');
+  ok(row.data[0] === 0x08, 'setRowByte 改参数：值变了');
   ok(shared[0] === 0x00 && row.data !== shared, '原数组没被原地改（换新数组 —— REQUIRED_PREFIX 的 data 是共享常量）');
   C.setRowByte(row, 'cmd', 0x3a);
   ok(row.cmd === 0x3a, 'setRowByte 也能改命令字节');
   const before = row.data;
   C.setRowByte(row, 9, 0x11);
   ok(row.data === before, '参数下标越界 = 不动（不抛错、不悄悄加长）');
+  ok(!('edited' in row), 'setRowByte 不记"改过"标记（脏不脏由 view 与原值快照比对，改回原值就该变干净）');
 
   // 位名：只认有把握的两条
   ok(/MADCTL/.test(C.bitNamesFor(0x36)?.name || '') && String(C.bitNamesFor(0x36).bits[3]).includes('BGR'),

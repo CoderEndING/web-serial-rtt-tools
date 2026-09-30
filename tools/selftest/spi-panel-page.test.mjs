@@ -111,6 +111,12 @@ console.log('== 1b. 布局（用户 2026-09-30 定的口径）：刷图置顶不
   ok(Math.abs(L.tableH - 360) <= 2, `解析表高度 = 360px（原来 120px 下限的 3 倍，实测 ${L.tableH}）`);
   ok(L.over === 'auto' && L.canScroll, `主区自己出纵向滚动条（overflow-y=${L.over}，${L.clientH} → ${L.scrollH}）`);
   ok(L.docOverflow === false, '整页没有横向滚动条');
+  const log = await ev(`
+    const card = document.getElementById('pn-log-card');
+    return { folded: card.classList.contains('folded'), btn: card.querySelector('.foldbtn').textContent,
+             h: Math.round(card.getBoundingClientRect().height), logH: Math.round(document.getElementById('pn-log').getBoundingClientRect().height) };`);
+  ok(log.folded === false && log.logH > 100 && log.btn === '收起',
+     `日志**默认展开**（用户 2026-09-30）：卡片 ${log.h}px / 日志区 ${log.logH}px，按钮写着「${log.btn}」`);
 }
 
 // ==================================================================== 2
@@ -246,74 +252,95 @@ console.log('== 5. 面板初始化：内置示例 + 解析 + 表格 ==');
 }
 
 // ==================================================================== 5b
-console.log('== 5b. 字节 → 位 开关板：点字节改 bit（改完即生效，文本框不动）==');
+console.log('== 5b. 字节编辑（照 bmp_sender.html）：每格一个字节可直接敲 + 点开位开关板 ==');
 {
   const opened = await ev(`
     // 用内置 AXS15352 示例（第 0 行是自动补的 MADCTL 0x36 = 0x00，正是要试色序的那个字节）
     document.getElementById('pn-code-preset').value = 'axs15352';
     document.getElementById('pn-code-load').click();
     await new Promise(r => setTimeout(r, 300));
-    const chip = document.querySelector('#pn-code-body tr:nth-child(1) td:nth-child(4) button.byte');
-    chip.click();
+    const cell = document.querySelector('#pn-code-body tr:nth-child(1) td.params input.bx');
+    cell.click();
     await new Promise(r => setTimeout(r, 80));
     const pop = document.getElementById('pn-bitpop');
-    return { hidden: pop.hidden,
-             bits: pop.querySelectorAll('#pn-bitpop-bits input[type=checkbox]').length,
-             checked: [...pop.querySelectorAll('#pn-bitpop-bits input[type=checkbox]')].filter(c => c.checked).length,
+    const bits = [...pop.querySelectorAll('#pn-bitpop-bits button.bit')];
+    return { hidden: pop.hidden, bits: bits.length,
+             onBits: bits.filter(b => b.classList.contains('on')).length,
+             chgBits: bits.filter(b => b.classList.contains('chg')).length,
+             firstBit: bits[0]?.textContent.replace(/\\s+/g, ' ').trim(),
              title: document.getElementById('pn-bitpop-title').textContent,
-             hex: document.getElementById('pn-bitpop-hex').value,
-             bin: document.getElementById('pn-bitpop-bin').textContent,
-             note: document.getElementById('pn-bitpop-note').textContent,
-             open: document.querySelectorAll('#pn-code-body button.byte.open').length,
+             val: document.getElementById('pn-bitpop-val').textContent,
+             hint: document.getElementById('pn-bitpop-hint').textContent,
+             acts: [...pop.querySelectorAll('button[data-bit]')].map(b => b.dataset.bit),
+             ruler: document.getElementById('pn-code-ruler').textContent.trim(),
+             cellCount: document.querySelectorAll('#pn-code-body tr:nth-child(1) td.params input.bx').length,
              text: document.getElementById('pn-code-text').value };`);
-  ok(opened.hidden === false && opened.bits === 8, `点参数字节弹出 8 个 bit（bit 数 ${opened.bits}）`);
-  ok(/MADCTL/.test(opened.title) || /#0/.test(opened.title), `标题带行号与字节值：「${opened.title}」`);
-  ok(opened.checked === 0 && opened.hex === '0x00' && opened.bin === '0000 0000', `当前值 = 0x00（二进制「${opened.bin}」）`);
-  ok(/BGR/.test(opened.note), `已知命令给位名（MADCTL 提到 BGR）：${opened.note.slice(0, 46)}…`);
-  ok(opened.open === 1, '被点的那个字节高亮着（知道自己在改哪个）');
+  ok(opened.hidden === false && opened.bits === 8, `点参数字节弹出 8 个 bit 方块（bit 数 ${opened.bits}）`);
+  ok(opened.onBits === 0 && opened.chgBits === 0 && /0x00 = 0 = 0b00000000/.test(opened.val),
+     `当前值 0x00 一位都没亮（「${opened.val}」）`);
+  ok(/bit7/.test(opened.firstBit) && /128/.test(opened.firstBit), `方块是"bit号 + 0/1 + 权重"三行：${opened.firstBit}`);
+  ok(/第 0 条（0x36）· 第 0 字节/.test(opened.title), `标题带行号与字节号：「${opened.title}」`);
+  ok(/MADCTL/.test(opened.hint) && /BGR/.test(opened.hint), `已知命令给位名（MADCTL/BGR）：${opened.hint.slice(0, 40)}…`);
+  ok(opened.acts.join(',') === 'zero,ones,inv,orig,close', `一排快捷键齐了（${opened.acts.join('/')}）`);
+  ok(/^0 1 2 3/.test(opened.ruler), `表头有字节序号标尺：「${opened.ruler.slice(0, 24)}…」`);
+  ok(opened.cellCount >= 1, `参数字节每格一个输入框（第 0 行 ${opened.cellCount} 格）`);
 
   const toggled = await ev(`
     const pop = document.getElementById('pn-bitpop');
-    const b3 = pop.querySelector('#pn-bitpop-bits input[data-bit="3"]');
-    b3.click();                                     // 勾 bit3 = MADCTL 的 BGR 位
+    pop.querySelector('#pn-bitpop-bits button.bit[data-k="3"]').click();      // bit3 = MADCTL 的 BGR 位
     await new Promise(r => setTimeout(r, 80));
-    const chip = document.querySelector('#pn-code-body tr:nth-child(1) td:nth-child(4) button.byte');
+    const cell = document.querySelector('#pn-code-body tr:nth-child(1) td.params input.bx');
     const row = window.__tools.panel.effectiveRows[0];
-    return { hex: document.getElementById('pn-bitpop-hex').value,
-             bin: document.getElementById('pn-bitpop-bin').textContent,
-             cell: chip.textContent, edited: document.querySelectorAll('#pn-code-body tr.edited').length,
-             data: Array.from(row.data), cmd: row.cmd,
+    return { val: document.getElementById('pn-bitpop-val').textContent,
+             onBits: [...pop.querySelectorAll('#pn-bitpop-bits button.bit')].filter(b => b.classList.contains('on')).length,
+             chgBits: [...pop.querySelectorAll('#pn-bitpop-bits button.bit')].filter(b => b.classList.contains('chg')).length,
+             cell: cell.value, dirty: document.querySelectorAll('#pn-code-body tr.dirty').length,
+             data: Array.from(row.data),
              sum: document.getElementById('pn-code-sum').textContent,
              text: document.getElementById('pn-code-text').value };`);
-  ok(toggled.hex === '0x08' && toggled.bin === '0000 1000', `勾 bit3 → 字节变 0x08（${toggled.bin}）`);
-  ok(toggled.data[0] === 0x08 && toggled.cell === '0x08', `表格单元格与行数据都改了（cells=${toggled.cell} data=${toggled.data}）`);
-  ok(toggled.edited === 1 && /已改 1 行/.test(toggled.sum), `行标记 + 摘要说明「${toggled.sum.slice(0, 60)}…」`);
+  ok(/0x08 = 8 = 0b00001000/.test(toggled.val) && /原 0x00/.test(toggled.val), `勾 bit3 → 0x08 并标出原值（${toggled.val}）`);
+  ok(toggled.onBits === 1 && toggled.chgBits === 1, '只有 bit3 亮，且它被标成"和原值不同"（黄框）');
+  ok(toggled.data[0] === 0x08 && toggled.cell === '08', `表格格子与行数据同步（cell=${toggled.cell} data=${toggled.data}）`);
+  ok(toggled.dirty === 1 && /已改 1 行/.test(toggled.sum), `行变脏 + 摘要说明「${toggled.sum.slice(0, 60)}…」`);
   ok(toggled.text === opened.text && opened.text.length > 500,
      `上面的文本框一个字符都没动（${opened.text.length} 字符逐字节相同 —— 原文是用户的资产）`);
 
-  const others = await ev(`
-    const pop = document.getElementById('pn-bitpop');
-    // HEX 直接敲 + 一键取反/清 0
-    const hex = document.getElementById('pn-bitpop-hex');
-    hex.value = '0x55'; hex.dispatchEvent(new Event('input'));
+  const typed = await ev(`
+    // 表格里**直接敲十六进制**（与点 bit 走同一条路） + 一键快捷键 + 「改回」
+    const cell = document.querySelector('#pn-code-body tr:nth-child(1) td.params input.bx');
+    cell.value = '5a'; cell.dispatchEvent(new Event('change', { bubbles: true }));   // 真浏览器里 change 会冒泡
     await new Promise(r => setTimeout(r, 60));
-    const afterHex = Array.from(window.__tools.panel.effectiveRows[0].data);
-    document.getElementById('pn-bitpop-inv').click();
+    const afterType = { data: Array.from(window.__tools.panel.effectiveRows[0].data), val: document.getElementById('pn-bitpop-val').textContent };
+    document.getElementById('pn-bitpop').querySelector('button[data-bit="inv"]').click();      // 逐位取反
     await new Promise(r => setTimeout(r, 60));
     const afterInv = Array.from(window.__tools.panel.effectiveRows[0].data);
-    document.getElementById('pn-bitpop-zero').click();
+    document.getElementById('pn-bitpop').querySelector('button[data-bit="orig"]').click();     // 恢复原值
     await new Promise(r => setTimeout(r, 60));
-    const afterZero = Array.from(window.__tools.panel.effectiveRows[0].data);
-    // 再点同一个字节 = 收起来
-    document.querySelector('#pn-code-body tr:nth-child(1) td:nth-child(4) button.byte').click();
+    const afterOrig = { data: Array.from(window.__tools.panel.effectiveRows[0].data),
+                        dirty: document.querySelectorAll('#pn-code-body tr.dirty').length,
+                        sum: document.getElementById('pn-code-sum').textContent };
+    // 再改一次，然后点行尾「改回」
+    document.getElementById('pn-bitpop').querySelector('button[data-bit="ones"]').click();
     await new Promise(r => setTimeout(r, 60));
-    return { afterHex, afterInv, afterZero, hidden: pop.hidden, open: document.querySelectorAll('#pn-code-body button.byte.open').length };`);
-  ok(others.afterHex[0] === 0x55, `HEX 输入直接改字节（0x${others.afterHex[0].toString(16)}）`);
-  ok(others.afterInv[0] === 0xaa, `取反 = 0xAA（0x${others.afterInv[0].toString(16)}）`);
-  ok(others.afterZero[0] === 0x00 && others.hidden === true && others.open === 0,
-     '清 0 后关掉开关板（再点同一个字节就收起来）');
+    const dirtyBefore = document.querySelectorAll('#pn-code-body tr.dirty').length;
+    document.querySelector('#pn-code-body button[data-act="revert"]').click();
+    await new Promise(r => setTimeout(r, 80));
+    const afterRevert = { data: Array.from(window.__tools.panel.effectiveRows[0].data),
+                          dirty: document.querySelectorAll('#pn-code-body tr.dirty').length,
+                          cell: document.querySelector('#pn-code-body tr:nth-child(1) td.params input.bx').value,
+                          sum: document.getElementById('pn-code-sum').textContent };
+    document.getElementById('pn-bitpop').querySelector('button[data-bit="close"]').click();
+    await new Promise(r => setTimeout(r, 60));
+    return { afterType, afterInv, afterOrig, dirtyBefore, afterRevert, hidden: document.getElementById('pn-bitpop').hidden };`);
+  ok(typed.afterType.data[0] === 0x5a && /0x5A/.test(typed.afterType.val), '直接在格子里敲十六进制就改了字节（位开关板同步）');
+  ok(typed.afterInv[0] === 0xa5, `逐位取反 = 0xA5（0x${typed.afterInv[0].toString(16)}）`);
+  ok(typed.afterOrig.data[0] === 0x00 && typed.afterOrig.dirty === 0 && !/已改/.test(typed.afterOrig.sum),
+     '「恢复原值」把这一字节改回 0x00，行也自己变干净了（脏标记是跟原值比对，不是粘住的 flag）');
+  ok(typed.dirtyBefore === 1 && typed.afterRevert.data[0] === 0x00 && typed.afterRevert.dirty === 0 &&
+     typed.afterRevert.cell === '00', `行尾「改回」还原整行（格子回到 ${typed.afterRevert.cell}）`);
+  ok(typed.hidden === true, '「完成」把位开关板收起来');
 
-  // 改过的值必须进到"重放"要发的那一串 STEP 里（用假探针看线上字节：档 1 = DC0 36 DC1 08）
+  // 改过的值必须进到"重放"要发的那一串 STEP 里（用假探针看线上字节：档 1 = 命令 + 参数）
   const replay = await ev(`
     document.getElementById('pn-preset').value = 'axs15352';
     document.getElementById('pn-preset-apply').click();
@@ -321,12 +348,12 @@ console.log('== 5b. 字节 → 位 开关板：点字节改 bit（改完即生�
     document.getElementById('pn-enable').click();
     await new Promise(r => setTimeout(r, 400));
     const s = window.__tools.spiSession, p = s.mockProbe;
-    const chip = document.querySelector('#pn-code-body tr:nth-child(1) td:nth-child(4) button.byte');
-    chip.click();
+    const cell = document.querySelector('#pn-code-body tr:nth-child(1) td.params input.bx');
+    cell.click();
     await new Promise(r => setTimeout(r, 60));
-    document.getElementById('pn-bitpop-bits').querySelector('input[data-bit="3"]').click();   // MADCTL → 0x08
+    document.getElementById('pn-bitpop-bits').querySelector('button.bit[data-k="3"]').click();   // MADCTL → 0x08
     await new Promise(r => setTimeout(r, 60));
-    document.getElementById('pn-bitpop-close').click();
+    document.getElementById('pn-bitpop').querySelector('button[data-bit="close"]').click();
     p.resetState();
     document.getElementById('pn-code-play').click();
     for (let i = 0; i < 200 && s.busy; i++) await new Promise(r => setTimeout(r, 100));
@@ -391,11 +418,15 @@ console.log('== 6. 重放：整表下发 + 单发（假探针逐帧对账）==')
   ok(one.wire[0] === '02 f2 00 00 28', `档 2 展开正确：0x02 + 命令字 0xF2 + 24bit 地址(0) + 参数 0x28（实测 ${one.wire[0]}）`);
 
   // 前两行必须是自动补的 0x36/0x3A（AXS15352 缺了会全黑）
+  // ⚠️ 值现在在输入框里（不参与 textContent），所以读 input.value 而不是行文本
   const prefix = await ev(`
-    const rows = [...document.querySelectorAll('#pn-code-body tr')].slice(0, 2).map(tr => tr.textContent);
-    return rows;`);
-  ok(/0x36/.test(prefix[0]) && /MADCTL/.test(prefix[0]) && /0x3a/.test(prefix[1]) && /COLMOD/.test(prefix[1]),
-     `表格最前面两行是自动补的 MADCTL/COLMOD：「${prefix[0]?.slice(0, 40)}」/「${prefix[1]?.slice(0, 40)}」`);
+    const rows = [...document.querySelectorAll('#pn-code-body tr')].slice(0, 2);
+    return rows.map(tr => ({ cmd: tr.querySelector('input.bx.cmd').value,
+                             p0: tr.querySelector('td.params input.bx')?.value || '',
+                             txt: tr.textContent.replace(/\\s+/g, ' ').trim() }));`);
+  ok(prefix[0].cmd === '36' && prefix[0].p0 === '00' && /MADCTL/.test(prefix[0].txt) &&
+     prefix[1].cmd === '3a' && prefix[1].p0 === '55' && /COLMOD/.test(prefix[1].txt),
+     `表格最前面两行是自动补的 MADCTL/COLMOD：「0x${prefix[0].cmd} 0x${prefix[0].p0} ${prefix[0].txt.slice(0, 22)}」/「0x${prefix[1].cmd} 0x${prefix[1].p0}」`);
 }
 
 // ==================================================================== 7

@@ -234,6 +234,7 @@ export class RttView {
       this._applyOcdTarget(false);
     };
     applyTarget();
+    this._applyTargetUi = applyTarget;       // onShow 里要对账"别页切过目标类型"（同一个全局开关）
     store.bind($('r-target'), 'rtt.target');
     const onTargetChanged = () => { applyTarget(); if (this.probe || this.bridge) this.disconnect(); };
     $('r-target').addEventListener('change', onTargetChanged);
@@ -729,6 +730,16 @@ export class RttView {
 
   /** 切到本标签时调用（隐藏状态下建的终端在这里补尺寸/重放） */
   onShow(){
+    /**
+     * 目标类型是**全局且粘**的（HID 0x31 action 10），波形页也能切、而且写的是同一个键
+     * （`rtt.target`）。用户很可能在那边刚切过 RISC-V —— 切回来时这一格得跟上，
+     * 否则"同一个开关，两页显示不一样"，看起来就像没生效。真不一致就按新值重摆界面。
+     */
+    const savedTarget = store.get('rtt.target', '');
+    if ((savedTarget === 'riscv' || savedTarget === 'swd') && savedTarget !== $('r-target').value && this._applyTargetUi){
+      $('r-target').value = savedTarget;
+      this._applyTargetUi();
+    }
     if (this.mode !== 'term' || !this.term) return;
     try { this.fit?.fit(); } catch {}
     if (this._termStale){ this._redrawAll(); this._termStale = false; }

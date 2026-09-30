@@ -362,6 +362,9 @@ export const bitNamesFor = cmd => BIT_NAMES[(cmd | 0) & 0xff] || null;
  *
  * 🚨 参数是 `Uint8Array`，**必须换一个新数组**：自动补的那两条前缀（REQUIRED_PREFIX）的
  *    `data` 是模块级共享的，原地改会连常量一起污染 —— "下次解析"就再也回不到出厂值了。
+ *
+ * ⚠️ 这里**不记"改过"的标记**：界面靠"与原值快照的指纹比对"判断脏不脏（`panel-view.js` 的
+ *    `fingerprint()`）—— 改成别的再改回原值，那一行就该自己变干净，一个粘住的 flag 做不到。
  */
 export function setRowByte(row, k, val){
   const v = val & 0xff;
@@ -374,6 +377,5 @@ export function setRowByte(row, k, val){
     next[j] = v;
     row.data = next;
   }
-  row.edited = true;
   return row;
 }

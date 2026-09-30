@@ -13,6 +13,7 @@
  * 满了之后新样本计入 `overrun` 并显示在"丢样本"里 —— 绝不静默丢。
  */
 import { $, setStatus, seg } from '../ui/dom.js';
+import { store } from '../core/store.js';
 import { AkaLinkHid } from '../hid/probe.js';
 import { Elf } from '../elf/elf.js';
 import { listSampleable } from '../elf/dwarf.js';
@@ -66,6 +67,8 @@ export class ScopeView {
     this._capturing = false;    // 本轮采集还开着吗（DATA 分支据此决定入不入缓冲，见 start/stop）
     this.backend = null;        // **生效**后端：swd | riscv（只认探针回报的 DEF flags bit6 / 状态字 0 bit1）
     this.targetRiscv = null;    // 我们**请求**的目标类型（用于发现"请求 ≠ 生效"）
+    this._askedAt = 0;          // 上次"请求切换目标类型"的时刻（见 uiBackend()：请求 vs 生效谁说了算）
+    this._reportedAt = 0;       // 上次"探针回报生效后端"的时刻
   }
 
   // ================================================================= 初始化
@@ -104,6 +107,16 @@ export class ScopeView {
     $('sc-start').addEventListener('click', () => this.start());
     $('sc-stop').addEventListener('click', () => this.stop());
     $('sc-target').addEventListener('change', () => this.applyTargetType());
+    /**
+     * 装载时就把「目标类型」对齐到**全局那个开关**（HID 0x31 action 10，与 RTT Viewer 共用、且是**粘**的）：
+     * 用户在 RTT 页切过 RISC-V、或上一次会话切过，这里却还显示 SWD —— 同一个开关两页显示不一致，
+     * 最容易被当成 bug（"我明明切过了"）。跟随后，`uiBackend()` 立刻按 RISC-V/JTAG 显示（时钟格名字、
+     * 置灰、读计划的分档），不必等采样回报。
+     */
+    const savedTarget = store.get('rtt.target', '');
+    if (savedTarget === 'riscv' || savedTarget === 'swd') $('sc-target').value = savedTarget;
+    this.targetRiscv = $('sc-target').value === 'riscv';
+    store.bind($('sc-target'), 'rtt.target');       // 这一页改 = 改同一个全局开关，落回同一个键
     $('sc-bench').addEventListener('click', () => this.bench());
     $('sc-recc').addEventListener('click', () => this.applyRecPeriod());
     $('sc-clear').addEventListener('click', () => this.clear());
@@ -141,6 +154,7 @@ export class ScopeView {
     this._wireKeys();
     this.renderVars();
     this.updatePlan();
+    this._applyBackendUi();          // 装载就按「目标类型」（可能是上次的 RISC-V/JTAG）摆好时钟格与建议
     this.syncButtons();
     this._loop();
   }
@@ -227,6 +241,17 @@ export class ScopeView {
 
   onShow(){
     requestAnimationFrame(() => { this._needDraw = true; });
+    /**
+     * 每次切到本页都对一次**全局目标类型**（`rtt.target`，与 RTT Viewer 共用同一个键）：
+     * 用户很可能在 RTT 页刚切过 RISC-V —— 那边一改，这边得跟着（否则"同一个开关两页显示不一样"，
+     * 用户只会以为切换没生效）。真不一致就按新值刷新界面（时钟格名字/置灰/读计划）。
+     */
+    const saved = store.get('rtt.target', '');
+    if ((saved === 'riscv' || saved === 'swd') && saved !== $('sc-target').value){
+      $('sc-target').value = saved;
+      this.targetRiscv = saved === 'riscv';
+      this._applyBackendUi();
+    }
   }
 
   /** 键盘：Esc 清测量游标、Home/End 跳首尾（只在探针页可见、焦点不在输入框时生效）*/
@@ -500,7 +525,9 @@ export class ScopeView {
      */
     const useFast = plan.fastPath;
     const headlineUs = plan.bestUs, headlineHz = plan.bestHz;
-    const riscv = this.backend === P.BACKEND.RISCV;
+    // 「按哪条路显示」= uiBackend()：生效后端优先，还没采样就按你刚选的目标类型 ——
+    // 否则"切到 RISC-V/JTAG"这一步在读计划那行上看不出任何变化（用户 2026-09-30 现场）。
+    const riscv = this.uiBackend() === P.BACKEND.RISCV;
     /**
      * 周期比"读一次"还短 ⇒ 探针必然跳拍，时间轴上会留空洞（主机看到的是洞，不是被压缩）。
      * 用户实测就是踩在这里：周期填 5 µs 想要 200 kHz，实得 112.9 kHz，
@@ -771,6 +798,10 @@ export class ScopeView {
     const sel = $('sc-target');
     const riscv = sel.value === 'riscv';
     this.targetRiscv = riscv;
+    this._askedAt = (globalThis.performance?.now?.() ?? Date.now());   // 见 uiBackend()：请求与生效的先后关系
+    // 🚨 **先刷界面再谈连接**：这一格的意思就是"我要走哪条路"，与探针在不在线无关。
+    //    老写法把刷新放在 hidXfer 之后，于是"没连探针时切下拉 → 界面一动不动"（用户实测踩到）。
+    this._applyBackendUi();
     if (!this.hid){ this.setStatusText(`已记为「${P.backendName(riscv ? P.BACKEND.RISCV : P.BACKEND.SWD)}」，但探针没连上——连上后再切一次`, 'warn'); return; }
     if (this.running){ this.setStatusText('采样中不能切目标类型：先停采样', 'warn'); }
     try {
@@ -799,6 +830,7 @@ export class ScopeView {
     if (!b || this.backend === b) return;
     const first = this.backend === null;
     this.backend = b;
+    this._reportedAt = (globalThis.performance?.now?.() ?? Date.now());   // 生效值的时间戳（uiBackend 用它判先后）
     this._applyBackendUi();
     if (!first){
       this.setStatusText(`⚠ 后端变成了 ${P.backendName(b)}（${source || '探针回报'}）—— `
@@ -806,16 +838,18 @@ export class ScopeView {
     }
   }
 
-  /** 后端相关的界面联动：显示、SWD 专属控件置灰、速率/建议周期提示 */
+  /** 后端相关的界面联动：显示、SWD 专属控件置灰、速率/建议周期提示。
+   *  `uiBackend()` = 生效后端优先、还没回报就按你选的目标类型（见那个函数的注释）。 */
   _applyBackendUi(){
-    const riscv = this.backend === P.BACKEND.RISCV;
+    const cur = this.uiBackend();
+    const riscv = cur === P.BACKEND.RISCV;
     const el = $('sc-backend');
     if (el){
       const asked = this.targetRiscv == null ? null : (this.targetRiscv ? P.BACKEND.RISCV : P.BACKEND.SWD);
       const mismatch = asked && this.backend && asked !== this.backend;
       el.textContent = this.backend
         ? `生效后端：${P.backendName(this.backend)}` + (mismatch ? `　⚠ 你选的是 ${P.backendName(asked)}，探针换了一条路` : '')
-        : '生效后端：未开始（采样后由探针回报）';
+        : (asked ? `生效后端：未开始（你选的是 ${P.backendName(asked)}，采样后由探针回报）` : '生效后端：未开始（采样后由探针回报）');
       el.className = 'hint' + (mismatch ? ' err' : '');
     }
     // SWD 专属：SWD 时钟档在 JTAG 下无效（探针忽略），置灰并说明；采样时暂停串口桥那个 checkbox 仍有效
@@ -832,12 +866,10 @@ export class ScopeView {
      * 那一格的**名字**要跟着目标类型改（用户 2026-09-30）：同一个档位在 SWD 下是 SWD 时钟，
      * 在 RISC-V/JTAG 下是 **JTAG 时钟（TCK）** —— 名字不改的话，切到 JTAG 后用户会以为
      * "还有个 SWD 时钟在起作用"（探针其实会忽略它）。
-     * 跟**请求的目标类型**走（`sc-target` 一选就变），生效后端不一致时上面那行「生效后端」会报警；
-     * 与 RTT Viewer 页同一套口径（那边叫 JTAG TCK）。
+     * 跟 `uiBackend()` 走：一选 RISC-V/JTAG 立刻改名，不等采样回报；与 RTT Viewer 页同一套口径。
      */
-    const wantRiscv = this.targetRiscv == null ? riscv : this.targetRiscv;
     const clkLbl = clkRow?.querySelector('span');
-    if (clkLbl) clkLbl.textContent = wantRiscv ? 'JTAG 时钟' : 'SWD 时钟';
+    if (clkLbl) clkLbl.textContent = riscv ? 'JTAG 时钟' : 'SWD 时钟';
     this._applyMhzUi();                     // 🚨 立刻改这一格，别等下一次统计刷新（否则会短暂显示旧的 "SWD xx MHz"）
     this.updatePlan();                      // 计划行的速率/建议周期按后端分档
   }
@@ -847,7 +879,7 @@ export class ScopeView {
   _applyMhzUi(){
     const el = $('sc-mhz');
     if (!el) return;
-    el.textContent = this.backend === P.BACKEND.RISCV
+    el.textContent = this.uiBackend() === P.BACKEND.RISCV
       ? 'RISC-V/JTAG'
       : (this.swdMhz ? `SWD ${this.swdMhz} MHz` : 'SWD —');
   }
@@ -880,16 +912,33 @@ export class ScopeView {
   }
 
   /**
+   * **界面按哪条路显示**（时钟格名字/置灰、读计划、建议周期都用它）：
+   *   · 用户刚改过目标类型、探针**还没回报新的生效值** → 按**你选的**那条路显示；
+   *   · 探针回报过（DEF 的 flags bit6 / 状态字 0 的 bit1）且回报发生在这次请求之后 → 按**生效值**。
+   *
+   * 两条都踩过坑，所以规则必须是这样（用户 2026-09-30 现场："我切换了，没有变化"）：
+   *   1. 老写法一律等生效值 —— 刚打开页面切到 RISC-V/JTAG 时屏幕上**什么都不动**（要等采样才知道），
+   *      用户只会以为切换没生效；
+   *   2. 一律按请求值也不行 —— 命令行/别处把探针切成 RISC-V 后打开本页（请求还是默认的 SWD），
+   *      页面会用 SWD 的 1.5 µs 去建议周期，而实际在走 JTAG（3.17 µs），那是会丢样本的错误建议。
+   * 「生效后端」那一行仍**只报探针的值**，请求 ≠ 生效时红字提醒（探针拉不起来会自己换一条路）。
+   */
+  uiBackend(){
+    if (this._reportedAt && this._reportedAt >= (this._askedAt || 0)) return this.backend;
+    return this.targetRiscv == null ? this.backend : (this.targetRiscv ? P.BACKEND.RISCV : P.BACKEND.SWD);
+  }
+
+  /**
    * 单字流水读路径的成本（µs）。
    *   · SWD：随时钟档走。真机两点实测 60 MHz → 1.533 µs、45 MHz → 1.758 µs，
    *     按 `a + b/f` 拟合（a = 0.86 µs 固定开销、b = 40.5 µs·MHz ≈ 一次 AP 读 + 收尾的时钟数）；
    *     没显式选档（"自动"）就用最近一次探针回报的实际 MHz，再退到 60 MHz 档。
-   *   · RISC-V/JTAG：单字流水读实测 **2.937 µs**（HPM6800EVK），与 SWD 时钟档无关
-   *     （JTAG 时序由 DMI 汇编旋钮定），所以直接用常数 —— 拿 SWD 的 1.5 µs 去建议周期
-   *     会让用户看到大面积丢拍（handoff 文档第 2 条明确提过）。
+   *   · RISC-V/JTAG：单字流水读实测 **3.17 µs**（HPM6800EVK，2026-09-30 P1-1 修完的复测值），
+   *     与 SWD 时钟档无关（JTAG 时序由 DMI 汇编旋钮定），所以直接用常数 —— 拿 SWD 的 1.5 µs
+   *     去建议周期会让用户看到大面积丢拍（handoff 文档第 2 条明确提过）。
    */
   fastWordUs(){
-    if (this.backend === P.BACKEND.RISCV) return P.BACKEND_COST.riscv.single;
+    if (this.uiBackend() === P.BACKEND.RISCV) return P.BACKEND_COST.riscv.single;
     const sel = Number($('sc-clock').value) || 0;
     const mhz = sel > 0 ? sel / 1000 : (this.swdMhz || 60);
     return mhz > 0 ? +(0.858 + 40.5 / mhz).toFixed(3) : 1.55;
@@ -922,7 +971,7 @@ export class ScopeView {
       const vars = (this.selected.length ? this.selected : (this.usingMock ? this.mockVars() : []));
       if (!vars.length){ this.setStatusText('先选变量再标定（标定用的是当前计划）', 'warn'); return; }
       const clockKhz = Number($('sc-clock').value) || 0;
-      const riscv = this.backend === P.BACKEND.RISCV;
+      const riscv = this.uiBackend() === P.BACKEND.RISCV;      // 选中的是 JTAG 就别发 SWD 时钟档（探针会忽略）
       const flags = (clockKhz >= 60000 ? P.SCOPE_FLAG.ALLOW_60M : 0)
         | ($('sc-cdcoff')?.checked ? P.SCOPE_FLAG.CDC_OFF : 0)
         | (this.targetRiscv ? P.SCOPE_FLAG.RISCV : 0);

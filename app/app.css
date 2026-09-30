@@ -372,38 +372,56 @@ fieldset.folded{padding-bottom:6px}
 fieldset.folded > legend{color:var(--acc)}
 fieldset.folded > legend::after{content:' · 已折叠';color:var(--fg2);font-size:11px}
 .foldbtn{margin-left:8px;padding:0 6px;font-size:11px}
-#pn-code-body td:nth-child(4){word-break:break-all;white-space:normal;max-width:560px}
 #pn-code-sum.ok{color:var(--ok)} #pn-code-sum.warn{color:var(--warn)} #pn-code-sum.err{color:var(--err)}
-/* 解析表里的字节：**每个字节一个按钮**（点开就是这个字节的 8 个 bit）。
-   等宽 + 紧凑（看着仍像数据），但鼠标上去要亮 —— 不亮就没人知道它能点。 */
-#pn-code-body button.byte{
-  font-family:var(--mono);font-size:11.5px;line-height:1.25;padding:0 4px;margin:0 3px 0 0;
-  background:var(--bg3);border:1px solid var(--line);border-radius:5px;color:var(--fg);
+/* ---- 解析表：每个参数字节一个**可编辑的十六进制格子**（做法照 tools/bmp_sender.html）----
+   直接敲就能改；点一下开「位开关板」逐位改。格子宽度固定 25px —— 表头那行"字节标尺"
+   靠它对齐（等宽字体里空格宽度也一致，尺子和格子才天然对齐；改宽度必须两边一起改）。 */
+#pn-code-body input.bx{
+  width:25px;padding:0 2px;height:19px;text-align:center;
+  font-family:var(--mono);font-size:11.5px;background:var(--bg3);
+  border:1px solid var(--line);border-radius:4px;color:var(--fg);
 }
-#pn-code-body button.byte:hover{border-color:var(--acc);color:#fff;background:var(--bg4)}
-#pn-code-body button.byte.open{border-color:var(--acc);box-shadow:inset 0 0 0 1px var(--acc)}
-/* 自动补的两行前缀用虚线边框：一眼区分"你贴的"与"页面补的"（它们同样可点、可改） */
-#pn-code-body tr.auto button.byte{border-style:dashed}
-/* 改过的行留个记号：改的是**这份步骤表**（重放/导出用它），上面的文本框不动 */
-#pn-code-body tr.edited td:nth-child(1)::after{content:' ·改';color:var(--warn)}
-#pn-code-body tr.edited button.byte{border-color:var(--warn)}
+#pn-code-body input.bx:hover{border-color:var(--acc)}
+#pn-code-body input.bx:focus{outline:1px solid var(--acc);border-color:var(--acc)}
+#pn-code-body input.bx.cmd{color:#9fd0ff;font-weight:600}
+#pn-code-body input.bx.bad{border-color:var(--err);background:#3a1a1a}
+/* 改过的行：底色 + 格子变色（一眼看出哪几行不是原表；行尾会给「改回」） */
+#pn-code-body tr.dirty td{background:#ffb02010}
+#pn-code-body tr.dirty input.bx{background:#3a2f12;border-color:#8f6c18;color:#ffd479}
+/* 字节标尺（在"参数"表头格里）：字号/间距必须和格子一致，否则越往后越偏 */
+#pn-code-tab .ruler{margin-top:3px;color:#6b7385;font-weight:400;letter-spacing:normal;white-space:nowrap}
+#pn-code-tab .ruler span{display:inline-block;width:25px;text-align:center}
+/* 参数列不许折行：折了标尺就对不上（窄窗口让表格自己横向滚，与参考页一致） */
+#pn-code-tab td.params,#pn-code-tab td.acts{white-space:nowrap}
+#pn-code-tab td{vertical-align:middle}
 
-/* 位开关板（.bitpop）：跟着被点的字节走。position:fixed —— 放主区里会被 overflow 裁掉 */
+/* 位开关板（.bitpop）：照 tools/bmp_sender.html —— 8 个大方块（bit 号 / 0|1 / 权重）
+   + 和原值不同的位套黄框 + 一排快捷键。
+   position:fixed：表格在 overflow:auto 的容器里，absolute 会被裁掉；滚动时由 JS 重新定位。 */
 .bitpop{
-  position:fixed;z-index:60;width:268px;padding:7px 10px 9px;background:var(--bg2);
-  border:1px solid var(--acc);border-radius:9px;box-shadow:0 14px 36px #000a;
+  position:fixed;z-index:60;background:var(--bg2);border:1px solid var(--acc);
+  border-radius:10px;padding:10px 12px;box-shadow:0 12px 34px #000b;
 }
 .bitpop[hidden]{display:none}
-.bp-head{display:flex;align-items:center;gap:6px;font-family:var(--mono);font-size:12px}
-.bp-head b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.bp-grid{display:grid;grid-template-columns:1fr 1fr;gap:2px 8px;margin-top:6px}
-.bp-grid label{display:flex;align-items:center;gap:4px;font-family:var(--mono);font-size:11.5px;cursor:pointer}
-.bp-grid label .w{color:var(--fg2);min-width:26px;text-align:right}
-.bp-grid label .nm{color:var(--fg2);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.bp-grid label.on .nm{color:var(--acc)}
-.bp-foot{display:flex;align-items:center;gap:6px;margin-top:7px;font-size:11.5px;color:var(--fg2)}
-.bp-foot .num{width:58px;font-family:var(--mono)}
-#pn-bitpop-bin{font-family:var(--mono);letter-spacing:.6px}
+.bitpop .bp-head{display:flex;align-items:baseline;gap:4px}
+.bitpop .btitle{font-weight:600;font-size:12.5px;margin-right:10px}
+.bitpop .bval{font-family:var(--mono);font-size:12.5px;color:var(--fg2)}
+.bitpop .bits{display:flex;gap:6px;margin-top:9px}
+.bitpop .bit{
+  display:flex;flex-direction:column;align-items:center;gap:0;width:47px;padding:5px 0 4px;
+  border:1px solid var(--line);background:#12141a;border-radius:7px;cursor:pointer;transition:.1s;
+}
+.bitpop .bit:hover{border-color:var(--acc)}
+.bitpop .bit .bk{font-size:10px;color:var(--fg2);line-height:1.2}
+.bitpop .bit .bv{font-family:var(--mono);font-size:16px;font-weight:700;line-height:1.25;color:#6b7385}
+.bitpop .bit .bw{font-size:10px;color:#5c6373;line-height:1.2}
+.bitpop .bit .bn{font-size:9.5px;color:var(--fg2);line-height:1.2;max-width:44px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.bitpop .bit.on{background:#12365c;border-color:var(--acc)}
+.bitpop .bit.on .bv{color:#9fd0ff}
+.bitpop .bit.chg{outline:2px solid var(--warn);outline-offset:-2px}
+.bitpop .bit.chg .bw{color:var(--warn)}
+.bitpop .bp-acts{display:flex;gap:6px;margin-top:9px;flex-wrap:wrap}
+.bitpop .hint{margin:7px 0 0;max-width:440px}
 .drop{
   border:2px dashed var(--line);border-radius:9px;padding:9px;text-align:center;
   color:var(--fg2);cursor:pointer;font-size:12.5px;margin:5px 0;transition:.15s;

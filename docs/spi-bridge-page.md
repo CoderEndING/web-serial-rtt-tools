@@ -733,19 +733,39 @@ await send('Emulation.clearDeviceMetricsOverride');   // 脚本收尾**必须**�
 | ① 顺序 + 去收起 | `index.html` 里把 `#pn-img-card` 挪到 `#pn-code-card` 前面，legend 里不再有 `.foldbtn`；`.main>fieldset{flex:0 0 auto}`（按自然高度排，不再三块弹性挤压） | `spi-panel-page.test.mjs` §1b |
 | ③ 表 360px | `#pn-code-wrap{height:360px}`（原来只有 120px 下限）；表自己滚（`.scroll`），卡片跟在后面 | §1b（量到 360±2） |
 | ④ 右列滚动 | `#tab-panel .main{overflow-y:auto;overflow-x:hidden}` —— 侧栏本来就有自己的滚动条，两条互不干扰 | §1b（`scrollHeight > clientHeight` 且整页无横向溢出） |
-| ③ byte → bit | 表里**每个字节都是按钮**（`button.byte[data-i][data-k]`），点开浮板 `#pn-bitpop`：8 个 bit 各一个勾选框（带位权，已知命令还带位名）、HEX 直填、`0 / FF / ~` 三个快捷键；勾一下就 `setRowByte()` 写回那一行并重绘单元格 | §5b（21 项：弹出/位名/勾 bit3→0x08/摘要"已改 N 行"/线上真发 36 08/重新解析回滚） |
+| 日志默认展开 | `#pn-log-card` 不再带 `folded`（刷屏/重放完第一眼就要看它有没有报错），按钮写「收起」 | §1b（`logH > 100`） |
+| ③ 字节编辑 | **每格一个参数字节**（`input.bx`，直接敲十六进制）+ 表头**字节序号标尺**；点格子开位开关板 | §5b（21 项） |
 | 纯函数 | `app/spi/panel-code.js` 新增 `byteBits/bitsByte/toggleBit/bitsText/bitWeight/BIT_NAMES/setRowByte` | `spi-panel-code.test.mjs` §D |
-| UI 控制器 | `app/spi/bit-editor.js` 的 `BitPopover`（`position:fixed`，主区滚动裁不到它；Esc/点别处/再点同一字节都能关） | §5b |
+| UI 控制器 | `app/spi/bit-editor.js` 的 `BitPopover`（`position:fixed`，滚动时自己跟；Esc/点别处/「完成」都能关） | §5b |
+
+### 字节编辑：**照 `tools/bmp_sender.html` 重做**（用户 2026-09-30："这样不好用，参考那个网页"）
+
+第一版是"每个字节一个小胶囊按钮，点开弹 8 个小勾选框" —— 能用，但改一个值要点三次、位名挤在
+两列网格里看不清。参考页（`E:\esp-idf-s31\projects\spi_lcd_bmp\tools\bmp_sender.html`）的做法明显更顺手，
+现在整套照它来：
+
+| | 参考页怎么做 | 本页落地 |
+|---|---|---|
+| 表格单元格 | 每格一个 `<input class="bx">`，**直接敲十六进制**（值就在格子里） | 同款：`#pn-code-body input.bx`，命令字节是 `input.bx.cmd`（只编辑），参数字节点一下开位开关板 |
+| 表头 | 数据列带**字节序号标尺**（0 1 2 3…，跟最长那行生成） | `#pn-code-ruler`，`span` 宽 25px 与格子同宽、同字体（等宽），所以能对齐 |
+| 位开关板 | **8 个大方块横排**：上 `bit7`、中大字 `0/1`、下 `权重`；点一下翻转 | 同款 `.bitpop .bit`（47px 宽，`on` 高亮、`chg` 黄框标"和原值不同"） |
+| 快捷键 | 清零 `00` / 全置 1 `FF` / 逐位取反 / **恢复原值** / 完成 | 同款五个按钮（`data-bit="zero|ones|inv|orig|close"`） |
+| 脏标记 | 行指纹与原表比：`tr.dirty` + 输入框变色 + 行尾「改回」 | 同款（`fingerprint(row)` 与解析时的 `baseRows` 比；行尾多一个「改回」） |
+| 定位 | `position:fixed` + `scroll/resize` 时 `lcdBitPos()` 重新定位 | 同款（`reattach()` 在整表重绘后把锚点找回来） |
 
 三条**语义约定**（用户会踩，所以写进注释与自测）：
 1. **改的是"这份步骤表"，不回写文本框** —— 重放/导出用改后的值，上面贴的原文一个字都不动
-   （原文是用户的资产，页面不偷偷改它）；想丢弃改动就再点一次「解析并预览」（按原文重建）；
-2. 自动补的 MADCTL/COLMOD 两行**同样可点可改**（它们本来就是要发出去的字节），行首用虚线边框区分；
+   （原文是用户的资产，页面不偷偷改它）；想丢弃改动就点「解析并预览」（按原文重建）或行尾「改回」（只还原那一行）；
+2. 自动补的 MADCTL/COLMOD 两行**同样可编辑**（它们本来就是要发出去的字节）；
 3. `setRowByte` **必须换一个新的 `Uint8Array`**：`REQUIRED_PREFIX` 的 `data` 是模块级共享常量，
-   原地改会把"出厂值"一起污染（自测里专门钉了这条）。
+   原地改会把"出厂值"一起污染（自测里专门钉了这条）。脏不脏**用指纹比**，不记粘住的 flag ——
+   改成别的再改回原值，那一行就该自己变干净。
 
-> 位名只给**有把握**的两条命令（0x36 MADCTL / 0x3A COLMOD，MIPI DCS 常见排法，界面里也写明了
-> "常见排法"）；其余命令只显示 bit7…bit0 与位权 —— 猜错位名比不标更糟。
+> 位名只给**有把握**的两条命令（0x36 MADCTL / 0x3A COLMOD，MIPI DCS 常见排法）；其余命令只显示
+> bit7…bit0 与位权 —— 猜错位名比不标更糟。
+>
+> ⚠️ 参数列**不折行**（折了标尺就对不上）：字节多的行（AXS15352 那条 28 字节的）会让表格自己横向滚，
+> 这与参考页的 `.cmdwrap` 是同一个取舍。
 
 ---
 

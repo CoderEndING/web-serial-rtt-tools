@@ -85,8 +85,8 @@ console.log('== 1. 标签页与初始状态 ==');
   const s = await ev('return window.__tools.summary();');
   ok(Array.isArray(s.tabs) && s.tabs.includes('spi'), '标签栏里有 spi（桥页）');
   ok(s.tabs.includes('panel'), '标签栏里有 panel（屏页）');
-  ok(s.tabs[s.tabs.length - 2] === 'spi' && s.tabs[s.tabs.length - 1] === 'panel',
-     `最后两个标签是 桥 → 屏（${s.tabs.slice(-2).join(' → ')}）`, s.tabs.join(','));
+  ok(s.tabs[s.tabs.length - 3] === 'spi' && s.tabs[s.tabs.length - 2] === 'panel' && s.tabs[s.tabs.length - 1] === 'gen',
+     `最后三个标签是 桥 → 屏 → 工程生成（${s.tabs.slice(-3).join(' → ')}）`, s.tabs.join(','));
   ok(s.ok === true, '页面无 JS 错误', JSON.stringify(s.errors));
   ok(s.spi && s.spi.connected === false && s.spi.dataReady === false, '初始：未连接（HID 与数据面都空）');
   ok(s.panel && s.panel.connected === false, '屏页看到的是**同一个**会话（初始也未连接）');
