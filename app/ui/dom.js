@@ -65,3 +65,41 @@ export function ensureSelectOption(sel, value, label){
   o.textContent = label || v;
   sel.appendChild(o);
 }
+
+/**
+ * 往日志面板追加一行，并把"滚到底"**合并**掉。
+ *
+ * 🚨 别在每行后面直接写 `el.scrollTop = el.scrollHeight`：读 `scrollHeight` 会强制浏览器
+ *    **同步重算样式与布局**，实测**每行约 17 ms**（2026-09-30 真机量：ring 只有 36 条、
+ *    面板文本才 1045 字符，照样 16.8 ms/行）。而 `session.log()` 是在发帧 / 刷图 / 回放 /
+ *    读回的**热路径里同步调用**的 —— 刷一张图光"刷图开始"那一行就白吃 17 ms，
+ *    一口气几十行的场景会被它整片拖住。
+ *    这里改成：追加只做写入；滚动用 rAF 合并（一帧最多滚一次），
+ *    并且只在用户本来就贴着底部时才自动跟随，翻历史时不会被拽回底部。
+ *
+ * @param {HTMLElement} el 日志容器（`#pn-log` / `#sp-log`）
+ * @param {string} text 行文本
+ * @param {string} cls 行样式类（`ok` / `err` / `warn` / `dim`）
+ * @param {number} max 最多保留多少行，超出丢最老的
+ */
+export function appendLogLine(el, text, cls = 'dim', max = 500){
+  if (!el) return;
+  const d = document.createElement('div');
+  d.className = cls;
+  d.textContent = text;
+  el.appendChild(d);
+  while (el.childNodes.length > max) el.removeChild(el.firstChild);
+  if (el._stick === undefined) el._stick = true;          // 默认跟随底部
+  if (!el._scrollHooked){
+    el._scrollHooked = true;
+    el.addEventListener('scroll', () => {
+      el._stick = (el.scrollHeight - el.clientHeight - el.scrollTop) < 40;
+    }, { passive: true });
+  }
+  if (el._scrollPending) return;                          // 一帧内只滚一次
+  el._scrollPending = true;
+  requestAnimationFrame(() => {
+    el._scrollPending = false;
+    if (el._stick) el.scrollTop = el.scrollHeight;
+  });
+}

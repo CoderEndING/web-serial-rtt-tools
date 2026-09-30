@@ -13,7 +13,7 @@
  *
  * 预览里显示的是**量化后的样子**（走一遍 565 往返 + R/B 交换 + 电平），所以"预览 == 发出去的"。
  */
-import { $, setStatus } from '../ui/dom.js';
+import { $, setStatus, appendLogLine } from '../ui/dom.js';
 import { store } from '../core/store.js';
 import * as P from './protocol.js';
 import * as C from './panel-code.js';
@@ -64,7 +64,7 @@ export const PANEL_PRESETS = {
      */
     cfg: { sclkHz: 40000000, mode: 0, csPolicy: 0, padDc: 0, padRst: 5 /*PA02 J3[7]*/, padBl: 13 /*PA31 J3[11]*/, padActiveLow: 0x06 },
     geom: 'st77916',
-    note: '档 2：0x02 + 24 bit 地址（00 XX 00，命令在中间字节）+ 参数；像素用 0x32 + 四线。SPI2：CS=J3[26] SCLK=J3[13] D0=J3[28] D1=J3[27] D2=J3[10] D3=J3[8]；RST=PA02 J3[7]、BL=PA31 J3[11]（都经 LA 实测；PA10 J3[33] 被固件 LED 任务占用，驱动不出持续电平）；**模式必须 mode 1**（屏在上升沿采样，mode 0 会让数据在上升沿换 → 采到上一位 → 黑屏）',
+    note: '档 2：0x02 + 24 bit 地址（00 XX 00，命令在中间字节）+ 参数；像素用 0x32 + 四线。SPI2：CS=J3[26] SCLK=J3[13] D0=J3[28] D1=J3[27] D2=J3[10] D3=J3[8]；RST=PA02 J3[7]、BL=PA31 J3[11]（都经 LA 实测；PA10 J3[33] 被固件 LED 任务占用，驱动不出持续电平）',
   },
 };
 
@@ -273,14 +273,9 @@ export class SpiPanelView {
   // ==================================================================== 渲染
 
   appendLog(e){
-    const el = $('pn-log');
-    if (!el) return;
-    const d = document.createElement('div');
-    d.className = e.kind === 'g' ? 'ok' : e.kind === 'e' ? 'err' : e.kind === 'w' ? 'warn' : 'dim';
-    d.textContent = (e.tag === 'bus' ? '[桥] ' : '') + e.text;
-    el.appendChild(d);
-    while (el.childNodes.length > 500) el.removeChild(el.firstChild);
-    el.scrollTop = el.scrollHeight;
+    appendLogLine($('pn-log'),
+      (e.tag === 'bus' ? '[桥] ' : '') + e.text,
+      e.kind === 'g' ? 'ok' : e.kind === 'e' ? 'err' : e.kind === 'w' ? 'warn' : 'dim');
   }
 
   renderLogFromRing(){
@@ -639,6 +634,31 @@ export class SpiPanelView {
     return P.BATCH_CHOICES.includes(v) ? v : 8192;
   }
 
+  /**
+   * 进度回调的**限流器** —— 往 DOM 写进度必须限流，别每次回调都写。
+   *
+   * 🚨 实测（2026-09-30 真机 A/B，360×360 / 253 KB / 527 片 / 攒批 16 KB）：
+   *    `onProgress` 是**在每次 USB 提交之后同步调用**的（见 `transport.sendPacks`），
+   *    而写一次可见元素的 `textContent` 实测约 **5 ms**（文本变更 → 样式/布局重算）。
+   *    于是"攒批把 527 次 USB 调用压到 18 次"省下来的时间，又被 18 次 DOM 写入吃了回去：
+   *      · 不传回调：45 ms（6.2 MB/s）
+   *      · 传回调  ：134 ms（1.9 MB/s）——**慢 3 倍**
+   *    读回那条路更狠：**每片写一次**，519 片 × 约 2 ms ≈ 1.2 s，直接把读回压在 205 KB/s。
+   *
+   * 限流后：中间的调用只更新变量，**至多每 `minGapMs` 写一次 DOM**；收尾那次（sent ≥ total）
+   * 一定放行，保证最终进度不会停在 90%。
+   */
+  progressThrottle(fn, minGapMs = 150){
+    let last = -1e9;
+    return (sent, total, ...rest) => {
+      const done = total > 0 && sent >= total;
+      const now = performance.now();
+      if (!done && now - last < minGapMs) return;
+      last = now;
+      fn(sent, total, ...rest);
+    };
+  }
+
   applyGeometry(){
     const g = this.geometry();
     $('pn-canvas').width = g.w;
@@ -722,12 +742,12 @@ export class SpiPanelView {
     try {
       const r = await s.sendFrames(out.items, {
         tag: this.tag, quiet: true, timeoutMs: 5000, batchBytes: this.batchBytes(),
-        onProgress: (sent, total) => {
+        onProgress: this.progressThrottle((sent, total) => {
           const pct = (sent / total * 100).toFixed(0);
           const dt = (performance.now() - t0) / 1000;
           $('pn-img-sum').textContent = `发送中 ${pct}%（${sent}/${total} 包）· ${dt.toFixed(1)} s · ` +
             `${(out.px / 1024 / Math.max(0.001, dt)).toFixed(0)} KB/s`;
-        },
+        }),
       });
       const ms = performance.now() - t0;
       const bad = r.rsps.filter(v => v && v.status !== P.ST.OK);
@@ -905,6 +925,12 @@ export class SpiPanelView {
     let off = 0, done = 0, missed = 0;
     s.log('i', `读回开始：${plan.w}×${plan.h} → ${plan.total} B / ${plan.chunks.length} 片` +
       `（${s.profile?.profile === 2 ? 'QSPI：读命令 + 地址递增' : 'DCS：2E 读 + 3E 续读'}）`, this.tag);
+    // 🚨 这里原本是**每片写一次 DOM**：519 片 × 约 2 ms ≈ 1.2 s，正好等于整个读回耗时
+    //    （实测 1235 ms / 205 KB/s）—— 限流后再写，收尾那片一定放行。
+    const updProg = this.progressThrottle((done, total, off2, dt, miss) => {
+      $('pn-read-prog').textContent = `读片 ${done}/${total} · ${(off2 / 1024).toFixed(1)} KB · ` +
+        `${dt.toFixed(1)} s · ${(off2 / 1024 / Math.max(0.001, dt)).toFixed(0)} KB/s` + (miss ? ` · 丢 ${miss} 片` : '');
+    });
     try {
       for (const c of plan.chunks){
         if (this.readAbort) break;
@@ -916,9 +942,7 @@ export class SpiPanelView {
         if (!rsp || !rsp.data?.length){ missed++; }
         else { buf.set(rsp.data.subarray(0, c.bytes), off); }
         off += c.bytes; done++;
-        const dt = (performance.now() - t0) / 1000;
-        $('pn-read-prog').textContent = `读片 ${done}/${plan.chunks.length} · ${(off / 1024).toFixed(1)} KB · ` +
-          `${dt.toFixed(1)} s · ${(off / 1024 / Math.max(0.001, dt)).toFixed(0)} KB/s` + (missed ? ` · 丢 ${missed} 片` : '');
+        updProg(done, plan.chunks.length, off, (performance.now() - t0) / 1000, missed);
       }
     } finally {
       const ms = performance.now() - t0;

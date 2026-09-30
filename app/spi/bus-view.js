@@ -9,7 +9,7 @@
  *   · 配置写入一律**回读对账**（状态字的 err 是"最近一次错误"，不能判断本次成功）；
  *   · 回环自检把每个长度原样发出去、原样读回来逐字节比对 —— 真机没接跳线时会 FAIL，那正是它的用处。
  */
-import { $, setStatus } from '../ui/dom.js';
+import { $, setStatus, appendLogLine } from '../ui/dom.js';
 import { yieldTask, waitMs } from '../core/pace.js';
 import * as P from './protocol.js';
 import * as D from './frames-dsl.js';
@@ -163,14 +163,9 @@ export class SpiBusView {
   // ==================================================================== 渲染
 
   appendLog(e){
-    const el = $('sp-log');
-    if (!el) return;
-    const d = document.createElement('div');
-    d.className = e.kind === 'g' ? 'ok' : e.kind === 'e' ? 'err' : e.kind === 'w' ? 'warn' : 'dim';
-    d.textContent = (e.tag === 'panel' ? '[屏] ' : '') + e.text;
-    el.appendChild(d);
-    while (el.childNodes.length > 500) el.removeChild(el.firstChild);
-    el.scrollTop = el.scrollHeight;
+    appendLogLine($('sp-log'),
+      (e.tag === 'panel' ? '[屏] ' : '') + e.text,
+      e.kind === 'g' ? 'ok' : e.kind === 'e' ? 'err' : e.kind === 'w' ? 'warn' : 'dim');
   }
 
   /** 切回本页时按 ring 重建（另一页期间发生的事也在这里补上）*/
