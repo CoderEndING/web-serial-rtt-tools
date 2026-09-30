@@ -29,7 +29,11 @@ export const PANEL_PRESETS = {
     label: '天马 2P01 / AXS15352（240×296 · 4 线 SPI + DC）',
     short: 'AXS15352（240×296）',
     profile: { profile: 1, defLines: 1, dcActiveHigh: true, csHoldInStep: true, qspiWrOpcode: 0x02, qspiColorOpcode: 0x32, qspiAddrBytes: 3 },
-    cfg: { sclkHz: 40000000, csPolicy: 0, padDc: 5 /*PA02 J3[7]*/, padRst: 13 /*PA31 J3[11]*/, padBl: 11 /*PA10 J3[33]*/, padActiveLow: 0x06 },
+    /* ⚠️ BL 从 PA10（pad 11）挪到 **PA26（pad 14，J3[24]）**：PA10 被板载 LED 任务每 50 ms
+     * 写一次，实测只有 ~20 ns 毛刺、驱动不出持续电平（2026-09-30 LA 实测），当 BL 会不亮。
+     * PA26 是同日从 SPI1 显示口释放出来的脚，固件已接受索引 14（回读一致）。
+     * ⚠️ 但它**只验到固件接受、没在 LA 上看过波形** —— 真要用这档，先用 LA 确认一下。 */
+    cfg: { sclkHz: 40000000, csPolicy: 0, padDc: 5 /*PA02 J3[7]*/, padRst: 13 /*PA31 J3[11]*/, padBl: 14 /*PA26 J3[24]*/, padActiveLow: 0x06 },
     geom: 'axs15352',
     note: '档 1：同一 CS 窗口内「命令 → 翻 DC → 参数」。2026-09-30 起桥在 SPI2：SCLK=J3[13] MOSI=J3[28] CS=J3[26]',
   },
