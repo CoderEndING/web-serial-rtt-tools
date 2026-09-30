@@ -35,7 +35,14 @@ export const OP = {
 };
 export const OP_NAME = Object.fromEntries(Object.entries(OP).map(([k, v]) => [v, k]));
 
-/** 读模式：opcode / 数据相位线数 / dummy 周期（协议里 dummy 字段的 1 = 8 拍）*/
+/**
+ * 读模式：opcode / 数据相位线数 / dummy 周期（协议里 dummy 字段的 1 = 8 拍）
+ *
+ * ⚠️ dummy 只是**默认值**，页面上那个 dummy 框会覆盖它（见 `readItems` 的 `dummy` 参数）：
+ *   同一颗兼容片实测 0x3B DUAL OUT 要 **16 拍**（dummy=2）才对齐，而 JEDEC/原厂写的是 8 拍。
+ *   线数也不是"1 线接法就只能用 1 线档"：**DUAL 用 IO0/IO1，标准 SPI 接法就能用**；
+ *   只有 quad（0x6B/0xEB）才额外需要 IO2/IO3。
+ */
 export const READ_MODES = [
   { v: OP.READ, lines: 1, dummy: 0, name: 'READ 0x03 · 1 线 · 无 dummy' },
   { v: OP.FAST_READ, lines: 1, dummy: 1, name: 'FAST READ 0x0B · 1 线 · 8 dummy' },
@@ -145,6 +152,39 @@ export function parseSfdp(bytes){
   };
 }
 
+/**
+ * 从一张表的 DWORD 2 推容量（BFPT 的 DWORD 2 存的是「容量(bit) - 1」）。
+ * 只在结果是个"像样的" 2 的幂次 MB 数时才认，否则返回 null —— 免得拿厂商私有表瞎猜。
+ *
+ * 用途：有些兼容片的 BFPT 内容照抄了、参数表 ID 却写成厂商自定义（0xFF00）。
+ * 2026-09-30 实测那颗 W25Q64 兼容片就是：表 ID=0xFF00，但 DWORD 2 = 0x03FFFFFF → 8 MB，
+ * 与 JEDEC ID 报的 8 MB 完全吻合。
+ */
+export function bfptDensity(bytes){
+  const b = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes || 0);
+  if (b.length < 8) return null;
+  const dw2 = (b[4] | (b[5] << 8) | (b[6] << 16) | (b[7] << 24)) >>> 0;
+  if (dw2 === 0 || dw2 === 0xffffffff) return null;
+  const mb = (dw2 + 1) / 8 / 1048576;
+  if (mb < 1 || mb > 4096 || Math.abs(mb - Math.round(mb)) > 1e-6) return null;
+  return `${Math.round(mb)} MB（DWORD 2 = 0x${dw2.toString(16)}，即容量(bit)-1）`;
+}
+
+/**
+ * JEDEC BFPT（基本参数表，id=0000h）里**含义确定**的字段。
+ *
+ * 只解 JESD216 里含义明确、能一眼对上的那几个；其余字段逐位含义随 revision 变，
+ * 硬解容易出错 —— 原始 DWORD 调用方已经摊开了，对着 JESD216 表 2 查即可。
+ * 最有用的就是**容量**：BFPT 的 DWORD 2 存的是「容量(bit) - 1」。
+ */
+export function parseBfpt(bytes){
+  const out = [];
+  const dens = bfptDensity(bytes);
+  out.push(dens ? `　· 容量：${dens}` : '　· 容量（DWORD 2）：未填/无效');
+  out.push('　· 其余字段（擦除粒度 / 读模式与 dummy / 时序…）见 JESD216 表 2，按上面的 DWORD 编号逐位查');
+  return out;
+}
+
 /** 把 BFPT 那样的原始 DWORD 数组排成可读文本 */
 export function dumpDwords(bytes){
   const b = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes || 0);
@@ -217,6 +257,12 @@ export const sfdpHeadItems = (dummy = 1) => [readFrame({ opcode: OP.RDSFDP, addr
 /** SFDP 头 + 全部参数表头（8 + nph×8 B）—— 一般一次读 16 B 就够 nph=1 的器件 */
 export const sfdpParamItems = (nph = 1, dummy = 1) =>
   [readFrame({ opcode: OP.RDSFDP, addr: 0, addrLen: 3, dummy, lines: 1, rx: Math.min(64, 8 + Math.max(1, nph) * 8) })];
+/**
+ * **整片 SFDP 空间**（JESD216 规定是 256 B 的只读区）—— 「完整读 SFDP」用它，
+ * 把头、所有参数表头、以及表与表之间的空隙一次拿全，原始字节可以整片摊开看。
+ */
+export const sfdpFullItems = (dummy = 1) =>
+  [readFrame({ opcode: OP.RDSFDP, addr: 0, addrLen: 3, dummy, lines: 1, rx: 256 })];
 export const sfdpTableItems = (ptr, lengthDwords, dummy = 1) =>
   [readFrame({ opcode: OP.RDSFDP, addr: ptr, addrLen: 3, dummy, lines: 1, rx: Math.min(64, Math.max(4, lengthDwords * 4)) })];
 export const rdsr1Items = () => [readFrame({ opcode: OP.RDSR1, addrLen: 0, dummy: 0, lines: 1, rx: 1 })];
@@ -224,16 +270,23 @@ export const rdsr2Items = () => [readFrame({ opcode: OP.RDSR2, addrLen: 0, dummy
 export const wrenItems = () => [cmdFrame(OP.WREN)];
 export const wrdiItems = () => [cmdFrame(OP.WRDI)];
 
-/** 读一段数据：单帧（≤492 B）或按连续读拆帧 */
-export function readItems(addr, len, { mode = OP.QIOR, chunk = XFER_TX_MAX } = {}){
+/**
+ * 读一段数据：单帧（≤492 B）或按连续读拆帧。
+ *
+ * `dummy` 可覆盖模式自带的默认值 —— **必须能覆盖**：dummy 拍数随器件不同
+ * （同一颗兼容片实测 0x3B DUAL OUT 要 16 拍，而 JEDEC/原厂的 0x3B 是 8 拍），
+ * 且它只影响**首帧**（续读帧靠 CS_HOLD 让 flash 自己往下数）。
+ */
+export function readItems(addr, len, { mode = OP.QIOR, chunk = XFER_TX_MAX, dummy } = {}){
   const m = READ_MODES.find(x => x.v === mode) || READ_MODES[0];
+  const dm = Number.isFinite(dummy) ? Math.max(0, Math.min(4, dummy | 0)) : m.dummy;
   const c = Math.max(1, Math.min(XFER_TX_MAX, chunk | 0));
   const items = [];
   let off = 0, first = true;
   while (off < len){
     const n = Math.min(c, len - off);
     if (first){
-      items.push(readFrame({ opcode: m.v, addr: (addr + off) >>> 0, addrLen: 3, dummy: m.dummy, lines: m.lines, rx: n, flags: F.CS_HOLD }));
+      items.push(readFrame({ opcode: m.v, addr: (addr + off) >>> 0, addrLen: 3, dummy: dm, lines: m.lines, rx: n, flags: F.CS_HOLD }));
       first = false;
     } else {
       // 续读帧：不发 cmd / 地址，靠 CS_HOLD 让 flash 自己往下数

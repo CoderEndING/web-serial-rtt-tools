@@ -721,20 +721,52 @@ export class SpiBusView {
       }
       const rp = await s.sendFrames(FL.sfdpParamItems(head.nph, dummy), { tag: this.tag });
       const sf = FL.parseSfdp(rp.rsps[0]?.data);
-      const lines = [`SFDP  ${sf.revName}（major ${sf.major}）· ${sf.nph} 个参数表头`, ''];
+      /* ① **整片 256 B 读满**（JESD216 规定 SFDP 是 256 B 只读区）：头和所有表头一次拿全，
+       *    原始字节整片摊开 —— 表与表之间的空隙、厂商私有区也都看得见。*/
+      const full = await s.sendFrames(FL.sfdpFullItems(dummy), { tag: this.tag });
+      const raw = full.rsps[0]?.data;
+      const lines = [`SFDP  ${sf.revName}（major ${sf.major}）· 声明 ${sf.nph} 个参数表头　[dummy=${dummy}]`, ''];
+
+      if (raw){
+        // 表头区（前 8 + nph×8 B）之外还全 0xFF 的话，说明这块 SFDP 就只声明了这么多
+        const hdrEnd = 8 + Math.max(1, sf.nph) * 8;
+        const tail = [...raw.subarray(hdrEnd)].some(v => v !== 0xff && v !== 0x00);
+        lines.push(`原始 256 B${tail ? '' : `（前 ${hdrEnd} B 之后全是 FF：这块 SFDP 确实只声明了这些）`}：`);
+        lines.push(...hexDump(raw, 256).split('\n').map(l => '  ' + l));
+        lines.push('');
+      }
+
       for (const h of sf.headers || []){
-        lines.push(`  表 ${h.index}  id=0x${h.id.toString(16).padStart(4, '0')}  ${h.name}  rev ${h.major}.${h.minor}  ${h.lengthDwords} DWORD  指针 0x${h.ptr.toString(16)}`);
+        lines.push(`表 ${h.index}  id=0x${h.id.toString(16).padStart(4, '0')}  ${h.name}  rev ${h.major}.${h.minor}  ${h.lengthDwords} DWORD  指针 0x${h.ptr.toString(16)}`);
       }
       s.log('g', `Flash SFDP：${sf.text}`, this.tag);
-      // BFPT 那一张顺便读回来（最多 64 B），原始 DWORD 直接摊开
-      const bfpt = (sf.headers || []).find(h => h.idLsb === 0 && h.idMsb === 0);
-      if (bfpt){
-        const rt = await s.sendFrames(FL.sfdpTableItems(bfpt.ptr, bfpt.lengthDwords, dummy), { tag: this.tag });
-        const bytes = rt.rsps[0]?.data;
-        if (bytes){
-          lines.push('', 'JEDEC BFPT 原始 DWORD（解读按 JESD216，先看原始值）');
-          lines.push(...FL.dumpDwords(bytes));
+
+      /* ② **每张表都读出来**（以前只挑 BFPT），原始 DWORD 逐个摊开。
+       *    BFPT（id 0000h）额外给几个 JESD216 里有确定含义的字段。*/
+      for (const h of sf.headers || []){
+        if (!h.ptr || !h.lengthDwords){
+          lines.push('', `表 ${h.index}：指针/长度为空，跳过（芯片没填）`);
+          continue;
         }
+        const rt = await s.sendFrames(FL.sfdpTableItems(h.ptr, h.lengthDwords, dummy), { tag: this.tag });
+        const bytes = rt.rsps[0]?.data;
+        if (!bytes){ lines.push('', `表 ${h.index}：没读到数据`); continue; }
+        lines.push('', `表 ${h.index}（0x${h.id.toString(16).padStart(4, '0')} ${h.name}）原始 DWORD：`);
+        lines.push(...FL.dumpDwords(bytes));
+        if (h.idLsb === 0 && h.idMsb === 0){
+          const bf = FL.parseBfpt(bytes);
+          if (bf) lines.push('', '　BFPT 关键字段：', ...bf);
+        } else {
+          /* 厂商自定义表也顺手看一眼 DWORD 2：有些兼容片把 BFPT 内容照抄了、
+           * 参数表 ID 却写成 0xFF00（2026-09-30 实测那颗 W25Q64 兼容片就是这样）。*/
+          const dens = FL.bfptDensity(bytes);
+          if (dens) lines.push('', `　⚠ 这张表声明是厂商自定义，但 DWORD 2 推出来的容量是 ${dens}`,
+            '　　 —— 内容和 JEDEC BFPT 对得上，八成是把 BFPT 的 ID 字节写错了。');
+        }
+      }
+      if (!(sf.headers || []).some(h => h.idLsb === 0 && h.idMsb === 0)){
+        lines.push('', '⚠ 这颗芯片**没有声明 id=0000h 的 JEDEC BFPT 表** —— 原厂 W25Q64JV 应该有一张；',
+          '   要么它真没有，要么就是把 BFPT 的参数表 ID 字节写错了（看上面 DWORD 2 的推断）。');
       }
       this.flOut(lines.join('\n'), 'ok');
     });
@@ -773,7 +805,7 @@ export class SpiBusView {
     const mode = opts.mode ?? this.flMode();
     const addr = opts.addr ?? this.flAddr();
     const n = len ?? Math.max(1, Math.min(1 << 16, +$('sp-fl-len').value || 256));
-    const items = FL.readItems(addr, n, { mode: mode.v });
+    const items = FL.readItems(addr, n, { mode: mode.v, dummy: this.flDummy() });
     const r = await s.sendFrames(items, { tag: this.tag, quiet: !!opts.quiet, onProgress: opts.onProgress });
     const out = new Uint8Array(n);
     let off = 0, bad = 0;
@@ -817,7 +849,7 @@ export class SpiBusView {
       const t0 = performance.now();
       const r = await this.flRead(n, { onProgress: (done, total) => {
         if (done === total || done % 64 === 0) this.flOut(`读测速 ${done}/${total} 包…`);
-      } });
+      } });   // dummy 由 flRead 内部取面板上的值（见 flRead）
       const dt = performance.now() - t0;
       if (r.bad) throw new Error(`${r.bad} 条帧不是 OK（读失败了，先「读 ID / SFDP」确认链路）`);
       const sclk = s.counters?.actualSclkHz || s.cfg?.sclkHz || 0;
@@ -825,16 +857,16 @@ export class SpiBusView {
       const theo1 = sclk ? sclk / 8 : 0;                                       // 1 线时的上限（B/s）
       const eff = theo ? (r.off / (dt / 1000)) / theo * 100 : 0;
       /**
-       * 🚨 多线档要提醒：**只接了 1 线 SPI 的 flash 用不了四线档**（IO2/IO3 没接）。
-       *    用户 2026-09-30 就踩了这个：flash 是 1 线接法、却选了 QUAD I/O 0xEB，
-       *    结果读回全是错位垃圾，还把"写 + 校验"报成了失败。理论值也跟着档位虚高。
+       * 🚨 只有**四线**档要提醒（IO2/IO3）：标准 SPI 接法本来就有 IO0/IO1，
+       *    2 线的 DUAL OUT 0x3B **能直接用**（用户 2026-09-30 纠正过：当时我误把
+       *    "1 线接法" 当成了 2 线也不能用）。
+       *    四线档则要看 IO2/IO3 有没有接上 —— 接不上就是垃圾数据。
        */
-      const multi = mode.lines > 1;
+      const quad = mode.lines >= 4;
       const line = `${kb} KB 用时 ${dt.toFixed(1)} ms → ${rate(r.off, dt)}` +
         (theo ? `（实际 SCLK ${P.sclkLabel(sclk)} 理论上限 ${(theo / 1e6).toFixed(2)} MB/s，实测占 ${eff.toFixed(0)}%）` : '') +
-        (multi ? `　⚠ 本档是 ${mode.lines} 线数据相位：只接了 1 线 SPI 的 flash **用不了这一档** —— ` +
-                 `IO1~IO3 没接，读回来的必然是垃圾，**而且每片都要等到超时才罢休、整段看着像卡死**；` +
-                 `普通 SPI 请选 READ 0x03 / FAST READ 0x0B —— 那两档的理论上限是 ${(theo1 / 1e6).toFixed(2)} MB/s` : '');
+        (quad ? `　⚠ 本档是 4 线数据相位，要 IO2/IO3 都接上；只接了 1 线（MOSI/MISO）的话读回是垃圾。` +
+                `2 线的 DUAL OUT 0x3B 只用 IO0/IO1，1 线接法就能用（上限 ${(theo1 / 1e6 * 2).toFixed(2)} MB/s）` : '');
       s.log(eff && eff < 45 ? 'w' : 'g', '读测速：' + line, this.tag);
       if (eff && eff < 45) s.log('w', '占理论值不到一半：检查 ①CS_HOLD 连续读有没有生效 ②每帧 492 B 有没有被拆小 ③线数/模式是否与器件匹配', this.tag);
       this.flOut(`读测速  ${mode.name}\n${line}`, eff && eff < 45 ? 'warn' : 'ok');
@@ -941,7 +973,8 @@ export class SpiBusView {
       s.log(same ? 'g' : 'e', `写 + 校验：${data.length} B · ${dt.toFixed(0)} ms · ${rate(data.length, dt)} · ` +
         (same ? '回读一致 ✔' : `回读**不一致**（前 16 B：${hexDump(vr.bytes.subarray(0, 16))}）`), this.tag);
       if (!same) s.log('w', `不一致的常见原因：` +
-        `① **读模式与接线不匹配**（当前是 ${this.flMode().name}）—— 只接了 1 线 SPI 的 flash 用不了 0xEB/0x6B 四线档，换 READ 0x03 / FAST READ 0x0B 再验；` +
+        `① **读模式的线数 / dummy 与接线或器件不匹配**（当前 ${this.flMode().name}、dummy ${this.flDummy()}）—— ` +
+        `四线档要 IO2/IO3 都接；dual 只用 IO0/IO1 能用，但 dummy 随器件不同（同一颗兼容片实测 0x3B 要 dummy=2）；` +
         `② 页间等 tPP 太短（现在 ${tpp} ms，试着加大）；③ 没先擦除（NOR 只能 1→0）；④ 地址写到了别处`, this.tag);
       this.flOut(`写 + 校验  ${data.length} B @0x${addr.toString(16)}\n${pages} 页 · ${dt.toFixed(0)} ms · ${rate(data.length, dt)}\n回读${same ? '一致 ✔' : '不一致 ✘'}` +
         (same ? '' : `\n写：${hexDump(data.subarray(0, 24))}\n读：${hexDump(vr.bytes.subarray(0, 24))}`), same ? 'ok' : 'err');

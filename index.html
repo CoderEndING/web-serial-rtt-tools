@@ -836,7 +836,7 @@
             </div>
             <div class="framegrid">
               <label class="row"><span>读模式</span><select id="sp-fl-mode"></select></label>
-              <label class="row"><span>dummy</span><input id="sp-fl-dummy" class="num" value="1" inputmode="numeric" title="协议里的 dummy 字段（0~4）。SFDP 与四线读一般要 8 拍；读不出签名就用「读 SFDP」自动标定"></label>
+              <label class="row"><span>dummy</span><input id="sp-fl-dummy" class="num" value="1" inputmode="numeric" title="dummy 拍数档（0~4，1 = 8 拍）。读一段 / 读测速 / 写校验 / 读 SFDP 都用它；SFDP 读不出签名会自动标定。⚠️ 随器件不同：JEDEC 的 0x3B 是 8 拍，有些兼容片要 16 拍（dummy=2）—— 读出来“前面对不上、像多/少一个字节”就是它不对"></label>
               <label class="row"><span>地址</span><input id="sp-fl-addr" value="0x000000"></label>
               <label class="row"><span>长度</span><input id="sp-fl-len" class="num" value="256" inputmode="numeric"></label>
             </div>
