@@ -11,8 +11,6 @@
  */
 import { $, setStatus, appendLogLine } from '../ui/dom.js';
 import { yieldTask, waitMs } from '../core/pace.js';
-import { store } from '../core/store.js';
-import { PANEL_PRESETS } from './panel-view.js';   // 「引脚分配图」的默认脚位取自屏型号推荐值
 import * as P from './protocol.js';
 import * as D from './frames-dsl.js';
 import * as FL from './flash.js';
@@ -296,28 +294,18 @@ export class SpiBusView {
    *    不是 J3 脚号 —— 表格每行末尾那个数字才是 pad 索引（0 = 这根脚不在 pad 表里）。
    *    曾经拿 J3 脚号去比过，结果 "DC=PA02(index 5)" 被标到了 J3[5]（PB08）上。
    */
-  /**
-   * 未配置时图上先标出来的**推荐脚位**。
-   *
-   * 来源 = 屏页当前选的屏型号（`panel.preset`，屏页用 `store.bind` 落的）的推荐值 `cfg`，
-   * 也就是「套用推荐值」之后会变成的样子。
-   * 用户 2026-09-30 的原话：**接线在配置之前** —— 所以这张图不能等配置，勾没勾都得看得见。
-   */
-  defaultAuxPads(){
-    const key = store.get('panel.preset', 'st77916');
-    const k = PANEL_PRESETS[key] ? key : 'st77916';
-    const cfg = PANEL_PRESETS[k].cfg || {};
-    return { dc: cfg.padDc | 0, rst: cfg.padRst | 0, csAux: cfg.padCsAux | 0,
-             bl: cfg.padBl | 0, te: cfg.padTe | 0, model: k };
-  }
-
   renderPinMap(){
     const c = this.session.cfg || {};
-    const dflt = this.defaultAuxPads();
-    /* [线名, 配置里的值, 该屏型号的推荐脚位] */
+    /**
+     * [线名, 配置里的值, **默认脚位**]
+     *
+     * 默认脚位取自 `protocol.AUX_DEFAULT`（固定表），**不跟屏型号走** —— 用户 2026-09-30：
+     * 接线在配置之前，图上必须"配置值优先、否则默认值"，不能忽有忽无、更不能指到不能用的脚。
+     */
     const LINES = [
-      ['DC', c.padDc, dflt.dc], ['RST', c.padRst, dflt.rst], ['CS_AUX', c.padCsAux, dflt.csAux],
-      ['BL', c.padBl, dflt.bl], ['TE', c.padTe, dflt.te],
+      ['DC', c.padDc, P.AUX_DEFAULT.DC], ['RST', c.padRst, P.AUX_DEFAULT.RST],
+      ['CS_AUX', c.padCsAux, P.AUX_DEFAULT.CS_AUX], ['BL', c.padBl, P.AUX_DEFAULT.BL],
+      ['TE', c.padTe, P.AUX_DEFAULT.TE],
     ];
     /**
      * 这根 pad 上挂了什么线：
@@ -344,14 +332,14 @@ export class SpiBusView {
       [13, 'PB11', 'spi', 'SCLK', 1], [14, 'GND', 'gnd', '', 0],
       [15, 'NC', 'nc', '', 0], [16, 'NC', 'nc', '', 0],
       [17, '3V3', 'pwr', '', 0], [18, 'NC', 'nc', '', 0],
-      [19, 'PA29', 'no', 'USB0_OC net', 0], [20, 'GND', 'gnd', '', 0],
-      [21, 'PA28', 'aux', '', 0], [22, 'NC', 'nc', '', 0],
-      [23, 'PA27', 'aux', '', 0], [24, 'PA26', 'aux', '', 0],
+      [19, 'PA29', 'aux', '原 SPI1 MOSI（2026-09-30 释放）', 17], [20, 'GND', 'gnd', '', 0],
+      [21, 'PA28', 'aux', '原 SPI1 MISO（2026-09-30 释放）', 16], [22, 'NC', 'nc', '', 0],
+      [23, 'PA27', 'aux', '原 SPI1 SCLK（2026-09-30 释放）', 15], [24, 'PA26', 'aux', '原 SPI1 CS0（2026-09-30 释放）', 14],
       [25, 'GND', 'gnd', '', 0], [26, 'PB10', 'spi', 'CS', 4],
       [27, 'PB12', 'spi', 'D1 / MISO', 2], [28, 'PB13', 'spi', 'D0 / MOSI', 3],
       [29, 'PY00', 'no', 'PIOC domain', 9], [30, 'GND', 'gnd', '', 0],
       [31, 'PY01', 'no', 'PIOC domain', 10], [32, 'PA09', 'aux', 'USER key', 6],
-      [33, 'PA10', 'aux', 'board LED', 11], [34, 'GND', 'gnd', '', 0],
+      [33, 'PA10', 'no', 'board LED（每 50 ms 被 LED 任务写，实测驱动不出持续电平）', 11], [34, 'GND', 'gnd', '', 0],
       [35, 'NC', 'nc', '', 0], [36, 'PA00', 'no', 'log UART0', 7],
       [37, 'PA30', 'no', 'USB0_PWR + Q1', 12], [38, 'PA01', 'no', 'log UART0', 8],
       [39, 'GND', 'gnd', '', 0], [40, 'NC', 'nc', '', 0],
@@ -359,13 +347,14 @@ export class SpiBusView {
     const cell = ([pin, name, role, note, pad]) => {
       const { now, dft } = sel(pad);
       const cls = { spi: 'is-spi', vcom: 'is-vcom', aux: 'is-aux', no: 'is-no' }[role] || 'is-plain';
-      /* 配置里把辅助线挂在"已经不能当辅助脚"的脚上（桥信号/CDC/保留脚）＝ 陈旧配置，
-       * 固件会拒；这种就标红 + ⚠，别让人以为接对了 */
+      /* 配置把辅助线挂在"当不了辅助脚"的脚上（SPI2 固定脚 / CDC 串口 / 保留脚 / 实测不可用）
+       * ＝ 陈旧或错误的配置：标红 + ⚠，别让人以为接对了 */
       const stale = !!now && role !== 'aux';
+      const why = { spi: 'SPI2 的固定信号脚', vcom: 'CDC 虚拟串口脚', no: '实测当不了辅助脚' }[role] || '不可用';
       return `<td class="p-pin">${pin}</td>` +
              `<td class="p-name ${cls}"><span class="p-mark">${M[role] || '·'}</span>${name}` +
              (note ? `<span class="p-note">${note}</span>` : '') +
-             (now ? `<span class="p-sel${stale ? ' is-bad' : ''}">&lt;&lt; ${now}${stale ? ' ⚠ 这根脚已被占用（固件会拒）' : ''}</span>` : '') +
+             (now ? `<span class="p-sel${stale ? ' is-bad' : ''}">&lt;&lt; ${now}${stale ? ` ⚠ 这根是${why}，接上去也不动` : ''}</span>` : '') +
              (dft ? `<span class="p-sel is-dflt">&lt;&lt; ${dft}（默认）</span>` : '') +
              '</td>';
     };
@@ -376,30 +365,26 @@ export class SpiBusView {
     $('sp-pinmap-body').innerHTML = rows.join('');
     $('sp-pinmap-legend').textContent =
       '★ 桥的信号（SPI2）　● CDC 虚拟串口（UART2）　○ 可当辅助脚　⛔ 不可用　· 电源/地/空脚　' +
-      '<< 实心＝当前配置　<< 虚线（默认）＝未配置，按屏型号推荐值先标出来的位置';
+      '<< 实心＝当前配置　<< 虚线（默认）＝还没配，按默认脚位先标给你接线';
     const show = (v, d) => v ? (P.PAD_NAME[v] || ('pad' + v))
                              : d ? (P.PAD_NAME[d] || ('pad' + d)) + '（默认）' : '不用';
     $('sp-pinmap-foot').textContent =
-      '辅助脚：DC=' + show(c.padDc, dflt.dc) +
-      '　RST=' + show(c.padRst, dflt.rst) +
-      '　CS 辅助=' + show(c.padCsAux, dflt.csAux) +
-      '　BL=' + show(c.padBl, dflt.bl) +
-      '　TE=' + show(c.padTe, dflt.te) +
+      '辅助脚：DC=' + show(c.padDc, P.AUX_DEFAULT.DC) +
+      '　RST=' + show(c.padRst, P.AUX_DEFAULT.RST) +
+      '　CS 辅助=' + show(c.padCsAux, P.AUX_DEFAULT.CS_AUX) +
+      '　BL=' + show(c.padBl, P.AUX_DEFAULT.BL) +
+      '　TE=' + show(c.padTe, P.AUX_DEFAULT.TE) +
       '　｜　接线：CS←J3[26] SCLK←J3[13] D0←J3[28] D1←J3[27] D2←J3[10] D3←J3[8]，' +
       'VCOM ← J3[5](TX,PB08) / J3[3](RX,PB09)';
-    const modelName = PANEL_PRESETS[dflt.model]?.short || dflt.model;
-    $('sp-pinmap-sub').textContent = (c.padRst || c.padBl || c.padDc || c.padCsAux || c.padTe)
-      ? `（实心 << 是当前配置；虚线 << 是没配的那几条线按「${modelName}」推荐值先标的位置）`
-      : `（四条辅助线现在都是「不用」—— 图上已按「${modelName}」的推荐脚位先标好（虚线 <<），照着接线，接完点「套用推荐值」即可）`;
+    $('sp-pinmap-sub').textContent =
+      '（<< 实心 = 当前配置；<< 虚线（默认）= 还没配，按默认脚位标出来给你接线）';
 
     /**
-     * 图上**没出现**的线要交代清楚：缺一根 DC 不等于漏画，而是这个档位根本不用它。
-     * （用户 2026-09-30 问过"图中缺一个DC脚"。）
-     * 三种"没出现"：① 这档用不到（如 QSPI 没有独立 DC 脚）② 没配也没默认脚 ③ 有默认脚，
-     * 但那根脚已经被**别的线配走**了 —— ③ 必须明说，否则用户按脚注去接就接错了。
+     * 图上**没出现**的线要交代清楚（用户 2026-09-30 问过"图中缺一个DC脚"）：
+     *   ① 本来就没默认脚、也没配（如 CS_AUX / TE）—— 说清它是干什么的、要不要接；
+     *   ② 有默认脚，但那根脚**已经被别的线配走**了 —— 必须明说，否则照着脚注接就接错了。
      */
     const WHY = {
-      DC: 'QSPI 档没有独立的 DC 脚，命令与数据靠 0x02（写命令 + 24 bit 地址）和 0x32（写像素）两个 opcode 区分',
       CS_AUX: '第二片选，只挂一片屏时不用',
       TE: '面板撕裂信号（输入），不接也能刷图',
     };
