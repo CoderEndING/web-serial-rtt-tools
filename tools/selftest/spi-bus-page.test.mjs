@@ -359,7 +359,13 @@ console.log('== 10. NOR flash 卡（假探针里挂着一颗 W25Q128 模型）==
     const dis = [...sel.options].filter(o => o.disabled).map(o => o.dataset.pad);
     return { dis, note: document.getElementById('sp-pad-note').textContent };`);
   ok(pads.dis.includes('9') && pads.dis.includes('10'), `PY00/PY01 已灰掉（固件 v1 不支持）：${pads.dis.join(',')}`);
-  ok(!pads.dis.includes('12'), '没开 qspi 档时 PA30/PA31 还能选');
+  /* 2026-09-30：桥搬到 SPI2 之后，灰名单变成"PB10~PB13（SPI2 固定脚）+ PA30（USB0_PWR 被 Q1 短到地）"，
+     PA31 反而自由了（当年 qspi 档下灰 PA30/PA31 的规则已经删掉）。 */
+  ok(pads.dis.includes('1') && pads.dis.includes('2') && pads.dis.includes('3') && pads.dis.includes('4'),
+     `PB10~PB13 已灰掉（SPI2 的 CS/SCLK/MISO/MOSI）：${pads.dis.join(',')}`);
+  ok(pads.dis.includes('12'), 'PA30 已灰掉（USB0_PWR 被板上 Q1 短到地）');
+  ok(!pads.dis.includes('13'), 'PA31 是自由脚，不该灰');
+  ok(/PB10~PB13/.test(pads.note) && /PA30/.test(pads.note), '提示文字里写明了为什么灰');
   ok(/PY00\/PY01/.test(pads.note), '提示文字里写明了为什么灰');
 
   // 10.2 读 ID

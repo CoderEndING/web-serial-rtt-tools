@@ -159,19 +159,19 @@ export const PROFILE_SHORT = { 0: 'raw（普通 SPI）', 1: 'spi_dcx（SPI + DC�
 /** pad 索引表（协议内固定；0 = 不用）。`note` 里写明固件的拒绝规则（PY00/PY01 在 v1 不支持）*/
 export const PADS = [
   { i: 0, name: '（不用）', j3: '' },
-  { i: 1, name: 'PB11', j3: 'J3[13]' },
-  { i: 2, name: 'PB12', j3: 'J3[27]' },
-  { i: 3, name: 'PB13', j3: 'J3[28]' },
-  { i: 4, name: 'PB10', j3: 'J3[26]' },
+  { i: 1, name: 'PB11', j3: 'J3[13]（SPI2_SCLK，别选）' },
+  { i: 2, name: 'PB12', j3: 'J3[27]（SPI2_MISO，别选）' },
+  { i: 3, name: 'PB13', j3: 'J3[28]（SPI2_MOSI，别选）' },
+  { i: 4, name: 'PB10', j3: 'J3[26]（SPI2_CS，别选）' },
   { i: 5, name: 'PA02', j3: 'J3[7]' },
   { i: 6, name: 'PA09', j3: 'J3[32]（TinyUF2 按键）' },
-  { i: 7, name: 'PA00', j3: 'J3[36]（UART0 TX）' },
-  { i: 8, name: 'PA01', j3: 'J3[38]（UART0 RX）' },
+  { i: 7, name: 'PA00', j3: 'J3[36]（UART0 TX / log）' },
+  { i: 8, name: 'PA01', j3: 'J3[38]（UART0 RX / log）' },
   { i: 9, name: 'PY00', j3: 'J3[29]（v1 不支持）' },
   { i: 10, name: 'PY01', j3: 'J3[31]（v1 不支持）' },
   { i: 11, name: 'PA10', j3: 'J3[33]（板载 LED）' },
-  { i: 12, name: 'PA30', j3: 'J3[37]（开 quad 后不可用）' },
-  { i: 13, name: 'PA31', j3: 'J3[11]（开 quad 后不可用）' },
+  { i: 12, name: 'PA30', j3: 'J3[37]（USB0_PWR：被板上 Q1 短到地，拉不动，别用）' },
+  { i: 13, name: 'PA31', j3: 'J3[11]（USB0_ID 网络，可当慢速输出）' },
 ];
 export const PAD_NAME = Object.fromEntries(PADS.map(p => [p.i, p.name]));
 

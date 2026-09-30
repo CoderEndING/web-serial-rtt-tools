@@ -241,27 +241,33 @@ export class SpiBusView {
 
   /**
    * 引脚下拉的可用性跟固件对齐（`sb_pad_ok` / `sb_cfg_validate`）：
-   * PY00/PY01 v1 不支持；qspi 档下 PA30/PA31 是 IO2/IO3；PA26~PA29 是 SPI1 固定脚（根本不在表里）。
+   * PY00/PY01 v1 不支持；PB10~PB13 现在（2026-09-30 起）是 **SPI2 的 CS/SCLK/MISO/MOSI**，
+   * 永远不能当辅助脚；PA30 是 USB0_PWR 网络（被板上 Q1 常态短到地），也别用；
+   * PA31（USB0_ID 网络）现在是自由脚，可以当慢速输出。
    * 灰掉只是**提前告知** —— 真发下去固件也会回 RANGE，那是最后一道闸。
    */
   refreshPads(){
     const quad = this.session.profile?.profile === P.PROFILE_KIND.QSPI;
     const notes = [];
+    /* SPI2 固定脚（固件 reserved[]）：PB10/CS(4)、PB11/SCLK(1)、PB12/MISO(2)、PB13/MOSI(3) */
+    const SPI2_PADS = [1, 2, 3, 4];
     for (const id of ['sp-pad-dc', 'sp-pad-rst', 'sp-pad-csaux', 'sp-pad-bl']){
       const sel = $(id);
       if (!sel) continue;
       for (const o of sel.options){
         const pad = +o.dataset.pad;
-        const bad = pad === 9 || pad === 10 || (quad && (pad === 12 || pad === 13));
+        /* 9/10 = PY00/PY01（v1 不支持）；SPI2_PADS = 桥的信号线；12 = PA30（被 Q1 短到地） */
+        const bad = pad === 9 || pad === 10 || pad === 12 || SPI2_PADS.includes(pad);
         o.disabled = bad;
       }
       if (sel.selectedOptions[0]?.disabled){
         const was = sel.selectedOptions[0].textContent;
         sel.value = '0';
-        this.session.log('w', `${id.replace('sp-pad-', '').toUpperCase()} 选的「${was}」在当前档位下固件会拒，已改回「不用」`, this.tag);
+        this.session.log('w', `${id.replace('sp-pad-', '').toUpperCase()} 选的「${was}」固件会拒（SPI2 固定脚 / PY / PA30），已改回「不用」`, this.tag);
       }
     }
-    if (quad) notes.push('已开 qspi 档：PA30/PA31 是 IO2/IO3，不能再当辅助脚（已灰）');
+    notes.push('PB10~PB13 是 SPI2 的 CS/SCLK/MISO/MOSI（已灰）');
+    notes.push('PA30 是 USB0_PWR 网络，被板上 Q1 常态短到地，拉不动（已灰）');
     notes.push('PY00/PY01 在 v1 不支持（已灰）');
     $('sp-pad-note').textContent = 'TE 撕裂信号暂不暴露（TBD）。' + notes.join('；') + '。';
   }
