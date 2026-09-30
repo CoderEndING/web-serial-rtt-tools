@@ -35,7 +35,7 @@ const VERSION = '1.0';
 function parseArgs(argv){
   const a = { port: 17321, host: '127.0.0.1', root: path.join(__dirname, '..'), target: '', attach: false,
               openocd: '', scripts: '', tclPort: 6666, jlinkAttach: false, jlinkPort: 19021,
-              jlinkLogger: '', jlinkDevice: '', jlinkChannel: 0, token: '', allowOrigin: [] };
+              jlinkLogger: '', jlinkDevice: '', jlinkChannel: 0, token: '', allowOrigin: [], doctor: false };
   for (let i = 0; i < argv.length; i++){
     const k = argv[i];
     const next = () => argv[++i];
@@ -53,6 +53,7 @@ function parseArgs(argv){
       case '--jlink-logger': a.jlinkLogger = next(); break;
       case '--jlink-device': a.jlinkDevice = next(); break;
       case '--jlink-channel': a.jlinkChannel = Number(next()); break;
+      case '--doctor': case '--check': a.doctor = true; break;
       case '--token': a.token = next(); break;
       case '--allow-origin': a.allowOrigin.push(...String(next() || '').split(',').map(s => s.trim()).filter(Boolean)); break;
       case '-h': case '--help': a.help = true; break;
@@ -79,6 +80,8 @@ if (args.help){
   --jlink-port <n>      J-Link RTT telnet 端口
   --jlink-logger <exe>  JLinkRTTLogger.exe 路径：自己拉一个只读的 RTT 日志流
   --jlink-device <名>   配合 --jlink-logger 用（如 STM32F103C8）
+  --doctor              环境预检：Node / 端口 / 静态根 / OpenOCD+scripts / J-Link 逐个查一遍，
+                        把找过的路径和该改哪一行都打出来（不启服务，装完工具先跑它）
   --token <串>          WebSocket 口令（默认空 = 不校验；填了就要求 ?token=… 或
                         Sec-WebSocket-Protocol: bearer.<token>）
   --allow-origin <o>    额外允许的 Origin（逗号分隔，可重复）。默认只允许：
@@ -1210,21 +1213,120 @@ const isMain = (() => {
 })();
 
 if (isMain){
-  installExitHooks();
-  server.listen(args.port, args.host, () => {
-    console.log(`\nrtt-bridge ${VERSION}`);
-    console.log(`  网页地址 : http://${args.host}:${args.port}/    （同源打开 → 没有本地网络访问权限提示）`);
-    console.log(`  WebSocket: ws://${args.host}:${args.port}/ws`);
-    console.log(`  静态根   : ${args.root}`);
-    console.log(`  目标配置 : ${args.target || '(无，等网页指定)'}`);
-    if (args.jlinkAttach){
-      console.log(`  J-Link 流: 连 127.0.0.1:${args.jlinkPort}（先用 JLinkRTTViewer 把 RTT 会话开起来）`);
-    } else {
-      console.log(`  OpenOCD  : ${args.attach ? '复用已在跑的（--attach）' : findOpenOcd()}`);
-    }
-    console.log('\nCtrl+C 退出（会把 OpenOCD / J-Link 子进程一起收掉，不留孤儿占探针）\n');
-  });
+  if (args.doctor){
+    // 预检只读：不占端口、不起服务、不碰探针（生成的桥包里 check-tools.bat 就是跑它）
+    runDoctor().then(bad => process.exit(bad ? 1 : 0)).catch(e => { console.error('[预检] 出错：' + (e?.message || e)); process.exit(1); });
+  } else {
+    installExitHooks();
+    server.listen(args.port, args.host, () => {
+      console.log(`\nrtt-bridge ${VERSION}`);
+      console.log(`  网页地址 : http://${args.host}:${args.port}/    （同源打开 → 没有本地网络访问权限提示）`);
+      console.log(`  WebSocket: ws://${args.host}:${args.port}/ws`);
+      console.log(`  静态根   : ${args.root}`);
+      console.log(`  目标配置 : ${args.target || '(无，等网页指定)'}`);
+      if (args.jlinkAttach){
+        console.log(`  J-Link 流: 连 127.0.0.1:${args.jlinkPort}（先用 JLinkRTTViewer 把 RTT 会话开起来）`);
+      } else {
+        console.log(`  OpenOCD  : ${args.attach ? '复用已在跑的（--attach）' : findOpenOcd()}`);
+      }
+      console.log('\nCtrl+C 退出（会把 OpenOCD / J-Link 子进程一起收掉，不留孤儿占探针）\n');
+    });
+  }
 }
 
-/** 自测用的出口：两个后端（收子进程的行为要真验）+ 退出清理逻辑 */
+/** 自测用的出口：两个后端（收子进程的行为要真验）+ 退出清理逻辑 + 环境预检 */
 export { OpenOcdBackend, JLinkBackend };
+
+/* ============================ 环境预检（--doctor） ============================ */
+/**
+ * 环境预检（`--doctor`）：把"为什么跑不起来"一次性说清楚 —— 生成的桥包里 `check-tools.bat` 就是跑它。
+ *
+ * 设计原则：**每一项都把找过的路径 / 该改哪一行写出来**，别让用户对着"连不上"猜。
+ * 退出码：0 = 全就绪；>0 = 有需要处理的项（`check-tools.bat` 据此换结尾话术）。
+ *
+ * 只读：**不占端口、不起服务、不碰探针**（端口那项是"试听一下再放掉"）。
+ */
+async function runDoctor(){
+  const rows = [];
+  const row = (label, ok, text) => { rows.push({ label, ok, text }); };
+
+  // ① Node 版本
+  const major = Number(process.versions.node.split('.')[0]);
+  row('Node', major >= 18, `v${process.versions.node}${major >= 18 ? '（满足 18+）' : '（太老：要 18 或更高）'}`);
+
+  // ② 静态根（有没有网页副本）
+  const rootAbs = path.resolve(args.root);
+  const hasWeb = fs.existsSync(path.join(rootAbs, 'index.html'));
+  row('静态根', null, `${rootAbs}${hasWeb ? '（有 index.html，可离线用）'
+    : '（没有网页 —— 用线上页面 https://minichao9901.github.io/web-serial-rtt-tools/ 也行，它在白名单里）'}`);
+
+  // ③ 端口（试听一下再放掉）
+  const portFree = await new Promise(res => {
+    const s = net.createServer();
+    s.once('error', () => res(false));
+    s.once('listening', () => s.close(() => res(true)));
+    s.listen(args.port, args.host);
+  });
+  row(`端口 ${args.port}`, portFree, portFree ? '空闲 ✓'
+    : `被占用 —— 换一个：start-bridge.bat --port ${args.port + 1}（或先关掉已经开着的桥）`);
+
+  // ④ OpenOCD + scripts + 当前目标的 cfg
+  let exe = '', scripts = '';
+  try { exe = findOpenOcd(); } catch { exe = ''; }
+  const exeOk = !!exe && (exe.includes(path.sep) ? fs.existsSync(exe) : true);
+  row('OpenOCD', exeOk ? true : null,
+    exeOk ? exe : `${exe || '(没找到)'} —— 装一个，或在 bridge.config.json 的 "openocd" 里写绝对路径（也可命令行 --openocd <路径>）`);
+  if (exeOk){
+    try { scripts = openocdScripts(exe); } catch { scripts = ''; }
+    const sOk = !!scripts && fs.existsSync(scripts);
+    const probes = ['interface/cmsis-dap.cfg', 'target/stm32f1x.cfg'];
+    const miss = sOk ? probes.filter(p => !fs.existsSync(path.join(scripts, p))) : probes;
+    row('OpenOCD scripts', sOk ? (miss.length ? null : true) : null,
+      sOk ? `${scripts}${miss.length ? `（缺 ${miss.join(' / ')}）` : `（含 ${probes.join(' / ')}）`}`
+          : '(没推断出来) —— 在 bridge.config.json 的 "scripts" 里写绝对路径（或命令行 --scripts <路径>）');
+  }
+
+  // ⑤ 当前目标的 cfg 是否都在
+  const tname = args.target || 'stm32f103';
+  const t = config.targets[tname];
+  if (t?.cfgs?.length && scripts){
+    const missing = t.cfgs.filter(c => !path.isAbsolute(c) && !fs.existsSync(path.join(scripts, c)));
+    row(`目标 ${tname}`, missing.length ? null : true,
+      missing.length ? `缺 cfg：${missing.join(' / ')}（查 bridge.config.json 的 targets.${tname}.cfgs）`
+                     : `${t.cfgs.join(' + ')}${t.speed ? ` @ ${t.speed} kHz` : ''}`);
+  } else if (t){
+    row(`目标 ${tname}`, null, 'scripts 目录没找到，没法核对 cfg');
+  } else {
+    // 目标名都不认识 = 真问题（起桥时 resolveTarget 会直接抛）：标 ❌，让退出码带上它
+    row(`目标 ${tname}`, false,
+      `bridge.config.json 里没有这个目标（可选：${Object.keys(config.targets).join(' / ')}；网页端也可以选「自定义 cfg…」）`);
+  }
+
+  // ⑥ J-Link 三件套
+  const jl = { server: 'JLinkGDBServerCL.exe', exe: 'JLink.exe', rttlogger: 'JLinkRTTLogger.exe' };
+  const found = [];
+  for (const [which, label] of Object.entries(jl)){
+    const p = findJLinkExe(which);
+    const ok = p.includes(path.sep) && fs.existsSync(p);
+    found.push(`${label}${ok ? ' ✓' : ' ✗'}`);
+    if (which === 'server'){
+      row('J-Link', ok ? true : null,
+        ok ? p : `${p || '(没找到)'} —— 装 SEGGER J-Link 软件包，或在 bridge.config.json 的 jlink.gdbserver 里写绝对路径`);
+    }
+  }
+  row('J-Link 三件套', null, found.join(' · ') + '（只用 OpenOCD 的话，J-Link 没有也行）');
+
+  // ⑦ 打印（拼好再一次性输出，避免和其它日志交错）
+  // ⚠️ 对齐要按**显示宽度**补空格：中文/全角算 2 列，`padEnd` 只数字符 → 标签会参差不齐
+  const width = s => [...s].reduce((n, ch) => n + (/[\u1100-\uFFE6]/.test(ch) ? 2 : 1), 0);
+  const pad = (s, w) => s + ' '.repeat(Math.max(0, w - width(s)));
+  const out = [`rtt-bridge ${VERSION} · 环境预检（--doctor）`, ''];
+  for (const r of rows) out.push(`  ${pad(r.label, 18)}: ${r.text}${r.ok === true ? ' ✅' : r.ok === false ? ' ❌' : ''}`);
+  const bad = rows.filter(r => r.ok === false).length;
+  out.push('');
+  out.push(bad ? `有 ${bad} 项要处理（上面带 ❌ 的）：路径不对就改 bridge.config.json 的 openocd / scripts / jlink.*，`
+                 + '\n或者命令行直接传 --openocd / --scripts / --jlink-logger，改完再跑一次本预检。'
+               : '预检通过：双击 start-bridge.bat（或直接 node rtt-bridge.mjs）就能起桥了。');
+  console.log(out.join('\n'));
+  return bad;
+}

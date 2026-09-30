@@ -106,7 +106,10 @@ console.log('== 1b. 复位成已知状态（页面选项存在 localStorage 里�
   })()`);
   await sleep(300);
   ok(!(await evaluate(`document.getElementById('g-force').checked`)), '「直接覆盖」已复位为未勾选');
-  ok((await evaluate(`window.__tools.gen.files.length`)) === 6, '6 个产物重新全勾上');
+  const after = await evaluate(`JSON.stringify(window.__tools.gen.summary())`);
+  const sm = JSON.parse(after);
+  ok(sm.files.length === 13 && sm.bridgeKit.files.length === 7,
+     `产物重新全勾上：6 个模板文件 + 7 个桥包文件（实际 ${sm.files.length} / 桥包 ${sm.bridgeKit.files.length}）`);
 }
 
 console.log('== 2. 产物字节 = Python 工具基线 + 4 项固定修正 ==');
@@ -115,11 +118,12 @@ console.log('== 2. 产物字节 = Python 工具基线 + 4 项固定修正 ==');
   // 注意：页面**固定**套 4 项修正，所以期望值 = 基线文件再走一遍同一套修正逻辑。
   await evaluate(`(()=>{const e=document.getElementById('g-project');e.value='MDK-ARM';e.dispatchEvent(new Event('input',{bubbles:true}));return true})()`);
   await sleep(300);
-  const files = await evaluate(`(async()=>{
+  const all = await evaluate(`(async()=>{
     const b64 = u8 => { let s=''; for(let i=0;i<u8.length;i+=4096) s += String.fromCharCode.apply(null, u8.subarray(i,i+4096)); return btoa(s); };
     return window.__tools.gen.files.map(f => ({ name:f.name, len:f.data.length, b64:b64(f.data) }));
   })()`);
-  ok(files.length === 6, `生成 6 个文件（实际 ${files.length}）`, files.map(f => f.name).join(','));
+  const files = all.filter(f => !f.name.startsWith('rtt-bridge-kit/'));
+  ok(files.length === 6 && all.length === 13, `模板产物 6 个（总 ${all.length}，另 7 个是桥包）`, all.map(f => f.name).join(','));
   for (const f of files){
     const fixed = expectedBytes(f.name);
     const got = Buffer.from(f.b64, 'base64');
@@ -154,7 +158,7 @@ console.log('== 3. 预览区显示的就是要写出去的内容 ==');
   const head = await evaluate(`document.getElementById('g-preview').textContent.slice(0,60)`);
   ok(head.startsWith('# JLink Makefile for MDK-ARM'), `预览开头正确：${JSON.stringify(head.slice(0, 40))}`);
   const status = await evaluate(`document.getElementById('g-status').textContent`);
-  ok(/6 个文件.*CRLF/.test(status), `状态行：${status}`);
+  ok(/13 个文件.*CRLF.*含桥包/.test(status), `状态行：${status}`);
   // 切到 test_sram.bin 看二进制预览
   await evaluate(`[...document.querySelectorAll('#g-files button')].find(b=>b.textContent==='test_sram.bin').click(), true`);
   await sleep(120);
@@ -168,7 +172,7 @@ console.log('== 4. 勾选与参数开关真的生效 ==');
   await evaluate(`(()=>{const e=document.getElementById('g-c-pyocd');e.checked=false;e.dispatchEvent(new Event('change',{bubbles:true}));return true})()`);
   await sleep(300);
   const after = await evaluate(`JSON.stringify(window.__tools.gen.files.map(f=>f.name))`);
-  ok(before === 6 && !after.includes('Makefile.pyocd'), `取消勾选后不再生成 Makefile.pyocd（${before} → ${after}）`);
+  ok(before === 13 && !after.includes('Makefile.pyocd'), `取消勾选后不再生成 Makefile.pyocd（${before} → ${JSON.parse(after).length} 个）`);
   await evaluate(`(()=>{const e=document.getElementById('g-c-pyocd');e.checked=true;e.dispatchEvent(new Event('change',{bubbles:true}));return true})()`);
 
   // 参数改动 → 只该动那一行（拿页面自己的两个状态比，避免把修正项掺进来）
@@ -241,8 +245,16 @@ console.log('== 6. 「打包 ZIP」真的下下来 ==');
   ok(!!zip, '下载目录里出现了 zip', zip || readdirSync(DL).join(','));
   if (zip){
     const size = readFileSync(zip).length;
-    ok(size > 40000, `zip 大小 ${size} B（6 个文件裸数据 42509 B）`);
+    ok(size > 40000, `zip 大小 ${size} B（6 个模板文件 42509 B + 桥包约 68 KB）`);
     ok(/MDK-ARM-gen\.zip$/.test(zip), '文件名按项目名生成：' + zip.split('\\').pop());
+    // 桥包那 7 个也在这个 zip 里（名字带 rtt-bridge-kit/ 一层）—— 直接按 ZIP 中央目录里的名字核
+    const raw = readFileSync(zip);
+    const names = [];
+    for (let i = 0; i + 30 < raw.length; i++){
+      if (raw.readUInt32LE(i) === 0x02014b50){ const n = raw.readUInt16LE(i + 28); names.push(raw.subarray(i + 46, i + 46 + n).toString('utf8')); }
+    }
+    ok(names.filter(n => n.startsWith('rtt-bridge-kit/')).length === 7,
+       `zip 里带 rtt-bridge-kit/ 那 7 个文件（中央目录读到 ${names.length} 项：${names.slice(0, 3).join(',')}…）`);
   }
   const supported = await evaluate(`window.__tools.gen.summary().supported.directoryPicker`);
   console.log(`  NOTE  showDirectoryPicker 可用 = ${supported}（真·写入文件夹需要真人手势，自动化测不了）`);
@@ -255,8 +267,9 @@ console.log('== 7. 「写入文件夹」的写入逻辑（拿假目录句柄跑�
   await evaluate(`(()=>{
     window.__mock = { written:{}, asked:0 };
     window.confirm = () => { window.__mock.asked++; return true; };
-    window.showDirectoryPicker = async () => ({
-      name: 'FAKE-PROJ',
+    // 目录句柄：带 getDirectoryHandle（桥包的文件名里有 rtt-bridge-kit/ 这一层）
+    const mk = label => ({
+      name: label,
       async getFileHandle(name, opts){
         if (opts && opts.create === false){
           if (name === 'Makefile.jlink' || name === 'rtt_logger.py') return { name };   // 假装这两个已存在
@@ -271,17 +284,21 @@ console.log('== 7. 「写入文件夹」的写入逻辑（拿假目录句柄跑�
           async close(){},
         }; } };
       },
+      async getDirectoryHandle(name){ return mk(name); },
     });
+    window.showDirectoryPicker = async () => mk('FAKE-PROJ');
     return true;
   })()`);
   await evaluate(`document.getElementById('g-save').click(), true`);
   await sleep(900);
   const raw = await evaluate(`JSON.stringify({ names:Object.keys(window.__mock.written), asked:window.__mock.asked, status:document.getElementById('g-status').textContent, force:document.getElementById('g-force').checked })`);
   const r = JSON.parse(raw);
-  ok(r.names.length === 6, `6 个文件都写进去了（实际 ${r.names.length}：${r.names.join(',')}）`);
+  ok(r.names.length === 13 && r.names.includes('start-bridge.bat') && r.names.includes('rtt-bridge.mjs'),
+     `13 个文件都写进去了（6 模板 + 7 桥包，实际 ${r.names.length}：${r.names.join(',')}）`);
   ok(r.asked === 1, `同名文件触发了一次覆盖确认（asked=${r.asked}）`);
   ok(/FAKE-PROJ/.test(r.status), `状态行报告写入目录：${r.status}`);
-  for (const f of r.names){
+  // 模板那 6 个逐字节对基线（桥包那 7 个由 tools/selftest/bridge-kit.test.mjs 管内容）
+  for (const f of ['Makefile.jlink', 'jlink_gdb.script', 'Makefile.pyocd', 'Makefile.openocd', 'rtt_logger.py', 'test_sram.bin']){
     const b64 = await evaluate(`window.__mock.written[${JSON.stringify(f)}]`);
     const want = expectedBytes(f);
     const got = Buffer.from(b64, 'base64');
@@ -293,6 +310,48 @@ console.log('== 7. 「写入文件夹」的写入逻辑（拿假目录句柄跑�
   await sleep(700);
   const asked2 = await evaluate(`window.__mock.asked`);
   ok(asked2 === 1, `勾了「直接覆盖」后不再弹确认（asked 仍为 ${asked2}）`);
+}
+
+console.log('== 7b. 桥包（本地桥安装包）：内容与「下载桥包」按钮 ==');
+{
+  const kit = await evaluate(`(async()=>{
+    const g = window.__tools.gen;
+    const f = n => g.files.find(x => x.name.endsWith('/' + n));
+    return {
+      names: g.files.filter(x => x.name.startsWith('rtt-bridge-kit/')).map(x => x.name.split('/').pop()),
+      bat: f('start-bridge.bat').text,
+      cfg: f('bridge.config.json').text,
+      mjs: f('rtt-bridge.mjs').data.length,
+      sh: f('start-bridge.sh').text,
+      ps: f('get-node.ps1').text,
+    };
+  })()`);
+  ok(kit.names.length === 7, `桥包 7 个文件：${kit.names.join(' · ')}`);
+  ok(/--doctor/.test(kit.bat) && /get-node\.ps1/.test(kit.bat) && /Ctrl\+C/.test(kit.bat),
+     '启动器里有：环境预检 + 便携 Node 兜底 + Ctrl+C 说明');
+  ok(JSON.parse(kit.cfg).targets.stm32f103 && JSON.parse(kit.cfg).jlink.speed === 50000,
+     '配置里带目标与 J-Link 默认值（真机标定过的 50 MHz）');
+  ok(kit.mjs > 50000, `桥本体嵌进来了（${kit.mjs} B，与仓库那份逐字节一致由 make test-gen 对）`);
+  ok(/^#!\/bin\/sh/.test(kit.sh) && !/\r/.test(kit.sh), 'sh 版是 LF 的（CRLF 会让 bash 报 bad interpreter）');
+  ok(/npmmirror/.test(kit.ps) && /SHASUMS256/.test(kit.ps), '便携 Node 下载器带国内镜像与 sha256 校验');
+
+  // 改一个参数 → 立刻反映到生成物（页面是"边填边生成"）
+  await evaluate(`(()=>{const e=document.getElementById('g-bk-port');e.value='17999';e.dispatchEvent(new Event('change',{bubbles:true}));return true})()`);
+  await sleep(300);
+  const port = await evaluate(`window.__tools.gen.files.find(x=>x.name.endsWith('start-bridge.bat')).text.includes('set "PORT=17999"')`);
+  ok(port === true, '页面里改端口 → 桥包的启动器立刻跟着改');
+  await evaluate(`(()=>{const e=document.getElementById('g-bk-port');e.value='17321';e.dispatchEvent(new Event('change',{bubbles:true}));return true})()`);
+  await sleep(250);
+
+  // 关掉开关 → 桥包那 7 个消失
+  await evaluate(`(()=>{const e=document.getElementById('g-bk-on');e.checked=false;e.dispatchEvent(new Event('change',{bubbles:true}));return true})()`);
+  await sleep(300);
+  const off = await evaluate(`JSON.stringify(window.__tools.gen.summary().bridgeKit)`);
+  const offObj = JSON.parse(off);
+  ok(offObj.on === false && offObj.files.length === 0, `关掉「生成桥包」→ 只剩 6 个模板文件（桥包 ${offObj.files.length} 个）`);
+  await evaluate(`(()=>{const e=document.getElementById('g-bk-on');e.checked=true;e.dispatchEvent(new Event('change',{bubbles:true}));return true})()`);
+  await sleep(250);
+  ok(await evaluate(`!!document.getElementById('g-zip-bridge')`), '「下载桥包（ZIP）」按钮在页面上');
 }
 
 console.log(`\n${fail ? 'FAIL' : 'OK'}  ${pass} 通过 / ${fail} 失败`);

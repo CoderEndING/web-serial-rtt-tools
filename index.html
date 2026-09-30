@@ -1140,6 +1140,35 @@
       </fieldset>
 
       <fieldset>
+        <legend>本地桥（J-Link / OpenOCD）</legend>
+        <label class="chk"><input type="checkbox" id="g-bk-on" checked title="J-Link / OpenOCD 都是本机程序，浏览器无权启动它们 —— 要用这两条后端就得有个本机桥。零安装的 WebUSB 通路不需要它">生成「本地桥」安装包（双击即用）</label>
+        <label class="row"><span>端口</span><input id="g-bk-port" class="num" value="17321" inputmode="numeric" title="桥监听的本地端口；页面与桥都走它"></label>
+        <label class="row"><span>目标</span>
+          <select id="g-bk-target">
+            <option value="stm32f103">STM32F103（cmsis-dap + stm32f1x）</option>
+            <option value="stm32h7b0">STM32H7B0（cmsis-dap + stm32h7x）</option>
+            <option value="custom">自定义 cfg…</option>
+          </select></label>
+        <label class="row"><span>自定义 cfg</span><input id="g-bk-cfgs" value="interface/cmsis-dap.cfg, target/stm32f1x.cfg" title="逗号分隔；相对 OpenOCD 的 scripts 目录（也可写绝对路径）。只有「目标 = 自定义」时才用"></label>
+        <label class="row"><span>OpenOCD kHz</span><input id="g-bk-speed" class="num" value="4000" inputmode="numeric"></label>
+        <label class="row"><span>openocd.exe</span><input id="g-bk-openocd" placeholder="留空 = 自动探测" title="找不到 OpenOCD 时填绝对路径（例：C:/Users/你/.espressif/tools/openocd-esp32/vX/openocd-esp32/bin/openocd.exe）"></label>
+        <label class="row"><span>scripts 目录</span><input id="g-bk-scripts" placeholder="留空 = 跟着 openocd.exe 推断"></label>
+        <label class="row"><span>J-Link 器件</span><input id="g-bk-jdev" value="STM32F103C8" title="给 J-Link 的 -Device（留空用默认 STM32F103C8）"></label>
+        <label class="row"><span>J-Link kHz</span><input id="g-bk-jspeed" class="num" value="50000" inputmode="numeric" title="本机 J-Link PRO + F103 实测 50 MHz 可用"></label>
+        <label class="row"><span>便携 Node</span><input id="g-bk-nodever" class="num" value="22.14.0" title="本机没装 Node 时自动下这个版本（绿色包，放到包里的 node/ 目录，不动系统）"></label>
+        <label class="row"><span>下载源</span>
+          <select id="g-bk-mirror">
+            <option value="1">国内镜像优先（npmmirror）</option>
+            <option value="0">官方优先（nodejs.org）</option>
+          </select></label>
+        <label class="chk"><input type="checkbox" id="g-bk-autonode" checked title="关掉 = 没 Node 时只提示、不下载（企业内网/杀软敏感时用）">没 Node 时自动下便携版</label>
+        <div class="row btnrow"><button id="g-zip-bridge" title="只打包桥的 7 个文件（zip 里是 rtt-bridge-kit/…）：解压后双击 start-bridge.bat 就能起桥">下载桥包（ZIP）</button></div>
+        <p class="hint">包里：启动器（bat/sh）+ 桥本体 + 配置 + 预检脚本 + 便携 Node 下载器 + 说明。
+          <b>路径留空 = 桥自己探测</b>（ESP-IDF 的 openocd-esp32 → Program Files → PATH；J-Link 找 SEGGER 目录里版本号最大的）；
+          起桥前会先跑一次环境预检，把"该改哪一行"打出来。退出用 <b>Ctrl+C</b>（会把 OpenOCD / J-Link 子进程一起收掉）。</p>
+      </fieldset>
+
+      <fieldset>
         <legend>已套用的修正（固定 4 项）</legend>
         <p class="hint" style="margin-top:2px">
           生成时<b>固定</b>在 <code>uvprojx2cmake.py</code> 的产物上套这 4 处修补，不需要你勾：

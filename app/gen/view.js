@@ -21,6 +21,7 @@ import {
   OUTPUTS, PARAM_DEFAULTS, JLINK_DEVICES, OPENOCD_INTERFACES, OPENOCD_TARGETS,
   parseUvprojx, suggestFromDevice, matchFamily, buildOutputs, appliedFixes,
 } from './model.js';
+import { bridgeKitFiles as kitFiles, kitBytes, KIT_DIR } from './bridge-kit.js';
 
 const FIELDS = [
   ['g-project', 'gen.project'],
@@ -42,6 +43,19 @@ const FIELDS = [
   ['g-openocd-freq', 'gen.openocdFreq'],
   ['g-rtt-port', 'gen.rttPort'],
   ['g-testbin-size', 'gen.testBinSize'],
+  // 本地桥安装包
+  ['g-bk-on', 'gen.bkOn', 'checked'],
+  ['g-bk-port', 'gen.bkPort'],
+  ['g-bk-target', 'gen.bkTarget'],
+  ['g-bk-cfgs', 'gen.bkCfgs'],
+  ['g-bk-speed', 'gen.bkSpeed'],
+  ['g-bk-openocd', 'gen.bkOpenocd'],
+  ['g-bk-scripts', 'gen.bkScripts'],
+  ['g-bk-jdev', 'gen.bkJlinkDevice'],
+  ['g-bk-jspeed', 'gen.bkJlinkSpeed'],
+  ['g-bk-nodever', 'gen.bkNodeVer'],
+  ['g-bk-mirror', 'gen.bkMirror'],
+  ['g-bk-autonode', 'gen.bkAutoNode', 'checked'],
   ['g-newline', 'gen.newline'],
   ['g-force', 'gen.force', 'checked'],
   ['g-c-jlink', 'gen.cJlink', 'checked'],
@@ -97,8 +111,13 @@ export class GenView {
     // 保存
     $('g-save').addEventListener('click', () => this.saveToFolder());
     $('g-zip').addEventListener('click', () => this.downloadZip());
+    $('g-zip-bridge').addEventListener('click', () => this.downloadBridgeZip());
     $('g-copy').addEventListener('click', () => this.copyCurrent());
     $('g-dl').addEventListener('click', () => this.downloadCurrent());
+    // 改了桥那几项就地重算（和别的字段一样：input/change 都挂）
+    for (const el of $('tab-gen').querySelectorAll('input,select')){
+      if (el.id.startsWith('g-bk-')) el.addEventListener('change', () => this.refresh());
+    }
 
     this.refresh();
   }
@@ -126,6 +145,19 @@ export class GenView {
       testBinSize: $('g-testbin-size').value.trim(),
       newline: $('g-newline').value,
       force: $('g-force').checked,
+      // 本地桥安装包（J-Link / OpenOCD 那条路；见 bridge-kit.js）
+      bridgeKit: c('g-bk-on'),
+      bridgePort: $('g-bk-port').value.trim(),
+      bridgeTarget: $('g-bk-target').value,
+      bridgeCfgs: $('g-bk-cfgs').value.trim(),
+      bridgeSpeed: $('g-bk-speed').value.trim(),
+      bridgeOpenocd: $('g-bk-openocd').value.trim(),
+      bridgeScripts: $('g-bk-scripts').value.trim(),
+      bridgeJlinkDevice: $('g-bk-jdev').value.trim(),
+      bridgeJlinkSpeed: $('g-bk-jspeed').value.trim(),
+      bridgeNodeVer: $('g-bk-nodever').value.trim(),
+      bridgeMirror: $('g-bk-mirror').value === '1',
+      bridgeAutoNode: c('g-bk-autonode'),
       checks: { jlink: c('g-c-jlink'), gdb: c('g-c-gdb'), pyocd: c('g-c-pyocd'), openocd: c('g-c-openocd'), testBin: c('g-c-testbin') },
     };
   }
@@ -133,7 +165,19 @@ export class GenView {
   // ---------------------------------------------------------------- 生成 + 预览
   refresh(){
     this.p = this.params();
-    this.files = buildOutputs(this.p);
+    /**
+     * 产物 = Python 模板那几件 + **本地桥安装包**（桥那几件在 `bridge-kit.js` 里单独生成，
+     * 不掺进 `buildOutputs()` —— 那个函数的产物要和 Python 工具逐字节对账，不能动）。
+     */
+    this.kitFiles = kitFiles({
+      on: this.p.bridgeKit,
+      port: this.p.bridgePort, token: '',
+      target: this.p.bridgeTarget, customCfgs: this.p.bridgeCfgs, speed: this.p.bridgeSpeed,
+      openocd: this.p.bridgeOpenocd, scripts: this.p.bridgeScripts,
+      jlinkDevice: this.p.bridgeJlinkDevice, jlinkSpeed: this.p.bridgeJlinkSpeed,
+      nodeVersion: this.p.bridgeNodeVer, mirror: this.p.bridgeMirror, autoNode: this.p.bridgeAutoNode,
+    });
+    this.files = [...buildOutputs(this.p), ...this.kitFiles];
     if (this.sel >= this.files.length) this.sel = Math.max(0, this.files.length - 1);
     this.renderFileTabs();
     this.renderPreview();
@@ -144,7 +188,8 @@ export class GenView {
     if (!this.files.length){
       setStatus($('g-status'), '一个都没勾：至少勾一个产物', 'err');
     } else {
-      setStatus($('g-status'), `${this.files.length} 个文件 · ${kb} KB · ${this.p.newline === 'lf' ? 'LF' : 'CRLF'} · 修正 ${nfix} 项`, 'ok');
+      setStatus($('g-status'), `${this.files.length} 个文件 · ${kb} KB · ${this.p.newline === 'lf' ? 'LF' : 'CRLF'} · 修正 ${nfix} 项` +
+        (this.kitFiles.length ? ` · 含桥包 ${(kitBytes(this.kitFiles) / 1024).toFixed(0)} KB` : ''), 'ok');
     }
     this.renderDetect();
     return this.files;
@@ -155,7 +200,10 @@ export class GenView {
     box.innerHTML = '';
     this.files.forEach((f, i) => {
       const b = document.createElement('button');
-      b.textContent = f.name;
+      // 标签只显示文件名（桥包那 7 个带 rtt-bridge-kit/ 前缀，全写出来会把标签栏撑成三行）；
+      // 完整路径放 title，鼠标悬停能看全
+      b.textContent = f.name.split('/').pop();
+      b.title = f.name;
       b.className = i === this.sel ? 'on' : '';
       b.addEventListener('click', () => { this.sel = i; this.renderFileTabs(); this.renderPreview(); });
       box.appendChild(b);
@@ -240,6 +288,14 @@ export class GenView {
   }
 
   // ---------------------------------------------------------------- 落地
+  /** 文件清单里可能带 `rtt-bridge-kit/xxx` 这种子目录名：目录选择器要一层层建出来 */
+  async _handleFor(root, name, create){
+    const parts = String(name).split('/');
+    let dir = root;
+    for (const seg of parts.slice(0, -1)) dir = await dir.getDirectoryHandle(seg, { create });
+    return dir.getFileHandle(parts[parts.length - 1], { create });
+  }
+
   async saveToFolder(){
     if (!this.files.length) return toast('先勾一个产物', 'warn');
     if (!window.showDirectoryPicker){
@@ -258,7 +314,7 @@ export class GenView {
     // 先看有没有同名文件（和 Python 工具的"存在就不覆盖"一个意思）
     const exists = [];
     for (const f of this.files){
-      try { await dir.getFileHandle(f.name, { create: false }); exists.push(f.name); } catch {}
+      try { await this._handleFor(dir, f.name, false); exists.push(f.name); } catch {}
     }
     if (exists.length && !$('g-force').checked){
       if (!confirm(`${dir.name} 里已存在：\n  ${exists.join('\n  ')}\n\n覆盖它们吗？`)) return;
@@ -266,7 +322,7 @@ export class GenView {
 
     try {
       for (const f of this.files){
-        const fh = await dir.getFileHandle(f.name, { create: true });
+        const fh = await this._handleFor(dir, f.name, true);
         const w = await fh.createWritable();
         await w.write(f.data);
         await w.close();
@@ -286,6 +342,14 @@ export class GenView {
     const name = `${sanitize(this.p.projectName)}-gen.zip`;
     saveBlob(new Blob([zip], { type: 'application/zip' }), name);
     toast(`已打包 ${this.files.length} 个文件（${(zip.length / 1024).toFixed(1)} KB），在「下载」文件夹里`, 'ok', 5200);
+  }
+
+  /** 只打包「本地桥」那 7 个文件（zip 里带 `rtt-bridge-kit/` 这一层）—— 给人直接发这一包 */
+  downloadBridgeZip(){
+    if (!this.kitFiles?.length) return toast('先在「本地桥」那一栏把开关勾上', 'warn');
+    const zip = zipStore(this.kitFiles.map(f => ({ name: f.name, data: f.data })));
+    saveBlob(new Blob([zip], { type: 'application/zip' }), `${KIT_DIR}.zip`);
+    toast(`已打包桥包 ${this.kitFiles.length} 个文件（${(zip.length / 1024).toFixed(1)} KB）：解压后双击 start-bridge.bat`, 'ok', 6000);
   }
 
   downloadCurrent(){
@@ -316,6 +380,12 @@ export class GenView {
       newline: this.p?.newline,
       detect: this.info,
       folder: this.folderName,
+      // 本地桥安装包：开了就有 7 个文件（tools/selftest/bridge-kit.test.mjs 管内容，这里只管"在不在"）
+      bridgeKit: {
+        on: !!this.p?.bridgeKit,
+        files: (this.kitFiles || []).map(f => f.name),
+        bytes: (this.kitFiles || []).reduce((a, f) => a + f.data.length, 0),
+      },
       supported: { directoryPicker: !!window.showDirectoryPicker },
     };
   }

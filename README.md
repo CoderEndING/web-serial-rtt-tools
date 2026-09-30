@@ -155,6 +155,7 @@ make hw-campaign-hpm ARGS="--cycles=1 --alt=1"   # 冒烟
 4. **RTT（J-Link / OpenOCD）**：双击 `bridge/start-bridge.bat`，页面里后端选「本地桥 · OpenOCD」→ 选目标芯片（常用 STM32 系列已内置；其它芯片选「自定义 cfg…」填 cfg 文件）→ 连接。
    桥要 Node 18+（零 npm 依赖）；**退出请用 Ctrl+C**（或先关网页）—— 桥会把 OpenOCD / J-Link 子进程一起收掉，
    不会留下孤儿占着探针（这正是"下次连不上"最常见的根因）。
+   手边没有仓库也没关系：**「工程生成」页最下面「本地桥」那一栏能一键下载整个桥包**（含启动器 / 便携 Node 兜底 / 环境预检）。
 
 串口和 RTT 可以**同时**用（一个走 USB CDC、一个走探针）。
 
@@ -181,6 +182,34 @@ make hw-campaign-hpm ARGS="--cycles=1 --alt=1"   # 冒烟
 - 预览区还能单独下载 / 复制当前那个文件。
 
 网页**不能**静默写你的项目目录 —— 必须你亲手选一次文件夹（浏览器安全模型）。
+
+### 顺带生成「本地桥」安装包（J-Link / OpenOCD 那条路）
+
+同一页最下面「本地桥」那一栏：勾上（默认开）就多出 7 个文件，打包成 `rtt-bridge-kit/` 一层；
+点「下载桥包（ZIP）」可以**只**下这一包（~77 KB）。解压后**双击 `start-bridge.bat`** 就是一条龙：
+
+```
+rtt-bridge-kit/
+  start-bridge.bat    找 Node（没有就下便携版）→ 环境预检 → 起桥 → 打印网页地址
+  check-tools.bat     只跑预检：端口 / OpenOCD / scripts / J-Link 逐个查，并告诉你该改哪一行
+  get-node.ps1        start-bridge.bat 的便携 Node 下载器（国内镜像优先 + sha256 校验）
+  start-bridge.sh     macOS / Linux 版
+  rtt-bridge.mjs      桥本体（与仓库里那份**逐字节一致**，sha256 印在 README 里）
+  bridge.config.json  你在页面上填的参数（目标 / 工具路径 / J-Link 默认值）
+  README-bridge.txt   三步上手 + 换机器改哪三行 + 常见问题
+```
+
+- **不依赖仓库**：桥自己会托管网页，所以用线上页面 `https://minichao9901.github.io/web-serial-rtt-tools/`
+  也行（那个 Origin 本来就在桥的白名单里）；
+- **不写死路径**：`bridge.config.json` 里 `openocd` / `scripts` / `jlink.*` **留空 = 桥自己探测**
+  （ESP-IDF 的 `openocd-esp32` → `Program Files\OpenOCD` → PATH；J-Link 找 SEGGER 目录里版本号最大的）；
+  找不到时预检会把"找过哪些路径"列出来；
+- **没装 Node 也不怕**：bat 检测到没有就下便携版（~30 MB，绿色，放到包里的 `node\`，不动系统 PATH），
+  国内走 npmmirror、官方兜底，下载后按 `SHASUMS256.txt` 校验 sha256；企业内网可关掉这个开关；
+- 退出请用 **Ctrl+C**（桥会把 OpenOCD / J-Link 子进程一起收掉，不留孤儿占探针）。
+
+改过 `bridge/rtt-bridge.mjs` 就要 `make gen-embed` 重嵌一次（否则页面发出去的桥是旧的）——
+忘了也不要紧，`make test-gen` 里那条哈希对账会红。
 
 **固定套用的 4 项修正**（2026-09-27 逐条过审；改的是 Python 模板里用起来硌人的地方）：
 

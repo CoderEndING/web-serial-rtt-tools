@@ -95,6 +95,23 @@ logger 的 `%TEMP%` 日志。横幅里也写明了这一点。
 logger 临时文件被删、以及"直接跑桥时横幅确实讲了退出行为"（证明主路径挂上了钩子）。
 ⚠️ Windows 上没法给子进程发真 Ctrl+C（SIGINT 只能由控制台产生），所以是"单测处理函数 + 真收真子进程"
 两条合起来覆盖，这点在测试文件里注明了。
+⚠️ 反过来也记一笔：**用 X 关黑窗口 / `taskkill /F` 强杀控制台，桥自身可能来不及清理** ——
+实测 `taskkill /T /F` 打 `cmd.exe` 时它先干掉父进程、再枚举子进程就找不到 node 了（node 会活下来）。
+所以横幅和 README 都写着"退出请按 Ctrl+C"。
+
+### 3.4.2 环境预检 `--doctor` 与「桥包」（2026-09-30）
+
+`node bridge/rtt-bridge.mjs --doctor`（只读：不占端口、不起服务、不碰探针）把这几项逐个查一遍并把
+"找过哪些路径 / 该改哪一行"打出来：Node 版本、静态根有没有网页副本、监听端口是否空闲、
+OpenOCD + scripts 目录（顺带核对 `interface/cmsis-dap.cfg` / `target/stm32f1x.cfg`）、当前目标的 cfgs、
+J-Link 三件套（`JLinkGDBServerCL.exe` / `JLink.exe` / `JLinkRTTLogger.exe`）。
+退出码 0 = 全就绪；>0 = 有 ❌ 项。
+
+「工程生成」页最下面「本地桥」那一栏能**一键生成整套桥包**（`app/gen/bridge-kit.js` + 嵌进去的桥源码
+`app/gen/bridge-src.js`）：7 个文件，解压双击 `start-bridge.bat` 即用，**不依赖仓库**、**路径留空自动探测**、
+**没 Node 自动下便携版**（npmmirror 优先 + `SHASUMS256.txt` 校验）。设计与口径见 README 的
+「工程生成 → 顺带生成本地桥安装包」。自测：`make test-gen`（`bridge-kit.test.mjs` 50 项，含"嵌进去的桥
+与仓库那份逐字节一致"的哈希对账）+ `make test-gen-page`（CDP：13 个文件、改参数立刻生效、ZIP 里带那 7 个）。
 
 ### 3.5 烧录（JLink.exe Commander）
 

@@ -96,7 +96,9 @@ console.log('== 4. 主程序路径：直接跑桥时确实挂了退出钩子 =='
   const src = fs.readFileSync(BRIDGE, 'utf8');
   ok(/for \(const sig of \['SIGINT', 'SIGTERM', 'SIGHUP'\]\)/.test(src) && /process\.on\('exit'/.test(src),
      '源码里三个终止信号 + exit 兜底都挂着');
-  ok(/if \(isMain\)\{\s*\n\s*installExitHooks\(\);/.test(src), 'installExitHooks() 在"被当脚本跑"的那条路上被调用（import 时不起服务、不挂钩子）');
+  // isMain 门里的结构：--doctor 走预检（只读），否则才起服务 + 挂退出钩子
+  ok(/if \(isMain\)\{[\s\S]{0,400}?installExitHooks\(\);/.test(src) && /args\.doctor/.test(src),
+     'installExitHooks() 在"被当脚本跑"的那条路上被调用（import 时不起服务、不挂钩子）；--doctor 只跑预检');
 
   // 真起一个桥（随机端口），看横幅 —— 它跑起来就说明主路径 + 钩子都进来了
   const port = 17400 + (process.pid % 90);
@@ -118,6 +120,36 @@ console.log('== 4. 主程序路径：直接跑桥时确实挂了退出钩子 =='
   ok(/Ctrl\+C 退出/.test(out) && /子进程一起收掉/.test(out), `横幅讲清了退出行为：「${(out.match(/Ctrl\+C[^\n]*/) || [''])[0].trim()}」`);
   ch.kill();
   await waitExit(ch, 2000);
+}
+
+// ==================================================================== 5
+console.log('== 5. --doctor 环境预检（只读：不占端口、不起服务）==');
+{
+  const root = join(here, '..', '..');
+  const run = args => new Promise(res => {
+    const c = spawn(process.execPath, [BRIDGE, ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = '';
+    c.stdout.on('data', d => { out += d; });
+    c.stderr.on('data', d => { out += d; });
+    c.once('exit', code => res({ out, code }));
+  });
+  const port = 17410 + (process.pid % 80);
+  const good = await run(['--doctor', '--port', String(port), '--target', 'stm32f103']);
+  ok(/环境预检/.test(good.out) && /Node\s*:/.test(good.out) && /端口/.test(good.out) && /OpenOCD/.test(good.out),
+     '预检把 Node / 端口 / OpenOCD / J-Link 逐项列出来');
+  ok(!/rtt-bridge 1\.0\s*\n\s*网页地址/.test(good.out), '预检**不启服务**（没有那几行启动横幅）');
+  const free = await new Promise(res => {           // 预检跑完后端口应该还是空的
+    const s = net.connect(port, '127.0.0.1');
+    const t = setTimeout(() => { s.destroy(); res(true); }, 500);
+    s.once('connect', () => { clearTimeout(t); s.destroy(); res(false); });
+    s.once('error', () => { clearTimeout(t); res(true); });
+  });
+  ok(free, '预检不占端口（跑完那口还是空的）');
+  ok(good.code === 0 || /要处理/.test(good.out), `退出码与结论一致（code=${good.code}）`);
+
+  const bad = await run(['--doctor', '--port', String(port), '--target', 'nosuchtarget']);
+  ok(/没有这个目标/.test(bad.out) && bad.code === 1, `目标不存在 → 指出来并以 1 退出（code=${bad.code}）`);
+  ok(/bridge\.config\.json/.test(bad.out), '报错里带上"该改哪个文件"（不是光说失败）');
 }
 
 console.log(`\n${fail ? '❌' : '✅'} bridge-lifecycle.test: ${pass} 通过 / ${fail} 失败`);

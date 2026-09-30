@@ -29,7 +29,7 @@ FW_DIR   = tools/target-firmware/stm32f103
 LA       = tools/la/kingst_la.py
 
 .DEFAULT_GOAL := help
-.PHONY: help serve serve-dev serve-stop browser open page-prep test test-ui test-gen test-gen-page test-hid test-dwarf test-scope test-scope-page test-scope-render test-spi test-spi-page test-hw test-record test-bridge test-bridge-gate test-hpm test-image test-all flash-timing hw-campaign hw-campaign-hpm campaign-summary \
+.PHONY: help serve serve-dev serve-stop browser open page-prep test test-ui test-gen test-gen-page gen-embed test-hid test-dwarf test-scope test-scope-page test-scope-render test-spi test-spi-page test-hw test-record test-bridge test-bridge-gate test-hpm test-image test-all flash-timing hw-campaign hw-campaign-hpm campaign-summary \
         bridge bridge-stop fw-build fw-flash fw-restore fw-h7-build fw-h7-slow fw-h7-flash \
         algo-check flash-plan la-info la-capture git-status git-log check clean spi-hw spi-flow
 
@@ -99,8 +99,15 @@ test-scope:
 	$(NODE) tools/selftest/scope-proto.test.mjs
 
 # 「工程生成」页与 Python 工具（uvprojx2cmake.py）产物的逐字节对账
+# 外加「本地桥安装包」生成器的自测（桥源码哈希对账 + bat/ps1/config 内容）
 test-gen:
 	$(NODE) tools/selftest/gen-parity.mjs
+	$(NODE) tools/selftest/bridge-kit.test.mjs
+
+# 改完 bridge/rtt-bridge.mjs 必须重嵌一次（否则「工程生成」页发出去的桥是旧的）
+# 忘了也没事：test-gen 里那条哈希对账会红
+gen-embed:
+	$(NODE) tools/dev/embed-bridge.mjs
 
 # 探针自定义 HID（RTT→CDC 转发）协议自测：组包 / 状态字 / 假探针流程
 test-hid:
