@@ -173,6 +173,14 @@ export const PADS = [
   { i: 11, name: 'PA10', j3: 'J3[33]（固件 LED 任务每 50 ms 写它，实测驱动不出持续电平，别选）' },
   { i: 12, name: 'PA30', j3: 'J3[37]（USB0_PWR：被板上 Q1 短到地，拉不动，别用）' },
   { i: 13, name: 'PA31', j3: 'J3[11]（USB0_ID 网络；实测可当慢速输出，BL 推荐）' },
+  /* 2026-09-30 释放：J3 上原 SPI1 显示接口那四根。桥搬到 SPI2 后固件里零引用
+   * （SWD=PA06/PA07、nRESET=PA08、CDC=PB08/PB09、log=PA00/PA01），实测固件已接受
+   * 索引 14~17（烧录后逐个回读通过）。⚠️ 若固件切到 akaLinkPro 板级构建，
+   * PA26/PA27/PA28 会被 nRESET/SWCLK/SWDIO 占走，届时要重新限制。 */
+  { i: 14, name: 'PA26', j3: 'J3[24]（原 SPI1 显示 CS；2026-09-30 起可用）' },
+  { i: 15, name: 'PA27', j3: 'J3[23]（原 SPI1 SCLK；2026-09-30 起可用）' },
+  { i: 16, name: 'PA28', j3: 'J3[21]（原 SPI1 MISO；2026-09-30 起可用）' },
+  { i: 17, name: 'PA29', j3: 'J3[19]（原 SPI1 MOSI；2026-09-30 起可用）' },
 ];
 export const PAD_NAME = Object.fromEntries(PADS.map(p => [p.i, p.name]));
 
