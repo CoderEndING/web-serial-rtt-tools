@@ -277,10 +277,17 @@ export class SpiBusView {
 
   // ------------------------------------------------------------ 引脚分配图
 
-  togglePinMap(){
+  async togglePinMap(){
     const box = $('sp-pinmap');
     box.hidden = !box.hidden;
-    if (!box.hidden) this.renderPinMap();
+    if (box.hidden) return;
+    /* 没读到配置就先自动读一次（连着探针 / 假探针都可以读），否则图里标不出辅助脚 */
+    const s = this.session;
+    if (!s.cfg && (s.connected || s.usingMock)){
+      await this.wrap(() => s.loadCfg({ tag: this.tag }));
+      this.refreshPads();
+    }
+    this.renderPinMap();
   }
 
   /**
@@ -351,7 +358,8 @@ export class SpiBusView {
       '　｜　接线：CS←J3[26] SCLK←J3[13] D0←J3[28] D1←J3[27] D2←J3[10] D3←J3[8]，' +
       'VCOM ← J3[5](TX,PB08) / J3[3](RX,PB09)';
     $('sp-pinmap-sub').textContent = (c.padRst || c.padBl || c.padDc)
-      ? '（已按当前配置标出辅助脚）' : '（还没读到配置，可先点「读取配置」）';
+      ? '（已按当前配置标出辅助脚：<< 后面就是线名）'
+      : '（配置里四条辅助线现在都是「不用」—— 换了屏型号记得「套用推荐值」）';
   }
 
   // ==================================================================== 配置
