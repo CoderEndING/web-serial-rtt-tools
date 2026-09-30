@@ -206,10 +206,11 @@ step('4. 面板初始化：内置表 + 自动补 MADCTL/COLMOD → 下发');
     document.getElementById('pn-code-load').click();
     await new Promise(r => setTimeout(r, 600));
     return { rows: window.__tools.panel.summary().rows,
-             prefix: document.getElementById('pn-code-prefix').checked,
+             table: document.querySelectorAll('#pn-code-body tr').length,
              sum: document.getElementById('pn-code-sum').textContent };`);
   ok(init.rows > 0, `解析出 ${init.rows} 条`, init.sum);
-  ok(init.prefix, '自动补 MADCTL/COLMOD 已勾（AXS15352 缺了会全黑）');
+  // 面板不再替用户的表补 MADCTL/COLMOD（2026-09-30 去掉）：表格行数应等于解析条数
+  ok(init.table === init.rows, `表格行数 == 解析条数（${init.table}/${init.rows}，不再自动补前缀）`);
 
   await cdp.eval(`document.getElementById('pn-enable').click();`);
   await sleep(700);

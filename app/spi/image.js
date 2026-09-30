@@ -249,12 +249,16 @@ export function parseBMP(bytes){
  *
  * 档 0/1 用 `STEP` 帧（固件按档展开：档 1 = 同一个 CS 窗口内"DC 命令 → 翻 DC → 参数"）。
  *
- * 档 2（QSPI）**直接发 XFER，不走 STEP** —— 因为固件当前的 `sb_step_qspi()` 把命令字放在
- * 24 bit 地址的**最低字节**（`addr = cmd`，线上 `02 | 00 00 XX`），而 ST77916 数据手册 §8.8.5.1
- * 写得很明确：`02h` 之后 3 字节 AD[23:0] = **`00 XX 00`**（"1 byte of 0x00, 1 byte of command
- * address and 1 byte of 0x00"，`CMD : 0x00XX00`）。ESP-IDF 官方驱动也是这么做的
- * （`esp_lcd_st77916_spi.c`：`lcd_cmd <<= 8`）。走 STEP 的 QSPI 命令一条都认不出来，
- * 所以这里绕开它：地址 = `命令字 << 8`。
+ * 档 2（QSPI）**直接发 XFER，不走 STEP**：地址自己按手册编码（`addr = 命令字 << 8`）。
+ *
+ * 📌 历史背景（2026-09-30 订正，别再照旧说法改回去）：当年绕开 STEP 是因为固件
+ * `sb_step_qspi()` 把命令字放在 24 bit 地址的**最低字节**（`addr = cmd`，线上 `02 | 00 00 XX`），
+ * 而 ST77916 数据手册 §8.8.5.1 写得很明确：`02h` 之后 3 字节 AD[23:0] = **`00 XX 00`**
+ * （"1 byte of 0x00, 1 byte of command address and 1 byte of 0x00"，`CMD : 0x00XX00`）。
+ * ESP-IDF 官方驱动也是这么做的（`esp_lcd_st77916_spi.c`：`lcd_cmd <<= 8`）。
+ * **固件已订正成同一形状**（`spi_bridge.c:1242-1256`，线上 `02 | 00 <cmd> 00 | params`，
+ * 本机 LA 实测确认为 `02 00 73 00 f0`）⇒ 现在 STEP 与 XFER 两条路逐字节一致。
+ * 这里继续走 XFER 只是因为"开窗能一次把 DC/线数/坐标带全"，不是因为 STEP 还错。
  */
 export function windowItems({ x0, x1, y0, y1 }, g = {}, o = {}){
   const col = g.colCmd ?? 0x2a, row = g.rowCmd ?? 0x2b;

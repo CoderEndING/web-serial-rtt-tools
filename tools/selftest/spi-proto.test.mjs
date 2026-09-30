@@ -311,14 +311,15 @@ console.log('== 6. 假探针：帧执行（回环 / 档位展开 / 非阻塞延�
   ok(eqArr(P.parseRsp(probe2.takeRsp()).data, Uint8Array.of(0, 0)), '没接跳线 → 读回 0x00（回环自检会 FAIL，符合预期）');
 
   // ④ 档位展开：三条 STEP 的线上字节
-  //    ⚠️ 档 2 这条钉的是**当前固件**的展开（`sb_step_qspi()` 把命令字放最低字节 → `02 | F0 00 00`），
-  //       而 ST77916 数据手册 §8.8.5.1 要求 `02 | 00 F0 00`（`CMD : 0x00XX00`，命令在中间字节）
-  //       —— 固件侧待修，见 docs/spi-bridge-page.md §11.12。页面已经绕开 STEP：
-  //       QSPI 的开窗直接发 XFER（`image.js` 的 windowItems），地址按手册编码。
+  //    ⚠️ 档 2 这条钉的是 `sb_step_qspi()` 的展开 = `addr = cmd << 8` → 线上 `02 | 00 F0 00`
+  //       （命令在 24 bit 地址的**中间字节**，即 ST77916 数据手册 §8.8.5.1 的 `CMD : 0x00XX00`）。
+  //       固件 2026-09-30 已订正到此形状（历史上错过 `cmd << 16` 与 `addr = cmd` 两版）；
+  //       本机 LA 实测真机线上确为 `02 00 73 00 f0`，所以 mock 必须与之一致，
+  //       否则整页自测会在"错的形状"上通过。
   const cases = [
     [{ profile: 0, defLines: 1 }, 'ce 5a a5', '档 0 raw：cmd + params'],
     [{ profile: 1 }, 'ce 5a a5', '档 1 spi_dcx：同一 CS 窗口里 DC 0→1'],
-    [{ profile: 2 }, '02 f0 00 00 28', '档 2 qspi：固件当前口径（命令字在最低字节，待修）'],
+    [{ profile: 2 }, '02 00 f0 00 28', '档 2 qspi：命令字在地址中间字节（00 XX 00，与手册一致）'],
   ];
   for (const [prof, want, label] of cases){
     const p = new M.MockSpiProbe();

@@ -548,12 +548,16 @@ export class MockSpiProbe {
     const bytes = [];
     if (prof.profile === 2){
       /**
-       * ⚠️ 这里**照当前固件**展开：`sb_step_qspi()` 把命令字放在 24 bit 地址的**最低字节**
-       * （`x.addr = cmd` → 线上 `02 | 00 00 XX`）。这与 ST77916 数据手册 §8.8.5.1 的
-       * `CMD : 0x00XX00`（命令在**中间**字节）不符 —— 固件侧待修（见 docs/spi-bridge-page.md §11.12）。
-       * 页面已经绕开它：QSPI 的开窗不再走 STEP，而是直接发 XFER（`image.js` 的 windowItems）。
+       * 档 2 = QSPI：`sb_step_qspi()` 把命令字放在 24 bit 地址的 **bits[23:16]**（`addr = cmd << 8`），
+       * 线上 = `02 | 00 <cmd> 00 | params` —— 与 ST77916 数据手册 §8.8.5.1 的 `CMD : 0x00XX00` 一致，
+       * 也与像素侧同一个编码（RAMWR 写 `0x002C00`、像素 opcode `0x32`）。
+       *
+       * 🚨 固件历史上错过两版，这里曾长期照**第二版**建模（`x.addr = cmd` → 线上 `02 | 00 00 XX`）：
+       *    第一版 `cmd << 16`（发出 `02 F0 00 00`）、第二版 `addr = cmd`（发出 `02 00 00 F0`）。
+       *    2026-09-30 固件已按 `cmd << 8` 订正（见其 `spi_bridge.c:1242-1256` 的订正说明），
+       *    本机 LA 实测真机线上确为 `02 00 73 00 f0` ⇒ mock 就该是这个形状。
        */
-      bytes.push(prof.qspiWrOpcode, cmd, 0x00, 0x00, ...params);      // 固件口径：opcode + cmd + 00 00
+      bytes.push(prof.qspiWrOpcode, 0x00, cmd, 0x00, ...params);      // opcode + 00 <cmd> 00 + params
     } else if (prof.profile === 1){
       bytes.push(cmd, ...params);                                     // 命令(DC=0) → 翻 DC → 参数(DC=1)
     } else {

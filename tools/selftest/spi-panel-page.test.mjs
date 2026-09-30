@@ -239,8 +239,10 @@ console.log('== 5. 面板初始化：内置示例 + 解析 + 表格 ==');
              rows: window.__tools.panel.summary().rows,
              table: document.querySelectorAll('#pn-code-body tr').length };`);
   ok(onLoad.text > 500, `一进来就载入了内置示例（${onLoad.text} 字符）`);
-  ok(onLoad.rows === 30 && onLoad.table === 32, `默认示例 = AXS15352 的 30 条 + 自动补的 2 条前缀 = 表格 32 行（${onLoad.rows}/${onLoad.table}）`);
-  ok(/认出 30 条/.test(onLoad.sum) && /自动补 0x36\/0x3A/.test(onLoad.sum), `摘要说清了结果（含"已自动补前缀"）：「${onLoad.sum.slice(0, 72)}」`);
+  // 面板**不再替用户的表补命令**（2026-09-30 用户要求去掉"自动补 MADCTL/COLMOD"）：
+  // 表格行数 == 解析出的条数，摘要里也不该再出现"自动补"字样。
+  ok(onLoad.rows === 30 && onLoad.table === 30, `默认示例 = AXS15352 的 30 条，表格 30 行（不再自动补前缀）（${onLoad.rows}/${onLoad.table}）`);
+  ok(/认出 30 条/.test(onLoad.sum) && !/自动补/.test(onLoad.sum), `摘要只报解析结果、不提"自动补"：「${onLoad.sum.slice(0, 72)}」`);
 
   // 切到 ST77916 示例（192 条 / 215 参数字节 / 120 ms）
   const st = await ev(`
@@ -250,7 +252,7 @@ console.log('== 5. 面板初始化：内置示例 + 解析 + 表格 ==');
     return { sum: document.getElementById('pn-code-sum').textContent,
              rows: window.__tools.panel.summary().rows,
              table: document.querySelectorAll('#pn-code-body tr').length };`);
-  ok(st.rows === 192 && st.table === 194, `ST77916 示例解析出 192 条（+2 前缀 = 194 行，实测 ${st.rows}/${st.table}）`);
+  ok(st.rows === 192 && st.table === 192, `ST77916 示例解析出 192 条，表格 192 行（去掉前缀后不再多 2 行，实测 ${st.rows}/${st.table}）`);
   ok(/215 参数字节/.test(st.sum) && /累计延时 120 ms/.test(st.sum), `统计与源文件声明一致：「${st.sum.replace(/ · 格式 \w+/, '')}」`);
 
   // 自己贴一段：C 数组（含一行故意写坏的）
@@ -285,11 +287,12 @@ console.log('== 5. 面板初始化：内置示例 + 解析 + 表格 ==');
 console.log('== 5b. 字节编辑（照 bmp_sender.html）：每格一个字节可直接敲 + 点开位开关板 ==');
 {
   const opened = await ev(`
-    // 用内置 AXS15352 示例（第 0 行是自动补的 MADCTL 0x36 = 0x00，正是要试色序的那个字节）
+    // 用内置 AXS15352 示例。去掉自动补前缀后首行 = 厂家表第一条 0xCE ← 5A A5，
+    // 这里点**第 2 个参数字节**（0xA5）—— 位开关板要能对着任意一个参数字节打开。
     document.getElementById('pn-code-preset').value = 'axs15352';
     document.getElementById('pn-code-load').click();
     await new Promise(r => setTimeout(r, 300));
-    const cell = document.querySelector('#pn-code-body tr:nth-child(1) td.params input.bx');
+    const cell = document.querySelector('#pn-code-body tr:nth-child(1) td.params input.bx:nth-of-type(2)');
     cell.click();
     await new Promise(r => setTimeout(r, 80));
     const pop = document.getElementById('pn-bitpop');
@@ -306,20 +309,22 @@ console.log('== 5b. 字节编辑（照 bmp_sender.html）：每格一个字节�
              cellCount: document.querySelectorAll('#pn-code-body tr:nth-child(1) td.params input.bx').length,
              text: document.getElementById('pn-code-text').value };`);
   ok(opened.hidden === false && opened.bits === 8, `点参数字节弹出 8 个 bit 方块（bit 数 ${opened.bits}）`);
-  ok(opened.onBits === 0 && opened.chgBits === 0 && /0x00 = 0 = 0b00000000/.test(opened.val),
-     `当前值 0x00 一位都没亮（「${opened.val}」）`);
+  // 去掉自动补前缀后，首行是厂家表第一条（AXS15352 = 0xCE ← 5A A5），
+  // 位开关板这时指的第 2 个参数字节 = 0xA5
+  ok(opened.onBits === 4 && opened.chgBits === 0 && /0xA5 = 165 = 0b10100101/.test(opened.val),
+     `当前值 0xA5 亮 4 位（「${opened.val}」）`);
   ok(/bit7/.test(opened.firstBit) && /128/.test(opened.firstBit), `方块是"bit号 + 0/1 + 权重"三行：${opened.firstBit}`);
-  ok(/第 0 条（0x36）· 第 0 字节/.test(opened.title), `标题带行号与字节号：「${opened.title}」`);
-  ok(/MADCTL/.test(opened.hint) && /BGR/.test(opened.hint), `已知命令给位名（MADCTL/BGR）：${opened.hint.slice(0, 40)}…`);
+  ok(/第 0 条（0xCE）· 第 1 字节/.test(opened.title), `标题带行号与字节号：「${opened.title}」`);
+  ok(!/MADCTL|BGR/.test(opened.hint), `0xCE 不在位名表里 → 只给位号/权重、不猜位名（${opened.hint.slice(0, 40)}…）`);
   ok(opened.acts.join(',') === 'zero,ones,inv,orig,close', `一排快捷键齐了（${opened.acts.join('/')}）`);
   ok(/^0 1 2 3/.test(opened.ruler), `表头有字节序号标尺：「${opened.ruler.slice(0, 24)}…」`);
   ok(opened.cellCount >= 1, `参数字节每格一个输入框（第 0 行 ${opened.cellCount} 格）`);
 
   const toggled = await ev(`
     const pop = document.getElementById('pn-bitpop');
-    pop.querySelector('#pn-bitpop-bits button.bit[data-k="3"]').click();      // bit3 = MADCTL 的 BGR 位
+    pop.querySelector('#pn-bitpop-bits button.bit[data-k="3"]').click();      // 0xA5 的 bit3（0xA5 该位本来就是 0）
     await new Promise(r => setTimeout(r, 80));
-    const cell = document.querySelector('#pn-code-body tr:nth-child(1) td.params input.bx');
+    const cell = document.querySelector('#pn-code-body tr:nth-child(1) td.params input.bx:nth-of-type(2)');
     const row = window.__tools.panel.effectiveRows[0];
     return { val: document.getElementById('pn-bitpop-val').textContent,
              onBits: [...pop.querySelectorAll('#pn-bitpop-bits button.bit')].filter(b => b.classList.contains('on')).length,
@@ -328,16 +333,18 @@ console.log('== 5b. 字节编辑（照 bmp_sender.html）：每格一个字节�
              data: Array.from(row.data),
              sum: document.getElementById('pn-code-sum').textContent,
              text: document.getElementById('pn-code-text').value };`);
-  ok(/0x08 = 8 = 0b00001000/.test(toggled.val) && /原 0x00/.test(toggled.val), `勾 bit3 → 0x08 并标出原值（${toggled.val}）`);
-  ok(toggled.onBits === 1 && toggled.chgBits === 1, '只有 bit3 亮，且它被标成"和原值不同"（黄框）');
-  ok(toggled.data[0] === 0x08 && toggled.cell === '08', `表格格子与行数据同步（cell=${toggled.cell} data=${toggled.data}）`);
+  ok(/0xAD = 173 = 0b10101101/.test(toggled.val) && /原 0xA5/.test(toggled.val), `勾 bit3 → 0xAD 并标出原值（${toggled.val}）`);
+  ok(toggled.onBits === 5 && toggled.chgBits === 1,
+     `0xAD 亮 5 位（bit7/5/3/2/0），其中刚勾的 bit3 被标成"和原值不同"（黄框）`);
+  ok(toggled.data[1] === 0xad && toggled.cell === 'ad', `表格格子与行数据同步（cell=${toggled.cell} data=${toggled.data}）`);
   ok(toggled.dirty === 1 && /已改 1 行/.test(toggled.sum), `行变脏 + 摘要说明「${toggled.sum.slice(0, 60)}…」`);
   ok(toggled.text === opened.text && opened.text.length > 500,
      `上面的文本框一个字符都没动（${opened.text.length} 字符逐字节相同 —— 原文是用户的资产）`);
 
   const typed = await ev(`
     // 表格里**直接敲十六进制**（与点 bit 走同一条路） + 一键快捷键 + 「改回」
-    const cell = document.querySelector('#pn-code-body tr:nth-child(1) td.params input.bx');
+    // 位开关板当前指着第 1 个参数字节（0xA5），敲 5A 后它要跟着同步
+    const cell = document.querySelector('#pn-code-body tr:nth-child(1) td.params input.bx:nth-of-type(2)');
     cell.value = '5a'; cell.dispatchEvent(new Event('change', { bubbles: true }));   // 真浏览器里 change 会冒泡
     await new Promise(r => setTimeout(r, 60));
     const afterType = { data: Array.from(window.__tools.panel.effectiveRows[0].data), val: document.getElementById('pn-bitpop-val').textContent };
@@ -357,17 +364,17 @@ console.log('== 5b. 字节编辑（照 bmp_sender.html）：每格一个字节�
     await new Promise(r => setTimeout(r, 80));
     const afterRevert = { data: Array.from(window.__tools.panel.effectiveRows[0].data),
                           dirty: document.querySelectorAll('#pn-code-body tr.dirty').length,
-                          cell: document.querySelector('#pn-code-body tr:nth-child(1) td.params input.bx').value,
+                          cell: document.querySelector('#pn-code-body tr:nth-child(1) td.params input.bx:nth-of-type(2)').value,
                           sum: document.getElementById('pn-code-sum').textContent };
     document.getElementById('pn-bitpop').querySelector('button[data-bit="close"]').click();
     await new Promise(r => setTimeout(r, 60));
     return { afterType, afterInv, afterOrig, dirtyBefore, afterRevert, hidden: document.getElementById('pn-bitpop').hidden };`);
-  ok(typed.afterType.data[0] === 0x5a && /0x5A/.test(typed.afterType.val), '直接在格子里敲十六进制就改了字节（位开关板同步）');
-  ok(typed.afterInv[0] === 0xa5, `逐位取反 = 0xA5（0x${typed.afterInv[0].toString(16)}）`);
-  ok(typed.afterOrig.data[0] === 0x00 && typed.afterOrig.dirty === 0 && !/已改/.test(typed.afterOrig.sum),
-     '「恢复原值」把这一字节改回 0x00，行也自己变干净了（脏标记是跟原值比对，不是粘住的 flag）');
-  ok(typed.dirtyBefore === 1 && typed.afterRevert.data[0] === 0x00 && typed.afterRevert.dirty === 0 &&
-     typed.afterRevert.cell === '00', `行尾「改回」还原整行（格子回到 ${typed.afterRevert.cell}）`);
+  ok(typed.afterType.data[1] === 0x5a && /0x5A/.test(typed.afterType.val), '直接在格子里敲十六进制就改了字节（位开关板同步）');
+  ok(typed.afterInv[1] === 0xa5, `逐位取反 = 0xA5（0x${typed.afterInv[1].toString(16)}）`);
+  ok(typed.afterOrig.data[1] === 0xa5 && typed.afterOrig.dirty === 0 && !/已改/.test(typed.afterOrig.sum),
+     '「恢复原值」把这一字节改回 0xA5（出厂值），行也自己变干净了（脏标记是跟原值比对，不是粘住的 flag）');
+  ok(typed.dirtyBefore === 1 && typed.afterRevert.data[1] === 0xa5 && typed.afterRevert.dirty === 0 &&
+     typed.afterRevert.cell === 'a5', `行尾「改回」还原整行（格子回到 ${typed.afterRevert.cell}）`);
   ok(typed.hidden === true, '「完成」把位开关板收起来');
 
   // 改过的值必须进到"重放"要发的那一串 STEP 里（用假探针看线上字节：档 1 = 命令 + 参数）
@@ -378,22 +385,27 @@ console.log('== 5b. 字节编辑（照 bmp_sender.html）：每格一个字节�
     document.getElementById('pn-enable').click();
     await new Promise(r => setTimeout(r, 400));
     const s = window.__tools.spiSession, p = s.mockProbe;
-    const cell = document.querySelector('#pn-code-body tr:nth-child(1) td.params input.bx');
+    const cell = document.querySelector('#pn-code-body tr:nth-child(1) td.params input.bx:nth-of-type(2)');
     cell.click();
     await new Promise(r => setTimeout(r, 60));
-    document.getElementById('pn-bitpop-bits').querySelector('button.bit[data-k="3"]').click();   // MADCTL → 0x08
+    document.getElementById('pn-bitpop-bits').querySelector('button.bit[data-k="3"]').click();   // 0xA5 → 0xAD
     await new Promise(r => setTimeout(r, 60));
     document.getElementById('pn-bitpop').querySelector('button[data-bit="close"]').click();
+    // 🚨 读日志必须在 p.resetState() **之前** —— 它会把 #pn-log 清空（本文件踩过：
+    //    先 resetState 再断言"日志里有改过记录"，必然落空）
+    const changeLog = document.getElementById('pn-log').textContent;
     p.resetState();
     document.getElementById('pn-code-play').click();
     for (let i = 0; i < 200 && s.busy; i++) await new Promise(r => setTimeout(r, 100));
     await new Promise(r => setTimeout(r, 300));
     const hex = w => [...w].map(b => b.toString(16).padStart(2, '0')).join(' ');
     return { wire: p.wire.slice(0, 2).map(hex), ok: p.stats.framesOk, err: p.stats.framesErr,
-             log: document.getElementById('pn-log').textContent };`);
-  ok(replay.wire[0] === '36 08', `改过的 MADCTL 真的按 0x08 发出去（档 1 线上字节「${replay.wire[0]}」，原文是 36 00）`);
+             changeLog };`);
+  ok(replay.wire[0] === 'ce 5a ad', `改过的参数字节真的按 0xAD 发出去（档 1 线上字节「${replay.wire[0]}」，原文是 ce 5a a5）`);
   ok(replay.err === 0 && replay.ok >= 32, `整表照样跑完（frames_ok=${replay.ok} err=${replay.err}）`);
-  ok(/改成 0x08/.test(replay.log), '日志里留了"哪一行改成什么"的记录（可追溯）');
+  // 日志里那条记的是小写十六进制（`hx()` 的输出），所以用 i 标志比对
+  ok(/改成 0xad/i.test(replay.changeLog) && /第 0 行/.test(replay.changeLog),
+     `日志里留了"哪一行改成什么"的记录（可追溯）：「${(replay.changeLog.match(/第 0 行[^\n]*/) || [''])[0]}」`);
 
   // 复位：重新「解析并预览」把改动丢掉（按原文重建）——这是有意的，得让用户看得见
   const reset = await ev(`
@@ -402,7 +414,7 @@ console.log('== 5b. 字节编辑（照 bmp_sender.html）：每格一个字节�
     return { data: Array.from(window.__tools.panel.effectiveRows[0].data),
              edited: window.__tools.panel.summary().editedRows,
              sum: document.getElementById('pn-code-sum').textContent };`);
-  ok(reset.data[0] === 0x00 && reset.edited === 0 && !/已改/.test(reset.sum),
+  ok(reset.data[1] === 0xa5 && reset.edited === 0 && !/已改/.test(reset.sum),
      '重新解析 → 改动清空、回到原文（步骤表按贴进来的文本重建）');
 }
 
@@ -435,31 +447,29 @@ console.log('== 6. 重放：整表下发 + 单发（假探针逐帧对账）==')
      `重放第一批就是"复位 → 开背光"（实测「${replay.wireLog.slice(0, 2).join(' | ')}」）`);
   ok(replay.enabled === true, '桥已使能（未使能时帧只会被 NAK）');
   ok(replay.profile === 2 && replay.geom === 'st77916', `已套用 ST77916：档 2 + 几何 st77916（实测 档${replay.profile} / ${replay.geom}）`);
-  ok(replay.framesOk === 196 && replay.framesErr === 0, `重放前置 2 帧（RST + 背光）+ 192 条 + 2 条自动前缀 = 196 帧全成功（frames_ok=${replay.framesOk} err=${replay.framesErr}）`);
+  ok(replay.framesOk === 194 && replay.framesErr === 0, `重放前置 2 帧（RST + 背光）+ 表 192 条 = 194 帧全成功（不再自动补前缀，实测 frames_ok=${replay.framesOk} err=${replay.framesErr}）`);
   ok(replay.bytesTx >= 215, `线上字节 ≥ 参数字节 215（实测 ${replay.bytesTx}，含每条 4 B STEP 头与档 2 的 4 B 前缀）`);
   ok(/完成/.test(replay.prog), `进度行收尾：「${replay.prog}」`);
 
-  // 单发第 3 行（表格含 2 条自动前缀，故 index 3 = 厂家表第 2 条 {0xF2, {0x28}, 1, 0}）：只有一帧
+  // 单发第 3 行 = index 2（表格就是厂家表本身，不再有那 2 行自动前缀）
   const one = await ev(`
     const s = window.__tools.spiSession, p = s.mockProbe;
     p.resetState();
-    document.querySelector('#pn-code-body button[data-act="one"][data-i="3"]').click();
+    document.querySelector('#pn-code-body button[data-act="one"][data-i="2"]').click();
     for (let i = 0; i < 60 && s.busy; i++) await new Promise(r => setTimeout(r, 100));
     await new Promise(r => setTimeout(r, 200));
     return { framesOk: p.stats.framesOk, wire: p.wire.map(w => [...w].map(b => b.toString(16).padStart(2, '0')).join(' ')) };`);
   ok(one.framesOk === 3 && one.wire.length === 1, `「单发」= 前置 2 帧 + 目标那 1 帧（${one.framesOk} 帧，其中数据帧 ${one.wire.length} 条）`);
-  ok(one.wire[0] === '02 f2 00 00 28', `档 2 展开正确：0x02 + 命令字 0xF2 + 24bit 地址(0) + 参数 0x28（实测 ${one.wire[0]}）`);
+  ok(one.wire[0] === '02 00 73 00 f0', `档 2 展开正确：0x02 + 地址 00 73 00（命令字在中间字节）+ 参数 0xF0（实测 ${one.wire[0]}）`);
 
-  // 前两行必须是自动补的 0x36/0x3A（AXS15352 缺了会全黑）
-  // ⚠️ 值现在在输入框里（不参与 textContent），所以读 input.value 而不是行文本
-  const prefix = await ev(`
-    const rows = [...document.querySelectorAll('#pn-code-body tr')].slice(0, 2);
-    return rows.map(tr => ({ cmd: tr.querySelector('input.bx.cmd').value,
-                             p0: tr.querySelector('td.params input.bx')?.value || '',
-                             txt: tr.textContent.replace(/\\s+/g, ' ').trim() }));`);
-  ok(prefix[0].cmd === '36' && prefix[0].p0 === '00' && /MADCTL/.test(prefix[0].txt) &&
-     prefix[1].cmd === '3a' && prefix[1].p0 === '55' && /COLMOD/.test(prefix[1].txt),
-     `表格最前面两行是自动补的 MADCTL/COLMOD：「0x${prefix[0].cmd} 0x${prefix[0].p0} ${prefix[0].txt.slice(0, 22)}」/「0x${prefix[1].cmd} 0x${prefix[1].p0}」`);
+  // 去掉自动补前缀之后，表格第一行**就是厂家表第一条**（ST77916 是 0xF0 ← 0x28）
+  const firstRow = await ev(`
+    const tr = document.querySelector('#pn-code-body tr');
+    return { cmd: tr.querySelector('input.bx.cmd').value,
+             p0: tr.querySelector('td.params input.bx')?.value || '',
+             txt: tr.textContent.replace(/\\s+/g, ' ').trim() };`);
+  ok(firstRow.cmd === 'f0' && firstRow.p0 === '28',
+     `表格第一行 = 厂家表首条 0xF0 ← 0x28（面板不再插 MADCTL/COLMOD）：「0x${firstRow.cmd} 0x${firstRow.p0} ${firstRow.txt.slice(0, 24)}」`);
 
   /**
    * 重放前的「复位 + 开背光」（默认勾上）：
@@ -469,6 +479,11 @@ console.log('== 6. 重放：整表下发 + 单发（假探针逐帧对账）==')
    */
   const pre = await ev(`
     const s = window.__tools.spiSession, p = s.mockProbe;
+    // 显式载一次 ST77916 表（不依赖上一节留下的状态）；下面单发第 4 行
+    document.getElementById('pn-code-preset').value = 'st77916';
+    document.getElementById('pn-code-load').click();
+    await new Promise(r => setTimeout(r, 400));
+    const wantStep = 'STEP cmd=0x' + window.__tools.panel.effectiveRows[3].cmd.toString(16);
     const fire = async () => {
       p.resetState();
       document.querySelector('#pn-code-body button[data-act="one"][data-i="3"]').click();
@@ -483,14 +498,14 @@ console.log('== 6. 重放：整表下发 + 单发（假探针逐帧对账）==')
     chk.checked = false;
     const off = await fire();
     chk.checked = true;
-    return { defaultOn, on, off };`);
+    return { defaultOn, on, off, wantStep };`);
   ok(pre.defaultOn === true, '「重放前先复位 + 开背光」默认就是勾上的');
   ok(pre.on.actions.slice(0, 2).join(' | ') === 'RESET low=10ms post=120ms | GPIO bl=1' &&
-     pre.on.actions[2]?.startsWith('STEP cmd=0xf2'),
-     `勾着：复位 → 开背光 → 再发数据，顺序对（实测「${pre.on.actions.join(' | ')}」）`);
+     pre.on.actions[2]?.startsWith(pre.wantStep),
+     `勾着：复位 → 开背光 → 再发数据，顺序对（期望第三步 ${pre.wantStep}；实测「${pre.on.actions.join(' | ')}」）`);
   ok(pre.on.delays.includes(130) && pre.on.err === 0,
      `复位时序沿用那一行的 10 / 120（登记 ${pre.on.delays.join(',')}）`);
-  ok(pre.off.actions.length === 1 && pre.off.actions[0].startsWith('STEP cmd=0xf2') && pre.off.err === 0,
+  ok(pre.off.actions.length === 1 && pre.off.actions[0].startsWith(pre.wantStep) && pre.off.err === 0,
      `取消勾选 → 只发数据那条，不碰 RST/BL（实测「${pre.off.actions.join(' | ')}」）`);
   ok(pre.off.ok === 1 && pre.on.ok === 3, `取消勾选后帧数从 ${pre.on.ok} 回到 ${pre.off.ok}（前置 2 帧真的没了）`);
 }
@@ -563,9 +578,10 @@ console.log('== 8. 面板电源 / 显示 4 个命令 + RST 脉冲 ==');
     }
     return { wire: p.wire.map(w => [...w].map(b => b.toString(16).padStart(2, '0')).join(' ')), delays: p.delays };`);
   ok(disp.wire.length === 4, `4 个按钮各发一条 STEP（实测 ${disp.wire.length} 条：${disp.wire.join(' | ')}）`);
-  ok(disp.wire[0]?.startsWith('02 11 00 00') && disp.wire[1]?.startsWith('02 29 00 00') &&
-     disp.wire[2]?.startsWith('02 28 00 00') && disp.wire[3]?.startsWith('02 10 00 00'),
-     `顺序与命令字对：上电 11h → 开显示 29h → 关显示 28h → 下电 10h`);
+  // 档 2 的 STEP 展开：opcode + 地址 `00 XX 00` + 参数（命令字在**中间**字节，与手册一致）
+  ok(disp.wire[0]?.startsWith('02 00 11 00') && disp.wire[1]?.startsWith('02 00 29 00') &&
+     disp.wire[2]?.startsWith('02 00 28 00') && disp.wire[3]?.startsWith('02 00 10 00'),
+     `顺序与命令字对：上电 11h → 开显示 29h → 关显示 28h → 下电 10h（地址 00 XX 00）`);
   ok(disp.delays.filter(d => d === 120).length === 2, `上电/下电各带 120 ms 等待（实测 ${disp.delays.join(',')}）`);
 
   const rst = await ev(`

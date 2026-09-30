@@ -352,7 +352,7 @@ console.log('== D. 字节 ↔ 位（解析表里"点字节改 bit"的纯逻辑�
   const row = { cmd: 0x36, data: shared, delayMs: 0 };
   C.setRowByte(row, 0, 0x08);
   ok(row.data[0] === 0x08, 'setRowByte 改参数：值变了');
-  ok(shared[0] === 0x00 && row.data !== shared, '原数组没被原地改（换新数组 —— REQUIRED_PREFIX 的 data 是共享常量）');
+  ok(shared[0] === 0x00 && row.data !== shared, '原数组没被原地改（换新数组 —— 行对象可能与其他引用共享同一个 data）');
   C.setRowByte(row, 'cmd', 0x3a);
   ok(row.cmd === 0x3a, 'setRowByte 也能改命令字节');
   const before = row.data;

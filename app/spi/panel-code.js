@@ -336,8 +336,7 @@ export const bitWeight = i => 1 << i;
 
 /**
  * **已知命令**的位名 —— 只写有把握的：
- *   0x36 MADCTL / 0x3A COLMOD 按 MIPI DCS 的常见排法（ST77916 与多数 MIPI 屏一致；
- *   AXS15352 的厂家表里这两条也走 MIPI 语义，见 panel-view.js 的 REQUIRED_PREFIX）。
+ *   0x36 MADCTL / 0x3A COLMOD 按 MIPI DCS 的常见排法（ST77916 与多数 MIPI 屏一致）。
  * 没列出来的命令**不猜**：只给 bit7…bit0 与位权 —— 猜错位名比不标更糟。
  */
 export const BIT_NAMES = {
@@ -360,8 +359,8 @@ export const bitNamesFor = cmd => BIT_NAMES[(cmd | 0) & 0xff] || null;
 /**
  * 改一条步骤里的**一个字节**：`k` = `'cmd'` 或参数下标（0 起）。原地改这一行并返回它。
  *
- * 🚨 参数是 `Uint8Array`，**必须换一个新数组**：自动补的那两条前缀（REQUIRED_PREFIX）的
- *    `data` 是模块级共享的，原地改会连常量一起污染 —— "下次解析"就再也回不到出厂值了。
+ * 🚨 参数是 `Uint8Array`，**必须换一个新数组**：行对象可能与其他引用共享同一个
+ *    `data`（例如调用方把同一份行数组派发给多处），原地改会把别处一起改掉。
  *
  * ⚠️ 这里**不记"改过"的标记**：界面靠"与原值快照的指纹比对"判断脏不脏（`panel-view.js` 的
  *    `fingerprint()`）—— 改成别的再改回原值，那一行就该自己变干净，一个粘住的 flag 做不到。

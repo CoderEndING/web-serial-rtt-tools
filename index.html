@@ -1053,7 +1053,6 @@
             <button id="pn-code-file" class="mini">载入文件…</button>
             <input type="file" id="pn-code-file-input" accept=".h,.c,.txt,.json" hidden>
             <span class="spacer"></span>
-            <label class="chk" title="AXS15352 的厂家表里没有这两条，缺了会全黑（实测结论）：0x36 MADCTL=0x00（RGB 顺序）+ 0x3A COLMOD=0x55（RGB565）。只影响重放/导出，不改你贴的文本。"><input type="checkbox" id="pn-code-prefix" checked> 自动补 MADCTL/COLMOD</label>
             <button id="pn-code-parse" class="primary mini">解析并预览</button>
           </div>
           <textarea id="pn-code-text" class="code" spellcheck="false" placeholder="把面板初始化代码贴到这里（C 数组为主，也认纯文本行与 JSON）：&#10;&#10;{0xCE, (uint8_t[]){0x5A, 0xA5}, 2, 0},&#10;{0xA1, (uint8_t[]){0x00, 0xDD}, 2, 0},&#10;{0x11, NULL, 0, 100},&#10;{0x29, NULL, 0, 0},"></textarea>

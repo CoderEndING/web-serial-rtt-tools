@@ -175,8 +175,8 @@ await cdp.eval(`
   await new Promise(r => setTimeout(r, 700));
   return true;`);
 base = await check('套用推荐值 + 载入内置表', base);
-const pre = await cdp.eval(`return { prof: window.__tools.spiSession.profile?.profile, sclk: window.__tools.spiSession.cfg?.sclkHz, rows: window.__tools.panel.summary().rows, prefix: document.getElementById('pn-code-prefix').checked };`);
-log(`③ 配置就位 ✓　档 ${pre.prof} · SCLK ${pre.sclk / 1e6} MHz · 表 ${pre.rows} 条 · 自动补前缀 ${pre.prefix}`);
+const pre = await cdp.eval(`return { prof: window.__tools.spiSession.profile?.profile, sclk: window.__tools.spiSession.cfg?.sclkHz, rows: window.__tools.panel.summary().rows, table: document.querySelectorAll('#pn-code-body tr').length };`);
+log(`③ 配置就位 ✓　档 ${pre.prof} · SCLK ${pre.sclk / 1e6} MHz · 表 ${pre.rows} 条（表格 ${pre.table} 行 —— 面板不再自动补 MADCTL/COLMOD，行数应相等）`);
 steps++;
 
 // ---- 初始化屏（可重复调用）

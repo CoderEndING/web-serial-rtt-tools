@@ -53,17 +53,6 @@ export const PANEL_PRESETS = {
 
 const GEOMETRY_SRC = { axs15352: 'axs15352', st77916: 'st77916' };
 
-/**
- * 厂家初始化表里**没有**、但缺了就全黑的两条（AXS15352 真屏实测结论，见交接文档 §5）：
- *   `0x36` MADCTL = 0x00（RGB 顺序；0x08 = BGR）—— 与"RGB565 高字节在前"是**正确组合**；
- *   `0x3A` COLMOD = 0x55（RGB565/16bpp）。
- * 它们必须排在厂家序列**之前**。默认勾上"自动补"，但不动用户贴的文本（只在解析结果前面插两行）。
- */
-export const REQUIRED_PREFIX = [
-  { cmd: 0x36, data: Uint8Array.of(0x00), delayMs: 0, auto: true, name: 'MADCTL（RGB 顺序）' },
-  { cmd: 0x3a, data: Uint8Array.of(0x55), delayMs: 0, auto: true, name: 'COLMOD（RGB565）' },
-];
-
 export class SpiPanelView {
   constructor(session){
     this.session = session;
@@ -109,7 +98,6 @@ export class SpiPanelView {
     $('pn-code-file').addEventListener('click', () => $('pn-code-file-input').click());
     $('pn-code-file-input').addEventListener('change', e => this.loadCodeFile(e.target.files[0]));
     $('pn-code-parse').addEventListener('click', () => this.parseCode());
-    $('pn-code-prefix').addEventListener('change', () => this.parseCode());
     $('pn-code-play').addEventListener('click', () => this.playRows(0, (this.effectiveRows || this.rows).length - 1));
     $('pn-code-stop').addEventListener('click', () => { this.playAbort = true; });
     $('pn-code-clear').addEventListener('click', () => { $('pn-code-text').value = ''; this.rows = []; this.bitpop.close(); this.renderCodeTable([]); this.setCodeSummary('已清空'); });
@@ -374,15 +362,20 @@ export class SpiPanelView {
     const r = C.parsePanelCode(text);
     this.parsed = r;
     this.rows = r.rows;
-    const withPrefix = $('pn-code-prefix').checked && r.rows.length > 0;
-    this.effectiveRows = withPrefix ? [...REQUIRED_PREFIX.map(x => ({ ...x })), ...r.rows] : r.rows;
+    /**
+     * **面板不再替用户的表补任何命令**（用户 2026-09-30 明确要求去掉"自动补 MADCTL/COLMOD"）：
+     * 厂家表的完整性该由**用户贴进来的文本**负责 —— 面板只老实解析、重放、导出它。
+     * 曾经自动插的两条（0x36 MADCTL=0x00 / 0x3A COLMOD=0x55）是当年为 AXS15352
+     * 那种"厂家表里没有、缺了会全黑"的情况打的补丁；现在多数表（如 ST77916 的 192 条）
+     * 自己就带这两条，再插反而重复。需要的人把它们写进自己的表即可。
+     */
+    this.effectiveRows = r.rows;
     // 原值快照：表格里的"脏标记 / 改回 / 恢复原值 / 哪些位动过"全靠它比对（不是靠一个粘住的 flag ——
     // 改回原值就该自己变干净）。深拷贝 data，别和行共享同一个 Uint8Array。
     this.baseRows = this.effectiveRows.map(r2 => ({ ...r2, data: Uint8Array.from(r2.data) }));
     this.renderCodeTable(this.effectiveRows);
     const bits = [`认出 ${r.stats.rows} 条`, `${r.stats.paramsBytes} 参数字节`, `累计延时 ${r.stats.delayMs} ms`,
                   `格式 ${r.format}`];
-    if (withPrefix) bits.push('已自动补 0x36/0x3A 两条前缀');
     if (r.errors.length) bits.push(`⚠ ${r.errors.length} 行没认出来`);
     if (r.warnings.length) bits.push(`⚠ ${r.warnings.length} 条告警`);
     this.setCodeSummary(bits.join(' · '), r.errors.length ? 'err' : (r.warnings.length ? 'warn' : 'ok'));
@@ -393,7 +386,6 @@ export class SpiPanelView {
       for (const w of r.warnings.slice(0, 5)) this.session.log('w', `第 ${w.line} 行：${w.why}`, this.tag);
     }
     this.session.log('g', `解析完成：${r.stats.rows} 条 / ${r.stats.paramsBytes} 参数字节 / 累计 ${r.stats.delayMs} ms` +
-      (withPrefix ? ' · 重放时会先补 MADCTL/COLMOD' : '') +
       (r.errors.length ? `（${r.errors.length} 行未识别，见上）` : ''), this.tag);
   }
 
