@@ -286,12 +286,17 @@ export class SpiBusView {
   /**
    * 画 J3 40 针的引脚分配（2026-09-30 SPI2/UART2 迁移后的接法）。
    * 标记：★ 桥的信号（SPI2） ● CDC 虚拟串口（UART2） ○ 可当辅助脚 ⛔ 不可用 · 电源/地/空脚
-   *       ◆ 当前在这根脚上的辅助线（DC/RST/CS辅助/BL/TE）
+   *       << DC/RST/CS_AUX/BL/TE = 当前配置里挂在这根 pad 上的辅助线
+   *
+   * ⚠️ 配置里的 padDc/padRst/... 是**协议 pad 索引**（见 protocol.js 的 PADS），
+   *    不是 J3 脚号 —— 表格每行末尾那个数字才是 pad 索引（0 = 这根脚不在 pad 表里）。
+   *    曾经拿 J3 脚号去比过，结果 "DC=PA02(index 5)" 被标到了 J3[5]（PB08）上。
    */
   renderPinMap(){
     const c = this.session.cfg || {};
     const sel = pad => {
       const n = [];
+      if (!pad) return '';
       if (c.padDc === pad) n.push('DC');
       if (c.padRst === pad) n.push('RST');
       if (c.padCsAux === pad) n.push('CS_AUX');
@@ -300,31 +305,31 @@ export class SpiBusView {
       return n.join('/');
     };
     const M = { spi: '★', vcom: '●', aux: '○', no: '⛔', pwr: '·', gnd: '·', nc: '·' };
-    /* [J3 脚, pad/label, 角色, 备注（ASCII，保证等宽对齐）] */
+    /* [J3 脚, pad 名/标签, 角色, 备注, 协议 pad 索引（0 = 不在辅助脚表里）] */
     const T = [
-      [1, '3V3', 'pwr', ''], [2, '5V0', 'pwr', ''],
-      [3, 'PB09', 'vcom', 'VCOM RX (UART2)'], [4, '5V0', 'pwr', ''],
-      [5, 'PB08', 'vcom', 'VCOM TX (UART2)'], [6, 'GND', 'gnd', ''],
-      [7, 'PA02', 'aux', ''], [8, 'PB15', 'spi', 'D3 / IO3'],
-      [9, 'GND', 'gnd', ''], [10, 'PB14', 'spi', 'D2 / IO2'],
-      [11, 'PA31', 'aux', 'USB0_ID net'], [12, 'NC', 'nc', ''],
-      [13, 'PB11', 'spi', 'SCLK'], [14, 'GND', 'gnd', ''],
-      [15, 'NC', 'nc', ''], [16, 'NC', 'nc', ''],
-      [17, '3V3', 'pwr', ''], [18, 'NC', 'nc', ''],
-      [19, 'PA29', 'no', 'USB0_OC net'], [20, 'GND', 'gnd', ''],
-      [21, 'PA28', 'aux', ''], [22, 'NC', 'nc', ''],
-      [23, 'PA27', 'aux', ''], [24, 'PA26', 'aux', ''],
-      [25, 'GND', 'gnd', ''], [26, 'PB10', 'spi', 'CS'],
-      [27, 'PB12', 'spi', 'D1 / MISO'], [28, 'PB13', 'spi', 'D0 / MOSI'],
-      [29, 'PY00', 'no', 'PIOC domain'], [30, 'GND', 'gnd', ''],
-      [31, 'PY01', 'no', 'PIOC domain'], [32, 'PA09', 'aux', 'USER key'],
-      [33, 'PA10', 'aux', 'board LED'], [34, 'GND', 'gnd', ''],
-      [35, 'NC', 'nc', ''], [36, 'PA00', 'no', 'log UART0'],
-      [37, 'PA30', 'no', 'USB0_PWR + Q1'], [38, 'PA01', 'no', 'log UART0'],
-      [39, 'GND', 'gnd', ''], [40, 'NC', 'nc', ''],
+      [1, '3V3', 'pwr', '', 0], [2, '5V0', 'pwr', '', 0],
+      [3, 'PB09', 'vcom', 'VCOM RX (UART2)', 0], [4, '5V0', 'pwr', '', 0],
+      [5, 'PB08', 'vcom', 'VCOM TX (UART2)', 0], [6, 'GND', 'gnd', '', 0],
+      [7, 'PA02', 'aux', '', 5], [8, 'PB15', 'spi', 'D3 / IO3', 0],
+      [9, 'GND', 'gnd', '', 0], [10, 'PB14', 'spi', 'D2 / IO2', 0],
+      [11, 'PA31', 'aux', 'USB0_ID net', 13], [12, 'NC', 'nc', '', 0],
+      [13, 'PB11', 'spi', 'SCLK', 1], [14, 'GND', 'gnd', '', 0],
+      [15, 'NC', 'nc', '', 0], [16, 'NC', 'nc', '', 0],
+      [17, '3V3', 'pwr', '', 0], [18, 'NC', 'nc', '', 0],
+      [19, 'PA29', 'no', 'USB0_OC net', 0], [20, 'GND', 'gnd', '', 0],
+      [21, 'PA28', 'aux', '', 0], [22, 'NC', 'nc', '', 0],
+      [23, 'PA27', 'aux', '', 0], [24, 'PA26', 'aux', '', 0],
+      [25, 'GND', 'gnd', '', 0], [26, 'PB10', 'spi', 'CS', 4],
+      [27, 'PB12', 'spi', 'D1 / MISO', 2], [28, 'PB13', 'spi', 'D0 / MOSI', 3],
+      [29, 'PY00', 'no', 'PIOC domain', 9], [30, 'GND', 'gnd', '', 0],
+      [31, 'PY01', 'no', 'PIOC domain', 10], [32, 'PA09', 'aux', 'USER key', 6],
+      [33, 'PA10', 'aux', 'board LED', 11], [34, 'GND', 'gnd', '', 0],
+      [35, 'NC', 'nc', '', 0], [36, 'PA00', 'no', 'log UART0', 7],
+      [37, 'PA30', 'no', 'USB0_PWR + Q1', 12], [38, 'PA01', 'no', 'log UART0', 8],
+      [39, 'GND', 'gnd', '', 0], [40, 'NC', 'nc', '', 0],
     ];
-    const cell = ([pin, name, role, note]) => {
-      const s = sel(pin);
+    const cell = ([pin, name, role, note, pad]) => {
+      const s = sel(pad);
       const cls = { spi: 'is-spi', vcom: 'is-vcom', aux: 'is-aux', no: 'is-no' }[role] || 'is-plain';
       return `<td class="p-pin">${pin}</td>` +
              `<td class="p-name ${cls}"><span class="p-mark">${M[role] || '·'}</span>${name}` +
