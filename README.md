@@ -199,10 +199,16 @@ make hw-campaign-hpm ARGS="--cycles=1 --alt=1"   # 冒烟
   · `app/rtt/protocol.js`：`readUp` **分块读**（`MAX_READ_PER_POLL = 64 KB`，大积压慢慢排而不是一次读崩）、
     通道缓冲上限 1 MB → 32 MB（8 MB 环是合法配置，不再被拒）、
     `validate()`/`_entry()` **读到全 0/校验不过时重试 3 次并顺手让链路自愈**（`mem.recover()`）。
-  · 固件侧建议：把上行环从 8 MB 缩到 **256 KB**（`sdk_compile_definitions(-DBUFFER_SIZE_UP=262144)`）——
-    环满即阻塞，积压上界就是 256 KB（转发通路 0.2 s 排空）。**控制块地址不用动**：
-    HPM 的 `.noncacheable` 段本来就落在真非缓存区（`board_init_pmp()` 用 PMA 配的
-    `MEM_TYPE_MEM_NON_CACHE_BUF`），改地址并不解决问题。
+  · 固件侧：**环的大小别动**（保持 SDK 默认）。我们试过把上行环缩到 256 KB，结果冷启动那一波
+    插桩 trace 当场把环灌满 —— 通道是 `BLOCK_IF_FIFO_FULL`，固件就**阻塞在 `SEGGER_RTT_Write`
+    里出不来了**（现象是"板子 ping 不通、像坏了"，只有调试器连上把积压排空才会继续）。
+    要减小积压请在**主机侧**做（上面那两条就是），别缩目标的环。
+    另外**控制块地址不用动**：HPM 的 `.noncacheable` 段本来就落在真非缓存区
+    （`board_init_pmp()` 用 PMA 配的 `MEM_TYPE_MEM_NON_CACHE_BUF`），改地址不解决任何问题。
+- **算法"跑不回来"也不再卡死**（2026-10 用户现场）：HPM 烧录时算法末尾那条 `ebreak` 偶发不回来
+  （`waitHalted` 超时），旧代码直接抛错走人、**核被扔在跑飞状态**（板子随即 ping 不通）。
+  现在 `HpmFlasher.call()` 会**就地自愈**（强行 halt → 复位 DM → 重装算法镜像并读回校验）后再跑一次；
+  两次都不过才报错，且失败收尾会 `halt + resetRun` 把目标放回可用状态，提示"直接再点一次烧录通常就过"。
 - **验收（本轮真机）**：新固件 + 上述修复后，**全程零手动复位**：
   Viewer 空闲 43.3 KB/s（8.4 Hz，零错位读）· Viewer **打流中** 12.8 KB/s（之前是连不上）；
   转发打流中 **1.387 MB/s**（探针侧 1.479，与仓库基线 1.377 一致）；10 s 存盘 13.16 MB、一致性 99.5%。
