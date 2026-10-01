@@ -62,9 +62,10 @@ export class HpmFlasher {
     if (bytes.length > HPM_COMMON.workAreaSize - this.dataBuf){
       throw new Error(`算法 ${bytes.length} B + 数据区放不进 ${HPM_COMMON.workAreaSize / 1024} KB 的 work area`);
     }
-    this.log(`写完 flashloader：${bytes.length} B（入口 7 个，偏移 ` +
+    this.log(`准备 flashloader：${bytes.length} B（入口 7 个，偏移 ` +
       Object.entries(this.entries).map(([k, v]) => `${k}+0x${v.entryOffset.toString(16)}`).join(' ') + '）');
     await this.dm.writeMem(HPM_ALGO.loadAddr, bytes);
+    this.log(`写完 flashloader：${bytes.length} B → SRAM 0x${HPM_ALGO.loadAddr.toString(16)}`);
 
     /**
      * 🚨 **写完立刻读回校验**（2026-10 真机教训）：SBA 写丢字（例如 DMI 忙时被丢掉的那条写）
@@ -100,18 +101,68 @@ export class HpmFlasher {
     return this.chipInfo;
   }
 
-  /** 调一个入口：写 a0..a4 → 写 pc → resume → 等 halt → 读 a0 */
+  /**
+   * 调一个入口：写 a0..a4 → 写 pc → resume → 等 halt → 读 a0。
+   *
+   * 🚨 2026-10 用户现场（线上页点「烧录」卡在"加载 flashloader"转圈，**而且把板子扔在核跑飞状态**
+   *    —— 之后 ping 都不通，看起来像板子坏了）：
+   *    算法末尾那条 `ebreak` 没回来（`waitHalted` 超时），旧代码直接抛错走人，
+   *    核还在跑那半截代码/垃圾指令。现在：
+   *      · **第 1 次没回来就地自愈再跑一次**（强行 halt → 复位 DM → 重装算法镜像并读回校验 →
+   *        重新置 `dcsr.ebreak*` + `fence.i`）—— 这条 JTAG/SBA 通路偶发丢拍，"重来一次就过"是常态；
+   *      · 两次都不过才抛错，并且由调用方（`view.js`）兜底做一次 `recoverAfterFailure()` 别让核飞着。
+   */
   async call(entry, args = [], timeoutMs = 20000){
     const e = this.entries[entry];
     if (!e) throw new Error(`没有入口 ${entry}`);
-    // 参数放 a0..a4（x10..x14）
-    for (let i = 0; i < args.length; i++) await this.dm.writeReg(0x1000 + 10 + i, args[i] >>> 0);
-    // 🚨 跑之前必须：置 dcsr.ebreak*（否则收尾的 ebreak 变成异常，核跑飞）+ fence.i（刚写进去的代码）
-    await this.dm.prepareRun();
-    await this.dm.resume((HPM_ALGO.loadAddr + e.entryOffset) >>> 0);
-    await this.dm.waitHalted(timeoutMs);
-    const rc = await this.dm.readReg(0x1000 + 10);
-    return rc >>> 0;
+    let lastErr = null;
+    for (let attempt = 1; attempt <= 2; attempt++){
+      try {
+        // 参数放 a0..a4（x10..x14）
+        for (let i = 0; i < args.length; i++) await this.dm.writeReg(0x1000 + 10 + i, args[i] >>> 0);
+        // 🚨 跑之前必须：置 dcsr.ebreak*（否则收尾的 ebreak 变成异常，核跑飞）+ fence.i（刚写进去的代码）
+        await this.dm.prepareRun();
+        await this.dm.resume((HPM_ALGO.loadAddr + e.entryOffset) >>> 0);
+        await this.dm.waitHalted(timeoutMs);
+        return (await this.dm.readReg(0x1000 + 10)) >>> 0;
+      } catch (err){
+        lastErr = err;
+        if (attempt === 2 || !/halt 超时/.test(String(err?.message || ''))) throw err;
+        this.log(`⚠ 算法 ${entry} 第 1 次没回来（${err.message}）→ 强行停核 + 复位 DM + 重装算法，再来一次`);
+        await this.recoverCore();
+      }
+    }
+    throw lastErr;
+  }
+
+  /**
+   * 核跑飞之后的现场恢复：`haltreq` 停住 → 复位 DM（dmactive 0→1）→ 重新 halt →
+   * 把算法镜像**再写一遍并读回校验**（DMI 丢字 / 指令预取拿到旧内容都靠这步兜住）。
+   */
+  async recoverCore(){
+    const bytes = hpmAlgoBytes();
+    try { await this.dm.halt(0, 3000); } catch { /* 停不住也继续往下试 */ }
+    try { await this.dm.init(); } catch { /* DM 复位失败就让后面的读去报错 */ }
+    await this.dm.activate(0);
+    await this.dm.halt(0, 3000);
+    await this.dm.writeMem(HPM_ALGO.loadAddr, bytes);
+    const back = await this.dm.readMem(HPM_ALGO.loadAddr, bytes.length);
+    for (let i = 0; i < bytes.length; i++){
+      if (back[i] !== bytes[i]){
+        throw new Error(`恢复时重写算法仍不一致（第 ${i} 字节：写 0x${bytes[i].toString(16)}、读回 0x${back[i].toString(16)}）` +
+          ' —— 探针↔目标链路不稳，建议拔插一次探针/给板子断电重上电再烧');
+      }
+    }
+    this.log('   已恢复现场（核已停、DM 已复位、算法镜像已重写并校验）');
+  }
+
+  /**
+   * **失败收尾**：烧录中途失败时调用，尽量别把核扔在"跑飞"状态
+   * （用户看到的会是"板子 ping 不通了、像坏了"，实际只是核在跑垃圾）。
+   */
+  async recoverAfterFailure(){
+    try { await this.dm.halt(0, 2000); } catch { /* 停不住就算了 */ }
+    try { await this.dm.resetRun(); } catch { /* 复位失败也认了 */ }
   }
 
   /**

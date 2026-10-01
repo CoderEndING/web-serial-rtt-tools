@@ -644,33 +644,46 @@ export class FlashView {
       },
     });
     this._status('加载 flashloader 到 SRAM（0x00000000）…');
-    const chipInfo = await flasher.setup();
-    this._log(`   flashloader 就绪：容量 ${(chipInfo.totalBytes / 1048576).toFixed(2)} MB · 扇区 ${chipInfo.sectorBytes} B`);
-
-    // ③ 擦 → 写 → 校验
-    const verify = $('f-verify').checked;
+    /**
+     * ②③ 全过程包一层"失败收尾"（2026-10 用户现场）：
+     * 算法跑不回来时旧代码直接抛错走人，**核被扔在跑飞状态**（板子随即 ping 不通，
+     * 用户以为板子坏了）。现在失败就先 `recoverAfterFailure()`（停车 + 系统复位），
+     * 再带上"再点一次通常就过"的可操作提示抛出去。
+     */
     let done = 0;
-    for (const seg of regions){
-      this._status(`擦除 0x${seg.addr.toString(16)} 起 ${fBytes(seg.data.length)}…`);
-      await flasher.erase(seg.addr, seg.data.length);
-      this._log(`擦除 OK：0x${seg.addr.toString(16)} + ${seg.data.length} B`);
-      await flasher.program(seg.addr, seg.data);
-      this._log(`烧写 OK：0x${seg.addr.toString(16)} + ${seg.data.length} B`);
-      if (verify){
-        this._status('校验（读回 flash 逐字节比）…');
-        await flasher.verify(seg.addr, seg.data);
-        this._log(`校验 OK：0x${seg.addr.toString(16)} + ${seg.data.length} B`);
-      }
-      done += seg.data.length;
-    }
-    this._bar(100);
+    const verify = $('f-verify').checked;
     const doReset = $('f-reset').checked;
-    await flasher.finish({ run: doReset });
-    if (doReset) this._log('已发系统复位（ndmreset），目标从 flash 启动');
-    this._status(`烧录完成：${fBytes(done)} → ${board.name}（RISC-V/JTAG）`, 'ok');
-    this._log(`小结：${fBytes(done)} · 校验${verify ? '开' : '关'} · 复位${doReset ? '开' : '关'} · ` +
-      `JTAG 批次 ${jtag.summary().batches} 次 / ${jtag.summary().bytes} B · ` +
-      `flash ${(chipInfo.totalBytes / 1048576).toFixed(2)} MB / 扇区 ${chipInfo.sectorBytes} B`);
+    try {
+      const chipInfo = await flasher.setup();
+      this._log(`   flashloader 就绪：容量 ${(chipInfo.totalBytes / 1048576).toFixed(2)} MB · 扇区 ${chipInfo.sectorBytes} B`);
+
+      // ③ 擦 → 写 → 校验
+      for (const seg of regions){
+        this._status(`擦除 0x${seg.addr.toString(16)} 起 ${fBytes(seg.data.length)}…`);
+        await flasher.erase(seg.addr, seg.data.length);
+        this._log(`擦除 OK：0x${seg.addr.toString(16)} + ${seg.data.length} B`);
+        await flasher.program(seg.addr, seg.data);
+        this._log(`烧写 OK：0x${seg.addr.toString(16)} + ${seg.data.length} B`);
+        if (verify){
+          this._status('校验（读回 flash 逐字节比）…');
+          await flasher.verify(seg.addr, seg.data);
+          this._log(`校验 OK：0x${seg.addr.toString(16)} + ${seg.data.length} B`);
+        }
+        done += seg.data.length;
+      }
+      this._bar(100);
+      await flasher.finish({ run: doReset });
+      if (doReset) this._log('已发系统复位（ndmreset），目标从 flash 启动');
+      this._status(`烧录完成：${fBytes(done)} → ${board.name}（RISC-V/JTAG）`, 'ok');
+      this._log(`小结：${fBytes(done)} · 校验${verify ? '开' : '关'} · 复位${doReset ? '开' : '关'} · ` +
+        `JTAG 批次 ${jtag.summary().batches} 次 / ${jtag.summary().bytes} B · ` +
+        `flash ${(chipInfo.totalBytes / 1048576).toFixed(2)} MB / 扇区 ${chipInfo.sectorBytes} B`);
+    } catch (e){
+      try { await flasher.recoverAfterFailure(); this._log('   失败收尾：已尝试让目标停下来并系统复位（别把核扔在跑飞状态）'); } catch {}
+      throw new Error(`${e?.message || e}　—— 已尝试把目标复位回可用状态；` +
+        '**直接再点一次「烧录」通常就过**（这条 JTAG/SBA 通路偶发丢拍）；' +
+        '连点两次都不过就先给板子断电重上电、并确认没有别的页签占着探针');
+    }
   }
 
   async _flashBridge(name, pathText){
