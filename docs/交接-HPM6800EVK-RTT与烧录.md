@@ -223,19 +223,49 @@ OpenOCD 要么不读，要么就用 **CPU 走 XIP 窗口**读（progbuf），**�
 
 改前 243 KB 校验**必卡**（60 s 超时 → 恢复 → 再 60 s → 整轮失败），现在 3.1 s 读完。
 
-### 7.5 仍未解决：第一次 `erase` 卡满 60 s（既有缺陷，与 `d353b4c` 无关）
+### 7.5 也修了：第一次 `erase` 卡满 60 s（提交 `8ecba48`）
 
-现场（`tmp/hpm-erasehang2.json` / `hpm-erasehang3.json`）：核楔在永不完成的 XPI 事务上
-（同 7.1 的形状，ILM 48/48 完好）。已排除：**SBA 残留**（置只写模式后 `sbbusy=0`）、
-**"XPI 已被应用配过"**（先 ndmreset 再 setup 也一样 —— 因为 reset-run 后应用会立刻重配 XPI）。
+现场（`tmp/hpm-erasehang2/3/4.json`）与 7.1 同形：核楔在永不完成的 XPI 事务上，ILM 48/48 完好。
+用 `tmp/la-our-capture.py`（页面侧 `/tmp/la-GO` 对齐窗口）抓下**我们自己**那条 erase 的 DMI 流水，
+和 OpenOCD 同一调用的流水逐条对齐 —— **入口 dpc=0x6、参数 a0=0x80000000 / a1=0x0 / a2=0x2000、
+fence 段、resume 方式全部一致**，所以差异不在"怎么调"，而在**调用前的状态**。
 
-下一步（工具已就位，照 7.3 那套做）：
-1. 抓**我们自己**这条路的波形和 OpenOCD 逐条 diff：
-   页面侧 `tmp/hpm-erasehang-page.js`（支持 `opts.waitGo`，setup 完**等 `/tmp/LA-GO`** 再发 erase，
-   窗口能精确压在这一次调用上）＋ host 侧 `tmp/la-our-capture.py`（起 LA → 建 GO → 导出）；
-   解码 `tmp/la-jtag-decode.py`（自带 TAP 状态机、流式，能吃几百 MB 的跳变表）。
-2. 重点对比"发 erase 之前那几十条 DMI"：OpenOCD 在 `flash_init` 之后、`erase` 之前做的事
-   （它的 `auto_config` 参数、有没有额外的 status/写使能、**有没有 reset-halt**）。
-3. 兜底方案：既然 ndmreset 后一定能过，可以在进 flash 流程前**主动做一次 reset-halt**
-   （`_haltByReset()`：ndmreset + haltreq 保持，核停在复位向量、**应用不会重新配 XPI**），
-   代价是目标会被复位一次；但要先确认它真能免掉那 60 s。
+真机 A/B（同参数 erase 8192 B）：
+
+| 前置 | 结果 |
+|---|---|
+| 直接 `setup()` → `erase` | **卡 >60 s**（靠 withAlgoRetry 自愈才过） |
+| 先 reset-**run**（ndmreset 后应用立刻重启并重配 XPI）→ setup → erase | 仍然卡 |
+| 先 reset-**halt**（ndmreset + 保持 haltreq，核停在复位向量）→ setup → erase | **118 ms 通过** |
+
+**根因**：目标上跑着 `flash_sdram_xip` 的应用时它**已经把 XPI 配过一遍**；在这种状态上跑
+`flash_init`（ROM 的 auto_config 再配一遍）之后，**第一次写类操作（erase）**就会楔死。
+reset-halt 让 XPI 从 POR 态由我们重新配置，问题消失。
+
+**改法**：`riscv-dm.js` 新增 `resetHalt()`；`flash.js` 的 `setup()` 先做 reset-halt
+（`resetFirst:false` 可关）；`hpm-sim.mjs` 补上"松开 ndmreset 时核是跑还是停，取决于 haltreq
+有没有保持"这条真机语义（我们的修复正依赖这个差别，模型不补就自测不出来）。
+已排除：SBA 残留（置只写模式后 `sbbusy=0`）、DMI 停摆（`dtmcs.dmistat=0`）。
+
+**真机端到端（demo.elf 246360 B，两个修复一起）**：
+
+| 段 | 擦除 | 编程 | 校验 |
+|---|---|---|---|
+| `0x80000400`（3216 B） | **122 ms**（原 63,336 ms） | 48 ms | 53 ms |
+| `0x80003000`（243144 B） | 1857 ms | 2675 ms | 3096 ms |
+
+**整轮 8.2 s** ✓（OpenOCD 基线 ~4.9 s；改前要么 verify 卡死整轮失败、要么侥幸过了 71 s）。
+
+### 7.6 复现这套排查的工具（都在 `tmp/`，未进仓库）
+
+| 脚本 | 干什么 |
+|---|---|
+| `tmp/la-ocd-full.py` / `la-ocd-capture.py` | 抓 OpenOCD 的完整/单次烧录波形（GO 文件握手对齐窗口） |
+| `tmp/la-our-capture.py` | 抓**我们自己**这条路的波形（页面侧 `opts.waitGo` 等 `/tmp/LA-GO`） |
+| `tmp/la-jtag-decode.py` | 自带 TAP 状态机的**流式** JTAG 解码器（吃几百 MB 跳变表；41 位 DR ↔ DMI） |
+| `tmp/la-parse-decoded.py` | 解 KingstVIS 的 JTAG 解码导出（`Time[s],TAP state,TDI,TDO`）→ DMI 流水账 |
+| `tmp/hpm-forensic.mjs` + `*-page.js` | CDP 驱动真页面跑实验（**会强制重载页面**：ES 模块按 URL 缓存，不重载会跑到旧代码） |
+| `tmp/hpm-flashfix-page.js` / `hpm-erasehang-page.js` | 端到端烧录计时 / erase 卡死取证（支持 `resetFirst`/`resetHalt`/`waitGo` 三个开关） |
+
+两条踩过的坑：① LA 只能**自由采集 + 边沿触发**，所以窗口对齐靠"让对方等一个 GO 文件"；
+② 这个探针的 JTAG 是**固定时序 ASM blob**，`adapter speed` 基本无效 —— 想解码只能上 500 MS/s 级采样。
