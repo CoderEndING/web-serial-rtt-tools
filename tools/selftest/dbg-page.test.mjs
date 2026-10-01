@@ -345,10 +345,14 @@ console.log('== 10. 断开 + 收尾 ==');
     const d = window.__tools.dbg;
     await d.disconnect();
     await new Promise(r => setTimeout(r, 200));
+    // 把界面选项复原（本 profile 是共用的：留在"模拟目标"上会让下一个套件/下次手工打开时意外）
+    const be = document.getElementById('d-backend');
+    be.value = 'webusb'; be.dispatchEvent(new Event('change'));
     return { sum: d.summary(), flag: document.getElementById('d-state').textContent,
-             bus: d.bus === window.__tools.probeBus };`);
+             bus: d.bus === window.__tools.probeBus, backend: be.value };`);
   ok(r.sum.connected === false && r.flag === '未连接', '断开后状态回到未连接', JSON.stringify(r.sum));
   ok(r.bus === true, '调试页挂着跨页签的探针协调对象（probeBus）');
+  ok(r.backend === 'webusb', '收尾把后端选回 WebUSB（不给下一个套件留坑）', r.backend);
   const errs = await ev('return window.__tools.errors;');
   ok(Array.isArray(errs) && errs.length === 0, '整轮跑完页面没有未捕获错误', JSON.stringify(errs));
 }
