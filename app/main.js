@@ -18,6 +18,7 @@ import { SpiBusView } from './spi/bus-view.js';
 import { SpiPanelView } from './spi/panel-view.js';
 import { ProbeBus, closeProbeUsbDevices } from './core/probe-bus.js';
 import { toast } from './ui/toast.js';
+import { BUILD } from './core/build.js';
 
 // ---------- 错误收集（自检/排障用；平时看不见） ----------
 const errors = [];
@@ -134,6 +135,38 @@ window.__tools = { session, assistant, terminal, rtt, flash, gen, hid, stream, s
 {
   const mask = document.getElementById('boot-mask');
   if (mask) requestAnimationFrame(() => mask.remove());
+}
+
+/**
+ * **构建标记 + 陈旧页面自检**（见 app/core/build.js 的注释）。
+ *
+ * 背景：GitHub Pages 对 HTML/JS 都发 `max-age=600`，推完修复后浏览器最长 10 分钟还在跑旧模块，
+ * 而本机开发服务发 `no-store` 永远最新 —— 于是会看到"本地流畅、线上卡顿"这种**假象**。
+ * 这里做两件事：① 把 BUILD 显示在标题栏（一眼可辨）；② 用 cache-buster 重新拉本文件比对，
+ * 不一致就提示刷新（不能自动 reload 解决：`location.reload()` 仍可能命中 HTTP 缓存，
+ * 得让用户 Ctrl+Shift+R）。
+ */
+{
+  const self = new URL('./core/build.js', import.meta.url);
+  const stamp = document.createElement('span');
+  stamp.id = 'build-stamp';
+  stamp.title = '当前页面加载的代码版本（GitHub Pages 有 10 分钟 HTTP 缓存：推完修复要硬刷新才生效）';
+  stamp.style.cssText = 'margin-left:10px;opacity:.7;font-size:12px';
+  stamp.textContent = BUILD.split(' ')[0] + ' 版';
+  (document.querySelector('.topright') || document.querySelector('header') || document.body).appendChild(stamp);
+  (async () => {
+    try {
+      const r = await fetch(self.href + '?t=' + Date.now(), { cache: 'no-store' });
+      const txt = await r.text();
+      if (!r.ok || !txt.includes(`BUILD = '${BUILD}'`)){
+        stamp.textContent = '⚠ 页面是旧版，请 Ctrl+Shift+R';
+        stamp.style.color = '#c60';
+        stamp.title = '线上有更新的版本（HTTP 缓存最多 10 分钟）；按 Ctrl+Shift+R 强制刷新即可';
+        console.warn('[build] 页面模块是旧版（HTTP 缓存）：线上已有更新，Ctrl+Shift+R 刷新');
+        errors.push?.('页面是旧版（HTTP 缓存），建议 Ctrl+Shift+R');
+      }
+    } catch { /* 离线/取不到就算了，不影响功能 */ }
+  })();
 }
 
 // ---------- 浏览器端端到端自检：?demo=serial&selftest=1 ----------
