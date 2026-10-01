@@ -55,8 +55,17 @@ browser:
 # 起服务（后台，已在跑就跳过）再开浏览器 —— 一条命令进入真机调试状态
 # 服务用**不发缓存**的那个（node tools/dev/serve-nocache.mjs）：改完代码普通刷新就能看到
 open:
+	$(NODE) tools/selftest/serial-grant.mjs --if-idle
 	pwsh -NoProfile -Command "if (-not (Get-NetTCPConnection -State Listen -LocalPort $(PORT) -ErrorAction SilentlyContinue)) { Start-Process -FilePath '$(NODE)' -ArgumentList 'tools/dev/serve-nocache.mjs','$(PORT)' -WorkingDirectory (Get-Location) -WindowStyle Hidden; Start-Sleep -Seconds 1 }; & 'tools/selftest/launch-browser.ps1' -Port $(CDP) -Url '$(APP)'"
 	pwsh -NoProfile -Command "Write-Host '页面：$(APP)    浏览器调试端口：$(CDP)'"
+
+# 探针授权（串口 + WebHID + WebUSB）——默认补「make open 起的那个 profile」和「自动化脚本用的那个」，
+# 来源覆盖 线上 Pages / 127.0.0.1:8899 / localhost:8899。换 USB 口或换探针之后重跑一次即可。
+#   make grant                 # 补（该 profile 的浏览器在跑会先关掉它）
+#   make grant ARGS=--show     # 看：每个 profile / 来源下都有哪些授权、当前口在不在里面
+#   make grant ARGS=--clean    # 清：删掉换口/换探针留下的过期条目
+grant:
+	$(NODE) tools/selftest/serial-grant.mjs $(ARGS)
 
 # ---------------------------------------------------------------- 自测
 test:
@@ -176,6 +185,7 @@ spi-flow: page-prep
 #    不是探针/板子的问题，但报错里只写着 "connect"，很容易往硬件上想。
 #    现在这些"CDP 驱动真页面"的目标都依赖本前置，一条命令就能跑。
 page-prep:
+	$(NODE) tools/selftest/serial-grant.mjs --if-idle
 	pwsh -NoProfile -Command "if (-not (Get-NetTCPConnection -State Listen -LocalPort $(PORT) -ErrorAction SilentlyContinue)) { Start-Process -FilePath '$(PY)' -ArgumentList '-m','http.server','$(PORT)','--bind','127.0.0.1' -WindowStyle Hidden; Start-Sleep -Seconds 1 }"
 	pwsh -NoProfile -Command "try { $$null = Invoke-WebRequest 'http://127.0.0.1:$(CDP)/json/version' -TimeoutSec 2 -UseBasicParsing } catch { & 'tools/selftest/launch-browser.ps1' -Port $(CDP) -Url '$(APP)'; Start-Sleep -Seconds 3 }"
 

@@ -147,6 +147,66 @@ make hw-campaign-hpm ARGS="--cycles=1 --alt=1"   # 冒烟
 
 完整数据、读法与三条踩坑见 [`docs/真机基准测试-hpm.md`](docs/真机基准测试-hpm.md)。
 
+## 现场三大痛点与对策（2026-10 HPM6800EVK 实测后落地）
+
+用户原话：**"web 总是卡住授权，好麻烦" · "web flash 烧录总是卡死，走不下去" · "rtt 转发 + rtt viewer 也挺困难"**。
+三条都查到了机制，且**都已经改在代码里**：
+
+### 1）授权弹框（Web Serial / WebHID / WebUSB）
+
+- **为什么烦**：这三类授权**都只能人工点一次**，CDP 也管不了（`DeviceAccess` 不覆盖 Web Serial，
+  `Browser.grantPermissions` 没有 `serial` 类型）。授权按「**页面来源 + 设备标识**」记在浏览器 profile 里：
+  串口那条记的是**设备实例 ID**（`...MI_01\8&305E904C&6&0001`，**换个 USB 口 `&6&` 就变** →
+  "昨天还能用，今天弹框里挑不到设备"）；HID/WebUSB 记的是 vid/pid/serial（换口仍认）。
+- **对策（一条命令，补的就是你平时开网页的那个 profile）**：
+  ```powershell
+  make grant                     # 补：串口 + WebHID + WebUSB，一次写进下面这些 profile × 来源
+  make grant ARGS=--show         # 看：每个 profile/来源下有哪些授权、当前 USB 口在不在里面
+  make grant ARGS=--clean        # 清：删掉换口/换探针留下的过期条目
+  ```
+  等价的直接调用：`node tools/selftest/serial-grant.mjs [--if-idle] [--origin=…] [--profile=…]`。
+  默认改**两个** profile，因为它们是两个不同的浏览器实例：
+    · `%TEMP%\edge-rtt-tools-test` —— **`make open` / `make page-prep` 起的那个窗口**（平时看的）；
+    · `%TEMP%\chrome-rtt-authorized` —— 自动化基准脚本（`hw-campaign*.mjs`）用的。
+  来源默认覆盖 **线上 Pages + `http://127.0.0.1:8899` + `http://localhost:8899`**（来源不同授权不通用）。
+  它从你自己 Chrome 的 profile 里**抄**探针的 HID/WebUSB 条目、再补上当前 CDC 口实例 ID；
+  **不碰**你日常的 Chrome profile（要动得显式 `--profile=user --force`，且浏览器必须全退）。
+  `make open` / `make page-prep` 每次都会先跑一次 `--if-idle`（**只在浏览器没跑时改**，跑着就跳过并提示），
+  所以正常情况下你**再也不会看到授权框**。换 USB 口或换探针之后重跑 `make grant` 即可。
+- **"弹框里一个设备都没有"**的三种真实原因：① 探针被另一个页签/另一个程序占着（关掉那个页签，
+  或 `node tmp/usb-holders.mjs` 看谁占着）；② 探针在 DFU 模式（没回到 CMSIS-DAP）；③ 换了 USB 口而授权记录还指着旧口（`make grant ARGS=--clean` 后再 `make grant`）。
+
+### 2）网页烧录卡死
+
+- **机制**：上一次会话（或一次失败的读）会在目标系统总线上留下**永不完成的事务**，此后 `sbcs` 的
+  `sbbusy`/`sbbusyerror` 常驻，**任何 SBA 访问都失败** —— 现象就是烧录报 `SBA 写 0x0 出错`，
+  重试多少次都过不去（实测只有整板断电或 ndmreset 能解；`dm.init()` 那套清不掉）。
+  另一类卡死是"擦除后等目标 halt 超时"（偶发，重试即过）。
+- **对策（已内置）**：烧录页在**动手之前**先跑一次 `dm.sbaHealthCheck()`
+  （`app/flash/hpm/riscv-dm.js`），分级自愈：**清错误位 → DM 复位 → ndmreset**，
+  自愈成功才继续；三级都救不回来才报错并提示断电重上电。
+  日志里会写 `SBA 健康检查：干净` 或 `⚠ SBA 之前是脏的 → 已自愈：…`。
+
+### 3）RTT 转发 / RTT Viewer 连不上、时好时坏
+
+- **机制（2026-10 定因）**：
+  ① RTT 上行环**开得太大**（HPM SDK 默认 `BUFFER_SIZE_UP = 8 MB`）：固件只写不读时，
+     主机晚连几分钟就攒下几 MB；慢链路（RISC-V/SBA ~30 KB/s）要排好几分钟，
+     而 SBA **一次读几 MB 会直接失败**（实测 1 MB 报 `DMI 写 0x39 失败`）。
+  ② 探针的 RISC-V/SBA 读会**偶发返回全 0 / 挂起**，一次就把"控制块好好的目标"判成
+     「没有 SEGGER RTT 标识」→ 界面表现就是"一会儿好一会儿坏"。
+- **对策（已改在代码里）**：
+  · `app/rtt/protocol.js`：`readUp` **分块读**（`MAX_READ_PER_POLL = 64 KB`，大积压慢慢排而不是一次读崩）、
+    通道缓冲上限 1 MB → 32 MB（8 MB 环是合法配置，不再被拒）、
+    `validate()`/`_entry()` **读到全 0/校验不过时重试 3 次并顺手让链路自愈**（`mem.recover()`）。
+  · 固件侧建议：把上行环从 8 MB 缩到 **256 KB**（`sdk_compile_definitions(-DBUFFER_SIZE_UP=262144)`）——
+    环满即阻塞，积压上界就是 256 KB（转发通路 0.2 s 排空）。**控制块地址不用动**：
+    HPM 的 `.noncacheable` 段本来就落在真非缓存区（`board_init_pmp()` 用 PMA 配的
+    `MEM_TYPE_MEM_NON_CACHE_BUF`），改地址并不解决问题。
+- **验收（本轮真机）**：新固件 + 上述修复后，**全程零手动复位**：
+  Viewer 空闲 43.3 KB/s（8.4 Hz，零错位读）· Viewer **打流中** 12.8 KB/s（之前是连不上）；
+  转发打流中 **1.387 MB/s**（探针侧 1.479，与仓库基线 1.377 一致）；10 s 存盘 13.16 MB、一致性 99.5%。
+
 ## 快速开始
 
 1. 打开页面（Pages 地址或本机的 `http://127.0.0.1:17321/`）。

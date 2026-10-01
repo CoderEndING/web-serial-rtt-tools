@@ -333,6 +333,62 @@ export class RiscvTransport {
   }
 
   /**
+   * **SBA 健康自检 + 分级自愈** —— 每次"要用 SBA 干正事"（烧录、读 RTT）之前先跑一遍。
+   *
+   * 2026-10 HPM6800EVK 真机定因：上一次会话（或上一次失败的读）会在系统总线上留下
+   * **永远不完成的事务**，此后：
+   *   · `sbcs` 里 `sbbusy`(bit21) 常驻、`sbbusyerror`(bit22)/`sberror`([14:12]) 挂着；
+   *   · **任何** SBA 访问都失败 —— 烧录的表现是 `SBA 写 0x0 出错`，重试三次也过不去；
+   *     读 RTT 的表现是"控制块读回全 0 / 找不到控制块"，用户看到的就是"网页总是卡住"。
+   * 分级自愈（从轻到重）：
+   *   ① `sbaClearErrors()` —— 能清掉"写 1 清零"的那几个位；
+   *   ② DM 复位（`dmcontrol` 写 0 再写 1，即 `init()`）—— 中止挂起操作；
+   *   ③ **系统复位（ndmreset）** —— 实测**只有这一级能解开"总线事务卡死"**（`init()` 解不开）。
+   *
+   * @returns {Promise<{ok:boolean, before:number|null, after:number|null, level:string, note:string}>}
+   */
+  async sbaHealthCheck({ peekAddr = 0x01200000, perWordMs = 800, allowSystemReset = true } = {}){
+    const readSbcs = async () => { try { return (await this.dmiRead(DM.SBCS)) >>> 0; } catch { return null; } };
+    /** 脏判据：busy 挂着、或 busyerror/sberror 非 0 */
+    const dirty = s => s == null || (s & SBCS.SBBUSY) !== 0 || (s & (SBCS.SBBUSYERROR | SBCS.SBERROR)) !== 0;
+    /** 真做一次短超时的 SBA 读 —— sbcs 干净也可能"读一下就卡" */
+    const peek = async () => { try { await this.readMem(peekAddr, 4, perWordMs); return true; } catch { return false; } };
+
+    const before = await readSbcs();
+    if (!dirty(before) && await peek()){
+      return { ok: true, before, after: before, level: 'none', note: 'SBA 干净' };
+    }
+
+    // ① 清错误位
+    try { await this.sbaClearErrors(); } catch {}
+    let after = await readSbcs();
+    if (!dirty(after) && await peek()){
+      return { ok: true, before, after, level: 'clear', note: '清掉 sberror/sbbusyerror 后恢复' };
+    }
+
+    // ② DM 复位（dmcontrol 0 → 1）
+    this.log('SBA 不健康 → 复位调试模块（dmcontrol 0→1）');
+    try { await this.dmiWrite(DM.DMCONTROL, 0); await this.dmiWrite(DM.DMCONTROL, DMCONTROL.dmactive); } catch {}
+    after = await readSbcs();
+    if (!dirty(after) && await peek()){
+      return { ok: true, before, after, level: 'dm', note: 'DM 复位后恢复' };
+    }
+
+    // ③ 系统复位（ndmreset）—— 最后手段，会把目标重启一次
+    if (allowSystemReset){
+      this.log('SBA 仍不健康 → 系统复位（ndmreset）自愈');
+      try { await this.resetRun(); await new Promise(r => setTimeout(r, 1500)); } catch {}
+      try { await this.dmiWrite(DM.DMCONTROL, 0); await this.dmiWrite(DM.DMCONTROL, DMCONTROL.dmactive); } catch {}
+      after = await readSbcs();
+      if (!dirty(after) && await peek()){
+        return { ok: true, before, after, level: 'ndmreset', note: '系统复位（ndmreset）后恢复' };
+      }
+    }
+    return { ok: false, before, after, level: 'failed', note: '清错误位 / DM 复位 / ndmreset 都没救回来（多半是接线或目标供电）' };
+  }
+
+
+  /**
    * 一条 USB 命令里塞多拍 DMI 扫描，返回**每条扫描**移出的位（BigInt，低位先出）。
    *
    * 为什么要这个：每拍扫描都是一次 USB 往返（实测 ~0.28 ms），而一次 CMSIS-DAP 的

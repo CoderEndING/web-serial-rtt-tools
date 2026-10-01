@@ -604,6 +604,34 @@ export class FlashView {
     }
     await dm.activate(0);
     await dm.halt(0, 3000);
+
+    /**
+     * 🚨 **烧录前的 SBA 健康自检 + 自愈**（2026-10 HPM6800EVK 真机加的一步）。
+     *
+     * 现场：上一次会话/上一次失败的读会在系统总线上留下**永远不完成的事务**，此后 `sbcs` 的
+     * `sbbusy`/`sbbusyerror` 常驻，**任何 SBA 访问都失败** —— 用户看到的就是
+     * 「网页烧录总是卡死走不下去」（实测报 `SBA 写 0x0 出错`，连重试三次都过不去，
+     * 只能整板断电或 ndmreset 才恢复）。这里在动手之前先探一下，脏了就地分级自愈
+     * （清错误位 → DM 复位 → **ndmreset**），把"卡死"变成"自动清障后继续"。
+     */
+    this._status('检查探针→目标的总线访问（SBA）是否健康…');
+    try {
+      const h = await withTimeout(dm.sbaHealthCheck(), 15000, 'SBA 健康检查');
+      if (h.level === 'none') this._log('   SBA 健康检查：干净');
+      else if (h.ok) this._log(`   ⚠ SBA 之前是脏的（before=0x${Number(h.before ?? 0).toString(16)}）→ 已自愈：${h.note}`);
+      else throw new Error(`SBA 卡死且自愈无效：${h.note}（before=0x${Number(h.before ?? 0).toString(16)} after=0x${Number(h.after ?? 0).toString(16)}）—— ` +
+        '拔插一次探针/给板子断电重上电再试');
+      if (h.level === 'ndmreset'){
+        // 系统复位把核重启了：halt 状态与 DM 都要重新建立，否则后面跑算法会莫名其妙
+        await dm.init();
+        await dm.activate(0);
+        await dm.halt(0, 3000);
+        this._log('   系统复位后已重新 halt');
+      }
+    } catch (e){
+      if (/SBA 卡死且自愈无效/.test(e?.message || '')) throw e;
+      this._log('   （SBA 健康检查本身出错，继续按老路试：' + (e?.message || e) + '）');
+    }
     this._log('   目标已 halt，开始加载 flashloader');
 
     // ② flashloader + 参数探测

@@ -31,6 +31,48 @@ import { u32le, u32leBytes, latin1 } from '../core/bin.js';
 export const CB_ID = 'SEGGER RTT';
 export const ENTRY = 24;
 
+/**
+ * 通道缓冲大小的合理上限 —— 只用来挡"读到垃圾"，不是功能限制。
+ *
+ * 🚨 这里原本写死 `1 << 20`（1 MB），2026-10 HPM6800EVK 真机踩到：
+ *    **HPM SDK 自带的 SEGGER_RTT_Conf.h 就把 `BUFFER_SIZE_UP` 设成 8 MB**
+ *    （`middleware/segger_rtt/Config/SEGGER_RTT_Conf.h`：`8192*1024`），于是
+ *    `lwip_tcpecho`（trace 插桩版）这种固件**控制块明明是好的**，页面却报
+ *    「通道 0 缓冲大小 8388608 不合理」→ `validate()` 不过 → Viewer 死活连不上。
+ *    "环开得大"是合法配置，代价只是延迟高（8 MB 环在 1 MB/s 的排空速率下要 8 s 才排空），
+ *    不是错误；探针侧的 `rtt_bridge.c` 也从来没有这个上限（只查 size==0 / rd>=size / wr>size）。
+ *
+ * 放到 32 MB：仍挡得住实测见过的垃圾值（例：探针挂起读残渣给过 size=560229490 ≈ 534 MB），
+ * 又不冤枉大环。真要再大，改这一个常量即可。
+ */
+export const MAX_CH_BYTES = 32 << 20;
+
+/**
+ * 一轮 `readUp` 最多读多少字节。
+ *
+ * 🚨 2026-10 HPM6800EVK 真机踩到（`lwip_tcpecho` 插桩版，上行环 8 MB）：
+ *    `readUp` 的语义原本是"一次读完整段 `[rd, wr)`"，而这个固件**只写不读**地跑了几十分钟，
+ *    Viewer 连上时环里积了 **3.8 MB** —— 那一次 `readMem` 在 RISC-V/SBA 上直接失败
+ *    （实测：4 B/64 B 各 4 ms；4 KB 138 ms；64 KB 2.4 s（≈30 KB/s）；**1 MB 报
+ *    `DMI 写 0x39 失败（op=1）`**）。因为读失败时不推进 RdOff，界面上的现象就是
+ *    **"控制块认出来了、轮询也在跑（polls 在涨），但一个字节都不来"**。
+ *    分块之后每轮都推进一点：大积压最多是"慢慢排空"，不会假死。
+ *
+ * 取值口径：64 KB 在 RISC-V/SBA 上实测 2.4 s 且不触发上面那个失败；
+ * 对 ARM/WebUSB 那条路（实测 275 KB/s~2.9 MB/s、轮询 100+ Hz）也远够用 ——
+ * 64 KB × 100 Hz = 6.4 MB/s 的天花板，比链路本身还高，只有"一次读 3 MB"这种病态才需要它。
+ */
+export const MAX_READ_PER_POLL = 64 * 1024;
+
+const sleepMs = ms => new Promise(r => setTimeout(r, ms));
+const allZero = b => b.length > 0 && b.every(x => x === 0);
+const hasCbId = b => b.length >= CB_ID.length && latin1(b.subarray(0, CB_ID.length)) === CB_ID;
+/**
+ * 让链路自己重启一次（能做就做）：RISC-V 那条路是**复位调试模块**（见 riscv-mem.js 的 recover），
+ * ARM/WebUSB 那条路也能重激活 SWD。没有 recover 的 mem（模拟器、桥）就当无事发生。
+ */
+async function recoverMem(mem){ try { await mem?.recover?.(); } catch {} }
+
 export class Rtt {
   constructor(mem, opts = {}){
     this.mem = mem;                     // { readMem(addr,len), writeMem(addr,bytes) }
@@ -39,6 +81,7 @@ export class Rtt {
     this.upBase = 0; this.downBase = 0;
     this.up = []; this.down = [];
     this._lastWr = new Map();
+    this._backlog = new Map();          // 每通道：环里还没读走的字节数（分块读的对账基准）
     this._lost = new Map();
     this._full = new Map();
     this._high = new Map();
@@ -103,8 +146,20 @@ export class Rtt {
   /** 校验某个地址是不是合理的控制块（结构自洽才认） */
   static async validate(mem, addr){
     try {
-      const hdr = await mem.readMem(addr, 24);
-      if (latin1(hdr.subarray(0, 10)) !== CB_ID) return { ok: false, reason: `没有 "SEGGER RTT" 标识` };
+      /**
+       * 🚨 头 24 字节**必须重试**（2026-10 HPM6800EVK 真机定因）：
+       *    探针的 RISC-V/SBA 读会**偶发返回全 0**（同一地址连读 20 次全对，但中间会插一次全 0；
+       *    实测还见过 `sbcs.sbbusy` 常驻的挂起事务），一次就把"控制块好好的目标"判成
+       *    「没有 "SEGGER RTT" 标识」—— 界面表现正是用户说的"Viewer 时好时坏、连不上"。
+       *    读失败或读到全 0 就**重启一次链路再读**，最多 3 次；3 次都不行才认账。
+       */
+      let hdr = await mem.readMem(addr, 24);
+      for (let i = 0; i < 2 && !hasCbId(hdr); i++){
+        await recoverMem(mem);
+        await sleepMs(80);
+        hdr = await mem.readMem(addr, 24);
+      }
+      if (!hasCbId(hdr)) return { ok: false, reason: `没有 "SEGGER RTT" 标识${allZero(hdr) ? '（读到全 0，重试 3 次仍如此）' : ''}` };
       const maxUp = u32le(hdr, 16), maxDown = u32le(hdr, 20);
       if (maxUp < 1 || maxUp > 16 || maxDown > 16) return { ok: false, reason: `通道数不合理（up=${maxUp} down=${maxDown}）` };
       const upBase = addr + 24, downBase = upBase + ENTRY * maxUp;
@@ -116,7 +171,7 @@ export class Rtt {
         const size = u32le(b, 8), wr = u32le(b, 12), rd = u32le(b, 16), pbuf = u32le(b, 4);
         if (!size) continue;                                   // 没用到的通道
         used++;
-        if (size > (1 << 20)) return { ok: false, reason: `通道 ${i} 缓冲大小 ${size} 不合理` };
+        if (size > MAX_CH_BYTES) return { ok: false, reason: `通道 ${i} 缓冲大小 ${size} 不合理（> ${MAX_CH_BYTES} 上限）` };
         if (wr >= size || rd >= size) return { ok: false, reason: `通道 ${i} 读写指针越界（wr=${wr} rd=${rd} size=${size}）` };
         if (!pbuf || (pbuf & 3)) return { ok: false, reason: `通道 ${i} 缓冲指针无效（0x${pbuf.toString(16)}）` };
         bytes += size;
@@ -143,23 +198,30 @@ export class Rtt {
     this.up = []; this.down = [];
     for (let i = 0; i < this.maxUp; i++) this.up.push(await this._entry(this.upBase, i));
     for (let i = 0; i < this.maxDown; i++) this.down.push(await this._entry(this.downBase, i));
-    this._lastWr.clear(); this._lost.clear();
+    this._lastWr.clear(); this._backlog.clear(); this._lost.clear();
     return this;
   }
 
   /**
    * 读一个通道表项（24 字节）。
    *
-   * 🚨 读**一次不通过结构校验就重读一次**：探针的 AP 读是挂起读，紧跟写/换地址之后
+   * 🚨 读**一次不通过结构校验就重读**：探针的 AP 读是挂起读，紧跟写/换地址之后
    *    偶尔会拿到上一笔事务的残渣（实测读到过 size=560229490、pbuf=0xd 这种）。
    *    这类垃圾几乎都过不了下面的合理性校验，所以"按需重读"比"无脑读两遍"划算得多
    *    （后者把 RTT 吞吐砍掉一半，实测 330 → 154 KB/s）。
+   *
+   * 🚨 2026-10 HPM6800EVK 追加：RISC-V/SBA 那条路会**偶发读回全 0 / 挂起**，
+   *    第二次失败时顺手让链路自愈一次（`mem.recover()` = 复位调试模块）再试 —— 用户看到的现象
+   *    是"轮询在跑但一个字节都不来 / 一会儿好一会儿坏"，重试+自愈能把它拉回来。
    */
   async _entry(base, i){
     let lastErr = null;
-    for (let attempt = 0; attempt < 2; attempt++){
+    for (let attempt = 0; attempt < 3; attempt++){
       try { return await this._entryOnce(base, i); }
-      catch (e){ lastErr = e; }
+      catch (e){
+        lastErr = e;
+        if (attempt === 1) await recoverMem(this.mem);
+      }
     }
     throw lastErr;
   }
@@ -169,7 +231,7 @@ export class Rtt {
     const e = { sName: u32le(b, 0), pbuf: u32le(b, 4), size: u32le(b, 8), wr: u32le(b, 12), rd: u32le(b, 16), flags: u32le(b, 20) };
     // 合理性检查：目标刚复位/没在跑时，控制块位置可能只剩旧数据或 0，
     // 不检查的话会拿垃圾指针去读（甚至读到天文数字长度 → RangeError）。
-    if (e.size > (1 << 20)) throw new Error(`RTT 通道 ${i} 的缓冲大小不合理（${e.size}）→ 目标可能刚复位或没在运行`);
+    if (e.size > MAX_CH_BYTES) throw new Error(`RTT 通道 ${i} 的缓冲大小不合理（${e.size} > ${MAX_CH_BYTES}）→ 目标可能刚复位或没在运行`);
     if (e.size && (e.wr >= e.size || e.rd >= e.size)) throw new Error(`RTT 通道 ${i} 的读写指针越界（wr=${e.wr} rd=${e.rd} size=${e.size}）→ 控制块内容不可信`);
     if (e.size && !e.pbuf) throw new Error(`RTT 通道 ${i} 的缓冲指针是 0 → 控制块内容不可信`);
     return e;
@@ -204,17 +266,40 @@ export class Rtt {
   // ---------------- 上行（目标 → 主机） ----------------
   /**
    * @returns {Promise<{bytes:Uint8Array, lost:number, full:boolean, high:boolean,
-   *                    level:number, wr:number, rd:number}>}
-   *   level = 本次读到的字节占缓冲容量（size-1）的比例；high = 水位 ≥ 3/4。
+   *                    level:number, wr:number, rd:number, backlog:number}>}
+   *   level = 环里**未读数据**占缓冲容量（size-1）的比例；high = 水位 ≥ 3/4；
+   *   backlog = 这一轮读完还剩多少没读（>0 说明数据比链路快，下一轮接着排）。
    */
   async readUp(ch = 0){
     const e = await this._entry(this.upBase, ch);            // 每次整项重读：WrOff/RdOff 一致，且能跟上固件重新初始化缓冲
     this.up[ch] = e;
-    const empty = { bytes: new Uint8Array(0), lost: 0, full: false, high: false, level: 0, wr: e.wr, rd: e.rd };
+    const empty = { bytes: new Uint8Array(0), lost: 0, full: false, high: false, level: 0, wr: e.wr, rd: e.rd, backlog: 0 };
     if (!e.size) return empty;
     let n = e.wr - e.rd;
     if (n < 0) n += e.size;
+
+    /**
+     * 「被覆盖丢掉多少」的记账（分块读之后必须换算法）。
+     *
+     * 老算法是 `本轮目标写入量 - 本轮读到的字节` —— 那是建立在"一次读完整段"之上的。
+     * 分块之后"故意留到下一轮读的"会被算成丢失（数字虚高、还可能误导成链路丢数据）。
+     * 改成按积压对账：`上一轮剩下的 + 本轮目标写入的 - 现在环里真有的` = 被目标覆盖掉的。
+     * BLOCK_IF_FIFO_FULL 的目标（本仓自测靶子都是）永远不会覆盖，这里恒为 0 —— 对得上。
+     */
+    const prevBacklog = this._backlog.get(ch) || 0;
+    const prevWr = this._lastWr.get(ch);
+    let lost = 0;
+    if (prevWr !== undefined){
+      const advanced = (e.wr - prevWr + e.size) % e.size;
+      lost = Math.max(0, prevBacklog + advanced - n);
+      if (lost) this._lost.set(ch, (this._lost.get(ch) || 0) + lost);
+    }
+    this._lastWr.set(ch, e.wr);
+    this._backlog.set(ch, n);                                // 先按"一个字节都没读走"记，读成功后再减
+
     if (n === 0) return empty;
+    /** 本轮实际读多少：见 MAX_READ_PER_POLL（大积压 + 慢链路时一次读完整段会直接失败）*/
+    const readNow = Math.min(n, MAX_READ_PER_POLL);
 
     let data;
     /**
@@ -225,10 +310,10 @@ export class Rtt {
      * 于是**未绕回的错误数据静默进了日志**（代码审查抓到的）。
      */
     const readSpan = async () => {
-      if (e.rd + n <= e.size) return await this.mem.readMem(e.pbuf + e.rd, n);
+      if (e.rd + readNow <= e.size) return await this.mem.readMem(e.pbuf + e.rd, readNow);
       const n1 = e.size - e.rd;
       const a = await this.mem.readMem(e.pbuf + e.rd, n1);
-      const b = await this.mem.readMem(e.pbuf, n - n1);
+      const b = await this.mem.readMem(e.pbuf, readNow - n1);
       const out = new Uint8Array(a.length + b.length);
       out.set(a); out.set(b, a.length);
       return out;
@@ -241,12 +326,15 @@ export class Rtt {
     if (Rtt._looksCorrupt(data)){
       const retry = await readSpan();                          // 先立即重读一次（同样两段逻辑）
       if (Rtt._looksCorrupt(retry)){
-        return { ...empty, corrupt: true };
+        return { ...empty, backlog: n, corrupt: true };         // 没读走任何东西 → 积压照旧
       }
       data = retry;
     }
 
-    await this.mem.writeMem(this.upBase + ENTRY * ch + 16, u32leBytes(e.wr));  // RdOff = WrOff
+    /** RdOff 只推进**本轮真读到的**那么多个字节（分块读的关键：留到下一轮继续，不丢也不阻塞）*/
+    const newRd = (e.rd + readNow) % e.size;
+    await this.mem.writeMem(this.upBase + ENTRY * ch + 16, u32leBytes(newRd));
+    this._backlog.set(ch, n - readNow);
 
     // 过载信号：水位（环形缓冲最多装 size-1）
     const cap = e.size - 1;
@@ -257,16 +345,7 @@ export class Rtt {
     if (high) this._high.set(ch, (this._high.get(ch) || 0) + 1);
     if (level > this.peak) this.peak = level;
 
-    // 精确差值：只有在主机侧 RdOff 落后时才算得出来（见文件头 ③）
-    const prev = this._lastWr.get(ch);
-    let lost = 0;
-    if (prev !== undefined){
-      const advanced = (e.wr - prev + e.size) % e.size;
-      lost = Math.max(0, advanced - data.length);
-      if (lost) this._lost.set(ch, (this._lost.get(ch) || 0) + lost);
-    }
-    this._lastWr.set(ch, e.wr);
-    return { bytes: data, lost, full, high, level, wr: e.wr, rd: e.rd };
+    return { bytes: data, lost, full, high, level, wr: e.wr, rd: e.rd, backlog: n - readNow };
   }
 
   /** 错位读指纹：数据里混进了控制块签名（重读一次能救回来就救，救不回就整轮丢弃重读） */
