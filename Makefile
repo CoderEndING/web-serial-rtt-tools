@@ -83,6 +83,11 @@ test:
 	$(NODE) tools/selftest/spi-read.test.mjs
 	$(NODE) tools/selftest/spi-frames-dsl.test.mjs
 	$(NODE) tools/selftest/spi-flash.test.mjs
+	$(NODE) tools/selftest/stm32-devid.test.mjs
+
+# 目标身份解码（「读 IDCODE」按钮）：DP IDCODE / CPUID / STM32 DBGMCU DEV_ID → 型号
+test-idcode:
+	$(NODE) tools/selftest/stm32-devid.test.mjs
 
 # 固件文件解析（ELF 按节取 + VMA→LMA、HEX、.bin）—— 离线
 test-image:

@@ -617,6 +617,9 @@
         <label class="row"><span>芯片</span>
           <select id="f-chip" title="走本地桥时它就是 OpenOCD 的目标 cfg；列表外的芯片选「自定义 cfg…」"></select>
         </label>
+        <div class="row btnrow">
+          <button id="f-idcode" title="只读地认目标（不动 flash、不改运行状态）：ARM/SWD 读 DP IDCODE + CPUID + STM32 DBGMCU DEV_ID/REV_ID + flash 容量寄存器；RISC-V/JTAG 读 TAP IDCODE。选错芯片也能读 —— 这个按钮不吃「芯片」那一格（只按后端选 SWD 还是 JTAG）。">读 IDCODE</button>
+        </div>
         <div class="row cfgrow" id="f-custom-cfgs-row" hidden><span>cfg 文件</span>
           <input id="f-cfgs" title="逗号/空格分隔，按顺序加载。相对 OpenOCD scripts 目录或绝对路径">
           <button id="f-cfgs-pick" type="button" title="列出桥所在机器的 OpenOCD cfg 让你挑">选择…</button>

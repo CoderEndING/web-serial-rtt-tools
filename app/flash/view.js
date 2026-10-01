@@ -22,6 +22,7 @@ import { BridgeClient } from '../rtt/bridge.js';
 import { WebUsbDapProbe, withTimeout } from '../rtt/dap-webusb.js';
 import { ALGOS, F1_DEV, checkFlashRange } from './algos.js';
 import { HPM_BOARDS, HPM_COMMON, hpmBoard, hpmCheckRange } from './hpm/chips.js';
+import { DBGMCU_BASES, FLASH_SIZE_REGS, decodeCpuid, decodeDpIdcode, decodeStm32Dev, refineByFlash, saneFlashKb } from './devid.js';
 import { closeProbeUsbDevices } from '../core/probe-bus.js';
 import { DapJtagTransport, setOutputModeData, PROBE_OUTPUT_MODE } from './hpm/dap-transport.js';
 import { RiscvTransport } from './hpm/riscv-dm.js';
@@ -86,6 +87,9 @@ export class FlashView {
     this._fileInfo();
 
     $('f-flash').addEventListener('click', () => this.flash().catch(e => this._err(e)));
+    /* 「读 IDCODE」：只读地认目标（不动 flash、不改运行状态）。用 `?.` —— 页面混版时可能还没这个按钮，
+     * 别让 init 挂在这儿（2026-10 那次白屏的教训）。 */
+    $('f-idcode')?.addEventListener('click', () => this.readIdcode().catch(e => this._err(e)));
     $('f-logclear').addEventListener('click', () => { $('f-log').textContent = ''; });
     this._status('空闲');
   }
@@ -244,6 +248,159 @@ export class FlashView {
       try { if (this.probe) await this.probe.disconnect(); } catch {}
       this.probe = null;
     }
+  }
+
+  // ================= 读目标身份（IDCODE） =================
+
+  /** 打开一个探针会话（读身份用；与烧录那条路同样的超时纪律，见 _flashWebusb 的注释）*/
+  async _openProbeForRead(opts = {}){
+    let auth;
+    try {
+      auth = await withTimeout(WebUsbDapProbe.authorized(), 5000, '枚举已授权探针');
+    } catch (e){
+      throw new Error(`${e.message} —— 浏览器 USB 服务可能被上一次中断的会话卡住了：刷新页面（或拔插一次探针）再试`);
+    }
+    const probe = auth.length
+      ? await withTimeout(WebUsbDapProbe.open(auth[0], opts), 15000, '连接探针（WebUSB）')
+      : await withTimeout(WebUsbDapProbe.request(false, opts), 60000, '等你在浏览器里选探针');
+    probe.onLog = s => this._log('   [usb] ' + s);
+    probe.fast = false;
+    return probe;
+  }
+
+  /**
+   * 「读 IDCODE」：只读地把目标身份读出来 —— **不动 flash、不改目标的运行状态**。
+   *
+   *   · ARM/SWD（零安装）：DP IDCODE → CPUID → STM32 DBGMCU DEV_ID/REV_ID → flash 容量寄存器
+   *   · RISC-V/JTAG（HPM 那条路）：TAP IDCODE
+   *
+   * 🚨 每一笔读都带**短超时 + 容错**：认身份必然要碰"这块芯片上没映射"的地址
+   *    （H7 没有 0xE0042000、F1 没有 0x1FFF7A22…），读不到就跳过 —— 绝不能让一笔读把整轮拖死
+   *    （WebUSB 的挂起传输会把浏览器的 USB 服务搞脏，那时 getDevices() 会永远不返回）。
+   *    读的**顺序按价值排**：DP IDCODE / CPUID 在最前，后面对不上也已经有结论。
+   */
+  async readIdcode(){
+    if (this.busy){ this._err(new Error('正在忙（烧录 / 读身份）—— 等它跑完再点')); return; }
+    this.busy = true;
+    if ($('f-idcode')) $('f-idcode').disabled = true;
+    const t0 = Date.now();
+    try {
+      const isRv = HPM_BOARDS.some(b => b.id === $('f-chip').value);
+      this._log('');
+      this._log(`──── 读目标身份（${isRv ? 'RISC-V/JTAG' : 'ARM/SWD'} · 零安装）────`);
+      if (isRv) await this._idcodeRiscv();
+      else await this._idcodeArm();
+      this._log(`──── 读完（${Date.now() - t0} ms）────`);
+    } finally {
+      this.busy = false;
+      if ($('f-idcode')) $('f-idcode').disabled = false;
+      try { if (this.probe) await this.probe.disconnect(); } catch {}
+      this.probe = null;
+    }
+  }
+
+  async _idcodeArm(){
+    this._status('读 IDCODE（SWD）…');
+    this.probe = await this._openProbeForRead({ clockKhz: 1000 });
+    const p = this.probe;
+    const rd = async (addr, len, apIndex = 0) => {
+      try { return await withTimeout(p.readMem(addr, len, apIndex), 1500, `读 0x${addr.toString(16)}`); }
+      catch (e){ this._log(`   （0x${addr.toString(16)}${apIndex ? ` AP${apIndex}` : ''} 读失败：${e?.message || e} —— 跳过）`); return null; }
+    };
+    const word = b => (b && b.length >= 4) ? ((b[0] | (b[1] << 8) | (b[2] << 16) | (b[3] << 24)) >>> 0) : null;
+    const half = b => (b && b.length >= 2) ? (b[0] | (b[1] << 8)) : null;
+    const hx = v => '0x' + (v >>> 0).toString(16).toUpperCase();
+
+    // ① DP IDCODE —— open() 协商 SWD 时钟时已经读过（SWD 激活后第一笔必须是它）
+    this._log('   ① DP IDCODE  ' + decodeDpIdcode(p.idcode >>> 0).text);
+
+    // ② CPUID：认内核
+    const cpuid = word(await rd(0xe000ed00, 4));
+    const cp = (cpuid != null) ? decodeCpuid(cpuid) : null;
+    this._log('   ② CPUID      ' + (cp ? cp.text : '读不到（0xE000ED00 是 Cortex-M 的标配地址，读不到多半不是 M 核）'));
+
+    /**
+     * ③ STM32 DBGMCU：**DEV_ID 才认得出型号**（IDCODE/CPUID 都认不出）。
+     *    候选地址逐个试，**每个都把原始值打出来**（哪怕是 0 / 全 1）—— "读回来是 0"和"读不动"
+     *    是两种完全不同的故障，不给原始值就没法判断（这轮就是这么找出来的）。
+     *    一个地址都不认时再退到 AP1 试一遍：H7 的 D3 域调试口有时要经 APB-AP 才够得着。
+     */
+    let dev = null;
+    const tried = [];
+    const probeDev = async (apIndex) => {
+      for (const base of DBGMCU_BASES){
+        const w = word(await rd(base, 4, apIndex));
+        if (w == null){ tried.push(`${hx(base)}${apIndex ? ' AP' + apIndex : ''}=读失败`); continue; }
+        const d = decodeStm32Dev(w & 0xfff, w >>> 16);
+        tried.push(`${hx(base)}${apIndex ? ' AP' + apIndex : ''}=${hx(w)}`);
+        if (d.devId && d.devId !== 0xfff){
+          dev = d;
+          this._log(`   ③ DBGMCU     ${hx(base)}${apIndex ? `（AP${apIndex}）` : ''} = ${hx(w)} → ${d.text}`);
+          return true;
+        }
+      }
+      return false;
+    };
+    if (!await probeDev(0)) await probeDev(1);
+    if (!dev) this._log(`   ③ DBGMCU     都不认：${tried.join(' · ')}（不是 STM32 / 该系列地址不在这三处 / PPB 访问没通）`);
+
+    // ④ flash 容量寄存器（16 位、单位 KB）—— 同样把原始值带上；H7 那类先 AP0 再 AP1 试
+    let kb = null;
+    const triedKb = [];
+    for (const apIndex of [0, 1]){
+      for (const r of FLASH_SIZE_REGS){
+        const v = half(await rd(r.addr, 2, apIndex));
+        const tag = `${hx(r.addr)}${apIndex ? ' AP' + apIndex : ''}=` +
+                    (v == null ? '读失败' : (saneFlashKb(v) ? `${v}KB` : `${hx(v)}（无效）`));
+        triedKb.push(tag);
+        if (v == null || !saneFlashKb(v)) continue;
+        kb = v;
+        this._log(`   ④ flash 容量 ${hx(r.addr)}${apIndex ? `（AP${apIndex}）` : ''} = ${v} KB（${r.fam} 的容量寄存器）`);
+        break;
+      }
+      if (kb != null) break;
+    }
+    if (kb == null) this._log(`   ④ flash 容量 都不认：${triedKb.join(' · ')}`);
+
+    // ⑤ 结论：DEV_ID 认家族，flash 容量再收窄一步（0x480 + 128 KB ⇒ H7B0 那种）
+    const bits = [];
+    if (dev?.known) bits.push(refineByFlash(dev.devId, kb) || dev.entry.name);
+    if (cp?.core) bits.push(cp.core);
+    if (kb) bits.push(`${kb} KB flash`);
+    const dpKind = decodeDpIdcode(p.idcode >>> 0).kind;
+    if (dpKind) bits.push(dpKind);
+    this._log(bits.length
+      ? `   ⇒ 判读：${bits.join(' · ')}`
+      : '   ⇒ 只确认了「SWD 通、对端是 ARM 的 DP」，型号认不出（用上面那几个原始值去对 ST 的 RM）');
+  }
+
+  async _idcodeRiscv(){
+    this._status('读 IDCODE（JTAG）…');
+    // 与 HPM 烧录同一条路的前半段：HID 切 output_mode=SWD+JTAG → 让探针自己的 RISC-V 引擎放掉 TAP。
+    // ⚠️ 这里**不**去停 RTT 桥（HID 0x31）—— 只是读个 IDCODE，别把用户正在跑的转发会话掐了。
+    try {
+      const hid = new AkaLinkHid();
+      await withTimeout(hid.reconnect(), 8000, '连探针 HID');
+      await withTimeout(hid.xfer(0x02 /* CMD_SET_CONFIG */, setOutputModeData(PROBE_OUTPUT_MODE.SWD_JTAG)), 3000, '切输出模式');
+      this._log('   已把探针切到 SWD+JTAG（HID 0x02，每次都要发）');
+      try {
+        await withTimeout(hid.xfer(0x33, Uint8Array.of(0)), 2500, '让 RISC-V 引擎放掉 TAP');
+        this._log('   已请求 RISC-V 引擎放掉 TAP（HID 0x33 action 0）');
+      } catch { this._log('   （0x33 无响应，可能本来就空闲）'); }
+      try { await hid.close(); } catch {}
+    } catch (e){
+      this._log('   ⚠ 切 output_mode 失败（继续试 JTAG）：' + (e?.message || e));
+    }
+
+    this.probe = await this._openProbeForRead({ skipTargetInit: true });   // 必须跳过按 SWD 协商那套
+    const jtag = new DapJtagTransport(this.probe, { irLength: HPM_COMMON.irLength, log: l => this._log('   ' + l) });
+    const dm = new RiscvTransport(jtag, { idle: 8, log: l => this._log('   ' + l) });
+    const info = await dm.init();
+    const known = info.idcode === HPM_COMMON.tapIdcode;
+    this._log(`   TAP IDCODE 0x${info.idcode.toString(16).toUpperCase()} → ${known ? 'HPM 全系（IR 长度 5，HPM6800/HPM5300…）' : '不在已知表里'}`);
+    this._log(`   dmstatus 0x${info.dmstatus.toString(16)} · dtmcs 0x${info.dtmcs.toString(16)}`);
+    this._log(known ? '   ⇒ 判读：RISC-V 调试模块（DM）应答了，JTAG 链路正常'
+                    : '   ⇒ TAP 能读但不是 HPM 的 IDCODE —— 接线 / 上电 / 器件选型看一眼');
   }
 
   // ---------- 主通道：WebUSB 零安装 ----------
