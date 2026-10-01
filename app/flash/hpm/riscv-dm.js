@@ -230,6 +230,31 @@ export class RiscvTransport {
     return await this.waitHalted(timeoutMs);
   }
 
+  /**
+   * **进 flash 流程前把 SoC 复位并把核停在复位向量**（ndmreset + 保持 haltreq）。
+   *
+   * 🚨 2026-10 LA 对照 OpenOCD + 真机 A/B 定因（**别删这一条**）：
+   *   HPM6800EVK 上跑着 `flash_sdram_xip` 的应用时，**应用已经把 XPI/flash 控制器配过一遍**
+   *   （它自己要 XIP 执行）。我们在这种"已被应用配过"的 XPI 上跑 `flash_init`（ROM 的 auto_config
+   *   重配一遍）之后，**第一次写类操作（erase）会把核楔死在一条永不完成的 XPI 事务上**：
+   *   `dmstatus` 恒 running、haltreq 都停不住、抽象命令 cmderr=4，要 ndmreset 才能解 ——
+   *   历史日志里"第一次 erase 必卡 60s、重试就过"就是它。
+   *
+   *   实测对照（同参数 erase 8192 B）：
+   *     · 直接 setup→erase                     ：卡 >60 s（靠 withAlgoRetry 自愈）
+   *     · 先 reset-**run**（复位后应用立刻重启并重配 XPI）→ setup→erase ：仍然卡
+   *     · 先 reset-**halt**（核停在复位向量，应用没机会重配 XPI）→ setup→erase ：**118 ms 通过**
+   *   ⇒ 所以这里用 reset-halt（**不是** reset-run）。
+   */
+  async resetHalt(hart = 0, timeoutMs = 5000){
+    try {
+      await this._haltByReset(hart, timeoutMs);
+    } catch {
+      // 停不住就退回普通 halt（至少别把流程卡死；真正的失败让后面的调用去报）
+      await this.halt(hart, timeoutMs).catch(() => {});
+    }
+  }
+
   /** dmcontrol 的公共位：dmactive + hartsel(h) */
   _ctl(hart, extra = 0){
     return ((DMCONTROL.dmactive | DMCONTROL.hartsel(hart) | extra) >>> 0);

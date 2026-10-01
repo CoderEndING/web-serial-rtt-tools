@@ -235,9 +235,17 @@ export class SimTarget {
           this._onResume();
         }
         if (!wasActive && (data & 1)) this.halted = true;             // dmactive 上升沿：DM 复位、hart 停住
-        // ndmreset 是电平式：拉高=拉复位（dmstatus 的 havereset 置起）、拉低=核从复位向量开始跑
+        // ndmreset 是电平式：拉高=拉复位（dmstatus 的 havereset 置起）、拉低=核从复位向量开始
+        // 🚨 松开复位时核是"跑"还是"停"，取决于 **haltreq 有没有一起保持**：
+        //    保持 haltreq = reset-**halt**（核停在复位向量，应用没机会重新配 XPI）；
+        //    不保持 = reset-run（应用立刻起来）。主机侧 `RiscvTransport.resetHalt` 靠的就是这个差别
+        //    （HPM6800EVK 上"应用配过的 XPI"会让第一次 erase 卡死，reset-halt 才治得好）。
         if ((data & 2) && !wasReset){ this.resetPulse = true; this.havereset = true; }
-        if (!(data & 2) && wasReset){ this.resetPulse = false; this.halted = false; this.pc = 0; }
+        if (!(data & 2) && wasReset){
+          this.resetPulse = false;
+          this.pc = 0;
+          this.halted = !!(data & (1 << 31)) || !!(data & (1 << 28));   // haltreq 保持 → 停在复位向量
+        }
         break;
       }
       case DM.PROGBUF0: case DM.PROGBUF0 + 1: case DM.PROGBUF0 + 2: case DM.PROGBUF0 + 3:

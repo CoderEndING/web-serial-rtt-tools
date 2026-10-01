@@ -60,6 +60,22 @@ export class HpmFlasher {
 
   /** 把算法写进 SRAM 并调 flash_init + flash_get_info（拿到芯片回报的真实容量/扇区）*/
   async setup(){
+    /**
+     * 🚨 **先 reset-halt 把 XPI 打回 POR 态**（2026-10 真机 A/B 定因，见 `RiscvTransport.resetHalt`）：
+     *    目标上跑着 flash_sdram_xip 的应用时，它已经把 XPI 配过一遍；在那种状态下跑 flash_init
+     *    再 erase，**第一次写类操作会把核楔死**（历史日志"第一次 erase 必卡 60 s"）。
+     *    reset-halt 让核停在复位向量、应用来不及重配 XPI，实测同参数 erase 从 >60 s 变成 118 ms。
+     *    `opts.resetFirst === false` 可关掉（离线自测/特殊场合用）。
+     */
+    if (this.resetFirst !== false){
+      const t = Date.now();
+      await this.dm.resetHalt?.();
+      // ndmreset 之后 DM 也要重新建立（TAP 复位 + dmcontrol 0→1 + halt）
+      try { await this.dm.init(); } catch { /* 失败就让后面的调用去报错 */ }
+      await this.dm.activate(0);
+      await this.dm.halt(0, 3000);
+      this.log(`已 reset-halt（把 XPI 打回 POR 态，${Date.now() - t} ms）—— 不然第一次 erase 会卡死`);
+    }
     const bytes = hpmAlgoBytes();
     const parsed = algoEntries(bytes);
     if (parsed.count < 7){
