@@ -175,6 +175,8 @@ make hw-campaign-hpm ARGS="--cycles=1 --alt=1"   # 冒烟
   所以正常情况下你**再也不会看到授权框**。换 USB 口或换探针之后重跑 `make grant` 即可。
 - **"弹框里一个设备都没有"**的三种真实原因：① 探针被另一个页签/另一个程序占着（关掉那个页签，
   或 `node tmp/usb-holders.mjs` 看谁占着）；② 探针在 DFU 模式（没回到 CMSIS-DAP）；③ 换了 USB 口而授权记录还指着旧口（`make grant ARGS=--clean` 后再 `make grant`）。
+- **权限被浏览器/系统策略锁死**（症状：站点面板里「串行端口」写着"不允许(默认)"且点不动）：
+  这是**组策略**干的，跟上面的设备授权无关 —— 见下一节「浏览器权限怎么配」的 ① 层。
 
 ### 2）网页烧录卡死
 
@@ -212,6 +214,103 @@ make hw-campaign-hpm ARGS="--cycles=1 --alt=1"   # 冒烟
 - **验收（本轮真机）**：新固件 + 上述修复后，**全程零手动复位**：
   Viewer 空闲 43.3 KB/s（8.4 Hz，零错位读）· Viewer **打流中** 12.8 KB/s（之前是连不上）；
   转发打流中 **1.387 MB/s**（探针侧 1.479，与仓库基线 1.377 一致）；10 s 存盘 13.16 MB、一致性 99.5%。
+
+## 浏览器权限怎么配（Edge / Chrome：串口 / HID / WebUSB）
+
+> 页面里 `navigator.serial` / `navigator.hid` / `navigator.usb` 能不能用，由**四层**设置共同决定。
+> 任何一层说"不"，页面上就是"点了没反应"。最典型的症状：站点面板里「**串行端口**」显示
+> **不允许(默认)** 而且**整行点不动** —— 那是被最上面的**策略层**锁住了（2026-10 用户现场实测）。
+> 两家浏览器是同一套 Chromium 机制，**只有 scheme 和注册表根不同**，下面统一说明。
+
+| 层级 | 管什么 | 在哪改 | 界面能改吗 |
+|---|---|---|---|
+| ① **组策略** | 全局总闸，优先级最高 | 注册表 `…\Policies\Microsoft\Edge` / `…\Policies\Google\Chrome` | ❌ 只能看：`edge://policy` / `chrome://policy` |
+| ② **浏览器默认值** | 对所有网站的默认行为 | `edge://settings/content/serialPorts` 等（见下） | ✅ |
+| ③ **单站点例外** | 只针对某一个来源 | 地址栏左侧图标 → 串行端口 / HID 设备 / USB 设备 | ✅（被 ① 锁住时整行变灰） |
+| ④ **设备授权** | 这个来源可以用**这一支**探针 | 弹框人工选一次；批量写 profile 用 `make grant`（见上一节） | 半自动 |
+
+### ① 组策略（"点不动"的病根就在这层）
+
+**症状**：站点面板里那一行是灰的、写着「不允许(默认)」；浏览器里可能还显示「**由你的组织管理**」。
+
+**先看**（界面里唯一能看策略的地方，页面上有「重新加载政策」按钮）：
+```
+edge://policy        （Chrome 用 chrome://policy）
+```
+搜 `Serial` / `Usb` / `Hid`，能看到策略名、当前生效值和来源。
+
+**关键策略名与取值**（`2` = 禁止，`3` = 允许网站询问）：
+
+| 策略 | 作用 | 正常值 |
+|---|---|---|
+| `DefaultSerialGuardSetting` | 网站能否请求**串行端口** | **3**（设成 2 = 全场禁止，就是上面那个病） |
+| `DefaultWebHidGuardSetting` | 网站能否请求 **HID 设备** | 3 |
+| `DefaultWebUsbGuardSetting` | 网站能否请求 **USB 设备** | 3 |
+
+**改**（改完必须**完全退出浏览器**再打开，策略只在启动时读）：
+```powershell
+# 恢复正常值（允许网站询问）——Edge 与 Chrome 各一条
+reg add "HKCU\SOFTWARE\Policies\Microsoft\Edge"   /v DefaultSerialGuardSetting /t REG_DWORD /d 3 /f
+reg add "HKCU\SOFTWARE\Policies\Google\Chrome"    /v DefaultSerialGuardSetting /t REG_DWORD /d 3 /f
+# 顺带把 HID / USB 也确认一遍（可选）
+reg add "HKCU\SOFTWARE\Policies\Microsoft\Edge"   /v DefaultWebHidGuardSetting /t REG_DWORD /d 3 /f
+reg add "HKCU\SOFTWARE\Policies\Microsoft\Edge"   /v DefaultWebUsbGuardSetting /t REG_DWORD /d 3 /f
+# 查看当前值
+reg query "HKCU\SOFTWARE\Policies\Microsoft\Edge" /v DefaultSerialGuardSetting
+```
+
+**顺带：免弹框放行某支设备**（做自动化很有用 —— 指定来源 + VID/PID 直接放行，连选择框都不弹）：
+
+| 策略 | 例子（给本地页放行 akaLinkPro，0x0D28/0x0202） |
+|---|---|
+| `SerialAllowUsbDevicesForUrls` | `[{"devices":[{"vendor_id":3608,"product_id":514}],"urls":["http://127.0.0.1:8899"]}]` |
+| `WebUsbAllowDevicesForUrls` | 同上 |
+| `WebHidAllowDevicesForUrls` | 同上（HID 只认 VID/PID） |
+| `SerialAllowAllPortsForUrls` | `["http://127.0.0.1:8899"]`（该来源放行**所有**串口） |
+
+> ⚠️ 这些都是 **HKCU 策略**，会让浏览器显示「由你的组织管理」。自己机器上自测无所谓；
+> 不想要这个提示就把对应值 `reg delete` 掉（删除 = 回落到浏览器默认，也就是"询问"）。
+
+### ② 浏览器默认值（界面上就能改）
+
+| 权限 | Edge | Chrome |
+|---|---|---|
+| 串行端口 | `edge://settings/content/serialPorts` | `chrome://settings/content/serialPorts` |
+| HID 设备 | `edge://settings/content/hidDevices` | `chrome://settings/content/hidDevices` |
+| USB 设备 | `edge://settings/content/usbDevices` | `chrome://settings/content/usbDevices` |
+
+（菜单点法：设置 → **Cookie 和网站权限** → 往下找对应项。）串口那页选「**站点要访问串行端口时询问**」= 正常值；下面还能手动把某些网站拉进「不允许」列表。
+
+### ③ 单站点例外（日常最常用）
+
+地址栏**左侧图标** → 点「串行端口 / HID 设备 / USB 设备」→ 选「询问 / 允许 / 不允许」，
+下方能看到**已授权的设备清单**并可逐条「**撤消访问权限**」。
+> 被 ① 的策略锁住时，这一行是灰的 —— 先去 ① 解锁。
+
+### ④ 设备授权（跟"权限"不是一回事）
+
+权限开着，但**换了个 USB 插口**，串口那条授权就失效了（它记的是设备实例 ID，`&N&` 那段会变）——
+现象是"弹框里挑不到设备"。补的办法就是上一节的：
+
+```powershell
+make grant                                   # 补串口 + WebHID + WebUSB（默认只改临时测试 profile）
+node tools/selftest/serial-grant.mjs --profile="$env:LOCALAPPDATA\Microsoft\Edge\User Data"   # 补你自己的 Edge
+node tools/selftest/serial-grant.mjs --profile="$env:LOCALAPPDATA\Google\Chrome\User Data" --force   # 补你自己的 Chrome
+```
+（**写之前必须退出对应浏览器**，否则 profile 会被浏览器覆盖回去。）
+
+### 附：不想让探针插拔时弹系统通知
+
+Chromium 系浏览器（Chrome / Edge / 钉钉内置浏览器等）会在探针插上时弹「检测到 akaLinkPro CMSIS-DAP，
+请前往 … 进行连接」——它来自 `WebUsbDeviceDetection` 这个功能（依据探针固件里的 **WebUSB 落地页描述符**）。
+只关这一条、不动其它通知：
+
+```powershell
+# 给启动该浏览器的快捷方式 / 开机自启项加上开关（完全退出浏览器后重启才生效）
+--disable-features=WebUsbDeviceDetection
+```
+反过来，如果希望"没打开浏览器也能收到提醒"，保留一个**后台常驻**的浏览器即可
+（Edge 默认开机自启：`msedge.exe --no-startup-window --win-session-start`）。
 
 ## 快速开始
 
