@@ -29,7 +29,7 @@ FW_DIR   = tools/target-firmware/stm32f103
 LA       = tools/la/kingst_la.py
 
 .DEFAULT_GOAL := help
-.PHONY: help serve serve-dev serve-stop browser open page-prep test test-ui test-gen test-gen-page gen-embed samples-anim test-hid test-dwarf test-scope test-scope-page test-scope-render test-spi test-read test-spi-page test-hw test-record test-bridge test-bridge-gate test-hpm test-image test-all flash-timing hw-campaign hw-campaign-hpm campaign-summary \
+.PHONY: help serve serve-dev serve-stop browser open page-prep test test-ui test-gen test-gen-page gen-embed samples-anim test-hid test-dwarf test-scope test-scope-page test-scope-render test-spi test-read test-spi-page test-hw test-record test-bridge test-bridge-gate test-hpm test-image test-all test-dbg test-dbg-page test-idcode test-dsl test-flash flash-timing hw-campaign hw-campaign-hpm campaign-summary \
         bridge bridge-stop fw-build fw-flash fw-restore fw-h7-build fw-h7-slow fw-h7-flash \
         algo-check flash-plan la-info la-capture git-status git-log check clean spi-hw spi-flow
 
@@ -84,6 +84,16 @@ test:
 	$(NODE) tools/selftest/spi-frames-dsl.test.mjs
 	$(NODE) tools/selftest/spi-flash.test.mjs
 	$(NODE) tools/selftest/stm32-devid.test.mjs
+	$(NODE) tools/selftest/dbg-core.test.mjs
+
+# 调试器页的逻辑层（纯 Node）：寄存器位域 / FPB 断点编码 / 命令解析 / 符号表 +
+# 拿内置假目标真跑一遍「连接 → 读寄存器 → 写内存 → 下断点 → 继续 → 命中断点 → 单步 → 复位」
+test-dbg:
+	$(NODE) tools/selftest/dbg-core.test.mjs
+
+# 调试器页的真页面自测（CDP，不需要硬件；用的是页面里的假目标）
+test-dbg-page: page-prep
+	$(NODE) tools/selftest/dbg-page.test.mjs
 
 # 目标身份解码（「读 IDCODE」按钮）：DP IDCODE / CPUID / STM32 DBGMCU DEV_ID → 型号
 test-idcode:
@@ -330,6 +340,14 @@ check:
 	$(NODE) --check app/spi/image.js
 	$(NODE) --check app/spi/frames-dsl.js
 	$(NODE) --check app/spi/flash.js
+	$(NODE) --check app/dbg/fmt.js
+	$(NODE) --check app/dbg/regs.js
+	$(NODE) --check app/dbg/bp.js
+	$(NODE) --check app/dbg/symbols.js
+	$(NODE) --check app/dbg/cmd.js
+	$(NODE) --check app/dbg/session.js
+	$(NODE) --check app/dbg/mock.js
+	$(NODE) --check app/dbg/view.js
 	$(NODE) --check app/main.js
 	$(NODE) --check bridge/rtt-bridge.mjs
 	pwsh -NoProfile -Command "Write-Host '语法检查通过'"

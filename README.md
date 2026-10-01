@@ -42,6 +42,10 @@
 |---|
 | ![J-Scope 真机](docs/shots/13-scope-ab-cursors.png) |
 
+| 调试器（零安装 · 暂停/继续/单步/复位 · 寄存器可直接改 · 内存 hexdump · 硬件断点 · gdb 风格命令行 · RTT 同屏） |
+|---|
+| ![调试器](docs/shots/14-dbg.png) |
+
 （截图里第一个标签用的是**内置演示串口**，所以显示的是假设备；`?demo=serial` 就能自己试。）
 
 ## 实测状态（2026-09-26，真硬件：MicroLink CMSIS-DAP + STM32F103）
@@ -599,6 +603,42 @@ rtt-bridge-kit/
 必须先开数据面读**再**发启动（否则最先那个 DEF 包早被丢掉，起跑线永远等不到）；
 上一轮的残留包会污染新一轮（用每轮开头的 DEF 当起跑线，之前的一律丢弃并计数）。
 
+## 调试器（零安装：暂停 / 单步 / 硬件断点 / 命令行 / RTT 同屏）
+
+网页里直接干调试器该干的那几件事，**不装 OpenOCD、不装 gdb**：
+暂停 / 继续 / 单步 / 复位、寄存器表（可改）、内存 hexdump（可改）、
+**FPB 硬件断点**、按符号名的命令行、旁边顺手看 RTT 的 printf。
+
+```
+连上探针（1 MHz）→ 载入 .elf 拿到符号 → 按符号下断点 → 继续 → 命中 → 看寄存器/内存 → 单步
+```
+
+| 能力 | 说明 |
+|---|---|
+| 运行控制 | 暂停 / 继续 / 单步 / 复位并停 / 复位并跑（走 `AIRCR.SYSRESETREQ`，**不依赖 NRST 接线**） |
+| 寄存器 | R0-R12 / SP / LR / PC / xPSR / MSP / PSP + **CFBP 拆出的 PRIMASK / BASEPRI / FAULTMASK / CONTROL**；回车即写 |
+| 内存 | 任意地址 hexdump（1~1024 字节），勾「可写」后点字节即改；可选**跟随 PC** |
+| 断点 | **硬件 FPB**（真机 Cortex-M7 = 8 个比较器），`b main` 这种按符号下；命中后「继续」会自己跨过断点 |
+| 符号 | 载入 `.elf` → `p g_var`（DWARF 带类型就解出数值）、PC/LR 显示 `函数名+偏移`、`sym <子串>` 搜符号 |
+| 命令行 | `h` `r` `md` `mw` `ms` `p` `x` `b` `bd` `bl` `c` `s` `halt` `reset` `info` `sym`（↑↓ 翻历史） |
+| RTT 同屏 | 目标在跑时也能读同一个 RTT 环，停住时照样看 printf |
+| 无硬件也能试 | 侧栏「后端 → 模拟目标」是内置的假 Cortex-M（有寄存器/内存/FPB 比较器/RTT 环），自测就跑在它上面 |
+
+四条真机硬约束（都写在 [`docs/dbg-page.md`](docs/dbg-page.md) 与代码注释里）：
+
+1. **PPB（`0xE0000000` 那一片）必须 ≤1 MHz** —— 内核调试寄存器都在那，这颗探针固件在时钟偏高时读回 0，
+   所以页面上那格默认 1000 kHz（别顺手调高）。
+2. **命中断点后"继续"必须先单步跨过**：FPB 命中后 PC 停在断点那条指令上，直接跑会立刻再命中
+   （现象是"点了继续没反应"）。做法与 gdb/pyOCD 一致：临时摘比较器 → 单步 → 装回 → 继续。
+3. **CFBP 的字节顺序**：`[7:0]=PRIMASK / [15:8]=BASEPRI / [23:16]=FAULTMASK / [31:24]=CONTROL`
+   （依据 OpenOCD `armv7m.c` 与 pyOCD 的实现，不是猜的）。
+4. **谁在占用探针**：连接前会请别的页签让出探针、并停掉「RTT 转发」的探针桥 ——
+   那个桥在**探针侧**一直轮询目标内存，不停的话单步一次要等好几秒。
+
+明确**不做**（与"简单"冲突的无底洞）：反汇编、局部变量/表达式求值、RTOS 感知、多核、软件断点。
+自测：`make test-dbg`（纯 Node，98 项：寄存器位域 / FPB 编码 / 命令解析 / 符号表 + 拿假目标真跑一遍
+「连接→读寄存器→写内存→下断点→继续→命中断点→单步→复位」）、`make test-dbg-page`（CDP 真页面，58 项）。
+
 ## 支持的调试后端
 
 | 后端 | 通道 | 双向 | 目标控制 | 依赖 |
@@ -639,6 +679,9 @@ app/
   rtt/                  protocol(RTT 协议) / dap-webusb(CMSIS-DAP) / bridge / elf / mock / view
   gen/                  工程生成：templates(模板移植自 uvprojx2cmake.py) / fixes(固定 4 项修正) / model(参数+器件表+uvprojx 解析) / zip(零依赖打包) / view
   hid/                  akaLinkPro 自定义 HID：probe(协议 + WebHID 客户端) / mock(假探针) / view(桥的面板) / stream(RTT 转发页，纯输出接收)
+  dbg/                  **调试器**（零安装的极简调试前端）：session(会话/运行控制/FPB 断点) / cmd(命令行) /
+                        symbols(ELF 符号) / regs(xPSR 与 CFBP 拆位) / bp(FPB 编解码) / fmt(解析与 hexdump) /
+                        mock(假 Cortex-M，自测用) / view(界面)；设计与踩坑见 docs/dbg-page.md
   flash/                烧录器：image(固件解析) / algos+runner(ARM flashloader) / view
     hpm/                HPM 系列（RISC-V）：jtag(TAP/DMI 编码) / riscv-dm(DM+SBA) / dap-transport(WebUSB) /
                         flash(擦写流程) / chips(板级参数，来自 SDK cfg) / algo(自动生成的 blob) / entry(入口表解析)
@@ -652,6 +695,8 @@ bridge/
 tools/
   selftest/             自测：Node 协议测试 / 工程生成对账 / HID 协议 / 页面端到端(CDP) / 桥端到端 / 浏览器真机(CDP) / LA 参考流量
     spi-read.test.mjs   **屏的回读**（读寄存器 / 读 GRAM → 预览 + BMP）：读计划、解码、BMP、假探针 GRAM 往返（`make test-read`）
+    dbg-core.test.mjs   **调试器页的逻辑层**：寄存器位域 / FPB 断点编码 / 命令解析 / 符号表 + 拿假目标真跑一遍调试动作（`make test-dbg`）
+    dbg-page.test.mjs   **调试器页的真页面自测**（CDP + 页面里的假目标，不需要硬件；`make test-dbg-page`）
     hw-campaign.mjs     **真机场景验收**（烧录+Viewer+转发+10s存盘+J-Scope+交替烧录计时，带判决，`make hw-campaign`）
     flash-timing.mjs    烧录耗时体检（`make flash-timing`，ARGS=--clamp 复现"后台页被限速"）
     recorder-file.test.mjs  「记录到文件」落盘语义（`.crswap`/积压/落盘进度，OPFS 替身；`make test-record`）
@@ -700,6 +745,13 @@ node tools\selftest\hid-proto.test.mjs
 
 # 1d) 桥的 WebSocket 准入（Origin 白名单 + 口令）：自己拉一个桥实例只做握手，不碰硬件
 node tools\selftest\bridge-origin.test.mjs
+
+# 1e) 调试器页的逻辑层（纯 Node，不需要浏览器/硬件）：寄存器位域、FPB 断点编码、命令解析、符号表，
+#     并用内置假目标真跑一遍「连接 → 读寄存器 → 写内存 → 下断点 → 继续 → 命中断点 → 单步 → 复位」
+node tools\selftest\dbg-core.test.mjs
+
+# 1f) 调试器页的真页面自测（CDP + 假目标；先 page-prep：8899 服务 + 9333 浏览器）
+node tools\selftest\dbg-page.test.mjs
 
 # 2) 页面端到端（内置演示串口，无需硬件）
 python -m http.server 8899 --bind 127.0.0.1        # 仓库根

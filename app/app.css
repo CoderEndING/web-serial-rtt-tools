@@ -501,3 +501,49 @@ fieldset.folded > legend::after{content:' · 已折叠';color:var(--fg2);font-si
 /* 图上"没出现"的线（比如 QSPI 不需要 DC）：明说原因，别让人以为是漏画 */
 #sp-pinmap-miss{color:#ffd479}
 #sp-pinmap-miss:empty{display:none}
+
+/* ============================ 调试器（#tab-dbg） ============================ */
+#tab-dbg .mono{font-family:var(--mono)}
+#tab-dbg .side .row>span:first-child{width:66px}
+#tab-dbg .main{gap:8px;min-height:0}
+#tab-dbg .toolbar{flex:none}
+#tab-dbg #d-pc{font-size:12px;color:var(--fg2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:44ch}
+#tab-dbg .dbggrid{display:grid;grid-template-columns:minmax(248px,1fr) minmax(330px,1.3fr);gap:9px;flex:1 1 auto;min-height:0}
+#tab-dbg .dbgbox{display:flex;flex-direction:column;min-width:0;min-height:0;overflow:hidden}
+#tab-dbg .dbgbox>legend{white-space:nowrap}
+#tab-dbg .dbgbox>legend .hint{margin:0;display:inline}
+#tab-dbg .reglist{flex:1 1 auto;min-height:0;overflow:auto;font-size:12px;font-family:var(--mono)}
+#tab-dbg .regrow{display:flex;align-items:center;gap:5px;padding:0 3px;border-radius:4px}
+#tab-dbg .regrow:hover{background:var(--bg3)}
+#tab-dbg .regrow .rn{flex:none;width:62px;color:var(--fg2)}
+#tab-dbg .regrow input.rv{flex:none;width:94px;font-size:12px;padding:0 5px;background:transparent;border:1px solid transparent;border-radius:4px}
+#tab-dbg .regrow input.rv:hover{border-color:var(--line)}
+#tab-dbg .regrow input.rv:focus{border-color:var(--acc);background:var(--bg)}
+#tab-dbg .regrow .note{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--fg2);font-size:11px}
+#tab-dbg .regrow.chg{background:#3a2f12}
+#tab-dbg .regrow.chg input.rv{color:#ffd479}
+#tab-dbg .hexdump{flex:1 1 auto;min-height:0;overflow:auto;font-size:12px;line-height:1.5}
+#tab-dbg .hxrow{white-space:pre}
+#tab-dbg .hxa{color:var(--fg2);margin-right:8px}
+#tab-dbg .by{display:inline-block;min-width:19px;text-align:center;border-radius:3px}
+#tab-dbg .by.w{cursor:pointer}
+#tab-dbg .by.w:hover{background:#1f6feb;color:#fff}
+#tab-dbg .asc{color:var(--fg2);margin-left:8px}
+#tab-dbg .dbgfoot{display:grid;grid-template-columns:minmax(0,1.55fr) minmax(0,1fr);gap:9px;flex:0 0 auto;height:33%;min-height:170px}
+#tab-dbg #d-out{flex:1 1 auto;min-height:0;height:auto;overflow:auto}
+#tab-dbg #d-out .cmdecho{color:#9fd0ff}
+#tab-dbg #d-rtt{flex:1 1 auto;min-height:0;overflow:auto;margin:0}
+#tab-dbg .sendbar{flex:none;margin-top:5px}
+#tab-dbg .bplist{max-height:120px;overflow:auto;font-size:12px}
+#tab-dbg .bprow{display:flex;align-items:center;gap:6px;padding:1px 3px;border-radius:4px}
+#tab-dbg .bprow:hover{background:var(--bg3)}
+#tab-dbg .bprow span{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#tab-dbg .bprow button{padding:0 6px;flex:none}
+#tab-dbg .memedit{margin-top:5px}
+#tab-dbg .memedit input{flex:0 0 auto;width:104px}
+#tab-dbg .memedit input#d-mem-ev{width:136px}
+#tab-dbg .memedit button{flex:none}
+@media (max-width:1180px){ #tab-dbg .dbggrid{grid-template-columns:1fr} }
+
+/* RTT 输出窗在没有数据时的占位（.rx 的默认文案是"接收区"，这里说清楚该点什么） */
+#tab-dbg #d-rtt:empty::before{content:"（点「定位并开始」：留空地址就用 .elf 里的 _SEGGER_RTT 符号）";color:#4a5563}

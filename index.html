@@ -30,6 +30,7 @@
     <button class="tab" data-tab="rttcdc">RTT 转发</button>
     <button class="tab" data-tab="scope">J-Scope 波形</button>
     <button class="tab" data-tab="flash">烧录器</button>
+    <button class="tab" data-tab="dbg">调试器</button>
     <button class="tab" data-tab="spi">SPI/QSPI 桥</button>
     <button class="tab" data-tab="panel">SPI/QSPI 屏</button>
     <button class="tab" data-tab="gen">工程生成</button>
@@ -672,6 +673,120 @@
         <span id="f-result">—</span>
         <span class="spacer"></span>
         <span class="hint">.bin 记得核对基地址（默认 0x08000000）</span>
+      </div>
+    </section>
+  </div>
+</section>
+
+<!-- ============================ 调试器 ============================ -->
+<section class="panel" id="tab-dbg">
+  <div class="ws">
+    <aside class="side">
+      <fieldset>
+        <legend>连接</legend>
+        <label class="row"><span>后端</span>
+          <select id="d-backend" title="WebUSB：与 RTT/烧录共用同一支探针，零安装。模拟目标：内置的假 Cortex-M（有寄存器/内存/FPB 断点），不需要硬件，用来试界面。">
+            <option value="webusb">WebUSB · 零安装（默认）</option>
+            <option value="mock">模拟目标（不需要硬件）</option>
+          </select>
+        </label>
+        <label class="row"><span>SWD kHz</span>
+          <select id="d-clock" title="内核调试寄存器（DHCSR/DCRSR/FPB）在 PPB 区，这颗探针固件在时钟偏高时会读回 0 —— 所以默认 1 MHz，别随手调高。">
+            <option value="1000">1000（1 MHz，推荐）</option>
+            <option value="500">500</option>
+            <option value="200">200</option>
+          </select>
+        </label>
+        <div class="row btnrow">
+          <button id="d-connect" class="primary">连接</button>
+          <button id="d-disconnect" disabled>断开</button>
+        </div>
+        <p class="hint">连接前会请别的页签让出探针，并停掉「RTT 转发」的探针桥（它在探针侧一直轮询目标内存，会跟调试抢同一条 SWD）。</p>
+      </fieldset>
+
+      <fieldset>
+        <legend>符号（.elf）</legend>
+        <div class="row btnrow">
+          <button id="d-elf-pick">载入 ELF…</button>
+          <input type="file" id="d-elf-file" accept=".elf,.axf,.out,.bin" hidden>
+        </div>
+        <p class="hint" id="d-elf-info">载入 .elf 后可以按符号名下断点（<code>b main</code>）、<code>p 变量</code> 看数值、PC 显示函数名。</p>
+      </fieldset>
+
+      <fieldset>
+        <legend>目标</legend>
+        <div class="row btnrow">
+          <button id="d-reset-halt">复位并停</button>
+          <button id="d-reset-run">复位并跑</button>
+        </div>
+        <p class="hint">走 AIRCR.SYSRESETREQ（软件复位）：本机好几块板没把 NRST 接到探针，拉复位线看着成功其实没动。</p>
+      </fieldset>
+
+      <fieldset>
+        <legend>断点（硬件 FPB）</legend>
+        <div id="d-bp-list" class="bplist"></div>
+        <div class="row btnrow"><button id="d-bp-clear">清空断点</button></div>
+        <p class="hint" id="d-bp-cap">—</p>
+      </fieldset>
+
+      <fieldset>
+        <legend>RTT 输出（同屏）</legend>
+        <div class="row btnrow">
+          <button id="d-rtt-locate">定位并开始</button>
+          <button id="d-rtt-stop">停止</button>
+        </div>
+        <div class="row"><span>地址</span><input id="d-rtt-addr" class="mono" placeholder="留空 = 用 _SEGGER_RTT 符号"></div>
+        <label class="chk"><input type="checkbox" id="d-rtt-on"> 连接后自动开始</label>
+        <p class="hint" id="d-rtt-info">读的是同一个 RTT 环，目标在跑的时候也能看到 printf。</p>
+      </fieldset>
+    </aside>
+
+    <section class="main">
+      <div class="toolbar">
+        <span id="d-state" class="flag flag-off">未连接</span>
+        <span id="d-pc" class="mono">PC —</span>
+        <span class="spacer"></span>
+        <button id="d-halt" disabled>暂停</button>
+        <button id="d-cont" disabled>继续</button>
+        <button id="d-step" disabled>单步</button>
+        <label class="chk"><input type="checkbox" id="d-follow-pc" checked> 内存跟随 PC</label>
+      </div>
+
+      <div class="dbggrid">
+        <fieldset class="dbgbox">
+          <legend>寄存器 <button id="d-reg-refresh" class="foldbtn">刷新</button></legend>
+          <div id="d-regs" class="reglist"></div>
+        </fieldset>
+        <fieldset class="dbgbox">
+          <legend>内存</legend>
+          <div class="toolrow nw">
+            <span>地址</span><input id="d-mem-addr" class="mono" value="0x20000000">
+            <span>长度</span><input id="d-mem-len" class="num" value="128" inputmode="numeric">
+            <button id="d-mem-read">读</button>
+            <label class="chk"><input type="checkbox" id="d-mem-write-on"> 可写</label>
+          </div>
+          <div id="d-mem" class="hexdump mono"></div>
+          <div class="toolrow nw memedit">
+            <span>改</span><input id="d-mem-ea" class="mono" placeholder="地址">
+            <input id="d-mem-ev" class="mono" placeholder="字节（如 01 或 0x01）">
+            <button id="d-mem-write">写入</button>
+          </div>
+        </fieldset>
+      </div>
+
+      <div class="dbgfoot">
+        <fieldset class="dbgbox">
+          <legend>命令行 <span class="hint">h = 帮助；↑↓ = 历史</span></legend>
+          <div id="d-out" class="log mono"></div>
+          <div class="sendbar">
+            <input id="d-cmd" class="mono" placeholder="h / r / md 0x20000000 / b main / p g_var / c / s" autocomplete="off">
+            <button id="d-run" class="primary">执行</button>
+          </div>
+        </fieldset>
+        <fieldset class="dbgbox">
+          <legend>RTT 输出</legend>
+          <pre id="d-rtt" class="rx mono"></pre>
+        </fieldset>
       </div>
     </section>
   </div>

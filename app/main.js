@@ -13,6 +13,7 @@ import { GenView } from './gen/view.js';
 import { RttCdcView } from './hid/view.js';
 import { RttCdcStreamView } from './hid/stream.js';
 import { ScopeView } from './scope/view.js';
+import { DbgView } from './dbg/view.js';
 import { SpiSession } from './spi/session.js';
 import { SpiBusView } from './spi/bus-view.js';
 import { SpiPanelView } from './spi/panel-view.js';
@@ -34,6 +35,8 @@ const gen = new GenView();
 const hid = new RttCdcView();
 const stream = new RttCdcStreamView(session);
 const scope = new ScopeView();
+// 调试器（#dbg）：零安装的极简调试前端（暂停/单步/寄存器/内存/FPB 断点/命令行/RTT 同屏）
+const dbg = new DbgView();
 // SPI 桥：**一次连接，两页共用**（桥页管链路与通用帧，屏页管面板档/初始化/刷图）
 const spiSession = new SpiSession();
 const spi = new SpiBusView(spiSession);
@@ -49,6 +52,7 @@ stream.init();
 scope.init();
 spi.init();
 panel.init();
+dbg.init();
 
 initTabs(name => {
   if (name === 'terminal') requestAnimationFrame(() => terminal.onShow());
@@ -57,6 +61,7 @@ initTabs(name => {
   if (name === 'scope') requestAnimationFrame(() => scope.onShow());
   if (name === 'spi') requestAnimationFrame(() => spi.onShow());
   if (name === 'panel') requestAnimationFrame(() => panel.onShow());
+  if (name === 'dbg') requestAnimationFrame(() => dbg.onShow());
   if (name === 'gen') requestAnimationFrame(() => gen.onShow());
 });
 
@@ -84,6 +89,10 @@ probeBus.onRelease = async why => {
   try {
     // SPI 桥：既占 HID（配置）又占 USB 接口（数据面），别的页签要用探针时必须两边都放掉
     if (spiSession.connected || spiSession.dataReady){ await spiSession.teardown(); done.push('SPI 桥会话'); }
+  } catch { /* 同上 */ }
+  try {
+    // 调试器：占着探针（可能还在单步/轮询），让位时一并断开
+    if (dbg.session?.connected){ await dbg.disconnect(); done.push('调试会话'); }
   } catch { /* 同上 */ }
   // 🚨 最后一步**必须**把本页签的探针 USB 句柄都关掉：视图那边可能早就"断开"了、
   //    只是引用丢了没 close()，而浏览器仍然认为接口被这个页签占着 —— 不关的话
@@ -113,6 +122,7 @@ function summary(){
     scope: scope?.summary?.() || null,
     spi: spi?.summary?.() || null,
     panel: panel?.summary?.() || null,
+    dbg: dbg?.summary?.() || null,
     vendor: 'serial-rtt-tools',
   };
 }
@@ -123,8 +133,10 @@ document.body.appendChild(box);
 
 // 烧录器抢探针前会通过它请别的页签让位（见上面的 probeBus）
 flash.bus = probeBus;
+// 调试器同理：连之前先请别的页签放掉探针（跨页签协调是必需的，不是锦上添花）
+dbg.bus = probeBus;
 
-window.__tools = { session, assistant, terminal, rtt, flash, gen, hid, stream, scope, spi, panel, spiSession, probeBus, summary, errors };
+window.__tools = { session, assistant, terminal, rtt, flash, gen, hid, stream, scope, spi, panel, dbg, spiSession, probeBus, summary, errors };
 
 /**
  * 拆掉加载遮罩 —— 放在这里（所有 view 都 init 完、__tools 挂好之后）。
