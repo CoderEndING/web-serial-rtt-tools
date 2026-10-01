@@ -11,6 +11,10 @@
 | 用 RTT Viewer 测速 | ✅ 达成（空闲 43~56 KB/s；打流中 12.8~64 KB/s，零错位读） |
 | 10 s 存盘对账 | ✅ 13~14 MB，一致性 **99.5%**，内容是真实 trace 文本 |
 
+> 🔄 **2026-10 续查（本文件第 7 节）**：「偶发卡死」已查明是**确定性缺陷**，根因与 OpenOCD 的差异
+> 都用 LA 解码波形锁定了，**verify 那条已在 `d353b4c` 修掉并真机验证**（243 KB 校验 3.1 s 通过）。
+> 只剩「第一次 erase 卡满 60 s 才自愈」这一条既有缺陷待办（第 7 节末）。
+
 ⚠️ **板子当前需要断电重上电**：被卡死的烧录把目标调试模块（DM）留在挂起态
 （`haltreq` 写进去也不停核，OpenOCD 同样 halt 不住），**只有整板断电可解**。断电后 TCP 5001 通即恢复。
 
@@ -148,3 +152,90 @@ make open                                   # 起服务 + 浏览器（自动补�
    - RTT Viewer 空闲 **43~56 KB/s**（8.4 Hz、零错位读）；打流中 12.8~64 KB/s
    - 10 s 存盘 13~14 MB、一致性 **99.5%**、内容是 `文件:行| 函数` 形式的 trace 文本
    - 打流时**必须挂着读者**（转发或 Viewer 任一），否则环会被灌满、固件被憋住
+
+---
+
+## 7. 续查（2026-10-01 晚）：LA 解码 OpenOCD 波形 → 定因 → 已修
+
+### 7.1 「偶发卡死」其实是**确定性缺陷**
+
+翻遍 4 份历史日志 + 本会话复现 5 次，模式 100% 一致（不是"偶发丢拍"）：
+
+* **`read`（校验）在 flash offset ≥0x30000 且尺寸 ≥32768 时必卡**；
+  同址 4096/8192/16384 正常，0x0/0x10000/0x20000 各 65536 也正常
+  → 坏地址落在 **(0x34000, 0x38000]**；真机表现是"校验走到 81%（第 4 块）卡死 60s×2 → 整轮失败"。
+* **第一次 `erase` 也必卡满 60 s**（靠 withAlgoRetry 自愈才过），见 7.4。
+
+卡死瞬间的现场（`tmp/hpm-xip*.json`）：
+
+* `dmstatus` 恒报 **running**；**写 haltreq 也停不住核**；抽象命令 `cmderr=4`（halt/resume）；
+* **SBA 读 ILM[0..48] 仍是我们的算法（48/48 字节一致）** → 不是"应用重启覆盖了 ILM"；
+* `dtmcs.dmistat = 0` → **DTM 没进错误态**，写 `dmireset` 无效（这条假说排除）；
+* → **核楔在一条永不完成的 XPI 总线事务上**，只有 ndmreset / 整板断电可解。
+
+### 7.2 两条读路径的可行性（关键判据）
+
+| 路径 | 结果 |
+|---|---|
+| SBA 直读 XPI 窗口 `0x80000000` | ❌ 自己就挂（`dm.readMem(0x80000000,16)` 超时） |
+| CPU 走 XIP 窗口 `lw`（progbuf 执行） | ✅ 0x80000000/0x30000/0x34000/0x36000/0x38000/0x3E000 全部 ~6 ms 秒回真实固件内容 |
+
+### 7.3 LA 解码 OpenOCD：差异只有一条
+
+抓法：LA CH0..3 = TCK/TMS/TDI/TDO，500 MS/s（探针的 JTAG 是**固定时序 ASM blob**，
+`adapter speed` 基本被忽略 —— 4 KB 写 100 kHz 与 8 MHz 都是 ~0.14 s，所以只能靠高采样率硬啃）；
+用户在 KingstVIS 里解码后导出，本仓 `tmp/la-parse-decoded.py` 解成 DMI 流水账
+（220133 次扫描 / 覆盖 2 次完整全量烧录；`tmp/la-jtag-decode.py` 是自带 TAP 状态机的流式解码器）。
+
+| | OpenOCD | 我们（改前） |
+|---|---|---|
+| `sbcs`/`sbaddress0`/`sbdata0` 写入 | **0 次**（完全不用 SBA） | 全程 SBA |
+| `cmdtype=mem`（抽象内存访问） | **0 次** | 0 次 |
+| 读目标内存 | progbuf 跑 `lw s1,0(s1)`（CPU 自己走 XIP 窗口） | SBA |
+| 写目标内存 | progbuf 跑 `sw s1,0(s0); addi s0,s0,4`（配 `abstractauto`，一个 DATA0 写搬一个字） | SBA |
+| 擦/写 flash | 算法 `init/erase/program`，参数与我们**一模一样**（`a0=0x80000000 a1=off a2=size`） | 相同 |
+| fence 段 | `fence.i; fence rw,rw(+ebreak)`（progbuf） | **逐字相同** |
+| **读回校验** | **根本不读**：`read`（dpc=0x12）入口调用次数 = **0**，`flash write_image` 不校验 | 调 `read` → ROM `flash_read` → **楔死** |
+
+**⇒ 差异就是：我们多做了一步"用 ROM 的 `flash_read` 读回校验"，而这一步在这颗芯片上会楔死总线。**
+OpenOCD 要么不读，要么就用 **CPU 走 XIP 窗口**读（progbuf），**从来不碰 ROM 的 read**。
+（`nor_config` 解出来完全正常：size=16384 KB / page=256 / sector=4 KB / block=64 KB，
+"erase 除零"假说排除；算法 blob 与 SDK `samples/openocd_algo` 的源文件**逐字节相同**，
+所以差异只在"怎么驱动"，不在算法本身。）
+
+### 7.4 已修：verify 改走 CPU + XIP 窗口（提交 `d353b4c`）
+
+* 新增 `app/flash/hpm/xip-copy.js`：**手工汇编**的 7 条指令拷贝例程（`lw/sw/addi×3/bne/ebreak`，
+  28 B），装载到 SRAM `0x600`（算法 blob 之后、scratchInfo 之前）；自测会**反解机器码逐条核对**。
+* `flash.js`：`call()` 抽出 `callAt(addr,…)`（算法入口与例程共用同一套
+  "写 a0..a4 → prepareRun → resume → waitHalted"）；`setup()` 每次写例程并读回校验；
+  `verify()` 用 `copyFromXip()` 从 XIP 窗口搬进中转区再比 —— **完全不碰 ROM 的 `flash_read`**。
+* 自测：`hpm-sim.mjs` 认这条例程，并按实测阈值**建模"ROM read 楔死总线"**；
+  `hpm-flash.test.mjs` §4b：反解 7 条机器码 + 0x30000 起校验 64 KB 通过且 ROM read 调用 0 次 +
+  反证（真去调 `read` 读同一形状 → 模拟目标当场楔死）。`make test-hpm` 91 项全过。
+
+**真机验证（demo.elf 246360 B）**：
+
+| 段 | 长度 | 擦除 | 编程 | **校验** |
+|---|---|---|---|---|
+| `0x80000400` | 3216 B | 63.3 s（见 7.5） | 52 ms | 56 ms |
+| `0x80003000` | 243144 B | 1.9 s | 2.8 s | **3.1 s** |
+
+改前 243 KB 校验**必卡**（60 s 超时 → 恢复 → 再 60 s → 整轮失败），现在 3.1 s 读完。
+
+### 7.5 仍未解决：第一次 `erase` 卡满 60 s（既有缺陷，与 `d353b4c` 无关）
+
+现场（`tmp/hpm-erasehang2.json` / `hpm-erasehang3.json`）：核楔在永不完成的 XPI 事务上
+（同 7.1 的形状，ILM 48/48 完好）。已排除：**SBA 残留**（置只写模式后 `sbbusy=0`）、
+**"XPI 已被应用配过"**（先 ndmreset 再 setup 也一样 —— 因为 reset-run 后应用会立刻重配 XPI）。
+
+下一步（工具已就位，照 7.3 那套做）：
+1. 抓**我们自己**这条路的波形和 OpenOCD 逐条 diff：
+   页面侧 `tmp/hpm-erasehang-page.js`（支持 `opts.waitGo`，setup 完**等 `/tmp/LA-GO`** 再发 erase，
+   窗口能精确压在这一次调用上）＋ host 侧 `tmp/la-our-capture.py`（起 LA → 建 GO → 导出）；
+   解码 `tmp/la-jtag-decode.py`（自带 TAP 状态机、流式，能吃几百 MB 的跳变表）。
+2. 重点对比"发 erase 之前那几十条 DMI"：OpenOCD 在 `flash_init` 之后、`erase` 之前做的事
+   （它的 `auto_config` 参数、有没有额外的 status/写使能、**有没有 reset-halt**）。
+3. 兜底方案：既然 ndmreset 后一定能过，可以在进 flash 流程前**主动做一次 reset-halt**
+   （`_haltByReset()`：ndmreset + haltreq 保持，核停在复位向量、**应用不会重新配 XPI**），
+   代价是目标会被复位一次；但要先确认它真能免掉那 60 s。
