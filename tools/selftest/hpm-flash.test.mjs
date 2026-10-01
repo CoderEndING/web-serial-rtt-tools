@@ -213,6 +213,67 @@ console.log('== 4. 端到端：加载 flashloader → init → 擦 → 写 → �
   ok(!sim.halted, 'finish(run) 之后目标被放跑（ndmreset 脉冲 + 不置 haltreq）');
 }
 
+// ------------------------------------------------------------------ 4b
+console.log('== 4b. verify 走 XIP 窗口（2026-10 LA 解码 OpenOCD 波形定因）==');
+{
+  /**
+   * 背景（真机实测）：ROM 的 `flash_read` 在 flash offset ≥0x30000 且尺寸 ≥32768 时
+   * **会把核楔在一条永不完成的 XPI 事务上**（haltreq 都停不住，整轮烧录报废）。
+   * 抓 OpenOCD 烧同一块板的 JTAG 波形解码后看到：它读内存全靠 progbuf 跑 `lw s1,0(s1)`
+   * （CPU 自己走 XIP 窗口），`sbcs/sbaddress0/sbdata0` 写入次数为 0，而且**从不调算法的 read 入口**。
+   * 所以 verify 改成"内核拷贝例程从 XIP 窗口搬"。这一节把这个决定钉死。
+   */
+  const XC = await import(url('app/flash/hpm/xip-copy.js'));
+  const dec = XC.XIP_COPY_WORDS.map(XC.decodeXipCopyWord);
+  ok(dec.length === 7 && dec[0].mnemonic === 'lw' && dec[0].rd === 5 && dec[0].rs1 === 10 && dec[0].imm === 0,
+     'xip-copy 第 1 条反解 = lw t0, 0(a0)（源地址在 a0）');
+  ok(dec[1].mnemonic === 'sw' && dec[1].rs1 === 11 && dec[1].rs2 === 5,
+     'xip-copy 第 2 条反解 = sw t0, 0(a1)（目的地址在 a1）');
+  ok(dec[2].mnemonic === 'addi' && dec[2].rd === 10 && dec[2].imm === 4 &&
+     dec[3].mnemonic === 'addi' && dec[3].rd === 11 && dec[3].imm === 4,
+     'xip-copy 第 3/4 条 = 源、目的各 +4');
+  ok(dec[4].mnemonic === 'addi' && dec[4].rd === 12 && dec[4].imm === -4,
+     'xip-copy 第 5 条 = 剩余长度 a2 -= 4');
+  ok(dec[5].mnemonic === 'bne' && dec[5].rs1 === 12 && dec[5].rs2 === 0 && dec[5].imm === -20,
+     'xip-copy 第 6 条 = bne a2, x0, -20（跳回第 1 条；5 条指令 × 4 B = 20）');
+  ok(dec[6].mnemonic === 'ebreak', 'xip-copy 收尾是 ebreak（上层 waitHalted 靠它看到 halt）');
+  ok((XC.XIP_COPY_ADDR & 3) === 0 && XC.XIP_COPY_ADDR >= 0x56c && XC.XIP_COPY_ADDR + 28 <= 0x1000,
+     `例程落在 0x${XC.XIP_COPY_ADDR.toString(16)}：在算法 blob（0x56c 结束）之后、scratchInfo（0x1000）之前`);
+
+  const board = C.hpmBoard('hpm6800evk');
+  // RAM 要够大：中转区在 0x2000，最大分块 64 KB
+  const sim = new SimTarget({ flashSize: 0x40000, ramSize: 0x20000 });
+  const dm = new RiscvTransport(sim, { idle: 7 });
+  await dm.init(); await dm.activate(0); await dm.halt();
+  const flasher = new HpmFlasher(dm, { board });
+  await flasher.setup();
+  ok(sim.xipCopies === 0, 'setup 阶段还没用 XIP 拷贝（它只在 verify 里用）');
+
+  // 🚨 故意挑"真机必卡"的形状：offset ≥ 0x30000 且分块 ≥ 32768
+  const addr = board.flashBase + 0x30000;
+  const img = new Uint8Array(65536);
+  for (let i = 0; i < img.length; i++) img[i] = (i * 13 + 7) & 0xff;
+  await flasher.erase(addr, img.length);
+  await flasher.program(addr, img);
+  await flasher.verify(addr, img);
+  ok(true, '在 0x30000 起校验 64 KB **过了**（真机上这条路以前必卡死）');
+  ok(!sim.romReadWedged && !(sim.romReads > 0),
+     `一次 ROM 的 flash_read 都没发（read 入口调用 0 次），走的是 XIP 拷贝：${sim.xipCopies} 次`);
+  ok(sim.xipCopies > 0, `XIP 拷贝例程真的在目标上跑了（${sim.xipCopies} 次）`);
+
+  // 反证：真拿 ROM 的 read 去读那个形状 → 模拟目标当场楔死（不 halt）。
+  // 这条既是"bug 被如实建模"的证明，也是"别把 verify 改回 ROM read"的钉子。
+  sim.romReadWedged = false;
+  let wedgeErr = '';
+  try {
+    await flasher.callAt(0, [board.flashBase, flasher.dataBuf, 0x30000, 65536], 250);   // 入口 0 = init(被复用只为跑到 read 形状)
+    // 直接调 read 入口（偏移 0x12）才准确：
+    await flasher.call('read', [board.flashBase, flasher.dataBuf, 0x30000, 65536], 250);
+  } catch (e){ wedgeErr = e.message; }
+  ok(sim.romReadWedged && /halt 超时/.test(wedgeErr),
+     `反证成立：走 ROM 的 read 读同一段 → 模拟目标楔死、等 halt 超时（${wedgeErr.split('（')[0].trim()}）`);
+}
+
 // ------------------------------------------------------------------ 5
 console.log('== 5. 板级参数与状态码文案 ==');
 {

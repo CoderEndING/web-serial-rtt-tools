@@ -16,6 +16,7 @@
 
 import { DM, DMI_OP, DMI_STATUS, SBCS, sbcsBlock, sbcsHold, REGNO, DCSR_EBREAK } from '../../app/flash/hpm/jtag.js';
 import { parseAlgoEntryTable, ENTRY_ORDER } from '../../app/flash/hpm/entry.js';
+import { XIP_COPY_ADDR } from '../../app/flash/hpm/xip-copy.js';
 
 const STATUS = { success: 0, invalidArgument: 1, outOfRange: 2, timeout: 3, noFlash: 4 };
 
@@ -69,6 +70,10 @@ export class SimTarget {
     this.flashInfo = { totalBytes: this.flash.length, sectorBytes: this.sectorSize, blockBytes: this.blockSize };
     this.progChunks = 0;
     this.eraseOps = 0;
+    this.romReads = 0;                          // ROM 的 flash_read 真跑了几次
+    this.xipCopies = 0;                         // XIP 拷贝例程跑了几次（verify 走这条）
+    this.romReadWedged = false;                 // 命中"ROM 读楔死总线"那个真机 bug
+    this.readWedgedNow = false;
     this.log = [];
     // 统计（自测断言用）
     this.stats = { scans: 0, dmiWrites: 0, dmiReads: 0, sbaReads: 0, sbaWrites: 0 };
@@ -317,30 +322,59 @@ export class SimTarget {
    * 所以主机侧改了入口偏移/顺序，这里立刻就不认（而不是靠测试代码自己告诉模拟器调哪个函数）。
    */
   _onResume(){
+    const a0 = this.regs[10], a1 = this.regs[11], a2 = this.regs[12], a3 = this.regs[13], a4 = this.regs[14];
+    void a4;
+    // 🚨 真机语义：只能以 `ebreak` 收尾、**且 dcsr.ebreak* 置起**时才进调试模式（= halt）。
+    //    没置的话它是普通断点异常 → 核跳进异常向量乱跑、dmstatus 永远 running
+    //    （我们就是这么在真机上卡了一轮）。这里照这个来，主机侧漏掉置位就能在自测里暴露。
+    const ebreakOk = () => {
+      if (this.dcsrEbreakEnabled) return true;
+      this.log.push(`resume pc=0x${this.pc.toString(16)}：dcsr.ebreak* 没置 → ebreak 变成异常，核跑飞（不 halt）`);
+      this.regs[10] = 0;                         // 返回码是垃圾（现实中读不到）
+      this.halted = false;
+      this.trapped = true;
+      return false;
+    };
+    /**
+     * 🚨 **XIP 拷贝例程**（`app/flash/hpm/xip-copy.js`，装载在 0x600）：
+     *    主机侧 verify 靠它让**内核自己走 XIP 窗口**把 flash 搬进 RAM —— 与 OpenOCD 同路
+     *    （2026-10 LA 解码 OpenOCD 波形定因：它读内存全靠 progbuf 跑 `lw s1,0(s1)`，
+     *      `sbcs/sbaddress0/sbdata0` 写入次数为 0，且**从不调算法的 read 入口**）。
+     *    这里按例程的真实语义执行：从 XPI 窗口拷 len 字节到 RAM；越界/非 4 倍数 → fault（不 halt）。
+     *    ⚠️ 它**不是入口表里的一项**，所以必须在"查表 + 不是入口就 return"**之前**处理。
+     */
+    if ((this.pc >>> 0) === XIP_COPY_ADDR){
+      if (!ebreakOk()) return;
+      const r = this._xipCopy(a0, a1, a2);
+      if (r === STATUS.success){
+        this.regs[10] = 0;
+        this.halted = true;
+        return;
+      }
+      this.regs[10] = r >>> 0;
+      this.halted = false;                        // 加载/存储 fault → 走异常向量，永远到不了 ebreak
+      this.trapped = true;
+      this.log.push(`xip_copy(src=0x${a0.toString(16)}, dst=0x${a1.toString(16)}, ${a2} B) → fault（地址越界/长度不是 4 的倍数）`);
+      return;
+    }
     const table = this._entryTable();
     // 🚨 pc 指的是**表项位置**（loadAddr + entryOffset，init 就是 0），不是 jal 的落点
     const hit = table.find(e => e.entryOffset === (this.pc >>> 0));
     if (!hit) { this.log.push(`resume pc=0x${this.pc.toString(16)}（不是算法入口，当作普通运行）`); return; }
     const entry = ENTRY_ORDER[table.indexOf(hit)];
-    const a0 = this.regs[10], a1 = this.regs[11], a2 = this.regs[12], a3 = this.regs[13], a4 = this.regs[14];
-    void a4;
-    // 🚨 真机语义：算法末尾那条 ebreak **只有 dcsr.ebreakm 置起时**才进调试模式（= halt）。
-    //    没置的话它是普通断点异常 → 核跳进异常向量乱跑、dmstatus 永远 running
-    //    （我们就是这么在真机上卡了一轮）。这里照这个来，主机侧漏掉置位就能在自测里暴露。
-    if (!this.dcsrEbreakEnabled){
-      this.log.push(`resume pc=0x${this.pc.toString(16)}：dcsr.ebreak* 没置 → ebreak 变成异常，核跑飞（不 halt）`);
-      this.regs[10] = 0;                         // 返回码是垃圾（现实中读不到）
-      this.halted = false;
-      this.trapped = true;
-      return;
-    }
+    if (!ebreakOk()) return;
     let rc = STATUS.success;
     switch (entry){
       case 'init':  rc = this._flashInit(a0, a2, a3); break;
       case 'erase': rc = this._flashErase(a0, a1, a2); break;
       case 'program': rc = this._flashProgram(a0, a1, a2, a3); break;
       // 参数顺序照 README 的签名：flash_read(flash_base, buf, address, size) → a0..a3
-      case 'read':  rc = this._flashRead(a0, a1, a2, a3); break;
+      case 'read':
+        rc = this._flashRead(a0, a1, a2, a3);
+        // 🚨 命中"ROM 读楔死总线"的形状：核卡在永不完成的 XPI 事务上，
+        //    **永远到不了末尾那条 ebreak**（真机上 haltreq 都停不住）→ 这里必须直接返回，不置 halted。
+        if (this.readWedgedNow){ this.regs[10] = 0; this.halted = false; return; }
+        break;
       case 'info':  rc = this._flashInfo(a0, a1); break;
       case 'eraseChip': rc = this._flashEraseChip(); break;
       case 'deinit': rc = STATUS.success; break;
@@ -411,11 +445,42 @@ export class SimTarget {
     return STATUS.success;
   }
 
+  /**
+   * ROM 的 `flash_read` 语义 —— **连同真机那个"楔死总线"的 bug 一起建模**。
+   *
+   * 2026-10 HPM6800EVK 实测：flash offset ≥ 0x30000 且尺寸 ≥ 32768 时，
+   * ROM 的读会卡在一条**永不完成的 XPI 事务**上：核再也到不了 ebreak（haltreq 都停不住），
+   * `dmstatus` 恒报 running。主机侧不加小心的表现就是"等目标 halt 超时 60s → 整轮报废"。
+   *
+   * 所以这里照真机行为来：命中那个形状就**不 halt**（= 卡死），
+   * 让"又有人把 verify 改回 ROM read"在离线自测里当场炸掉，而不是等真机烧板子。
+   * 阈值是实测值（0x30000+16384 正常、+32768 卡），不是拍脑袋。
+   */
   _flashRead(flashBase, bufAddr, addr, size){
     const off = addr >>> 0;                                  // 同上：这里是**偏移**
+    this.readWedgedNow = false;
+    if (off >= 0x30000 && size >= 32768){
+      this.romReadWedged = true;
+      this.readWedgedNow = true;
+      this.log.push(`flash_read(offset=0x${off.toString(16)}, ${size} B) → ROM 读楔死总线（真机 bug），核永远到不了 ebreak`);
+      return STATUS.success;
+    }
     if (off + size > this.flash.length) return STATUS.outOfRange;
     if (bufAddr + size > this.ramSize) return STATUS.invalidArgument;
     this.ram.set(this.flash.subarray(off, off + size), bufAddr);
+    this.romReads = (this.romReads || 0) + 1;
+    return STATUS.success;
+  }
+
+  /** XIP 拷贝例程的语义（内核走 XPI 窗口读，见 app/flash/hpm/xip-copy.js）*/
+  _xipCopy(src, dst, len){
+    const XIP_BASE = 0x80000000;
+    if (len === 0 || (len >>> 0) % 4) return STATUS.invalidArgument;
+    if ((src >>> 0) < XIP_BASE || ((src >>> 0) - XIP_BASE) + (len >>> 0) > this.flash.length) return STATUS.outOfRange;
+    if ((dst >>> 0) + (len >>> 0) > this.ramSize) return STATUS.invalidArgument;
+    this.ram.set(this.flash.subarray((src >>> 0) - XIP_BASE, (src >>> 0) - XIP_BASE + (len >>> 0)), dst >>> 0);
+    this.xipCopies = (this.xipCopies || 0) + 1;
+    this.log.push(`xip_copy(0x${(src >>> 0).toString(16)} → RAM 0x${(dst >>> 0).toString(16)}, ${len} B)`);
     return STATUS.success;
   }
 

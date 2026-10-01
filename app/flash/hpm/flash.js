@@ -15,6 +15,7 @@
 import { HPM_ALGO, hpmAlgoBytes } from './algo.js';
 import { algoEntries } from './entry.js';
 import { HPM_COMMON, hpmInitArgs, hpmCheckRange } from './chips.js';
+import { XIP_COPY_ADDR, xipCopyBytes } from './xip-copy.js';
 
 /** flashloader 调用 ROM API 的返回码（`hpm_stat_t`，只列常见的）*/
 export const HPM_STATUS = {
@@ -91,6 +92,21 @@ export class HpmFlasher {
         ' 先关掉其他会话、拔插一次探针再试');
     }
 
+    /**
+     * 🚨 **同时把 XIP 拷贝例程写进 SRAM**（2026-10 LA 对照 OpenOCD 后加的，见 `xip-copy.js`）。
+     *    verify 靠它从 XIP 窗口把 flash 搬回 RAM —— **不再碰 ROM 的 `flash_read`**（那个会楔死总线）。
+     *    它必须每次 setup 都写：`recoverCore()` 会重写算法区，而这里紧挨着算法区。
+     */
+    const copyBytes = xipCopyBytes();
+    await this.dm.writeMem(XIP_COPY_ADDR, copyBytes);
+    const copyBack = await this.dm.readMem(XIP_COPY_ADDR, copyBytes.length);
+    for (let i = 0; i < copyBytes.length; i++){
+      if (copyBack[i] !== copyBytes[i]){
+        throw new Error(`XIP 拷贝例程写进 SRAM 后读回不一致（第 ${i} 字节）—— SBA 写丢了数据，别继续跑`);
+      }
+    }
+    this.log(`XIP 拷贝例程就绪：${copyBytes.length} B → SRAM 0x${XIP_COPY_ADDR.toString(16)}（verify 走 CPU 读 XIP 窗口，不用 ROM 的 flash_read）`);
+
     const a = hpmInitArgs(this.board, { 0: HPM_ALGO.headerWords0, 1: HPM_ALGO.headerWords1, 2: HPM_ALGO.headerWords2 });
     let rc = await this.call('init', [a.flashBase, a.header, a.option0, a.option1, a.xpiBase]);
     if (rc) throw new Error(`flash_init 失败：${hpmStatusText(rc)}` +
@@ -124,17 +140,21 @@ export class HpmFlasher {
   async call(entry, args = [], timeoutMs = 20000){
     const e = this.entries[entry];
     if (!e) throw new Error(`没有入口 ${entry}`);
+    return await this.callAt((HPM_ALGO.loadAddr + e.entryOffset) >>> 0, args, timeoutMs);
+  }
+
+  /**
+   * 跑 SRAM 里**任意一段以 `ebreak` 收尾的例程**（算法入口与 `xip-copy.js` 的拷贝例程共用）。
+   * @param {number} addr 例程入口（SRAM 绝对地址）
+   */
+  async callAt(addr, args = [], timeoutMs = 20000){
     // 参数放 a0..a4（x10..x14）
     for (let i = 0; i < args.length; i++) await this.dm.writeReg(0x1000 + 10 + i, args[i] >>> 0);
     // 🚨 跑之前必须：置 dcsr.ebreak*（否则收尾的 ebreak 变成异常，核跑飞）+ fence.i（刚写进去的代码）
     await this.dm.prepareRun();
-    await this.dm.resume((HPM_ALGO.loadAddr + e.entryOffset) >>> 0);
+    await this.dm.resume(addr >>> 0);
     await this.dm.waitHalted(timeoutMs);
     return (await this.dm.readReg(0x1000 + 10)) >>> 0;
-    /**
-     * ⚠️ "没回来"（`waitHalted` 超时）**不在这里重试** —— 重试要连 `flash_init` 一起重做，
-     *    统一走 `withAlgoRetry()`（只重启核会让 ROM API 状态错乱，下一次直接回 rc=2）。
-     */
   }
 
   /**
@@ -250,8 +270,36 @@ export class HpmFlasher {
   }
 
   /**
-   * 校验：用算法的 `flash_read` 把 flash 读回 RAM 再逐字节比。
-   * （不走 0x80000000 的 XIP 映射：XPI 可能还没配成可读，而 flash_read 走 ROM API 一定可用。）
+   * 把 flash 的一段搬进 RAM 中转区 —— **用 CPU 走 XIP 窗口读，不走 ROM 的 `flash_read`**。
+   *
+   * 🚨 2026-10 LA 对照 OpenOCD 定因（细节见 `xip-copy.js`）：
+   *    ROM 的 `flash_read` 在 flash offset `0x30000` 起、尺寸 ≥32768 时**会把核楔死**
+   *    （事务永不完成 → `dmstatus` 恒 running、haltreq 都停不住、cmderr=4）—— 实测 5/5 复现。
+   *    而 CPU 自己走 XIP 窗口 `lw` 读同一批地址全部正常，**OpenOCD 用的就是这条路**
+   *    （它的 `sbcs/sbaddress0/sbdata0` 写入次数为 0，读内存全靠 progbuf 跑 `lw s1,0(s1)`）。
+   *
+   * @param {number} flashAddr 绝对地址（XPI 窗口内，如 0x80030000）
+   * @param {number} dst SRAM 目的地址
+   * @param {number} len 字节数（必须 4 的倍数）
+   */
+  async copyFromXip(flashAddr, dst, len){
+    if (len <= 0) return;
+    if (len % 4) throw new Error(`XIP 拷贝要求长度是 4 的倍数（${len}）`);
+    try {
+      await this.callAt(XIP_COPY_ADDR, [flashAddr >>> 0, dst >>> 0, len >>> 0], 20000);
+    } catch (e){
+      throw new Error(`XIP 拷贝例程没回来（读 0x${(flashAddr >>> 0).toString(16)} + ${len} B）：${e.message}` +
+        '　—— XPI 窗口可能没配上（flash_init 没跑？）或地址不在 flash 窗口内');
+    }
+  }
+
+  /**
+   * 校验：把 flash 读回 RAM 再逐字节比。
+   *
+   * 🚨 **绝对不要退回 ROM 的 `flash_read`**（2026-10 定因）：它在这颗芯片的
+   *    `0x34000~0x38000` 区段用大尺寸读会把核楔在一条永不完成的 XPI 事务上，
+   *    整个会话报废（要 ndmreset 才能救）。改成 CPU 走 XIP 窗口读（`copyFromXip`），
+   *    与 OpenOCD 的做法一致，实测同一区段读得又快又稳。
    */
   async verify(addr, data){
     if (!this.inited) throw new Error('先 setup()');
@@ -259,8 +307,8 @@ export class HpmFlasher {
     for (let off = 0; off < data.length; off += this.chunkBytes){
       const n = Math.min(this.chunkBytes, data.length - off);
       const padded = Math.ceil(n / 4) * 4;
-      const rc = await this.withAlgoRetry('read', [this.board.flashBase, this.dataBuf, this.offsetOf(addr + off), padded], 60000, `读回 0x${(addr + off).toString(16)}`);
-      if (rc) throw new Error(`flash_read 在 0x${(addr + off).toString(16)} 失败：${hpmStatusText(rc)}`);
+      // addr 对外是**绝对地址**（如 0x80003000），而 XIP 窗口就是 flashBase 起 —— 直接用
+      await this.copyFromXip((addr + off) >>> 0, this.dataBuf, padded);
       const back = await this.dm.readMem(this.dataBuf, padded);
       for (let i = 0; i < n; i++){
         if (back[i] !== data[off + i]){
