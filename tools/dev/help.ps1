@@ -19,6 +19,7 @@ $lines = @(
   '  make test-gen-page 「工程生成」页真页面验收（需要 make open 起的浏览器）'
   '  make test-dbg      调试器页的逻辑层（寄存器位域 / FPB 断点编码 / 命令解析 / 符号表 + 假目标跑一遍调试动作）'
   '  make test-dbg-page 调试器页的真页面验收（CDP + 内置假目标，不需要硬件）'
+  '  make test-dbg-hw   调试器页的真机冒烟（真探针 + 真目标板；需探针没被别的浏览器占着）'
   '  make test-record    记录到文件的落盘语义（.crswap / 积压 / 落盘进度；OPFS 替身，不需硬件）'
   '  make test-hw       真机 WebUSB RTT 验收（探针 + 目标板）'
   '  make flash-timing  烧录耗时体检（真机：慢在哪一步、是不是探针的锅；ARGS=--clamp 模拟后台节流）'

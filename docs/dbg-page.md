@@ -20,7 +20,12 @@
 | `app/dbg/mock.js` | **假目标**：行为正确的 Cortex-M 模型（含 FPB 比较器、RTT 环） | ✅ |
 | `app/dbg/view.js` | 只管 DOM（表格、dump、按钮、日志、观察循环） | ❌ 用 CDP 测 |
 
-自测：`make test-dbg`（纯 Node，98 项）、`make test-dbg-page`（CDP 真页面，58 项）。
+自测：`make test-dbg`（纯 Node，98 项）、`make test-dbg-page`（CDP 真页面，58 项）、
+`make test-dbg-hw`（真探针 + 真目标板的冒烟：连接 → 读 IDCODE/寄存器/内存 → 暂停/单步/继续 →
+试一个断点再删掉；**只读为主**，跑完把目标放回运行状态）。
+> ⚠️ 真机那条的前提是**探针没被别的程序占着**：同一个浏览器的别的页签、或另开的浏览器
+> （Chrome/Edge）里还连着探针时，`claimInterface` 会报 `Unable to claim interface` ——
+> 脚本会明确提示并跳过，不会假装成功。
 
 ## 2. 底座是复用的，没有另起一套
 

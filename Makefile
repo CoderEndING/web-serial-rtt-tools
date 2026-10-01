@@ -29,7 +29,7 @@ FW_DIR   = tools/target-firmware/stm32f103
 LA       = tools/la/kingst_la.py
 
 .DEFAULT_GOAL := help
-.PHONY: help serve serve-dev serve-stop browser open page-prep test test-ui test-gen test-gen-page gen-embed samples-anim test-hid test-dwarf test-scope test-scope-page test-scope-render test-spi test-read test-spi-page test-hw test-record test-bridge test-bridge-gate test-hpm test-image test-all test-dbg test-dbg-page test-idcode test-dsl test-flash flash-timing hw-campaign hw-campaign-hpm campaign-summary \
+.PHONY: help serve serve-dev serve-stop browser open page-prep test test-ui test-gen test-gen-page gen-embed samples-anim test-hid test-dwarf test-scope test-scope-page test-scope-render test-spi test-read test-spi-page test-hw test-record test-bridge test-bridge-gate test-hpm test-image test-all test-dbg test-dbg-page test-dbg-hw test-idcode test-dsl test-flash flash-timing hw-campaign hw-campaign-hpm campaign-summary \
         bridge bridge-stop fw-build fw-flash fw-restore fw-h7-build fw-h7-slow fw-h7-flash \
         algo-check flash-plan la-info la-capture git-status git-log check clean spi-hw spi-flow
 
@@ -94,6 +94,12 @@ test-dbg:
 # 调试器页的真页面自测（CDP，不需要硬件；用的是页面里的假目标）
 test-dbg-page: page-prep
 	$(NODE) tools/selftest/dbg-page.test.mjs
+
+# 调试器页的真机冒烟（真探针 + 真目标板；只读为主，跑完把目标放回运行状态）
+# ⚠️ 探针接口同时只能被一个程序占着：别的浏览器/页签还连着就得先让它断开，否则会报
+#    "Unable to claim interface"（脚本会明确提示，不会假装成功）
+test-dbg-hw: page-prep
+	$(NODE) tools/selftest/dbg-hw.mjs
 
 # 目标身份解码（「读 IDCODE」按钮）：DP IDCODE / CPUID / STM32 DBGMCU DEV_ID → 型号
 test-idcode:
