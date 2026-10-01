@@ -65,14 +65,16 @@ export class SpiBusView {
       for (const id of ['sp-pad-dc', 'sp-pad-rst', 'sp-pad-bl']){
         const o = new Option(label, String(p.i));
         o.dataset.pad = String(p.i);
-        $(id).appendChild(o);
+        const sel = $(id);
+        if (sel) sel.appendChild(o);        // ⚠️ 混版（旧 index.html + 新 js）时可能没这个元素，别让初始化挂掉
       }
     }
     /* 引脚设置的**开机默认值** = 引脚分配图里的推荐脚位（protocol.AUX_DEFAULT：DC=PA26 / RST=PA02 / BL=PA31）。
      * 用户 2026-10 要求："启动 DC/RST/BL 几个引脚的默认值（不是不用）" —— 所以在读到探针配置之前
      * 就先把推荐值显示出来，照着接线；点「读取配置」后以探针里的实际值为准（fillCfg）。 */
     for (const [id, pad] of [['sp-pad-dc', P.AUX_DEFAULT.DC], ['sp-pad-rst', P.AUX_DEFAULT.RST], ['sp-pad-bl', P.AUX_DEFAULT.BL]]){
-      $(id).value = String(pad);
+      const sel = $(id);
+      if (sel) sel.value = String(pad);
     }
     this.refreshPads();
 

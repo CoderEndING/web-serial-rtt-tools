@@ -199,13 +199,13 @@ export class SpiPanelView {
       const k = $('pn-geom').value;
       if (k !== 'custom' && I.PANEL_GEOMETRY[k]){
         this._geomBase = I.PANEL_GEOMETRY[k];
-        $('pn-w').value = String(this._geomBase.w);
-        $('pn-h').value = String(this._geomBase.h);
+        if ($('pn-w')) $('pn-w').value = String(this._geomBase.w);      // 混版时可能没有这两个框
+        if ($('pn-h')) $('pn-h').value = String(this._geomBase.h);
       }
       this.syncCustomGeomInputs();
       this.applyGeometry();
     });
-    for (const id of ['pn-w', 'pn-h']) $(id).addEventListener('change', () => { this.syncCustomGeomInputs(); this.applyGeometry(); });
+    for (const id of ['pn-w', 'pn-h']) $(id)?.addEventListener('change', () => { this.syncCustomGeomInputs(); this.applyGeometry(); });
     for (const id of ['pn-x', 'pn-y', 'pn-level']) $(id).addEventListener('input', () => this.renderPreview());
     $('pn-img-send').addEventListener('click', () => this.sendImage());
 
@@ -647,10 +647,16 @@ export class SpiPanelView {
     }
   }
 
-  /** 自定义宽高：只在选「自定义…」时可编辑（其它档灰掉，避免误改内置屏的尺寸）*/
+  /**
+   * 自定义宽高：只在选「自定义…」时可编辑（其它档灰掉，避免误改内置屏的尺寸）。
+   *
+   * 🚨 这两个框是 2026-10 新加的 —— **页面混版**（浏览器缓存着旧 index.html + 拿到新 app/*.js）
+   *    时它们还不存在，直接取 `.disabled` 会抛 TypeError，把整个页面的初始化打断（表现=白屏/加载不出来）。
+   *    所以这里一律用可选访问，缺元素就跳过：宁可少个功能，也不能让页面起不来。
+   */
   syncCustomGeomInputs(){
-    const custom = ($('pn-geom').value === 'custom');
-    for (const id of ['pn-w', 'pn-h']) $(id).disabled = !custom;
+    const custom = ($('pn-geom')?.value === 'custom');
+    for (const id of ['pn-w', 'pn-h']){ const el = $(id); if (el) el.disabled = !custom; }
   }
 
   /**
@@ -664,8 +670,8 @@ export class SpiPanelView {
     const k = $('pn-geom').value || 'st77916';
     if (k === 'custom'){
       const base = this._geomBase || I.PANEL_GEOMETRY.st77916;
-      const w = Math.max(1, Math.min(4096, +$('pn-w').value || base.w));
-      const h = Math.max(1, Math.min(4096, +$('pn-h').value || base.h));
+      const w = Math.max(1, Math.min(4096, +($('pn-w')?.value) || base.w));    // 混版时框可能不存在 → 用底座尺寸
+      const h = Math.max(1, Math.min(4096, +($('pn-h')?.value) || base.h));
       return { ...base, w, h, custom: true };
     }
     const g = I.PANEL_GEOMETRY[k] || I.PANEL_GEOMETRY.st77916;
