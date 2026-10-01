@@ -225,9 +225,47 @@ console.log('== 4. 按屏套用推荐值（档位 + SCLK + 引脚）==');
     document.getElementById('pn-preset-apply').click();
     await new Promise(r => setTimeout(r, 900));
     const s = window.__tools.spiSession;
-    return { prof: s.profile.profile, sclk: s.cfg.sclkHz, dc: s.cfg.padDc };`);
-  ok(back.prof === 1 && back.sclk === 40000000 && back.dc === 5,
-     `换回 AXS15352 → 档 1 + 40 MHz + DC=PA02（实测 ${back.prof}/${back.sclk}/${back.dc}）`);
+    return { prof: s.profile.profile, sclk: s.cfg.sclkHz, dc: s.cfg.padDc, rst: s.cfg.padRst, bl: s.cfg.padBl };`);
+  /* 2026-10 用户要求：AXS15352 的引脚**跟引脚分配图的推荐值一致**（AUX_DEFAULT），
+   * 不再各屏一套 —— DC=PA26 / RST=PA02 / BL=PA31。 */
+  ok(back.prof === 1 && back.sclk === 40000000 && back.dc === 14 && back.rst === 5 && back.bl === 13,
+     `换回 AXS15352 → 档 1 + 40 MHz + DC=PA26/RST=PA02/BL=PA31（实测 ${back.prof}/${back.sclk}/${back.dc}/${back.rst}/${back.bl}）`);
+}
+
+// ==================================================================== 4b
+console.log('== 4b. 自定义分辨率（内置两款之外的屏，如 240×240 的 GC9A01）==');
+{
+  const list = await ev(`return [...document.querySelectorAll('#pn-geom option')].map(o => o.value);`);
+  ok(list.includes('gc9a01'), `屏列表里有 gc9a01（240×240）：${list.join(',')}`);
+  ok(list.includes('custom'), '屏列表里有「自定义…」');
+
+  const cg = await ev(`
+    const $ = id => document.getElementById(id);
+    $('pn-geom').value = 'custom';
+    $('pn-geom').dispatchEvent(new Event('change'));
+    await new Promise(r => setTimeout(r, 150));
+    const editable = !$('pn-w').disabled && !$('pn-h').disabled;
+    $('pn-w').value = '240'; $('pn-w').dispatchEvent(new Event('change'));
+    $('pn-h').value = '240'; $('pn-h').dispatchEvent(new Event('change'));
+    await new Promise(r => setTimeout(r, 250));
+    const s = window.__tools.panel.summary();
+    return { editable, geom: s.geom, w: s.geomW, h: s.geomH,
+             cw: $('pn-canvas').width, ch: $('pn-canvas').height };`);
+  ok(cg.editable, '选「自定义…」后宽高两个框变成可编辑');
+  ok(cg.geom === 'custom' && cg.w === 240 && cg.h === 240, `自定义 240×240 生效（summary：${cg.geom} ${cg.w}×${cg.h}）`);
+  ok(cg.cw === 240 && cg.ch === 240, `画布跟着变 240×240（实测 ${cg.cw}×${cg.ch}）`);
+
+  const named = await ev(`
+    const $ = id => document.getElementById(id);
+    $('pn-geom').value = 'gc9a01'; $('pn-geom').dispatchEvent(new Event('change'));
+    await new Promise(r => setTimeout(r, 250));
+    const s = window.__tools.panel.summary();
+    return { w: $('pn-w').value, h: $('pn-h').value, sw: s.geomW, sh: s.geomH, disabled: $('pn-w').disabled,
+             cw: $('pn-canvas').width, ch: $('pn-canvas').height };`);
+  ok(named.sw === 240 && named.sh === 240 && named.cw === 240 && named.ch === 240,
+     `选中 gc9a01 后几何 240×240（画布 ${named.cw}×${named.ch}）`);
+  ok(named.w === '240' && named.h === '240' && named.disabled,
+     '选命名款时宽高框自动填成该屏尺寸并灰掉（避免误改内置屏）');
 }
 
 // ==================================================================== 5

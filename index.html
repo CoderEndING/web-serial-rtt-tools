@@ -714,17 +714,15 @@
       </fieldset>
 
       <fieldset>
-        <legend>辅助脚 + 有效电平</legend>
+        <legend>引脚设置</legend>
         <label class="row"><span>DC</span><select id="sp-pad-dc"></select></label>
         <label class="row"><span>RST</span><select id="sp-pad-rst"></select></label>
-        <label class="row"><span>CS 辅助</span><select id="sp-pad-csaux"></select></label>
         <label class="row"><span>BL</span><select id="sp-pad-bl"></select></label>
         <div class="row">
           <label class="chk"><input type="checkbox" id="sp-al-dc"> DC 低有效</label>
           <label class="chk"><input type="checkbox" id="sp-al-rst" checked> RST 低有效</label>
         </div>
         <div class="row">
-          <label class="chk"><input type="checkbox" id="sp-al-cs" checked> CS 低有效</label>
           <label class="chk"><input type="checkbox" id="sp-al-bl"> BL 低有效</label>
         </div>
         <div class="row btnrow"><button id="sp-pin-apply">应用引脚</button></div>
@@ -1002,7 +1000,10 @@
                 <option value="none">原始尺寸</option>
               </select></label>
             <label class="row"><span>开窗 x/y</span><input id="pn-x" class="num" value="0" inputmode="numeric"><input id="pn-y" class="num" value="0" inputmode="numeric"></label>
-            <label class="row"><span>屏幕</span><select id="pn-geom"></select></label>
+            <label class="row"><span>屏幕</span><select id="pn-geom" title="屏几何：两款内置屏，或选「自定义…」自己填宽高（协议参数沿用当前档的）"></select>
+              <input id="pn-w" class="num" value="240" inputmode="numeric" title="自定义宽度（像素）。选「自定义…」时生效">
+              <span style="width:auto">×</span>
+              <input id="pn-h" class="num" value="240" inputmode="numeric" title="自定义高度（像素）。选「自定义…」时生效"></label>
             <label class="row"><span>字节序</span>
               <select id="pn-byteorder" title="RGB565 的字节序。默认「高字节在前」与 MADCTL=0x00(RGB) 是正确组合；颜色不对时**只翻一个**开关（先试 R/B 交换，再试低字节在前）">
                 <option value="be">高字节在前（默认）</option>

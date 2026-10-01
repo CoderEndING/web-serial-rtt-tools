@@ -29,11 +29,12 @@ export const PANEL_PRESETS = {
     label: '天马 2P01 / AXS15352（240×296 · 4 线 SPI + DC）',
     short: 'AXS15352（240×296）',
     profile: { profile: 1, defLines: 1, dcActiveHigh: true, csHoldInStep: true, qspiWrOpcode: 0x02, qspiColorOpcode: 0x32, qspiAddrBytes: 3 },
-    /* ⚠️ BL 从 PA10（pad 11）挪到 **PA26（pad 14，J3[24]）**：PA10 被板载 LED 任务每 50 ms
-     * 写一次，实测只有 ~20 ns 毛刺、驱动不出持续电平（2026-09-30 LA 实测），当 BL 会不亮。
-     * PA26 是同日从 SPI1 显示口释放出来的脚，固件已接受索引 14（回读一致）。
-     * ⚠️ 但它**只验到固件接受、没在 LA 上看过波形** —— 真要用这档，先用 LA 确认一下。 */
-    cfg: { sclkHz: 40000000, csPolicy: 0, padDc: 5 /*PA02 J3[7]*/, padRst: 13 /*PA31 J3[11]*/, padBl: 14 /*PA26 J3[24]*/, padActiveLow: 0x06 },
+    /* 引脚与「引脚分配图」的推荐值一致（`protocol.AUX_DEFAULT`：DC=PA26 / RST=PA02 / BL=PA31）——
+     * 用户 2026-10 要求"跟大家都一样"，省得两块屏各记一套。
+     *   · RST=PA02（J3[7]）、BL=PA31（J3[11]）：两根都经 LA 实测过（复位脉冲 / 背光电平干净）
+     *   · DC=PA26（J3[24]）：原 SPI1 显示 CS，桥搬到 SPI2 后释放；慢速输出，实测固件接受索引 14
+     *   · 🚨 PA10（J3[33]）别用：板载 LED 任务每 50 ms 写它，驱动不出持续电平（2026-09-30 LA 实测） */
+    cfg: { sclkHz: 40000000, csPolicy: 0, padDc: 14 /*PA26 J3[24]*/, padRst: 5 /*PA02 J3[7]*/, padBl: 13 /*PA31 J3[11]*/, padActiveLow: 0x06 },
     geom: 'axs15352',
     note: '档 1：同一 CS 窗口内「命令 → 翻 DC → 参数」。2026-09-30 起桥在 SPI2：SCLK=J3[13] MOSI=J3[28] CS=J3[26]',
   },
@@ -96,6 +97,11 @@ export class SpiPanelView {
     for (const [k, p] of Object.entries(PANEL_PRESETS)) $('pn-preset').appendChild(new Option(p.short || p.label, k));
     for (const [k, d] of Object.entries(C.PANEL_DATA)) $('pn-code-preset').appendChild(new Option(`${d.label} · ${d.expect.rows} 条`, k));
     for (const [k, g] of Object.entries(I.PANEL_GEOMETRY)) $('pn-geom').appendChild(new Option(`${k}（${g.w}×${g.h}）`, k));
+    /* 「自定义…」：内置两款之外的屏（比如手边的 240×240 GC9A01）自己填宽高。
+     * 协议参数（开窗命令 / 线数 / qspi 色命令 / 对齐）沿用**当前档**那一套 —— 见 geometry()。 */
+    $('pn-geom').appendChild(new Option('自定义…', 'custom'));
+    this._geomBase = I.PANEL_GEOMETRY.st77916;      // 自定义的"协议参数底座"（选过命名几何就跟着换）
+    this.syncCustomGeomInputs();
 
     // 连接（与桥页同一个会话）
     $('pn-connect').addEventListener('click', () => s.connectHid(true));
@@ -186,7 +192,20 @@ export class SpiPanelView {
     for (const ev of ['dragenter', 'dragover']) $('pn-drop').addEventListener(ev, e => { e.preventDefault(); $('pn-drop').classList.add('hot'); });
     for (const ev of ['dragleave', 'drop']) $('pn-drop').addEventListener(ev, e => { e.preventDefault(); $('pn-drop').classList.remove('hot'); });
     $('pn-drop').addEventListener('drop', e => this.pickImage(e.dataTransfer.files[0]));
-    for (const id of ['pn-fit', 'pn-x', 'pn-y', 'pn-geom', 'pn-swap', 'pn-byteorder', 'pn-level']) $(id).addEventListener('change', () => this.renderPreview());
+    for (const id of ['pn-fit', 'pn-x', 'pn-y', 'pn-swap', 'pn-byteorder', 'pn-level']) $(id).addEventListener('change', () => this.renderPreview());
+    /* 屏幕几何：选命名款 → 把宽高填进自定义框（方便在此基础上微调）并换底座；
+     * 选「自定义…」→ 用框里的宽高。两种都要重算画布 / 读回窗口 / 假探针 GRAM ⇒ applyGeometry()。 */
+    $('pn-geom').addEventListener('change', () => {
+      const k = $('pn-geom').value;
+      if (k !== 'custom' && I.PANEL_GEOMETRY[k]){
+        this._geomBase = I.PANEL_GEOMETRY[k];
+        $('pn-w').value = String(this._geomBase.w);
+        $('pn-h').value = String(this._geomBase.h);
+      }
+      this.syncCustomGeomInputs();
+      this.applyGeometry();
+    });
+    for (const id of ['pn-w', 'pn-h']) $(id).addEventListener('change', () => { this.syncCustomGeomInputs(); this.applyGeometry(); });
     for (const id of ['pn-x', 'pn-y', 'pn-level']) $(id).addEventListener('input', () => this.renderPreview());
     $('pn-img-send').addEventListener('click', () => this.sendImage());
 
@@ -628,9 +647,30 @@ export class SpiPanelView {
     }
   }
 
+  /** 自定义宽高：只在选「自定义…」时可编辑（其它档灰掉，避免误改内置屏的尺寸）*/
+  syncCustomGeomInputs(){
+    const custom = ($('pn-geom').value === 'custom');
+    for (const id of ['pn-w', 'pn-h']) $(id).disabled = !custom;
+  }
+
+  /**
+   * 当前屏几何。
+   *   · 命名款 → `PANEL_GEOMETRY[k]` 原样返回
+   *   · 「自定义…」→ 宽度/高度取 `pn-w` / `pn-h`，其余协议参数（开窗命令 / 线数 / qspi 色命令 / 对齐）
+   *     沿用 `_geomBase`（最近一次选过的命名款，默认 st77916）—— 所以自定义**不用重配协议**，
+   *     换块 240×240 的 GC9A01 只要填两个数字。
+   */
   geometry(){
     const k = $('pn-geom').value || 'st77916';
-    return I.PANEL_GEOMETRY[k] || I.PANEL_GEOMETRY.st77916;
+    if (k === 'custom'){
+      const base = this._geomBase || I.PANEL_GEOMETRY.st77916;
+      const w = Math.max(1, Math.min(4096, +$('pn-w').value || base.w));
+      const h = Math.max(1, Math.min(4096, +$('pn-h').value || base.h));
+      return { ...base, w, h, custom: true };
+    }
+    const g = I.PANEL_GEOMETRY[k] || I.PANEL_GEOMETRY.st77916;
+    this._geomBase = g;
+    return g;
   }
 
   /**
@@ -1140,6 +1180,8 @@ export class SpiPanelView {
       ...this.session.summary(),
       preset: $('pn-preset')?.value || null,
       geom: $('pn-geom')?.value || null,
+      geomW: this.geometry().w,                    // 自定义分辨率时就是 pn-w / pn-h 的值
+      geomH: this.geometry().h,
       rows: this.rows.length,
       tableRows: (this.effectiveRows || []).length,      // 表格行数（含自动补的前缀）
       editedRows: this.dirtyCount(),                     // 与原值不同的行（表格里手改或位开关板改的）

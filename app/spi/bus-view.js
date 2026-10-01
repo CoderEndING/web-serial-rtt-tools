@@ -46,6 +46,10 @@ export class SpiBusView {
     this.loopAbort = false;
     this.unsub = null;
     this.lastRead = null;      // 最近一次 flash 读回的数据（写校验用）
+    /* CS 辅助脚（pad 2）与它的有效电平：**不再在「引脚设置」里配**（用户 2026-10 要求去掉那一行），
+     * 但配置块里这两个字段还在（CS 策略 = 1 时固件用得上），所以"读回来的值原样回写"，清成 0 会改坏别人的配置。 */
+    this._padCsAux = 0;        // 默认"不用"，与旧下拉的首项一致
+    this._csAuxLow = true;     // 默认低有效，与固件/假探针的 padActiveLow=0x06 一致
   }
 
   // ==================================================================== 初始化
@@ -58,11 +62,17 @@ export class SpiBusView {
     for (const c of P.CS_POLICY) $('sp-cs').appendChild(new Option(c.label, String(c.v)));
     for (const p of P.PADS){
       const label = p.j3 ? `${p.name}（${p.j3}）` : p.name;
-      for (const id of ['sp-pad-dc', 'sp-pad-rst', 'sp-pad-csaux', 'sp-pad-bl']){
+      for (const id of ['sp-pad-dc', 'sp-pad-rst', 'sp-pad-bl']){
         const o = new Option(label, String(p.i));
         o.dataset.pad = String(p.i);
         $(id).appendChild(o);
       }
+    }
+    /* 引脚设置的**开机默认值** = 引脚分配图里的推荐脚位（protocol.AUX_DEFAULT：DC=PA26 / RST=PA02 / BL=PA31）。
+     * 用户 2026-10 要求："启动 DC/RST/BL 几个引脚的默认值（不是不用）" —— 所以在读到探针配置之前
+     * 就先把推荐值显示出来，照着接线；点「读取配置」后以探针里的实际值为准（fillCfg）。 */
+    for (const [id, pad] of [['sp-pad-dc', P.AUX_DEFAULT.DC], ['sp-pad-rst', P.AUX_DEFAULT.RST], ['sp-pad-bl', P.AUX_DEFAULT.BL]]){
+      $(id).value = String(pad);
     }
     this.refreshPads();
 
@@ -221,12 +231,12 @@ export class SpiBusView {
     $('sp-clear').checked = !!(c.flags & P.CFG_FLAG.CLEAR_ON_ENABLE);
     $('sp-pad-dc').value = String(c.padDc);
     $('sp-pad-rst').value = String(c.padRst);
-    $('sp-pad-csaux').value = String(c.padCsAux);
     $('sp-pad-bl').value = String(c.padBl);
     $('sp-al-dc').checked = P.lineActiveLow(c.padActiveLow, P.LINE.DC);
     $('sp-al-rst').checked = P.lineActiveLow(c.padActiveLow, P.LINE.RST);
-    $('sp-al-cs').checked = P.lineActiveLow(c.padActiveLow, P.LINE.CS_AUX);
     $('sp-al-bl').checked = P.lineActiveLow(c.padActiveLow, P.LINE.BL);
+    this._padCsAux = c.padCsAux;                                       // CS 辅助：UI 不显示，回写时原样带上
+    this._csAuxLow = P.lineActiveLow(c.padActiveLow, P.LINE.CS_AUX);
     $('sp-ring').textContent = `OUT ${c.outRingKb} KB / IN ${c.inRingKb} KB / 单帧上限 ${c.maxFrameBytes} B`;
   }
 
@@ -259,7 +269,7 @@ export class SpiBusView {
     const notes = [];
     /* SPI2 固定脚（固件 reserved[]）：PB10/CS(4)、PB11/SCLK(1)、PB12/MISO(2)、PB13/MOSI(3) */
     const SPI2_PADS = [1, 2, 3, 4];
-    for (const id of ['sp-pad-dc', 'sp-pad-rst', 'sp-pad-csaux', 'sp-pad-bl']){
+    for (const id of ['sp-pad-dc', 'sp-pad-rst', 'sp-pad-bl']){
       const sel = $(id);
       if (!sel) continue;
       for (const o of sel.options){
@@ -422,7 +432,7 @@ export class SpiBusView {
     let activeLow = 0;
     if ($('sp-al-dc').checked) activeLow |= 1 << P.LINE.DC;
     if ($('sp-al-rst').checked) activeLow |= 1 << P.LINE.RST;
-    if ($('sp-al-cs').checked) activeLow |= 1 << P.LINE.CS_AUX;
+    if (this._csAuxLow) activeLow |= 1 << P.LINE.CS_AUX;      // CS 辅助：UI 不显示，沿用读回来的
     if ($('sp-al-bl').checked) activeLow |= 1 << P.LINE.BL;
     return {
       sclkHz: +$('sp-sclk').value || 0,
@@ -432,7 +442,7 @@ export class SpiBusView {
       txDmaThreshold: Math.max(0, Math.min(255, +$('sp-thr').value || 0)),
       padDc: +$('sp-pad-dc').value || 0,
       padRst: +$('sp-pad-rst').value || 0,
-      padCsAux: +$('sp-pad-csaux').value || 0,
+      padCsAux: this._padCsAux | 0,
       padBl: +$('sp-pad-bl').value || 0,
       padActiveLow: activeLow,
       padTe: this.session.cfg?.padTe ?? 0,

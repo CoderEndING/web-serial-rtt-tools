@@ -164,10 +164,12 @@ export class MockSpiProbe {
     this.opts = opts;
     this.now = opts.clock || (() => (typeof performance !== 'undefined' ? performance.now() : Date.now()));
 
-    /** 配置块：默认值照固件 spi_bridge.c:1365-1382 */
+    /** 配置块：默认值照固件 spi_bridge.c:1365-1382；**辅助脚用「引脚分配图」的推荐值**
+     *  （protocol.AUX_DEFAULT：DC=PA26 / RST=PA02 / BL=PA31），这样假探针、预设、引脚图三处一致，
+     *  用户 2026-10 要求"跟大家都一样"。 */
     this.cfg = {
       sclkHz: 0, mode: 0, bits: 8, csPolicy: 0, txDmaThreshold: 100,
-      padDc: 5 /*PA02*/, padRst: 13 /*PA31*/, padCsAux: 0, padBl: 11 /*PA10*/, padTe: 0,
+      padDc: 14 /*PA26*/, padRst: 5 /*PA02*/, padCsAux: 0, padBl: 13 /*PA31*/, padTe: 0,
       padActiveLow: 0x06 /*RST+CS 低有效*/, padLowRaw: 0x06, flags: CFG_FLAG.CLEAR_ON_ENABLE,
       reserved0: 0, outRingKb: 16, inRingKb: 8, maxFrameBytes: FRAME_MAX,
     };
@@ -289,7 +291,7 @@ export class MockSpiProbe {
       }
       case ACT.PIN_CFG: {
         const line = d[1] | 0, pad = d[2] | 0;
-        if (pad < 0 || pad > 13 || (!this._padOk(pad))){
+        if (pad < 0 || pad > 17 || (!this._padOk(pad))){
           this.lastErr = ST.RANGE;
           res[0] = 8;
           new DataView(res.buffer).setUint32(3, this.statusWord() | (ST.RANGE << 8), true);
@@ -342,7 +344,11 @@ export class MockSpiProbe {
      *   · PB10~PB13（1~4）= SPI2 的 SCLK/MISO/MOSI/CS，固定脚不能当辅助脚；
      *   · PA30（12）= USB0_PWR 网络，被板上 Q1 常态短到地，别用；
      *   · PA31（13）现在是自由脚（当年 quad 下占用它的规则已删）。
-     * 9/10 = PY00/PY01 不在 pad 表里（s_pad_table 为 0），由调用方按"表里没有"处理。 */
+     * 9/10 = PY00/PY01 不在 pad 表里（s_pad_table 为 0），由调用方按"表里没有"处理。
+     *
+     * 🚨 上界是 **17**（PA26~PA29，2026-09-30 从 SPI1 显示口释放、固件实测接受索引 14~17），
+     *    不是 13 —— 旧上界把 PA26 也拒了，于是"用推荐脚位 DC=PA26"的配置**永远写不进去**
+     *    （2026-10 定位：SPI 自测里那两条长期失败就是这个）。 */
     if (pad === 1 || pad === 2 || pad === 3 || pad === 4) return false;
     if (pad === 12) return false;
     return true;
@@ -352,7 +358,7 @@ export class MockSpiProbe {
     if (c.mode > 3) return 'mode';
     if (c.bits !== 8) return 'bits';
     if (c.csPolicy > 3) return 'csPolicy';
-    for (const p of [c.padDc, c.padRst, c.padCsAux, c.padBl, c.padTe]) if (p > 13 || !this._padOk(p)) return 'pad';
+    for (const p of [c.padDc, c.padRst, c.padCsAux, c.padBl, c.padTe]) if (p > 17 || !this._padOk(p)) return 'pad';
     return null;
   }
 

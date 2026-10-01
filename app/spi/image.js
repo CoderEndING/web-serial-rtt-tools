@@ -19,6 +19,10 @@ export const PIXEL_SLICE = 492;
 export const PANEL_GEOMETRY = {
   axs15352: { w: 240, h: 296, colCmd: 0x2a, rowCmd: 0x2b, ramWr: 0x2c, lines: 1, colorOpcode: null, align: 4 },
   st77916: { w: 360, h: 360, colCmd: 0x2a, rowCmd: 0x2b, ramWr: 0x2c, lines: 4, colorOpcode: 0x32, align: 4 },
+  /* GC9A01（1.28 吋圆屏常见规格 240×240）· SPI + DC · 单线 —— 协议参数与 AXS15352 同档
+   * （lines 1 / 无 qspi 色命令）。初始化表见 samples/panel-init/gc9a01_init_cmds.h，
+   * 可整段贴进本页『面板初始化』大框。页面上还能选「自定义…」自己填宽高。 */
+  gc9a01: { w: 240, h: 240, colCmd: 0x2a, rowCmd: 0x2b, ramWr: 0x2c, lines: 1, colorOpcode: null, align: 4 },
 };
 
 // ============================================================================

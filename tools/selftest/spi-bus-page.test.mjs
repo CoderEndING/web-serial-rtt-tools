@@ -118,7 +118,20 @@ console.log('== 3. 配置：读取 → 改写 → 回读对账 ==');
   const def = await ev(`return { sclk: document.getElementById('sp-sclk').value, cs: document.getElementById('sp-cs').value,
     dc: document.getElementById('sp-pad-dc').value, rst: document.getElementById('sp-pad-rst').value }`);
   ok(def.sclk === '0', `默认 SCLK = 板级默认（select=${def.sclk}）`);
-  ok(def.dc === '5' && def.rst === '13', `默认辅助脚 DC=PA02 / RST=PA31（${def.dc}/${def.rst}）`);
+  /* 2026-10：假探针默认辅助脚 = 「引脚分配图」推荐值（AUX_DEFAULT）—— 顺手把「引脚设置」这一节
+   * 的结构也钉住：改名、去掉 CS 辅助（下拉 + 低有效那个勾），只留 DC/RST/BL。 */
+  ok(def.dc === '14' && def.rst === '5', `默认辅助脚 DC=PA26 / RST=PA02（${def.dc}/${def.rst}）`);
+  const pinSec = await ev(`return {
+    legend: document.getElementById('sp-pad-dc').closest('fieldset').querySelector('legend').textContent,
+    hasCsAux: !!document.getElementById('sp-pad-csaux'),
+    hasCsLow: !!document.getElementById('sp-al-cs'),
+    bl: document.getElementById('sp-pad-bl').value,
+    opts: [...document.querySelectorAll('#sp-pad-dc option')].map(o => o.value),
+  };`);
+  ok(/引脚设置/.test(pinSec.legend), `那一节已改名「引脚设置」：${pinSec.legend}`);
+  ok(!pinSec.hasCsAux && !pinSec.hasCsLow, 'CS 辅助（下拉 + 低有效勾）已移除');
+  ok(pinSec.bl === '13', `BL 默认 PA31（${pinSec.bl}）`);
+  ok(pinSec.opts.includes('14') && pinSec.opts.includes('17'), 'pad 下拉里有 PA26~PA29（14~17，2026-09-30 释放的那批）');
 
   const applied = await ev(`
     document.getElementById('sp-sclk').value = '40000000';

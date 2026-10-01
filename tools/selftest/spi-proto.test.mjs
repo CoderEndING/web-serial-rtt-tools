@@ -248,14 +248,20 @@ console.log('== 5. 假探针：HID 0x35 语义 ==');
   const probe = new M.MockSpiProbe();
   const cfg = P.parseCfgPayload(await probe.xfer(P.HID_CMD, P.hidData.getCfg()));
   ok(cfg.sclkHz === 0 && cfg.txDmaThreshold === 100 && cfg.csPolicy === 0, '默认配置照固件（sclk=0 / 阈值 100 / cs_policy 0）');
-  ok(cfg.padDc === 1 && cfg.padRst === 2 && cfg.padCsAux === 4 && cfg.padBl === 3 && cfg.padActiveLow === 0x06,
-     '默认辅助脚 = PB11/PB12/PB10/PB13，RST+CS 低有效');
+  /* 2026-10 起假探针的默认辅助脚 = 「引脚分配图」的推荐值（protocol.AUX_DEFAULT），
+   * 与预设 / 引脚图三处一致；且这几个 pad 都是**可写**的（旧默认 PB11/PB12 是 SPI2 固定脚，
+   * 固件会拒 → 下面"合法配置写进去"那条一直过不去）。 */
+  ok(cfg.padDc === 14 && cfg.padRst === 5 && cfg.padCsAux === 0 && cfg.padBl === 13 && cfg.padActiveLow === 0x06,
+     `默认辅助脚 = PA26/PA02/不用/PA31（${cfg.padDc}/${cfg.padRst}/${cfg.padCsAux}/${cfg.padBl}），RST+CS 低有效`);
 
   const bad = P.parseWordPayload(await probe.xfer(P.HID_CMD, P.hidData.setCfg(P.encodeCfg({ sclkHz: 20000000, mode: 9, bits: 8 }))));
   ok(P.statusWord(bad).err === P.ST.RANGE, '非法 mode → 状态字带 RANGE（不静默接受）');
   ok(P.parseCfgPayload(await probe.xfer(P.HID_CMD, P.hidData.getCfg())).sclkHz === 0, '非法配置**没有**写进去（回读还是默认）');
 
-  const okCfg = P.parseWordPayload(await probe.xfer(P.HID_CMD, P.hidData.setCfg(P.encodeCfg({ sclkHz: 40000000, mode: 0, bits: 8, csPolicy: 0, txDmaThreshold: 100, padDc: 1, padRst: 2, padCsAux: 4, padBl: 3, padActiveLow: 0x06, padTe: 4, flags: 1 }))));
+  /* ⚠️ 辅助脚必须选**可写**的：PB10~PB13（pad 1~4）是 SPI2 的 CS/SCLK/MISO/MOSI，
+   *    假探针（和固件一样）会回 RANGE 拒掉整块配置 —— 这里以前写的是 1/2/4/3、padTe 还是 4，
+   *    于是"合法配置写进去了"和"使能后实际 SCLK"两条一直是红的（2026-10 定位并修）。 */
+  const okCfg = P.parseWordPayload(await probe.xfer(P.HID_CMD, P.hidData.setCfg(P.encodeCfg({ sclkHz: 40000000, mode: 0, bits: 8, csPolicy: 0, txDmaThreshold: 100, padDc: 14, padRst: 5, padCsAux: 0, padBl: 13, padActiveLow: 0x06, padTe: 0, flags: 1 }))));
   void okCfg;
   const back = P.parseCfgPayload(await probe.xfer(P.HID_CMD, P.hidData.getCfg()));
   ok(back.sclkHz === 40000000 && back.txDmaThreshold === 100 && back.padActiveLow === 0x06, '合法配置真的写进去了（回读对账）');
