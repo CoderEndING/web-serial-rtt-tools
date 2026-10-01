@@ -45,10 +45,10 @@ export const OP_NAME = Object.fromEntries(Object.entries(OP).map(([k, v]) => [v,
  */
 export const READ_MODES = [
   { v: OP.READ, lines: 1, dummy: 0, name: 'READ 0x03 · 1 线 · 无 dummy' },
-  { v: OP.FAST_READ, lines: 1, dummy: 1, name: 'FAST READ 0x0B · 1 线 · 8 dummy' },
-  { v: OP.DOR, lines: 2, dummy: 1, name: 'DUAL OUT 0x3B · 2 线出 · 8 dummy' },
-  { v: OP.QOR, lines: 4, dummy: 1, name: 'QUAD OUT 0x6B · 4 线出 · 8 dummy' },
-  { v: OP.QIOR, lines: 4, dummy: 1, name: 'QUAD I/O 0xEB · 4 线全开 · 8 dummy' },
+  { v: OP.FAST_READ, lines: 1, dummy: 1, name: 'FAST READ 0x0B · 1 线 · 8 拍 dummy' },
+  { v: OP.DOR, lines: 2, dummy: 1, name: 'DUAL OUT 0x3B · 2 线出 · 8 拍 dummy' },
+  { v: OP.QOR, lines: 4, dummy: 1, name: 'QUAD OUT 0x6B · 4 线出 · 8 拍 dummy' },
+  { v: OP.QIOR, lines: 4, dummy: 1, name: 'QUAD I/O 0xEB · 4 线全开 · 8 拍 dummy' },
 ];
 
 /** 擦除档：opcode / 粒度（0 = 整片，不带地址）*/
@@ -107,6 +107,15 @@ export function fmtSize(n){
 
 /** SFDP 签名 "SFDP"（小端读成 u32 = 0x50444653）*/
 export const SFDP_MAGIC = [0x53, 0x46, 0x44, 0x50];
+/**
+ * 只判签名（4 B）。
+ * 页面「读 SFDP」现在的口径是**只出原始 256 B**（2026-10 用户要求去掉解读），
+ * 所以只需要这一步做"dummy 对不对"的链路标定；下面的 parseSfdp 等解析函数保留给
+ * 离线分析 / 自测用，页面不再展示它们的输出。
+ */
+export function hasSfdpMagic(bytes){
+  return !!bytes && bytes.length >= 4 && SFDP_MAGIC.every((v, i) => bytes[i] === v);
+}
 export const SFDP_MINOR_NAME = { 0: 'JESD216', 5: 'JESD216A', 6: 'JESD216B', 7: 'JESD216C', 8: 'JESD216D' };
 /** 参数表 ID（高字节 0 = JEDEC 统一分配）*/
 export const SFDP_TABLE_NAME = {

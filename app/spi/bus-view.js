@@ -71,7 +71,13 @@ export class SpiBusView {
 
     // flash 卡的下拉与语法速查
     for (const m of FL.READ_MODES) $('sp-fl-mode').appendChild(new Option(m.name, String(m.v)));
-    $('sp-fl-mode').value = String(FL.OP.QIOR);
+    /* 默认读模式 = READ 0x03（最保守的 1 线读、不要 dummy）—— 用户 2026-10 现场要求：
+     * 之前默认 QUAD I/O 0xEB，一上来就得先解决 QE 位 / 四线接线，容易"读不出东西"就卡住。 */
+    $('sp-fl-mode').value = String(FL.OP.READ);
+    /* 切读模式 → dummy **自动跟着变**（每个模式的默认拍数在 READ_MODES 里，0 表示不要 dummy）。
+     * 仍可手动改：改完不会被覆盖，只有再次切换模式才会重新带出默认值。 */
+    $('sp-fl-mode').addEventListener('change', () => { $('sp-fl-dummy').value = String(this.flMode().dummy); });
+    $('sp-fl-dummy').value = String(this.flMode().dummy);
     for (const e of FL.ERASE_MODES) $('sp-fl-erase-mode').appendChild(new Option(e.name, String(e.v)));
     for (const x of D.DSL_SAMPLES) $('sp-dsl-preset').appendChild(new Option(x.name, x.name));
     $('sp-dsl-help').textContent = D.DSL_HELP;
@@ -697,78 +703,40 @@ export class SpiBusView {
   }
 
   /**
-   * 读 SFDP：先按当前 dummy 读 8 B 头，签名不对就**自动试别的 dummy**（0~4）——
-   * 协议里 dummy 的单位在这块板子上没实测标定过，与其猜不如让它自己找出来。
+   * 读 SFDP：**只出原始数据**（2026-10 用户现场要求：把后面的解读去掉）。
+   *
+   * 依据：JESD216 规定 SFDP 是 **256 B 只读区**，一次读满就拿到了全部信息；
+   * "这张表是什么、BFPT 那几个 DWORD 什么含义"让使用者按 JESD216 表 2 自己查，
+   * 页面上不再做解读。（`flash.js` 里的 parseSfdp / parseBfpt 保留给离线分析与自测用。）
+   *
+   * dummy 那一步是**链路标定**不是解读：JESD216 规定 `0x5A` 要 **8 拍 dummy**（= dummy 档 1），
+   * 所以**先按 1 试**（不管面板上填的是几），不成再依次试面板值 / 0 / 2 / 3 / 4。
    */
   async flReadSfdp(){
     const s = this.session;
     await this.wrap(async () => {
       const tried = [];
-      let dummy = this.flDummy(), head = null;
-      for (const d of [dummy, 0, 1, 2, 3, 4]){
+      let dummy = this.flDummy(), got = false;
+      for (const d of [1, dummy, 0, 2, 3, 4]){
         if (tried.includes(d)) continue;
         tried.push(d);
         const r = await s.sendFrames(FL.sfdpHeadItems(d), { tag: this.tag, quiet: tried.length > 1 });
         const bytes = r.rsps[0]?.data;
-        const p = bytes ? FL.parseSfdp(bytes) : null;
-        if (p?.sigOk){ head = p; dummy = d; break; }
+        if (FL.hasSfdpMagic(bytes)){ got = true; dummy = d; break; }
         if (tried.length === 1) s.log('w', `SFDP 签名不是 "SFDP"（dummy=${d}）：${bytes ? hexDump(bytes) : '没读到数据'} —— 换 dummy 再试`, this.tag);
       }
-      if (!head) throw new Error('dummy 0~4 都试过，SFDP 签名仍不对（接线 / 器件 / 供电先确认）');
+      if (!got) throw new Error('dummy 0~4 都试过，SFDP 签名仍不对（接线 / 器件 / 供电先确认）');
       if (dummy !== this.flDummy()){
         $('sp-fl-dummy').value = String(dummy);
         s.log('g', `SFDP 用 dummy=${dummy} 读出签名 —— 已把面板上的 dummy 改成 ${dummy}`, this.tag);
       }
-      const rp = await s.sendFrames(FL.sfdpParamItems(head.nph, dummy), { tag: this.tag });
-      const sf = FL.parseSfdp(rp.rsps[0]?.data);
-      /* ① **整片 256 B 读满**（JESD216 规定 SFDP 是 256 B 只读区）：头和所有表头一次拿全，
-       *    原始字节整片摊开 —— 表与表之间的空隙、厂商私有区也都看得见。*/
       const full = await s.sendFrames(FL.sfdpFullItems(dummy), { tag: this.tag });
       const raw = full.rsps[0]?.data;
-      const lines = [`SFDP  ${sf.revName}（major ${sf.major}）· 声明 ${sf.nph} 个参数表头　[dummy=${dummy}]`, ''];
-
-      if (raw){
-        // 表头区（前 8 + nph×8 B）之外还全 0xFF 的话，说明这块 SFDP 就只声明了这么多
-        const hdrEnd = 8 + Math.max(1, sf.nph) * 8;
-        const tail = [...raw.subarray(hdrEnd)].some(v => v !== 0xff && v !== 0x00);
-        lines.push(`原始 256 B${tail ? '' : `（前 ${hdrEnd} B 之后全是 FF：这块 SFDP 确实只声明了这些）`}：`);
-        lines.push(...hexDump(raw, 256).split('\n').map(l => '  ' + l));
-        lines.push('');
-      }
-
-      for (const h of sf.headers || []){
-        lines.push(`表 ${h.index}  id=0x${h.id.toString(16).padStart(4, '0')}  ${h.name}  rev ${h.major}.${h.minor}  ${h.lengthDwords} DWORD  指针 0x${h.ptr.toString(16)}`);
-      }
-      s.log('g', `Flash SFDP：${sf.text}`, this.tag);
-
-      /* ② **每张表都读出来**（以前只挑 BFPT），原始 DWORD 逐个摊开。
-       *    BFPT（id 0000h）额外给几个 JESD216 里有确定含义的字段。*/
-      for (const h of sf.headers || []){
-        if (!h.ptr || !h.lengthDwords){
-          lines.push('', `表 ${h.index}：指针/长度为空，跳过（芯片没填）`);
-          continue;
-        }
-        const rt = await s.sendFrames(FL.sfdpTableItems(h.ptr, h.lengthDwords, dummy), { tag: this.tag });
-        const bytes = rt.rsps[0]?.data;
-        if (!bytes){ lines.push('', `表 ${h.index}：没读到数据`); continue; }
-        lines.push('', `表 ${h.index}（0x${h.id.toString(16).padStart(4, '0')} ${h.name}）原始 DWORD：`);
-        lines.push(...FL.dumpDwords(bytes));
-        if (h.idLsb === 0 && h.idMsb === 0){
-          const bf = FL.parseBfpt(bytes);
-          if (bf) lines.push('', '　BFPT 关键字段：', ...bf);
-        } else {
-          /* 厂商自定义表也顺手看一眼 DWORD 2：有些兼容片把 BFPT 内容照抄了、
-           * 参数表 ID 却写成 0xFF00（2026-09-30 实测那颗 W25Q64 兼容片就是这样）。*/
-          const dens = FL.bfptDensity(bytes);
-          if (dens) lines.push('', `　⚠ 这张表声明是厂商自定义，但 DWORD 2 推出来的容量是 ${dens}`,
-            '　　 —— 内容和 JEDEC BFPT 对得上，八成是把 BFPT 的 ID 字节写错了。');
-        }
-      }
-      if (!(sf.headers || []).some(h => h.idLsb === 0 && h.idMsb === 0)){
-        lines.push('', '⚠ 这颗芯片**没有声明 id=0000h 的 JEDEC BFPT 表** —— 原厂 W25Q64JV 应该有一张；',
-          '   要么它真没有，要么就是把 BFPT 的参数表 ID 字节写错了（看上面 DWORD 2 的推断）。');
-      }
+      if (!raw?.length) throw new Error('SFDP 整片读没拿到数据（链路先确认）');
+      const lines = [`SFDP 原始 ${raw.length} B（dummy=${dummy}）—— 解读按 JESD216 表 2 查：`, ''];
+      lines.push(...hexDump(raw).split('\n').map(l => '  ' + l));
       this.flOut(lines.join('\n'), 'ok');
+      s.log('g', `Flash SFDP：读到 ${raw.length} B 原始数据（dummy=${dummy}）`, this.tag);
     });
   }
 

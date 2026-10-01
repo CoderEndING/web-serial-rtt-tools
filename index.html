@@ -829,23 +829,24 @@
             <legend>SPI / NOR Flash 测试（外接）<button class="mini foldbtn" data-fold="sp-flash-card">收起</button></legend>
             <div class="toolrow">
               <button id="sp-fl-readid" class="primary mini" title="读 JEDEC ID（0x9F）：厂商 / 类型 / 容量">读 ID</button>
-              <button id="sp-fl-sfdp" class="mini" title="读 SFDP（0x5A）：签名 / 版本 / 参数表头；dummy 不对会读不出签名，会自动试 0~4">读 SFDP</button>
+              <button id="sp-fl-sfdp" class="mini" title="读 SFDP（0x5A）：只出**原始 256 B**（JESD216 规定 SFDP 是 256 B 只读区），解读请查 JESD216 表；dummy 不对会读不出签名，会自动试 0~4">读 SFDP</button>
               <button id="sp-fl-sr" class="mini" title="读状态寄存器 SR1(0x05) + SR2(0x35)：BUSY / WEL / QE">读状态</button>
               <span class="spacer"></span>
               <button id="sp-fl-wiring" class="mini" title="显示外接 flash 的接线">接线</button>
             </div>
             <div class="framegrid">
               <label class="row"><span>读模式</span><select id="sp-fl-mode"></select></label>
-              <label class="row"><span>dummy</span><input id="sp-fl-dummy" class="num" value="1" inputmode="numeric" title="dummy 拍数档（0~4，1 = 8 拍）。读一段 / 读测速 / 写校验 / 读 SFDP 都用它；SFDP 读不出签名会自动标定。⚠️ 随器件不同：JEDEC 的 0x3B 是 8 拍，有些兼容片要 16 拍（dummy=2）—— 读出来“前面对不上、像多/少一个字节”就是它不对"></label>
+              <label class="row"><span>dummy</span><input id="sp-fl-dummy" class="num" value="0" inputmode="numeric" title="dummy 档位（0~4），**单位是 8 个时钟拍**：dummy=1 即 8 拍。读一段 / 读测速 / 写校验 / 读 SFDP 都用它；**切换读模式会自动带出该模式的默认值**（0x03 → 0，0x0B/0x3B/0x6B → 1）；SFDP 读不出签名会自动试 0~4。⚠️ 随器件不同：JEDEC 的 0x3B 是 8 拍，有些兼容片要 16 拍（dummy=2）—— 读出来“前面对不上、像多/少一个字节”就是它不对"></label>
               <label class="row"><span>地址</span><input id="sp-fl-addr" value="0x000000"></label>
               <label class="row"><span>长度</span><input id="sp-fl-len" class="num" value="256" inputmode="numeric"></label>
             </div>
+            <p class="hint" style="margin:2px 0 0">dummy 的**单位是 8 个时钟拍**（dummy=1 → 8 拍，不是 bit 也不是单拍）：0x03 无需 dummy；0x0B / 0x3B / 0x6B 一般 8 拍；0xEB 常见 8~10 拍。**切换读模式会自动带出默认值**，仍可手动改。</p>
             <div class="row btnrow">
               <button id="sp-fl-read">读一段</button>
               <button id="sp-fl-bench" title="连续读 N KB 计速（首帧发命令+地址、后续帧 CS_HOLD 续读）"><b>读测速</b></button>
               <label class="row" style="margin-left:auto"><span style="width:auto">测速量</span><input id="sp-fl-benchkb" class="num" value="64" inputmode="numeric"><span>KB</span></label>
             </div>
-            <div class="log" id="sp-fl-out" style="height:auto;min-height:52px;max-height:150px">（还没测过）</div>
+            <div class="log" id="sp-fl-out">（还没测过）</div>
 
             <div class="row" style="margin-top:7px">
               <label class="chk" title="擦写是破坏性的：先解锁，再点下面的按钮。地址 / 数据都在上面或下面填"><input type="checkbox" id="sp-fl-armed"> 我确认要擦写这颗 flash</label>

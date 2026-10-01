@@ -293,6 +293,8 @@ dialog form{margin-top:16px;text-align:right}
   resize:vertical;white-space:pre-wrap;overflow-wrap:anywhere;overflow-x:hidden;overflow-y:auto;
 }
 #sp-flash-card #sp-fl-out{margin-top:4px}
+/* flash 卡的「读数据 / 写数据」两个窗口**等高**（2026-10 用户要求：都按读数据那个高度来） */
+#sp-flash-card #sp-fl-out,#sp-flash-card #sp-fl-data{height:150px;min-height:150px;max-height:150px}
 #sp-flash-card .framegrid .row>span:first-child{width:56px}
 /* 语法速查：折叠块里是**预排文本**（等宽 + 保留换行），别被挤成一坨 */
 #tab-spi .dslhelp{margin-top:5px}

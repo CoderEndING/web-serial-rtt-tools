@@ -368,6 +368,28 @@ console.log('== 10. NOR flash 卡（假探针里挂着一颗 W25Q128 模型）==
   ok(/PB10~PB13/.test(pads.note) && /PA30/.test(pads.note), '提示文字里写明了为什么灰');
   ok(/PY00\/PY01/.test(pads.note), '提示文字里写明了为什么灰');
 
+  /* 10.1b 默认值 + 切模式自动带 dummy（2026-10 用户现场要求）
+   *   · 读模式默认 READ 0x03（1 线、不要 dummy）—— 不再一上来就是 QUAD I/O 0xEB
+   *   · dummy 默认 0
+   *   · 切模式 → dummy 自动跟着变（0x03→0、0x0B/0x3B/0x6B/0xEB→1），仍可手动改 */
+  const flDefault = await ev(`
+    const $ = id => document.getElementById(id);
+    return { mode: $('sp-fl-mode').value, dummy: $('sp-fl-dummy').value };`);
+  ok(flDefault.mode === '3' && flDefault.dummy === '0',
+     `默认 = READ 0x03 + dummy 0（实际 mode=${flDefault.mode} dummy=${flDefault.dummy}）`);
+  const flSwap = await ev(`
+    const $ = id => document.getElementById(id);
+    const out = [];
+    for (const v of ['11', '3', '59', '107', '235']){
+      $('sp-fl-mode').value = v;
+      $('sp-fl-mode').dispatchEvent(new Event('change'));
+      out.push([v, $('sp-fl-dummy').value]);
+    }
+    $('sp-fl-mode').value = '3'; $('sp-fl-mode').dispatchEvent(new Event('change'));
+    return out;`);
+  ok(JSON.stringify(flSwap) === JSON.stringify([['11','1'],['3','0'],['59','1'],['107','1'],['235','1']]),
+     `切读模式自动带出 dummy：${JSON.stringify(flSwap)}`);
+
   // 10.2 读 ID
   const id = await ev(`
     document.getElementById('sp-fl-readid').click();
@@ -376,14 +398,16 @@ console.log('== 10. NOR flash 卡（假探针里挂着一颗 W25Q128 模型）==
   ok(/Winbond/.test(id.out) && /16 MB/.test(id.out), `读 ID 显示厂商与容量：${id.out.split('\n')[1] || id.out}`);
   ok(/JEDEC ID/.test(id.log), '日志里也有');
 
-  // 10.3 读 SFDP（含参数表头与 BFPT 原始 DWORD）
+  // 10.3 读 SFDP：**只出原始 256 B**（2026-10 用户要求：把后面的解读去掉）
   const sfdp = await ev(`
     document.getElementById('sp-fl-sfdp').click();
     for (let i = 0; i < 40 && window.__tools.spiSession.busy; i++) await new Promise(r => setTimeout(r, 100));
     await new Promise(r => setTimeout(r, 300));
     return { out: document.getElementById('sp-fl-out').textContent, dummy: document.getElementById('sp-fl-dummy').value };`);
-  ok(/JESD216B/.test(sfdp.out), `SFDP 版本读出来了`);
-  ok(/BFPT/.test(sfdp.out) && /DWORD/.test(sfdp.out), '参数表头与 BFPT 原始 DWORD 都摊开了');
+  ok(/SFDP 原始 256 B/.test(sfdp.out), `标题写明是原始数据：${sfdp.out.split('\n')[0]}`);
+  ok(/0000\s+53 46 44 50/.test(sfdp.out), 'hexdump 前 4 字节就是 "SFDP" 签名（原始字节）');
+  ok(!/JESD216B|JESD216A|BFPT|DWORD|个参数表头|rev \d+\.\d+/.test(sfdp.out),
+     '不再出现任何解读内容（版本名 / 参数表 / BFPT / DWORD 都没有）');
   ok(sfdp.dummy === '1', 'dummy 标定结果写回面板（模型用 8 拍，1 就对）');
 
   // 10.4 读状态：SR1/SR2 解码
