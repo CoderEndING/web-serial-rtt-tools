@@ -69,7 +69,14 @@ export class RiscvTransport {
     await this.sequences(tapReset());
     await this.sequences(tapLoadIR(IR_IDCODE));
     this.idcode = Number((await this._scanDR(DR_IDCODE_BITS, 0n)) & 0xffffffffn) >>> 0;
-    if (!this.idcode || this.idcode === 0xffffffff) throw new Error('JTAG 链上没读到 IDCODE（0/全 1）——接线或供电？');
+    if (!this.idcode || this.idcode === 0xffffffff) {
+      throw new Error('JTAG 链上没读到 IDCODE（0/全 1）——' +
+        '① 先查接线/供电（20 针排线两头是否插紧、板子上电）；' +
+        '② 若反复如此、而且板上应用也不启动：目标很可能被**卡住的 ndmreset 按在复位态**' +
+        '（TAP 靠探针 TCK 还能读 IDCODE，但 DMI 全部读回同一常量、haltreq 无效）——' +
+        '**把探针 USB 和板子电源一起拔掉，等 10 秒再插**（只拔板子电源没用：探针的 5V 还在供电）。' +
+        '详见 app/flash/hpm/riscv-dm.js 里 resetHalt() 的注释');
+    }
     await this.sequences(tapLoadIR(IR_DTMCS));
     this.lastDtmcs = Number((await this._scanDR(DR_DTMCS_BITS, 0n)) & 0xffffffffn) >>> 0;
 
@@ -226,7 +233,13 @@ export class RiscvTransport {
   async _haltByReset(hart = 0, timeoutMs = 3000){
     await this.dmiWrite(DM.DMCONTROL, this._ctl(hart, DMCONTROL.ndmreset | DMCONTROL.haltreq));
     await new Promise(r => setTimeout(r, 50));
-    await this.dmiWrite(DM.DMCONTROL, this._ctl(hart, DMCONTROL.haltreq));
+    // 🚨 放开 ndmreset 这一步**必须执行**（卡住就把整芯片按在复位态，见 resetHalt() 的注释）
+    try {
+      await this.dmiWrite(DM.DMCONTROL, this._ctl(hart, DMCONTROL.haltreq));
+    } catch (e){
+      throw new Error(`ndmreset 没能放开（${e.message}）——目标可能停在复位态：` +
+        '把探针 USB 和板子电源一起拔掉 10 秒再插');
+    }
     return await this.waitHalted(timeoutMs);
   }
 
@@ -247,8 +260,30 @@ export class RiscvTransport {
    *   ⇒ 所以这里用 reset-halt（**不是** reset-run）。
    */
   async resetHalt(hart = 0, timeoutMs = 5000){
+    /**
+     * 🚨 **`ndmreset` 一定要放开**（2026-10 现场血案）：它是电平式的，"按住不放就整芯片停在复位态"
+     *    （`PPOR_RESET_HOLD` 的 bit4 = debug reset 默认是置起的）。而放开它只能由 DM 写寄存器 ——
+     *    万一这里在"已拉高、还没放开"之间抛错（USB 掉线、页面被关、探针被抢），目标就**锁死**：
+     *      · TAP 还能读 IDCODE（那靠探针的 TCK 驱动），
+     *      · 但 DMI 全部读回同一个常量、写不落地 → haltreq 无效、reset-halt 也停不住；
+     *      · 板子不启动（应用被按在复位态）。
+     *    **唯一出路是整板 POR —— 而且必须连探针 USB 一起拔**（探针的 5V 还在给板子供电时，
+     *    只拔板子电源不算 POR，解不开）。所以这里用 try/finally：**无论中间出什么事，都要把复位放开**。
+     */
+    let released = false;
     try {
-      await this._haltByReset(hart, timeoutMs);
+      await this.dmiWrite(DM.DMCONTROL, this._ctl(hart, DMCONTROL.ndmreset | DMCONTROL.haltreq));
+      await new Promise(r => setTimeout(r, 50));
+    } finally {
+      try {
+        await this.dmiWrite(DM.DMCONTROL, this._ctl(hart, DMCONTROL.haltreq));
+        released = true;
+      } catch { /* 放开失败：调用方会在后续读里报错；提示见 init() 的 IDCODE 文案 */ }
+    }
+    if (!released) throw new Error('ndmreset 没能放开（探针↔目标链路断了？）——' +
+      '这时目标可能停在复位态，要**把探针 USB 和板子电源一起拔掉 10 秒**再插才能解');
+    try {
+      await this.waitHalted(timeoutMs);
     } catch {
       // 停不住就退回普通 halt（至少别把流程卡死；真正的失败让后面的调用去报）
       await this.halt(hart, timeoutMs).catch(() => {});
