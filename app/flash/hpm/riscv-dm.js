@@ -150,11 +150,48 @@ export class RiscvTransport {
     throw new Error(`DMI 读 0x${addr.toString(16)} 一直 BUSY`);
   }
 
-  /** 同步 DMI 写（发 + 用一次 NOP 收状态）*/
+  /**
+   * 同步 DMI 写（发 + 用一次 NOP 收状态）。
+   * 🚨 **BUSY 要重试，不是直接抛**（2026-10 对照 OpenOCD 定因）：DMI 只有一级流水，
+   *    上一拍还没处理完时投进来的请求会被 DM 回 BUSY 丢掉 —— OpenOCD 的 `dmi_op` 就是
+   *    "BUSY 就重来"，我们原来是直接抛错 → 表现成"烧录偶发失败/卡住"。这里最多重试 4 次。
+   */
   async dmiWrite(addr, data){
-    await this.dmiPost(DMI_OP.WRITE, addr, data);
-    const r = await this.dmiPost(DMI_OP.NOP, 0, 0);
-    if (r.op !== DMI_STATUS.SUCCESS) throw new Error(`DMI 写 0x${addr.toString(16)} 失败（op=${r.op}）`);
+    for (let attempt = 0; attempt < 4; attempt++){
+      await this.dmiPost(DMI_OP.WRITE, addr, data);
+      const r = await this.dmiPost(DMI_OP.NOP, 0, 0);
+      if (r.op === DMI_STATUS.SUCCESS) return;
+      if (r.op !== DMI_STATUS.BUSY) throw new Error(`DMI 写 0x${addr.toString(16)} 失败（op=${r.op}）`);
+    }
+    throw new Error(`DMI 写 0x${addr.toString(16)} 一直 BUSY（DM 没跟上）`);
+  }
+
+  /**
+   * **批量 DMI 写** —— 烧录慢的大头就在这里。
+   *
+   * 老写法每个字 = `dmiWrite` = WRITE 一次扫描 + NOP 一次扫描 = **两次 USB 往返**；
+   * 1388 B 的 flashloader 就是 347 个字 ≈ 694 次往返，真机 ~0.3 ms/次也要 0.2 s，
+   * 链路稍慢（几十 ms/次）就变成几十秒 —— 用户看到的就是"卡在加载 flashloader"。
+   * 对照数据（2026-10 同一块板、同一支探针、同一份 246 KB 镜像）：
+   *   OpenOCD 0.12（DMI 压批）**4.9 s / 49 KiB/s**；我们逐字写 **42~78 s**。
+   * 这里照 `sbaReadBurst` 的**同一套时序**：`WRITE,NOP,WRITE,NOP,…` 压进**一条**
+   * `DAP_JTAG_Sequence`，**每拍都收状态**（DMI 只一级深，丢一拍会静默写错地方）。
+   * 任何一拍不是 SUCCESS 就返回 `badAt`，调用方从那一个字起退回逐字慢路径并重对齐地址。
+   *
+   * @returns {{ok:boolean, badAt:number, op?:number}} badAt=-1 表示全成功
+   */
+  async dmiWriteBurst(words){
+    const reqs = [];
+    for (const w of words){
+      reqs.push(dmiRequest(DMI_OP.WRITE, DM.SBDATA0, w >>> 0));
+      reqs.push(dmiRequest(DMI_OP.NOP, 0, 0));
+    }
+    const resps = await this._scanDRMany(reqs);
+    for (let i = 0; i < words.length; i++){
+      const r = dmiResponse(resps[i * 2 + 1]);            // 第 i 个写的结果在第 i 个 NOP 那拍
+      if (r.op !== DMI_STATUS.SUCCESS) return { ok: false, badAt: i, op: r.op };
+    }
+    return { ok: true, badAt: -1 };
   }
 
   // ---------------------------------------------------------------- 目标控制
@@ -333,6 +370,20 @@ export class RiscvTransport {
   }
 
   /**
+   * 单次 DMI 扫描的往返耗时（ms）—— 判"探针链路是不是退化了"。
+   *
+   * 正常这台探针一次扫描 ~0.3 ms（12 次 < 5 ms）。退化时（USB vendor 接口半死）实测每次
+   * 几十毫秒甚至超时：表现就是**烧录卡在"加载 flashloader"一动不动**（1388 B 要写 347 个字，
+   * 每个字一次往返 —— 0.3 ms/次是 0.1 s，30 ms/次就是 10 s+，还会一路慢下去）。
+   */
+  async dmiSpeedProbe(n = 12){
+    const t0 = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+    for (let i = 0; i < n; i++) await this.dmiPost(DMI_OP.NOP, 0, 0);
+    const t1 = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+    return (t1 - t0) / n;
+  }
+
+  /**
    * **SBA 健康自检 + 分级自愈** —— 每次"要用 SBA 干正事"（烧录、读 RTT）之前先跑一遍。
    *
    * 2026-10 HPM6800EVK 真机定因：上一次会话（或上一次失败的读）会在系统总线上留下
@@ -344,26 +395,35 @@ export class RiscvTransport {
    *   ① `sbaClearErrors()` —— 能清掉"写 1 清零"的那几个位；
    *   ② DM 复位（`dmcontrol` 写 0 再写 1，即 `init()`）—— 中止挂起操作；
    *   ③ **系统复位（ndmreset）** —— 实测**只有这一级能解开"总线事务卡死"**（`init()` 解不开）。
+   * 另外顺带量一次**链路速度**（`msPerScan`）：慢到离谱时要让调用方先重开 USB 会话，
+   * 否则后面擦/写/校验会一路卡（2026-10 用户现场"点烧录卡在加载 flashloader"就是这么来的）。
    *
-   * @returns {Promise<{ok:boolean, before:number|null, after:number|null, level:string, note:string}>}
+   * @returns {Promise<{ok:boolean, before:number|null, after:number|null, level:string, note:string,
+   *                    msPerScan?:number, slow?:boolean}>}
    */
-  async sbaHealthCheck({ peekAddr = 0x01200000, perWordMs = 800, allowSystemReset = true } = {}){
+  async sbaHealthCheck({ peekAddr = 0x01200000, perWordMs = 800, allowSystemReset = true, slowMs = 5 } = {}){
     const readSbcs = async () => { try { return (await this.dmiRead(DM.SBCS)) >>> 0; } catch { return null; } };
     /** 脏判据：busy 挂着、或 busyerror/sberror 非 0 */
     const dirty = s => s == null || (s & SBCS.SBBUSY) !== 0 || (s & (SBCS.SBBUSYERROR | SBCS.SBERROR)) !== 0;
     /** 真做一次短超时的 SBA 读 —— sbcs 干净也可能"读一下就卡" */
     const peek = async () => { try { await this.readMem(peekAddr, 4, perWordMs); return true; } catch { return false; } };
 
+    /** 顺带量一次链路速度：慢到离谱时调用方要先重开 USB 会话，否则后面会一路卡住 */
+    const msPerScan = await this.dmiSpeedProbe(12).catch(() => NaN);
+    const slow = Number.isFinite(msPerScan) && msPerScan > slowMs;
+    const spd = Number.isFinite(msPerScan) ? `${msPerScan.toFixed(2)} ms/扫描${slow ? ' ⚠ 偏慢（正常 ~0.3）' : ''}` : '速度测不出';
+    const R = o => ({ msPerScan: Number.isFinite(msPerScan) ? +msPerScan.toFixed(3) : undefined, slow, ...o });
+
     const before = await readSbcs();
     if (!dirty(before) && await peek()){
-      return { ok: true, before, after: before, level: 'none', note: 'SBA 干净' };
+      return R({ ok: true, before, after: before, level: 'none', note: `SBA 干净（${spd}）` });
     }
 
     // ① 清错误位
     try { await this.sbaClearErrors(); } catch {}
     let after = await readSbcs();
     if (!dirty(after) && await peek()){
-      return { ok: true, before, after, level: 'clear', note: '清掉 sberror/sbbusyerror 后恢复' };
+      return R({ ok: true, before, after, level: 'clear', note: `清掉 sberror/sbbusyerror 后恢复（${spd}）` });
     }
 
     // ② DM 复位（dmcontrol 0 → 1）
@@ -371,7 +431,7 @@ export class RiscvTransport {
     try { await this.dmiWrite(DM.DMCONTROL, 0); await this.dmiWrite(DM.DMCONTROL, DMCONTROL.dmactive); } catch {}
     after = await readSbcs();
     if (!dirty(after) && await peek()){
-      return { ok: true, before, after, level: 'dm', note: 'DM 复位后恢复' };
+      return R({ ok: true, before, after, level: 'dm', note: `DM 复位后恢复（${spd}）` });
     }
 
     // ③ 系统复位（ndmreset）—— 最后手段，会把目标重启一次
@@ -381,10 +441,10 @@ export class RiscvTransport {
       try { await this.dmiWrite(DM.DMCONTROL, 0); await this.dmiWrite(DM.DMCONTROL, DMCONTROL.dmactive); } catch {}
       after = await readSbcs();
       if (!dirty(after) && await peek()){
-        return { ok: true, before, after, level: 'ndmreset', note: '系统复位（ndmreset）后恢复' };
+        return R({ ok: true, before, after, level: 'ndmreset', note: `系统复位（ndmreset）后恢复（${spd}）` });
       }
     }
-    return { ok: false, before, after, level: 'failed', note: '清错误位 / DM 复位 / ndmreset 都没救回来（多半是接线或目标供电）' };
+    return R({ ok: false, before, after, level: 'failed', note: '清错误位 / DM 复位 / ndmreset 都没救回来（多半是接线或目标供电）' });
   }
 
 
@@ -453,13 +513,19 @@ export class RiscvTransport {
 
   /**
    * 一批能塞几个字？按 CMSIS-DAP 包长算：每拍请求 18 B（TDI 11 + 序列头 7）、响应 6 B，
-   * 一个字 = READ + NOP 两拍。留点余量（命令字节 + 固件自己的开销）。
+   * 一个字 = READ/NOP 或 WRITE/NOP 两拍。留点余量（命令字节 + 固件自己的开销）。
+   *
+   * 🚨 2026-10 逐档实测的**命令长度天花板**（同一支 akaLinkPro 探针）：
+   *    请求 577 B（16 字/批）正常；**721 B（20 字）起响应恒少 222 B**、973 B 更乱。
+   *    探针固件 `DAP_XFER_SIZE` 明明是 1024 且 `DAP.c` 没有任何条数上限 —— 所以问题在
+   *    USB 多包收发那一层（待单独攻）。在那之前**按 512 B 端点包长算批次**，不赌。
+   *    上限 64 只是兜底（真接上支持大包的目标时别再被写死的 12 卡住）。
    */
   _burstWords(){
-    const pkt = this.dap?.probe?.pkt || this.dap?.pkt || 512;
+    const pkt = Math.min(this.dap?.probe?.pkt || this.dap?.pkt || 512, 512);
     const byReq = Math.floor((pkt - 24) / 18 / 2);
     const byResp = Math.floor((pkt - 8) / 6 / 2);
-    return Math.max(2, Math.min(12, byReq, byResp));
+    return Math.max(2, Math.min(64, byReq, byResp));
   }
 
   /** 查一次 sbcs：攒着的总线错误要当场报出来，别让它变成后一段的错位读 */
@@ -563,15 +629,33 @@ export class RiscvTransport {
     await this.dmiWrite(DM.SBADDRESS0, addr >>> 0);
     const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     /**
-     * 🚨 **每个字都要收一次状态，不许"投一批再收"**（2026-10 真机教训，我自己踩的）：
-     *    DMI 流水线只有一级深 —— 前一条请求还没处理完时投进去的那条，DM 会回 **BUSY 并把它丢掉**。
-     *    我为了省扫描，曾把这里改成"每 64 个字收一次 NOP"，结果用户板子上 blob 写进 SRAM 时丢了字，
-     *    `flash_init` 跑的是残缺代码 → **卡死**（我这边时序恰好没触发，所以自测没抓到）。
-     *    正确写法就是 `dmiWrite`（写 + NOP 收状态）逐个来；省下来的那点时间不值得拿正确性换。
-     *    （`setup()` 里另有一道"写完读回校验"，这类问题以后会当场报错而不是表现成卡死。）
+     * 逐字写是**正确但极慢**的老路径（每字两次 USB 往返）—— 真机对照 OpenOCD 慢 10 倍
+     * （同一份 246 KB 镜像：OpenOCD 4.9 s，我们 42~78 s），"卡在加载 flashloader"就是这么来的。
+     * 现在走 `dmiWriteBurst`：多拍压进一条 `DAP_JTAG_Sequence`，**但仍然是每拍都收状态**
+     * （`WRITE,NOP,WRITE,NOP,…`，DMI 只一级深，丢一拍会静默写错地方）。
+     * 哪一拍不是 SUCCESS 就从那个字起退回逐字写，并把 `sbaddress0` 写回去对齐自增指针。
      */
-    for (let off = 0; off < bytes.length; off += 4){
+    const BURST = this._burstWords();
+    let off = 0;
+    while (off < bytes.length){
+      const nWords = Math.min(BURST, (bytes.length - off) >> 2);
+      if (nWords >= 2 && !this._writeBurstOff){
+        const words = [];
+        for (let k = 0; k < nWords; k++) words.push(dv.getUint32(off + k * 4, true));
+        const b = await this.dmiWriteBurst(words);
+        if (b.ok){ off += nWords * 4; continue; }
+        this._writeBurstMiss = (this._writeBurstMiss || 0) + 1;
+        if (this._writeBurstMiss >= 3){
+          this._writeBurstOff = true;
+          this.log('DMI 批量写连续失败 3 次 → 本段改走逐字慢路径（正确优先）');
+        }
+        // 自增指针已经推进到出错那一拍：写回地址对齐，再从那里逐字补
+        await this.dmiWrite(DM.SBADDRESS0, ((addr >>> 0) + off + b.badAt * 4) >>> 0);
+        off += b.badAt * 4;
+        continue;
+      }
       await this.dmiWrite(DM.SBDATA0, dv.getUint32(off, true));
+      off += 4;
     }
     // 收尾：读一次 sbcs 确认没有攒着的错误
     this.lastSbcs = await this.dmiRead(DM.SBCS);

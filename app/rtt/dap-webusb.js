@@ -189,10 +189,19 @@ export class WebUsbDapProbe {
     if (skipInfo) return;
     try {
       const ps = await this.info(0xff);
+      /**
+       * ⚠️ 探针上报的是 `DAP_XFER_SIZE`（akaLinkPro 固件 = **1024**，`DAP_config.h`；
+       *    `DAP.c:180` 注释明说"不能报端点 mps，否则主机每次只能带 ~508 B 数据"）——
+       *    但**实测 >512 B 的命令不可靠**（2026-10 逐档扫描：请求 577 B 正常、
+       *    721 B 起响应恒少 222 B、973 B 更乱；固件侧 `DAP_JTAG_Sequence` 与 OUT 回调都
+       *    没有硬上限，所以怀疑在 USB 多包收发这一层，待单独攻）。
+       *    烧录这种"必须一次成功"的路径**先按 512 B 端点包长算**，别赌没查清的多包行为。
+       */
       if (ps.length >= 2){ const v = ps[0] | (ps[1] << 8); if (v > 0 && v <= 4096) this.pkt = Math.min(v, 512); }
       const pc = await this.info(0xfe);
       this.packetCount = pc[0] || 1;
-      this.maxWords = Math.max(1, Math.min(120, Math.floor((this.pkt - 8) / 4)));
+      /** ARM/WebUSB 那条路的块读是按 512 B 包标定过的（F103/H7B0 基准），这里保守不变 */
+      this.maxWords = Math.max(1, Math.min(120, Math.floor((Math.min(this.pkt, 512) - 8) / 4)));
       this.name = `${prod} · ${this.pkt}B/包 · SWD ${Math.round(this.clockHz / 1000)}kHz`;
     } catch {}
   }
@@ -224,6 +233,7 @@ export class WebUsbDapProbe {
     this.iface = found.iface.interfaceNumber;
     this.epIn = found.epIn.endpointNumber;
     this.epOut = found.epOut.endpointNumber;
+    /** 初始值先按端点 mps（512，`DAP_Info(0xff)` 之后仍按 512 钳，见上面那条注释） */
     this.pkt = Math.min(found.epIn.packetSize || 64, 512);
     try {
       await withTimeout(d.claimInterface(this.iface), 5000, 'USB 认领接口');

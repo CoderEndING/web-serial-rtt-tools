@@ -40,7 +40,16 @@ export class HpmFlasher {
     this.board = opts.board;
     this.log = opts.log || (() => {});
     this.onProgress = opts.onProgress || (() => {});
-    this.chunkBytes = opts.chunkBytes ?? 4096;
+    /**
+     * 中转区一次搬多少字节。
+     *
+     * 🚨 2026-10 对照 OpenOCD 定标：原来是 4 KB —— 243 KB 镜像要调 **60 次** `flash_program`
+     *    + 60 次 `flash_read`，每次都要"写 a0..a4 → prepareRun(dcsr+fence.i) → resume →
+     *    轮询等 halt → 读回 a0"（实测每次 20~70 ms），光这部分就吃掉十几秒。
+     *    工作区 128 KB（`HPM_COMMON.workAreaSize`）：算法在 0x0、中转区在 0x2000，
+     *    单块上限约 120 KB —— 取 64 KB（16 次调用），留足余量。
+     */
+    this.chunkBytes = opts.chunkBytes ?? 65536;
     this.scratchInfo = 0x1000;          // flash_get_info 的输出（8 B）
     this.dataBuf = 0x2000;              // 编程数据中转区（RAM）
     this.inited = false;
@@ -115,24 +124,17 @@ export class HpmFlasher {
   async call(entry, args = [], timeoutMs = 20000){
     const e = this.entries[entry];
     if (!e) throw new Error(`没有入口 ${entry}`);
-    let lastErr = null;
-    for (let attempt = 1; attempt <= 2; attempt++){
-      try {
-        // 参数放 a0..a4（x10..x14）
-        for (let i = 0; i < args.length; i++) await this.dm.writeReg(0x1000 + 10 + i, args[i] >>> 0);
-        // 🚨 跑之前必须：置 dcsr.ebreak*（否则收尾的 ebreak 变成异常，核跑飞）+ fence.i（刚写进去的代码）
-        await this.dm.prepareRun();
-        await this.dm.resume((HPM_ALGO.loadAddr + e.entryOffset) >>> 0);
-        await this.dm.waitHalted(timeoutMs);
-        return (await this.dm.readReg(0x1000 + 10)) >>> 0;
-      } catch (err){
-        lastErr = err;
-        if (attempt === 2 || !/halt 超时/.test(String(err?.message || ''))) throw err;
-        this.log(`⚠ 算法 ${entry} 第 1 次没回来（${err.message}）→ 强行停核 + 复位 DM + 重装算法，再来一次`);
-        await this.recoverCore();
-      }
-    }
-    throw lastErr;
+    // 参数放 a0..a4（x10..x14）
+    for (let i = 0; i < args.length; i++) await this.dm.writeReg(0x1000 + 10 + i, args[i] >>> 0);
+    // 🚨 跑之前必须：置 dcsr.ebreak*（否则收尾的 ebreak 变成异常，核跑飞）+ fence.i（刚写进去的代码）
+    await this.dm.prepareRun();
+    await this.dm.resume((HPM_ALGO.loadAddr + e.entryOffset) >>> 0);
+    await this.dm.waitHalted(timeoutMs);
+    return (await this.dm.readReg(0x1000 + 10)) >>> 0;
+    /**
+     * ⚠️ "没回来"（`waitHalted` 超时）**不在这里重试** —— 重试要连 `flash_init` 一起重做，
+     *    统一走 `withAlgoRetry()`（只重启核会让 ROM API 状态错乱，下一次直接回 rc=2）。
+     */
   }
 
   /**
@@ -179,9 +181,45 @@ export class HpmFlasher {
     const chk = hpmCheckRange(this.board, addr, len);
     if (!chk.ok) throw new Error('擦除范围不合法：' + chk.why);
     if (!this.inited) throw new Error('先 setup()');
-    const rc = await this.call('erase', [this.board.flashBase, this.offsetOf(addr), len >>> 0], 60000);
+    /**
+     * 🚨 **擦除范围必须对齐到扇区**（2026-10 对照 OpenOCD 定标）。
+     *    OpenOCD 的 `flash write_image` 会自己补齐并打一行
+     *    `Warn : Adding extra erase range, 0x80000000 .. 0x800003ff`；
+     *    我们原来把 ELF 段里那个**非对齐**的范围（如 `0x80000400 + 3.1 KB`，起点落在扇区中间）
+     *    直接交给 ROM API，实测会**卡住不回来**（等 halt 超时）。
+     *    对齐规则：起点向下取整到扇区、终点向上取整（多擦的字节本来也要写，语义等价）。
+     */
+    const sec = this.chipInfo?.sectorBytes || 4096;
+    const start = (addr >>> 0) - ((addr >>> 0) % sec);
+    const end = Math.ceil(((addr >>> 0) + len) / sec) * sec;
+    const aligned = end - start;
+    if (start !== (addr >>> 0) || aligned !== len){
+      this.log(`擦除范围对齐到扇区：0x${start.toString(16)} + ${aligned} B` +
+        `（原 0x${(addr >>> 0).toString(16)} + ${len} B）`);
+    }
+    const rc = await this.withAlgoRetry('erase', [this.board.flashBase, this.offsetOf(start), aligned >>> 0], 60000,
+      `擦除 0x${start.toString(16)} + ${aligned} B`);
     if (rc) throw new Error(`flash_erase 失败：${hpmStatusText(rc)}`);
-    this.log(`已擦除 0x${addr.toString(16)} 起 ${len} B`);
+    this.log(`已擦除 0x${start.toString(16)} 起 ${aligned} B`);
+  }
+
+  /**
+   * 跑一次算法调用，**"没回来"就地自愈后重跑一次**。
+   *
+   * 🚨 自愈必须包含 **重新 `setup()`**（`flash_init` + `flash_get_info`）：
+   *    实测只重启核的话，ROM API 内部状态是乱的，下一次调用直接回
+   *    `rc=2（地址/长度越界）` —— 反而比不重试更迷惑（2026-10 真机日志）。
+   */
+  async withAlgoRetry(entry, args, timeoutMs, label){
+    try {
+      return await this.call(entry, args, timeoutMs);
+    } catch (e){
+      if (!/halt 超时|一直 BUSY/.test(String(e?.message || ''))) throw e;
+      this.log(`⚠ ${label}：算法没回来（${String(e.message).split('\n')[0]}）→ 停核 + 复位 DM + 重装算法 + 重跑 flash_init，再试一次`);
+      await this.recoverCore();       // 停核 / DM 复位 / 重写镜像并读回校验
+      await this.setup();             // ROM API 状态重置（关键：别只重启核）
+      return await this.call(entry, args, timeoutMs);
+    }
   }
 
   /** 绝对地址 → 算法要的偏移（XPI 窗口内）*/
@@ -204,7 +242,7 @@ export class HpmFlasher {
       const padded = new Uint8Array(Math.ceil(n / 4) * 4).fill(0xff);
       padded.set(chunk);
       await this.dm.writeMem(this.dataBuf, padded);
-      const rc = await this.call('program', [this.board.flashBase, this.offsetOf(addr + off), this.dataBuf, padded.length], 60000);
+      const rc = await this.withAlgoRetry('program', [this.board.flashBase, this.offsetOf(addr + off), this.dataBuf, padded.length], 60000, `烧写 0x${(addr + off).toString(16)}`);
       if (rc) throw new Error(`flash_program 在 0x${(addr + off).toString(16)} 失败：${hpmStatusText(rc)}` +
         (rc === 1 ? '（该地址不是已擦除状态？先擦除，或地址落在别的 flash 窗口）' : ''));
       this.onProgress((off + n) / total, off + n, total);
@@ -221,7 +259,7 @@ export class HpmFlasher {
     for (let off = 0; off < data.length; off += this.chunkBytes){
       const n = Math.min(this.chunkBytes, data.length - off);
       const padded = Math.ceil(n / 4) * 4;
-      const rc = await this.call('read', [this.board.flashBase, this.dataBuf, this.offsetOf(addr + off), padded], 60000);
+      const rc = await this.withAlgoRetry('read', [this.board.flashBase, this.dataBuf, this.offsetOf(addr + off), padded], 60000, `读回 0x${(addr + off).toString(16)}`);
       if (rc) throw new Error(`flash_read 在 0x${(addr + off).toString(16)} 失败：${hpmStatusText(rc)}`);
       const back = await this.dm.readMem(this.dataBuf, padded);
       for (let i = 0; i < n; i++){

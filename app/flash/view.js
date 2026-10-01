@@ -208,11 +208,27 @@ export class FlashView {
     } catch (e){
       this._status('空闲');
       setStatus($('f-result'), `❌ ${e?.message || e}`, 'err');
-      // 失败也要复位目标：flashloader 可能已写进 RAM（踩掉 RTT 控制块等数据），
-      // 不复位的话固件带着被踩的 RAM 继续跑，RTT/串口看上去就"坏了"。
-      // 先试 nRESET 脉冲；不行再试 AIRCR 软复位（很多接线根本没把 NRST 连到探针）。
-      try { if (this.probe) await this.probe.reset(); }
-      catch { try { if (this.probe) await this.probe.sysReset(); } catch {} }
+      /**
+       * 失败也要复位目标（ARM 路径的老经验：flashloader 可能已写进目标 RAM，踩掉 RTT 控制块等数据）。
+       *
+       * 🚨 **但 HPM / RISC-V 路径绝不能拉 nRESET**（2026-10 定因，也是"越失败越不对劲"的真凶）：
+       *    akaLinkPro 的板级配置写着 `reset_config none`，注释原文：
+       *    「Do NOT use the SRST pin: 20 针排线的第 15 脚是**探针自己的 RESET_N**，
+       *      拉 nSRST 会把探针一起复位（observed as OpenOCD hanging and the probe dropping off USB）」
+       *    我们原来不分路径都拉一次 `probe.reset()` → 烧录一失败就把探针打掉线，
+       *    之后所有命令响应错位（实测 `响应回显 0x3 ≠ 命令 0x0`、`DAP_JTAG_Sequence 0xff`、USB 读超时），
+       *    "再点一次"也很难成功 —— 而**紧接着用 OpenOCD 打同一块板 4.9 s 就过**（人家是干净会话）。
+       *    RISC-V 侧要复位目标请走 DM 的 ndmreset —— `flasher.recoverAfterFailure()` 已经做了。
+       */
+      let isHpm = false;
+      try { isHpm = !!hpmBoard($('f-chip').value); } catch {}
+      if (isHpm){
+        this._log('（HPM/RISC-V：跳过 nRESET 脉冲 —— 那根线会复位探针自己；目标已用 DM 的 ndmreset 复位）');
+      } else {
+        // 先试 nRESET 脉冲；不行再试 AIRCR 软复位（很多接线根本没把 NRST 连到探针）。
+        try { if (this.probe) await this.probe.reset(); }
+        catch { try { if (this.probe) await this.probe.sysReset(); } catch {} }
+      }
       throw e;
     } finally {
       this._hbStop();
@@ -680,7 +696,22 @@ export class FlashView {
         `flash ${(chipInfo.totalBytes / 1048576).toFixed(2)} MB / 扇区 ${chipInfo.sectorBytes} B`);
     } catch (e){
       try { await flasher.recoverAfterFailure(); this._log('   失败收尾：已尝试让目标停下来并系统复位（别把核扔在跑飞状态）'); } catch {}
-      throw new Error(`${e?.message || e}　—— 已尝试把目标复位回可用状态；` +
+      /**
+       * 🚨 **链路卡住就重开一次 USB 会话**（2026-10 A/B 实测得出的结论）。
+       *
+       * 现场对照（同一支探针、同一块板、同一份 246 KB 镜像）：
+       *   · 我们的路径报 `DAP_JTAG_Sequence 返回状态 0xff` / `响应回显 0x3 ≠ 命令 0x0` 之后，
+       *     后续命令会一路错下去（响应流错位，WebUSB 没有取消接口，超时的传输还在偷响应）；
+       *   · **紧接着用 OpenOCD 打同一块板：4.9 s、一次成功** —— 人家是"新会话"，我们是"脏会话"。
+       * 所以这里在失败收尾后顺手 `reopen()`（关掉再认领接口、清端点队列），
+       * 让"再点一次烧录"真的能过，而不是继续往错位流里灌命令。
+       */
+      const wedge = /0xff|响应回显|USB 读 超时|Unable to claim|占用 USB 接口|NO ACK|FAULT/i.test(String(e?.message || ''));
+      if (wedge){
+        this._log('   链路像是脏了（响应错位/超时）→ 重开一次 USB 会话，让下一次点击是干净起点');
+        try { await this.probe?.reopen?.(); } catch (err){ this._log('   （重开失败：' + (err?.message || err) + '，建议拔插一次探针）'); }
+      }
+      throw new Error(`${e?.message || e}　—— 已尝试把目标复位回可用状态${wedge ? '，并重开了 USB 会话' : ''}；` +
         '**直接再点一次「烧录」通常就过**（这条 JTAG/SBA 通路偶发丢拍）；' +
         '连点两次都不过就先给板子断电重上电、并确认没有别的页签占着探针');
     }
