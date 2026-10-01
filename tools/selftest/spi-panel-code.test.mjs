@@ -10,6 +10,7 @@
  */
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { readFileSync } from 'node:fs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const app = join(here, '..', '..', 'app');
@@ -430,6 +431,22 @@ console.log('== E. 动画 / 视频：摆放映射 + 一帧的帧序列（整帧�
   const packs = P.packFrames(items.map(it => P.frame(it.type, it.payload, { flags: it.flags })));
   ok(P.checkPacks(packs).length === 0 && packs.length === 1 + slices,
      `打包干净：${items.length} 帧 → ${packs.length} 包（3 条帧头 1 包 + 每片 1 包，一帧不跨包）`);
+}
+
+// ==================================================================== A6
+console.log('== A6. samples/panel-init 的样例表（整段贴进页面就能用）==');
+{
+  const f = join(here, '..', '..', 'samples', 'panel-init', 'gc9a01_init_cmds.h');
+  const src = readFileSync(f, 'utf8');
+  const r = C.parsePanelCode(src);
+  ok(r.format === 'c' && r.errors.length === 0,
+     `样例能被页面同款解析器读懂（format=${r.format} · 错误 ${r.errors.length}）`);
+  ok(r.rows.length === 43 && r.stats.paramsBytes === 134 && r.stats.delayMs === 0,
+     `GC9A01 样例：43 条 / 参数 134 B / 无延时项（实际 ${r.rows.length} 条 · ${r.stats.paramsBytes} B · 延时 ${r.stats.delayMs} ms）`);
+  ok((r.rows[0].cmd & 0xff) === 0xeb && (r.rows[r.rows.length - 1].cmd & 0xff) === 0x98,
+     '首条 0xEB、末条 0x98（与源 dump 顺序一致）');
+  ok(/没有延时项/.test(src) && /0x11/.test(src) && /0x29/.test(src),
+     '文件头写明"表内无延时、0x11/0x29 在表外"这个坑（否则照抄进工程必漏）');
 }
 
 console.log(`\n${fail ? '❌' : '✅'} spi-panel-code.test: ${pass} 通过 / ${fail} 失败`);
