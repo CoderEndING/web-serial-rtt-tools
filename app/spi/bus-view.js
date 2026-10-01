@@ -239,6 +239,17 @@ export class SpiBusView {
     $('sp-al-bl').checked = P.lineActiveLow(c.padActiveLow, P.LINE.BL);
     this._padCsAux = c.padCsAux;                                       // CS 辅助：UI 不显示，回写时原样带上
     this._csAuxLow = P.lineActiveLow(c.padActiveLow, P.LINE.CS_AUX);
+    /* 🚨 探针里 DC/RST/BL **全是「不用」**（刚烧完固件 / 重枚举后的默认态）时，别让面板跟着显示"不用" ——
+     * 用户 2026-10 现场就是这么被卡住的："启动就该给默认值，不是不用"。
+     * 按推荐脚位（AUX_DEFAULT）预填，并在日志里说清楚"这是预填、还没写进探针"，点「应用引脚」才落地。 */
+    if (!c.padDc && !c.padRst && !c.padBl){
+      $('sp-pad-dc').value = String(P.AUX_DEFAULT.DC);
+      $('sp-pad-rst').value = String(P.AUX_DEFAULT.RST);
+      $('sp-pad-bl').value = String(P.AUX_DEFAULT.BL);
+      this.session.log('w', `探针里 DC/RST/BL 都还是「不用」—— 已按推荐脚位预填：` +
+        `DC=${P.PAD_NAME[P.AUX_DEFAULT.DC]} / RST=${P.PAD_NAME[P.AUX_DEFAULT.RST]} / BL=${P.PAD_NAME[P.AUX_DEFAULT.BL]}；` +
+        `点「应用引脚」才会写进探针`, this.tag);
+    }
     $('sp-ring').textContent = `OUT ${c.outRingKb} KB / IN ${c.inRingKb} KB / 单帧上限 ${c.maxFrameBytes} B`;
   }
 

@@ -133,6 +133,29 @@ console.log('== 3. 配置：读取 → 改写 → 回读对账 ==');
   ok(pinSec.bl === '13', `BL 默认 PA31（${pinSec.bl}）`);
   ok(pinSec.opts.includes('14') && pinSec.opts.includes('17'), 'pad 下拉里有 PA26~PA29（14~17，2026-09-30 释放的那批）');
 
+  /* 探针里三根线全空（刚烧完固件/重枚举的默认态）时，面板**预填推荐脚位**而不是显示"不用" ——
+   * 用户 2026-10 现场就是卡在这儿。假探针的默认配置里 DC/RST/BL 是推荐值，所以这里换成
+   * "把探针写成全 0 → 再读回" 来复现现场。 */
+  const empty = await ev(`
+    const s = window.__tools.spiSession;
+    // 直接把假探针的配置改成"三根线都不用"（等价于刚烧完固件/重枚举后的默认态），再走页面的「读取配置」
+    s.mockProbe.cfg.padDc = 0; s.mockProbe.cfg.padRst = 0; s.mockProbe.cfg.padBl = 0;
+    document.getElementById('sp-get').click();
+    await new Promise(r => setTimeout(r, 400));
+    return { dc: document.getElementById('sp-pad-dc').value, rst: document.getElementById('sp-pad-rst').value,
+             bl: document.getElementById('sp-pad-bl').value, cfg: s.cfg,
+             log: document.getElementById('sp-log').textContent };`);
+  ok(empty.cfg.padDc === 0 && empty.dc === '14' && empty.rst === '5' && empty.bl === '13',
+     `探针里是"不用"时面板预填推荐脚位（探针 ${empty.cfg.padDc}/${empty.cfg.padRst}/${empty.cfg.padBl} → 面板 ${empty.dc}/${empty.rst}/${empty.bl}）`);
+  ok(/已按推荐脚位预填/.test(empty.log), '日志里说明了"预填还没写进探针"');
+  // 收尾：把假探针恢复成推荐值，后面几个小节继续用
+  await ev(`
+    const s = window.__tools.spiSession;
+    s.mockProbe.cfg.padDc = 14; s.mockProbe.cfg.padRst = 5; s.mockProbe.cfg.padBl = 13;
+    document.getElementById('sp-get').click();
+    await new Promise(r => setTimeout(r, 300));
+    return 1;`);
+
   const applied = await ev(`
     document.getElementById('sp-sclk').value = '40000000';
     document.getElementById('sp-mode').value = '0';
