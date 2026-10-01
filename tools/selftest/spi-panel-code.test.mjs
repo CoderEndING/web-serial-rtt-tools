@@ -441,12 +441,20 @@ console.log('== A6. samples/panel-init 的样例表（整段贴进页面就能�
   const r = C.parsePanelCode(src);
   ok(r.format === 'c' && r.errors.length === 0,
      `样例能被页面同款解析器读懂（format=${r.format} · 错误 ${r.errors.length}）`);
-  ok(r.rows.length === 43 && r.stats.paramsBytes === 134 && r.stats.delayMs === 0,
-     `GC9A01 样例：43 条 / 参数 134 B / 无延时项（实际 ${r.rows.length} 条 · ${r.stats.paramsBytes} B · 延时 ${r.stats.delayMs} ms）`);
-  ok((r.rows[0].cmd & 0xff) === 0xeb && (r.rows[r.rows.length - 1].cmd & 0xff) === 0x98,
-     '首条 0xEB、末条 0x98（与源 dump 顺序一致）');
-  ok(/没有延时项/.test(src) && /0x11/.test(src) && /0x29/.test(src),
-     '文件头写明"表内无延时、0x11/0x29 在表外"这个坑（否则照抄进工程必漏）');
+  ok(r.rows.length === 51 && r.stats.paramsBytes === 136 && r.stats.delayMs === 360,
+     `GC9A01：51 条 / 参数 136 B / 延时 360 ms（实际 ${r.rows.length} 条 · ${r.stats.paramsBytes} B · ${r.stats.delayMs} ms）`);
+  /* 🚨 回归钉子（2026-10）：dump JSON 会**丢掉零参数命令**，我们那份就丢过 5 条 ——
+   *    其中 0xEF/0xFE 是寄存器解锁、0x21 是开反显（厂商源码里标 critical）。
+   *    这里按"命令 + 参数字节数"逐个钉住，谁再把它们弄丢就会红。 */
+  const cmds = r.rows.map(x => [x.cmd & 0xff, (x.data ?? x[1] ?? []).length]);
+  for (const [cmd, len, why] of [[0xef, 0, '解锁'], [0xfe, 0, '解锁'], [0x35, 0, '关撕裂'], [0x21, 0, '开反显'], [0x29, 0, 'display on']]){
+    ok(cmds.some(([c, l]) => c === cmd && l === len),
+       `含 0x${cmd.toString(16).toUpperCase().padStart(2, '0')}（${why}）—— dump 生成时最容易丢的就是这类零参数命令`);
+  }
+  ok(cmds[0][0] === 0x01 && cmds[1][0] === 0x11 && cmds[cmds.length - 1][0] === 0x29,
+     '表外补入的 0x01(软复位) / 0x11(sleep out) 在表头、0x29(display on) 在表尾（与驱动 LCD_Init 次序一致）');
+  ok(/按声明长度补 0/.test(src) && /0xFF: 声明 4 B/.test(src),
+     '文件头记下了"源码里 0xFF 声明 4 B 只给 3 B"这类不一致（本表按声明长度补 0，与 SDK 行为一致）');
 }
 
 console.log(`\n${fail ? '❌' : '✅'} spi-panel-code.test: ${pass} 通过 / ${fail} 失败`);

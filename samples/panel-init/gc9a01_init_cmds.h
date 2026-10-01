@@ -2,25 +2,33 @@
  * GC9A01 初始化序列 —— **由脚本生成，别手改**
  *
  *   生成器: tools/dev/panel-json-to-c.mjs
- *   来源  : E:\esp-idf-wsh\资料\panel_init\dumps\gc9a01.json
- *           提取自 SiFli-SDK 的 customer/peripherals/gc9a01/gc9a01.c
- *           （该驱动在 SDK 里的注册名是 ST7789V_GMT024）
- *   接口  : lcdc_int_cfg: LCDC_INTF_SPI_DCX_1DATA · 48 MHz · LCDC_PIXEL_FORMAT_RGB565
- *   分辨率: dump 里为 null（取自板级宏）—— 别当成已知值
- *   规模  : 命令 43 条（dump 自报 row_count 43）
- *           dump 另记：表外 LCD_WriteReg 15 次 · HAL_Delay 5 次 · HAL_Delay_us 0 次
+ *   来源  : C:\Users\Administrator\Desktop\gc9a01.txt
+ *             厂商源码（SiFli-SDK 同款）：表 lcd_init_cmds[][MAX_CMD_LEN] · LCD_DRIVER_EXPORT2(ST7789V_GMT024)
+ *   接口  : LCDC_INTF_SPI_DCX_1DATA · 48 MHz · LCDC_PIXEL_FORMAT_RGB565
+ *   说明  : 表内 48 条来自源码；表外 3 条按 LCD_Init 的次序补入（行前有注释标出）
+ *   规模  : 命令 51 条 · 参数 136 B · 带延时 3 条（延时合计 360 ms）
  *
+ * ⚠️ 源码里"长度声明与实际给的字节数不符"的行（本表**按声明长度补 0**，与 SDK 行为一致）：
+ *      0xFF: 声明 4 B，源码只写了 3 B
+ *      0xDF: 声明 4 B，源码只写了 3 B
  * ⚠️ 表内**没有延时项**，也**不含** 0x11（sleep out）/ 0x29（display on）——
- *    SDK 驱动把它们写在初始化表**外面**。上屏前自己补：0x11 → 等 ≥120 ms → 0x29；
- *    IPS 圆屏模块（GC9A01 那类）通常还要先发 0x21 开反显，颜色才正。
+ *    SDK 驱动把它们写在初始化表**外面**（本文件已按 LCD_Init 的次序把表外命令补进来，见下面的分隔注释）。
+ *    上屏前还要自己补：复位（RST 低 → 20 ms → 高 → ≥120 ms）；IPS 圆屏（GC9A01 那类）需要 0x21 开反显。
  * ⚠️ 圆屏模块常见规格 1.28 吋 240×240，以你手上模块为准
+ * ⚠️ 表头那几条 0xEF/0xEB/0xFE/0xEF 与末尾 0x21 在厂商源码里被标了 critical，别删
  *
  * 格式: {cmd, data, data_bytes, delay_ms} —— delay 是**该命令之后**的延时。
  * 用法: 整段贴进网页「SPI/QSPI 屏」页的『面板初始化』大框即可解析（本来就是 C 数组）。
  */
-// lcd_init_cmds：43 条
 static const lcd_init_cmd_t gc9a01_init_cmds[] = {
+    // ↓ 表外（驱动 LCD_Init 里、初始化表之前）
+    {0x01, NULL, 0, 120},
+    // ↓ 表外（驱动 LCD_Init 里、初始化表之前）
+    {0x11, NULL, 0, 120},
+    {0xEF, NULL, 0, 0},
     {0xEB, (uint8_t[]){0x14}, 1, 0},
+    {0xFE, NULL, 0, 0},
+    {0xEF, NULL, 0, 0},
     {0xEB, (uint8_t[]){0x14}, 1, 0},
     {0x84, (uint8_t[]){0x40}, 1, 0},
     {0x85, (uint8_t[]){0xFF}, 1, 0},
@@ -40,13 +48,13 @@ static const lcd_init_cmd_t gc9a01_init_cmds[] = {
     {0x90, (uint8_t[]){0x08, 0x08, 0x08, 0x08}, 4, 0},
     {0xBD, (uint8_t[]){0x06}, 1, 0},
     {0xBC, (uint8_t[]){0x00}, 1, 0},
-    {0xFF, (uint8_t[]){0x60, 0x01, 0x04}, 3, 0},
+    {0xFF, (uint8_t[]){0x60, 0x01, 0x04, 0x00}, 4, 0},
     {0xC3, (uint8_t[]){0x13}, 1, 0},
     {0xC4, (uint8_t[]){0x13}, 1, 0},
     {0xC9, (uint8_t[]){0x22}, 1, 0},
     {0xBE, (uint8_t[]){0x11}, 1, 0},
     {0xE1, (uint8_t[]){0x10, 0x0E}, 2, 0},
-    {0xDF, (uint8_t[]){0x21, 0x0C, 0x02}, 3, 0},
+    {0xDF, (uint8_t[]){0x21, 0x0C, 0x02, 0x00}, 4, 0},
     {0xF0, (uint8_t[]){0x45, 0x09, 0x08, 0x08, 0x26, 0x2A}, 6, 0},
     {0xF1, (uint8_t[]){0x43, 0x70, 0x72, 0x36, 0x37, 0x6F}, 6, 0},
     {0xF2, (uint8_t[]){0x45, 0x09, 0x08, 0x08, 0x26, 0x2A}, 6, 0},
@@ -63,4 +71,8 @@ static const lcd_init_cmd_t gc9a01_init_cmds[] = {
     {0x67, (uint8_t[]){0x00, 0x3C, 0x00, 0x00, 0x00, 0x01, 0x54, 0x10, 0x32, 0x98}, 10, 0},
     {0x74, (uint8_t[]){0x10, 0x85, 0x80, 0x00, 0x00, 0x4E, 0x00}, 7, 0},
     {0x98, (uint8_t[]){0x3E, 0x07}, 2, 0},
+    {0x35, NULL, 0, 0},
+    {0x21, NULL, 0, 120},
+    // ↓ 表外（驱动 LCD_Init 里、初始化表之后）
+    {0x29, NULL, 0, 0},
 };
