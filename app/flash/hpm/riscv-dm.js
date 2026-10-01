@@ -91,10 +91,84 @@ export class RiscvTransport {
     await this.dmiWrite(DM.DMCONTROL, DMCONTROL.dmactive);
     // ⑥ 判据
     this.lastDmstatus = (await this.dmiRead(DM.DMSTATUS)) >>> 0;
+    /**
+     * 🚨 **`dmstatus` 读回 0（连 version 字段都是 0）= DM 停在 `dmactive=0`**（2026-10-01 现场）：
+     *    上面那句"dmcontrol=0 复位 DM"之后、"dmactive=1 唤醒"这一笔只要被链路抖掉一次，
+     *    整个 DM 就静默地留在未激活态 —— 表现是 **TAP 能读 IDCODE、但 DMI 全 0**、
+     *    `haltreq` 无效（用户现场日志正是 `dmstatus=0x0（version=0）`）。
+     *    规范里 **dmcontrol 即使 DM 未激活也仍然可写**，所以这里多叫几次；还不行就
+     *    TAP 复位 + `dtmcs.dmihardreset`（bit17）把 DTM 整个复位后再叫 —— 都失败才抛。
+     */
+    if (!this.lastDmstatus){
+      this.lastDmstatus = await this._dmWakeRecover();
+      if (!this.lastDmstatus){
+        throw new Error('调试模块不应答：dmstatus 一直读回 0（DM 停在未激活态，叫不醒）——' +
+          '把**探针 USB 和板子电源一起拔掉 10 秒**再插（只拔板子电源不够：探针 5V 还在供电）');
+      }
+    }
+    /**
+     * 🚨 **"DMI 冻住"判别**（2026-10-01 现场）：读**两个不同的** DM 寄存器却得到**完全相同的值**
+     *    （典型：`dmcontrol` 读回等于 `dmstatus`）—— 真机不可能这样，这是 DMI 卡在
+     *    "重复返回上一次响应"（响应寄存器冻住、写不落地 → `haltreq` 无效、reset-halt 也停不住）。
+     *    按规范这类态要 POR，但实测**TAP 复位 + `dtmcs.dmihardreset` + 重新 dmactive** 有机会救回来，
+     *    所以这里自动试一次；救不回来才让上层报错（提示拔探针 USB + 板子电源）。
+     */
+    try {
+      const dmc = (await this.dmiRead(DM.DMCONTROL)) >>> 0;
+      if (dmc === this.lastDmstatus){
+        this.log(` ⚠ DMI 像是冻住了（dmcontrol 与 dmstatus 都读回 0x${dmc.toString(16)}）→ 试硬复位 DTM`);
+        const st = await this._dmWakeRecover();
+        if (st) this.lastDmstatus = st;
+        // 救回来没有？**必须复验**：救不回来就当场抛明确错误，别让上层白等 3~6 秒的 halt 超时
+        // （真机实测：这种态 `dmihardreset` 也救不回来，只能 POR / BOOT0+复位）
+        let stillFrozen = false;
+        try {
+          const dmc2 = (await this.dmiRead(DM.DMCONTROL)) >>> 0;
+          stillFrozen = (dmc2 === this.lastDmstatus) || ((await this.dmiRead(DM.DMSTATUS)) >>> 0) === dmc2;
+        } catch { stillFrozen = true; }
+        if (stillFrozen){
+          throw new Error('调试模块的 DMI 冻住了（两个 DM 寄存器读回同一个值、写不落地，haltreq 无效）——' +
+            '硬复位 DTM 也救不回来。请**把探针 USB 和板子电源一起拔掉 10 秒**再插，' +
+            '或用板子的 **BOOT0 + 复位** 把它拉回来（实测两者都有效）');
+        }
+        this.log(' ✅ 硬复位 DTM 后 DM 恢复应答');
+      }
+    } catch (e){
+      if (/冻住/.test(String(e.message))) throw e;
+      /* 其它读失败就走正常路径报错 */
+    }
     this.open = true;
     this.log(`RISC-V DM：idcode=0x${this.idcode.toString(16)} dtmcs=0x${this.lastDtmcs.toString(16)} ` +
              `dmstatus=0x${this.lastDmstatus.toString(16)}（version=${DMSTATUS.version(this.lastDmstatus)}）`);
     return { idcode: this.idcode, dtmcs: this.lastDtmcs, dmstatus: this.lastDmstatus };
+  }
+
+  /**
+   * **把不应答的 DM 叫醒**（dmstatus 读回 0 = `dmactive=0`；或 DMI 冻住时先硬复位 DTM）。
+   * 返回叫醒后的 dmstatus（0 表示没救回来）。见 `init()` 里两处调用的注释。
+   */
+  async _dmWakeRecover(){
+    for (let i = 0; i < 5; i++){
+      try {
+        await this.dmiWrite(DM.DMCONTROL, DMCONTROL.dmactive);
+        await new Promise(r => setTimeout(r, 50));
+        const st = (await this.dmiRead(DM.DMSTATUS)) >>> 0;
+        if (st) return st;
+      } catch { /* 继续试 */ }
+    }
+    try {
+      await this.sequences(tapReset());
+      await this.sequences(tapLoadIR(IR_DTMCS));
+      await this._scanDR(DR_DTMCS_BITS, 1n << 17n);          // bit17 = dmihardreset
+      await this.sequences(tapReset());
+      await this.sequences(tapLoadIR(IR_DMI));
+      await this.dmiPost(DMI_OP.NOP, 0, 0);
+      await this.dmiPost(DMI_OP.NOP, 0, 0);
+      await this.dmiWrite(DM.DMCONTROL, DMCONTROL.dmactive);
+      const st = (await this.dmiRead(DM.DMSTATUS)) >>> 0;
+      if (st) this.log(' DM 之前不应答 → TAP 复位 + dmihardreset 后已唤醒');
+      return st;
+    } catch { return 0; }
   }
 
   /**
