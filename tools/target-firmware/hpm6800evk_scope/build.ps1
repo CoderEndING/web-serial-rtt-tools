@@ -34,6 +34,7 @@ $elf = Join-Path $bdir 'output\demo.elf'      # SDK 统一把可执行文件叫 
 if (Test-Path $elf) {
     $nm = "$sdkEnv\toolchains\rv32imac_zicsr_zifencei_multilib_b_ext-win\bin\riscv32-unknown-elf-nm.exe"
     Write-Output ""
-    Write-Output "J-Scope 契约变量块（把它填进 --base）："
+    Write-Output "J-Scope 变量块（g_v = 契约块 / g_v_hi = 高速平滑块，把它填进 --base）："
     & $nm -S $elf | Select-String 'g_v|g_mchtmr_hz|g_updates'
 }
+

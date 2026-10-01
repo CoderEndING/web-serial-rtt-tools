@@ -18,6 +18,23 @@
  *   | +24 | u_ramp  | u32  | 0..999 每拍 +1 的斜坡（10 kHz 周期 = 100 ms） |
  *   | +28 | lfsr    | u32  | 32 位 LFSR，每拍一步（伪随机，验"值在动"） |
  *
+ * 🟢 **高速平滑块 `g_v_hi`（2026-10 另加，契约块一个字节都没动）**
+ *
+ * 契约块是 **10 kHz 更新 + 20 点查表** ⇒ 一个 500 Hz 周期只有 20 个**不同**值、
+ * 每级台阶 100 µs。用 100 kHz 采样时，一个台阶里 10 个采样点取到同一个值，
+ * J-Scope 上看到的就是"台阶"（**不是采样率不够**，是信号本身就这样——这就是"契约"）。
+ * 想看**连续**曲线必须让**更新率 ≫ 采样率**，所以另开一块：
+ *
+ *   | 偏移 | 名字          | 类型 | 内容 |
+ *   | --- | --- | --- | --- |
+ *   | +0  | g_v_hi.tick   | u32  | 200 kHz 计数（每 5 µs +1）—— 用来核对**真实更新率** |
+ *   | +4  | g_v_hi.f_sin  | f32  | 500 Hz 平滑正弦（400 级），-1..+1 |
+ *
+ * 频率 = 更新率 / 表长 = 200 kHz / 400 = **500.00 Hz**（表 `kSinHi[]` 由
+ * `tools/dev/gen-sin-table.py` 生成，改表长必须同步改本文件的 `HI_UPDATE_HZ`）。
+ * 采样 100 kHz 时两次采样之间信号必变 ⇒ 画出来是连续曲线。
+ * 判据：`g_v_hi.tick` 每级台阶 +1、采样相邻两点的 tick 差 ≈ 采样率/200 kHz。
+ *
  * 🚨 **变量块必须放非缓存区**（`.noncacheable.bss` → 0x01240000 起，256 KB）。
  * 原因：探针读目标内存走 **SBA（系统总线访问）**，**绕过 CPU 的 D-cache**。放在可
  * 缓存区（0x01200000~0x0123FFFF）的变量，只要那一行还待在 cache 里没被逐出，
@@ -46,6 +63,7 @@
 #include "hpm_clock_drv.h"
 #include "hpm_common.h"
 #include "hpm_mchtmr_drv.h"
+#include "sin_hi_table.h"   /* kSinHi[]：400 点正弦表（自动生成，见 tools/dev/gen-sin-table.py） */
 
 typedef struct
 {
@@ -59,8 +77,20 @@ typedef struct
     volatile uint32_t lfsr;
 } scope_vars_t;
 
+/** 高速平滑块：更新率 ≫ 采样率，用来在 J-Scope 上看"连续"波形（见文件头） */
+typedef struct
+{
+    volatile uint32_t tick;     /* +0  200 kHz 计数（每 5 µs +1） */
+    volatile float    f_sin;    /* +4  500 Hz 平滑正弦（400 级），-1..+1 */
+} scope_hi_vars_t;
+
+/* g_v_hi 的更新率：200 kHz（5 µs 一拍）。改这个值必须同步改 kSinHi[] 的表长，
+ * 否则频率不再是 500 Hz：f = HI_UPDATE_HZ / SIN_HI_N */
+#define HI_UPDATE_HZ 200000U
+
 /* ---- 契约块（非缓存区，探针 SBA 直读得到当前值）---- */
 ATTR_PLACE_AT_NONCACHEABLE_BSS_WITH_ALIGNMENT(32) volatile scope_vars_t g_v;
+ATTR_PLACE_AT_NONCACHEABLE_BSS_WITH_ALIGNMENT(32) volatile scope_hi_vars_t g_v_hi;  /* 高速平滑块 */
 ATTR_PLACE_AT_NONCACHEABLE_BSS volatile uint32_t g_mchtmr_hz;  /* 实测 MCHTMR 频率 */
 ATTR_PLACE_AT_NONCACHEABLE_BSS volatile uint32_t g_updates;    /* 更新次数（tick 的镜像） */
 /* 自描述头：主机可以先读这两个字确认"这里的 32 B 就是变量块" */
@@ -128,9 +158,26 @@ int main(void)
     uint32_t t = 0U;
     uint32_t lfsr = 0x12345678U;
 
+    /* 高速平滑块的节拍：200 kHz（5 µs）。MCHTMR 是 24 MHz ⇒ hi_step = 120，整除无误差；
+     * 万一主频不是整倍数，用 while 补齐（下面），频率只由 hi_step 决定，不受循环抖动影响。 */
+    const uint32_t hi_step = (hz / HI_UPDATE_HZ) ? (hz / HI_UPDATE_HZ) : 1U;
+    uint32_t next_hi = (uint32_t)mchtmr_get_count(HPM_MCHTMR) + hi_step;
+    uint32_t th = 0U;
+
     for (;;)
     {
         uint32_t now = (uint32_t)mchtmr_get_count(HPM_MCHTMR);
+
+        /* ---- 高速平滑拍：每 5 µs 写一次（while 补齐欠账，保证 f = HI_UPDATE_HZ / SIN_HI_N 精确）----
+         * 两个 volatile 写是**非缓存区**，约几十 ns；200 kHz 下占 CPU 个位数百分比。
+         * 注意契约块的节拍一个字都没改 —— 这里只多花一点循环时间。 */
+        while ((int32_t)(now - next_hi) >= 0)
+        {
+            next_hi += hi_step;
+            th++;
+            g_v_hi.tick  = th;
+            g_v_hi.f_sin = kSinHi[th % SIN_HI_N];
+        }
 
         /* 只推进到"到点了"为止：轮询抖动是几十 ns，10 kHz 完全够用 */
         if ((int32_t)(now - next) < 0)

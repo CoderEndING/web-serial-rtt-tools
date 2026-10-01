@@ -96,6 +96,11 @@ test-hpm:
 hpm-algo:
 	pwsh -NoProfile -File tools/target-firmware/hpm_flash_algo/build.ps1
 
+# 靶子固件的「高速平滑正弦」表：仓库里那份必须与生成公式一致
+# （改了表长或更新率就要重跑 python tools/dev/gen-sin-table.py）
+sin-table-check:
+	python tools/dev/gen-sin-table.py --check
+
 # 桥的 WebSocket 准入（Origin 白名单 + 口令）：纯离线，自己拉一个桥实例只做握手
 test-bridge-gate:
 	$(NODE) tools/selftest/bridge-origin.test.mjs
