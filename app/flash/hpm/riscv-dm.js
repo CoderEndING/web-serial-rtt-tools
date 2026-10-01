@@ -130,10 +130,31 @@ export class RiscvTransport {
     return caps;
   }
 
-  /** 发一条 DMI 请求，返回**上一次**请求的响应（流水线语义）*/
+  /**
+   * 发一条 DMI 请求，返回**上一次**请求的响应（流水线语义）*/
   async dmiPost(op, addr = 0, data = 0){
     const bits = await this._scanDR(DR_DMI_BITS, dmiRequest(op, addr, data));
     return dmiResponse(bits);
+  }
+
+  /**
+   * **解 DTM 的 DMI 错误态**：响应 `op=3`（既不是 SUCCESS 也不是 BUSY）就是它。
+   *
+   * 🚨 2026-10-01 真机现场（用户手动烧录，挂在这里）：日志 `DMI 写 0x39 失败（op=3）`——
+   *    0x39 是 `sbaddress0`，op=3 说明 DTM 的 DMI 状态机进了错误态；规范写明
+   *    **此后所有 DMI 操作都不会被处理，直到写 `dtmcs.dmireset`**（sticky，自愈不了）。
+   *    我们原来只对 BUSY(1) 重试，遇到 op=3 直接抛错 → 整轮烧录中止（第一段已经写着"校验 OK"了）。
+   *    OpenOCD 处理这条（它的 dmi 层会看 dtmcs），我们照做：
+   *      装 IR=DTMCS → 写 bit16（dmireset）→ 装回 IR=DMI → 投两条 NOP 排空流水线。
+   *    写 dmireset 只清错误态、不动 DM 里的任何状态，所以**重试是安全的**。
+   */
+  async dmiReset(){
+    this.dmiResets = (this.dmiResets || 0) + 1;
+    await this.sequences(tapLoadIR(IR_DTMCS));
+    await this._scanDR(DR_DTMCS_BITS, 1n << 16n);        // bit16 = dmireset（写 1 清 sticky 错误 + 复位 DMI 状态机）
+    await this.sequences(tapLoadIR(IR_DMI));
+    await this.dmiPost(DMI_OP.NOP, 0, 0);                // 排空一拍，丢掉复位前那条挂起的响应
+    this.log(` DTM 的 DMI 进了错误态（op=3）→ 写 dmireset 清掉，第 ${this.dmiResets} 次`);
   }
 
   /**
@@ -148,6 +169,12 @@ export class RiscvTransport {
       await this.dmiPost(DMI_OP.READ, addr, 0);          // 冲掉上一条挂起的响应
       const r = await this.dmiPost(DMI_OP.NOP, 0, 0);    // 这条才是读的结果
       if (r.op === DMI_STATUS.SUCCESS) return r.data;
+      /**
+       * 🚨 `op=3` = DTM 的 DMI 进了错误态（不是 BUSY、也不是目标回 ERROR）——
+       *    规范：此后所有 DMI 操作都不被处理，**必须写 `dtmcs.dmireset` 才能继续**。
+       *    这里当场清掉重试（2026-10-01 用户现场：一个 op=3 就把整轮烧录中止了）。
+       */
+      if (r.op === 3){ await this.dmiReset(); continue; }
       if (r.op !== DMI_STATUS.BUSY) throw new Error(`DMI 读 0x${addr.toString(16)} 失败（op=${r.op}）`);
       if (Date.now() - t0 > timeoutMs){
         throw new Error(`DMI 读 0x${addr.toString(16)} 一直 BUSY（超过 ${timeoutMs} ms）——` +
@@ -164,10 +191,12 @@ export class RiscvTransport {
    *    "BUSY 就重来"，我们原来是直接抛错 → 表现成"烧录偶发失败/卡住"。这里最多重试 4 次。
    */
   async dmiWrite(addr, data){
-    for (let attempt = 0; attempt < 4; attempt++){
+    for (let attempt = 0; attempt < 6; attempt++){
       await this.dmiPost(DMI_OP.WRITE, addr, data);
       const r = await this.dmiPost(DMI_OP.NOP, 0, 0);
       if (r.op === DMI_STATUS.SUCCESS) return;
+      // `op=3` = DTM 的 DMI 进了错误态 → 写 dmireset 清掉重试（见 dmiReset 的注释）
+      if (r.op === 3){ await this.dmiReset(); continue; }
       if (r.op !== DMI_STATUS.BUSY) throw new Error(`DMI 写 0x${addr.toString(16)} 失败（op=${r.op}）`);
     }
     throw new Error(`DMI 写 0x${addr.toString(16)} 一直 BUSY（DM 没跟上）`);
