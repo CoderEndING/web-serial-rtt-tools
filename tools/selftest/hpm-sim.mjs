@@ -73,6 +73,8 @@ export class SimTarget {
     this.romReads = 0;                          // ROM 的 flash_read 真跑了几次
     this.xipCopies = 0;                         // XIP 拷贝例程跑了几次（verify 走这条）
     this.romReadWedged = false;                 // 命中"ROM 读楔死总线"那个真机 bug
+    this.injectOp3 = 0;                         // 故障注入：接下来 N 条 DMI 响应 op=3（DTM 错误态）
+    this.dmiResets = 0;                         // 主机侧写了几次 dtmcs.dmireset
     this.readWedgedNow = false;
     this.log = [];
     // 统计（自测断言用）
@@ -159,8 +161,24 @@ export class SimTarget {
     if ((S.ir & 0x1f) === 0x01){
       return;                                   // IDCODE：只读
     }
+    if ((S.ir & 0x1f) === 0x10){
+      // DTMCS 写：只认 dmireset（bit16）—— 真机语义：它清掉 DTM 的 DMI 错误态。
+      // 2026-10-01 用户现场就靠这一下自愈（`DMI 写 0x39 失败（op=3）`）。
+      if (S.dr & (1n << 16n)) this.dmiResets = (this.dmiResets || 0) + 1;
+      return;
+    }
     if ((S.ir & 0x1f) !== 0x11) return;
     this.stats.scans++;
+    /**
+     * 故障注入：模拟"DTM 的 DMI 进了错误态"—— 接下来 N 条 DMI 响应 op=3
+     * （既不是 SUCCESS 也不是 BUSY）。主机侧应该写 dtmcs.dmireset 后重试，而不是直接抛错。
+     */
+    if (this.injectOp3 > 0){
+      this.injectOp3--;
+      this.op3Injected = (this.op3Injected || 0) + 1;
+      this.pendingDmi = 3n;
+      return;
+    }
     // 41 位 DMI：op(2) | data(32)<<2 | addr(7)<<34
     const req = S.dr & ((1n << 41n) - 1n);
     const op = Number(req & 0x3n);

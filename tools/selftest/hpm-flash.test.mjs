@@ -274,6 +274,28 @@ console.log('== 4b. verify 走 XIP 窗口（2026-10 LA 解码 OpenOCD 波形定�
      `反证成立：走 ROM 的 read 读同一段 → 模拟目标楔死、等 halt 超时（${wedgeErr.split('（')[0].trim()}）`);
 }
 
+// ------------------------------------------------------------------ 4c
+console.log('== 4c. DMI 进错误态（响应 op=3）→ 写 dtmcs.dmireset 自愈 ==');
+{
+  /**
+   * 现场（2026-10-01 用户手动烧录）：`DMI 写 0x39 失败（op=3）` —— 0x39 是 sbaddress0，
+   * op=3 是 **DTM 的 DMI 错误态**（规范：此后所有 DMI 操作都不被处理，直到写 dtmcs.dmireset）。
+   * 当时我们直接抛错 → 整轮中止，还停在"第二段已擦除、未写完"。这条钉子钉住"会自愈"。
+   */
+  const sim = new SimTarget({ ramSize: 0x8000 });
+  const dm = new RiscvTransport(sim, { idle: 7 });
+  await dm.init(); await dm.activate(0); await dm.halt();
+  sim.sbaError = false;
+  sim.injectOp3 = 1;                      // 注入一条 op=3
+  await dm.dmiWrite(0x39, 0x01234567);    // 应该：dmiReset → 重试 → 成功
+  ok(sim.op3Injected === 1 && sim.dmiResets === 1,
+     `遇到 op=3 写了 1 次 dmireset 并重试（注入 ${sim.op3Injected} 次 / dmireset ${sim.dmiResets} 次）`);
+  ok(sim.dm.sbaddress === 0x01234567, `重试之后那条写真的落地了（sbaddress0 = 0x${sim.dm.sbaddress.toString(16)}）`);
+  // 读路径同理
+  sim.injectOp3 = 1;
+  const v = await dm.dmiRead(0x10);
+  ok(sim.dmiResets === 2 && typeof v === 'number', `读路径遇到 op=3 也会自愈（dmireset 累计 ${sim.dmiResets} 次）`);
+}
 // ------------------------------------------------------------------ 5
 console.log('== 5. 板级参数与状态码文案 ==');
 {
