@@ -68,8 +68,20 @@ export class HpmFlasher {
      *    `opts.resetFirst === false` 可关掉（离线自测/特殊场合用）。
      */
     if (this.resetFirst !== false){
+      /**
+       * 🚨 **这里必须硬要求 `resetHalt` 存在**（2026-10-01 用户现场）：
+       *    原来写的是 `await this.dm.resetHalt?.()` —— 一旦页面是**混版**（`flash.js` 是新的、
+       *    `riscv-dm.js` 还是旧的，GitHub Pages 按文件缓存 10 分钟很容易这样），
+       *    可选链会让这一步**静默跳过**，而下面那行日志照样打印"已 reset-halt"——
+       *    于是现象变成"日志看着是对的、第一次 erase 还是卡 60 s"（用户实测整整查了一轮）。
+       *    现在缺方法就直接报错并说清怎么办。
+       */
+      if (typeof this.dm.resetHalt !== 'function'){
+        throw new Error('页面模块版本不一致：flash.js 是新的，但 riscv-dm.js 还是旧的（没有 resetHalt）。' +
+          ' GitHub Pages 对 JS 有 10 分钟 HTTP 缓存，按 **Ctrl+Shift+R** 强制刷新页面再烧');
+      }
       const t = Date.now();
-      await this.dm.resetHalt?.();
+      await this.dm.resetHalt();
       // ndmreset 之后 DM 也要重新建立（TAP 复位 + dmcontrol 0→1 + halt）
       try { await this.dm.init(); } catch { /* 失败就让后面的调用去报错 */ }
       await this.dm.activate(0);
