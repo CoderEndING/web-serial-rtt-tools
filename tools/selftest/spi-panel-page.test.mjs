@@ -177,18 +177,32 @@ console.log('== 1b. 布局（用户 2026-10 定稿）：右列 tab 化（刷屏 
   ok(L.fold === 0, '折叠按钮**全部删除**（tab 本身就是显示 / 隐藏）');
   ok(L.docOverflow === false, '整页没有横向滚动条');
 
-  // 每个 tab 页**吃满整块高度**、且不出现纵向滚动（矮窗口才允许内部兜底滚动）
+  // 每个 tab 页**吃满整块高度**、不出现纵向滚动（矮窗口才允许内部兜底滚动）
   for (const t of ['img', 'code', 'read']){
     await selectDock(t);
     const m = await ev(`
       const pg = document.querySelector('#pn-box-dock .dockpage.on');
       const dock = document.getElementById('pn-box-dock').getBoundingClientRect();
+      // "被压扁"= overflow:hidden 的元素被 flex 缩到内容以下（字会被切掉一半）——
+      // 用户 2026-10 截图就是摘要行被压成 4px。auto/scroll 的那两块本来就该自己滚，不算。
+      const clipped = [...pg.children].filter(el => {
+        const cs = getComputedStyle(el);
+        return cs.overflowY === 'hidden' && el.getBoundingClientRect().height + 1 < el.scrollHeight;
+      }).map(el => el.id || el.className);
+      // 空间真的不够时，允许 tab 页自己滚 —— 但前提是"该让位的那块已经缩到 min-height 了"
+      const flexEl = pg.querySelector('#pn-code-wrap, .canvasrow, .readrow');
+      const minH = parseFloat(getComputedStyle(flexEl).minHeight) || 0;
       return { tab: pg.dataset.dock, h: Math.round(pg.getBoundingClientRect().height),
                dockH: Math.round(dock.height), legendH: Math.round(document.querySelector('#pn-box-dock>legend').getBoundingClientRect().height),
-               over: pg.scrollHeight - pg.clientHeight };`);
+               over: pg.scrollHeight - pg.clientHeight, clipped,
+               flexH: Math.round(flexEl.getBoundingClientRect().height), minH, flexName: flexEl.id || flexEl.className };`);
     // 断言用**相对量**：窗口多大都不该假红（自测跑在用户那个窗口上，尺寸不由我们定）
-    ok(m.tab === t && m.h >= m.dockH - m.legendH - 24 && m.over <= 1,
-       `「${t}」tab 吃满整块高度（${m.h}px ≈ dock ${m.dockH} − tab栏 ${m.legendH}）、内容不溢出（差 ${m.over}px）`);
+    ok(m.tab === t && m.h >= m.dockH - m.legendH - 24,
+       `「${t}」tab 吃满整块高度（${m.h}px ≈ dock ${m.dockH} − tab栏 ${m.legendH}）`);
+    ok(m.clipped.length === 0,
+       `「${t}」里没有控件行被压扁（${m.flexName} 让位到 ${m.flexH}px / 下限 ${m.minH}）` + (m.clipped.length ? ` —— 被压的是 ${m.clipped.join(', ')}` : ''));
+    ok(m.over <= 1 || m.flexH <= m.minH + 1,
+       `「${t}」装得下就不滚（溢出 ${m.over}px；真装不下时是"${m.flexName}"先缩到下限 ${m.minH}px 再让整页滚）`);
   }
 
   // 刷屏 tab：预览画布填满所在行（原来 max-height:170px 写死，360×360 的屏缩到 138×170 根本看不清）
@@ -234,11 +248,14 @@ console.log('== 1b. 布局（用户 2026-10 定稿）：右列 tab 化（刷屏 
     const saved = JSON.parse(localStorage.getItem('serial-rtt-tools:v1') || '{}')['panel.codeH'];
     drag(30);
     await new Promise(r2 => setTimeout(r2, 150));
-    return { before, after, tableBefore, tableAfter, back: Math.round(ta.getBoundingClientRect().height), saved };`);
+    return { before, after, tableBefore, tableAfter, tableMin: parseFloat(getComputedStyle(wrap).minHeight),
+             back: Math.round(ta.getBoundingClientRect().height), saved };`);
   ok(drag.after > drag.before && Math.abs(drag.saved - drag.after) <= 2,
      `拖分隔条：文本框 ${drag.before} → ${drag.after}px，并记进 store（panel.codeH=${drag.saved}）`);
-  ok(drag.tableBefore - drag.tableAfter >= 20,
-     `文本框长高的那 30px 是从表格里让出来的（表格 ${drag.tableBefore} → ${drag.tableAfter}px）—— 弹性而非写死`);
+  // 表格已经被压到 min-height 时，让不出来的部分由"整页滚"接手 —— 所以按"还能让多少"来断
+  const canGive = Math.max(10, drag.tableBefore - drag.tableMin - 2);
+  ok(drag.tableBefore - drag.tableAfter >= Math.min(25, canGive),
+     `文本框长高的那 30px 是从表格里让出来的（表格 ${drag.tableBefore} → ${drag.tableAfter}px，下限 ${drag.tableMin}）—— 弹性而非写死`);
   ok(Math.abs(drag.back - drag.before) <= 2, `拖回去复原（${drag.back}px）`);
 
   // 读回 tab：**它自己的**画布（#pn-canvas 在刷屏 tab 里，非活动 tab 是 display:none）

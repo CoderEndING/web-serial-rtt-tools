@@ -422,7 +422,13 @@ fieldset[disabled] legend::after{content:' · 未实现';color:var(--warn)}
 #tab-panel .dockpage{display:none;flex:1 1 auto;min-height:0;flex-direction:column;gap:6px;overflow-y:auto;overflow-x:hidden}
 #tab-panel .dockpage.on{display:flex}
 #tab-panel .dockpage .toolrow{margin:0}
-#tab-panel .dockpage>p.hint{flex:none;margin:0}
+/* 🚨 tab 页里的**控件行一律不许被压**：flex 列布局默认 `flex-shrink:1`，窗口一矮就把它们
+   压到几像素 —— 字被切掉一半（用户 2026-10 截图："箭头所指的地方字都被掩盖了一半"，
+   实测 730 高的窗口下摘要行只剩 **4px**、内容要 22px）。
+   该让位的只有那张表 / 那块画布（下面单独给 `flex:1 1 auto` + `min-height`），
+   实在装不下就让 tab 页自己滚（`overflow-y:auto` 是兜底）。 */
+#tab-panel .dockpage>*{flex:none}
+#tab-panel .dockpage>p.hint{margin:0}
 #tab-panel .dockpage>.row{flex:none}
 /* 运行胶囊：切到哪个 tab 都看得到"屏页在跑什么"（刷图 / 重放 / 读回 / 播放） */
 #tab-panel .dockrun{color:var(--fg2);font-size:11.5px;font-family:var(--mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -437,8 +443,9 @@ fieldset[disabled] legend::after{content:' · 未实现';color:var(--warn)}
 /* 解析表：**不再写死 360px** —— tab 化之后它吃满剩余高度（文本框那截用 #pn-grip-code 拖）。
    矮窗口下也不再被别的卡挤扁（用户："初始化部分被压缩得太厉害了"）。 */
 #tab-panel #pn-code-wrap{flex:1 1 auto;min-height:120px;height:auto;max-height:none}
-/* 文本框：默认 110px、可拖 70~400（它本来就自己滚），省下的高度全给表格 */
-#tab-panel #pn-code-text{height:110px;min-height:70px;flex:none}
+/* 文本框：**按页高取 20%**（下限 70、上限 200）、可拖 —— 它本来就自己滚，
+   矮窗口下把高度让给表格（730 高的窗口：110 → 84，表格多出 26px；900 高时 ≈ 118，与原来持平） */
+#tab-panel #pn-code-text{height:20%;min-height:70px;max-height:200px;flex:none}
 /* 日志常驻：高度落在 #pn-logbox 上（`.log` 自己按 30% 算会因为父高为 0 而塌掉），可拖 + 记 store */
 #tab-panel #pn-logbox{flex:0 0 auto;height:150px;min-height:72px;display:flex;flex-direction:column}
 #tab-panel #pn-logbox .log{height:100%;min-height:0;flex:1 1 auto}
