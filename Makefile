@@ -87,6 +87,7 @@ test:
 	$(NODE) tools/selftest/dbg-core.test.mjs
 	$(NODE) tools/selftest/i2c-proto.test.mjs
 	$(NODE) tools/selftest/i2c-dsl.test.mjs
+	$(NODE) tools/selftest/scenery-samples.test.mjs
 
 # USB→I2C 页的协议层 + 假探针 + 假器件（AT24C02/MPU6050/ADS1115/Si5351）—— 不需要硬件
 test-i2c:
@@ -293,6 +294,14 @@ test-bridge:
 # 屏页「动画 / 视频」的示例素材（GIF / APNG / 动画 WebP / MP4 / WebM）—— 见 samples/anim/README.md
 samples-anim:
 	$(PY) tools/dev/make-anim-samples.py $(ARGS)
+
+# 屏页「图片/图案刷屏」的风景照片素材（4 类 x 2 张 x 2 种屏）—— 见 samples/test_images/scenery/README.md
+samples-scenery:
+	$(PY) tools/dev/make-scenery-samples.py $(ARGS)
+
+# 风景照片素材的完整性（文件齐 + parseBMP 解得动 + sha256 对账）—— 纯 Node、离线
+test-scenery:
+	$(NODE) tools/selftest/scenery-samples.test.mjs
 
 test-all: test test-ui test-hw test-bridge
 	pwsh -NoProfile -Command "Write-Host '全部自测跑完'"
