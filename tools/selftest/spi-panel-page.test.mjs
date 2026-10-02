@@ -753,7 +753,7 @@ console.log('== 7. 图片 / 图案刷屏 ==');
   ok(send.framesOk === 529 && send.framesErr === 0, `整屏 529 帧全成功（2 条开窗 + 527 片像素，实测 ${send.framesOk}）`);
   // 开窗在档 2 是两条 XFER（opcode + 00 XX 00 + 4 字节坐标），所以是 2×4 而不是老写法两条 STEP 的 16
   ok(send.bytesTx === 259200 + 8, `线上字节 = 像素 259200 + 开窗 8（QSPI 两条 XFER 各 4 字节坐标，实测 ${send.bytesTx}）`);
-  ok(/刷图完成：527 片/.test(send.log), `日志里给了切片数与速率（「${(send.log.match(/刷图完成[^\n]*/) || [''])[0]}」）`);
+  ok(/刷图完成[^：]*：527 片/.test(send.log), `日志里给了切片数与速率（「${(send.log.match(/刷图完成[^\n]*/) || [''])[0]}」）`);
 
   // R/B 交换：同一张图，勾上之后首片像素字节不同（抽验第一片的前 2 字节）
   const swap = await ev(`
@@ -1059,6 +1059,10 @@ console.log('== 9d. 攒批：USB 调用次数降一个数量级，设备侧收�
   const run = async (batchBytes, ms) => ev(`
     const sel = document.getElementById('pn-batch');
     sel.value = '${batchBytes}'; sel.dispatchEvent(new Event('change', { bubbles: true }));
+    /* 这一节量的是**攒批**：必须把局部刷新关掉，否则每帧只发变化区，
+       "292 帧/帧"这个基线就不成立了（局部刷新有它自己的 9f）。 */
+    const pc = document.getElementById('pn-partial');
+    if (pc.checked){ pc.checked = false; pc.dispatchEvent(new Event('change', { bubbles: true })); }
     await new Promise(r => setTimeout(r, 100));
     const p = window.__tools.spiSession.mockProbe;
     p.resetState();
@@ -1086,6 +1090,122 @@ console.log('== 9d. 攒批：USB 调用次数降一个数量级，设备侧收�
   // 收尾：把档位放回默认的 16 KB，别影响后面的用例
   await ev(`const sel = document.getElementById('pn-batch');
             sel.value = '16384'; sel.dispatchEvent(new Event('change', { bubbles: true })); return 1;`);
+}
+
+// ==================================================================== 9f
+console.log('== 9f. 局部刷新：只发变化包围盒（静图重复刷会整帧跳过，动画按面积提速）==');
+{
+  await selectDock('img');
+  // ① 两个开关是同一份状态（刷屏 tab 一个、动画行一个），HTML 默认都是勾上的
+  const sw = await ev(`
+    const a = document.getElementById('pn-partial'), b = document.getElementById('pn-anim-partial');
+    // 前几节可能把开关拨到关（9d 为了量攒批基线会关掉），这里先复位成"开"
+    for (const el of [a, b]) if (!el.checked){ el.checked = true; el.dispatchEvent(new Event('change', { bubbles: true })); }
+    const defaults = { a: a.defaultChecked, b: b.defaultChecked };
+    const before = { a: a.checked, b: b.checked };
+    a.checked = false; a.dispatchEvent(new Event('change', { bubbles: true }));
+    const after = { a: a.checked, b: b.checked };
+    a.checked = true; a.dispatchEvent(new Event('change', { bubbles: true }));
+    const back = { a: a.checked, b: b.checked };
+    return { defaults, before, after, back, tol: document.getElementById('pn-partial-tol').value,
+             sum: document.getElementById('pn-img-sum').textContent };`);
+  ok(sw.defaults.a === true && sw.defaults.b === true, '两个开关在 HTML 里默认都是勾上的（刷屏 tab + 动画行）');
+  ok(sw.before.a === true && sw.before.b === true, '当前两边都是开');
+  ok(sw.after.b === false, '改刷屏 tab 那个 → 动画行的副本跟着变（同一份状态双向同步）');
+  ok(sw.back.b === true, '再改回来 → 两边又一致');
+  ok(sw.tol === '1', `容差默认 1 位（视频/JPEG 的量化噪声靠它吃掉）`);
+  ok(/局部刷新：开/.test(sw.sum), `摘要里写清了局部刷新状态：「${sw.sum.split('\n').pop()}」`);
+
+  // ② 静图：第一次整帧 → 第二次（同一个图案，什么都没改）整帧跳过
+  const twice = await ev(`
+    const p = window.__tools.spiSession.mockProbe;
+    const v = window.__tools.panel;
+    v.setPattern('BAR');
+    p.resetState();
+    await v.sendImage();
+    const first = v.summary();
+    const ok1 = p.stats.framesOk;
+    p.resetState();
+    await v.sendImage();
+    const second = v.summary();
+    return { first: { action: first.partial.lastAction, bytes: first.lastRun.bytes, frames: first.lastRun.frames, ok: ok1 },
+             second: { action: second.partial.lastAction, reason: second.partial.lastReason, framesOk: p.stats.framesOk },
+             sum: document.getElementById('pn-img-sum').textContent };`);
+  ok(twice.first.action === 'full' && twice.first.frames > 200,
+     `第 1 次「刷这一张」：整帧 ${twice.first.frames} 帧（${twice.first.ok} 个协议帧到设备侧）`);
+  ok(twice.second.action === 'skip' && twice.second.framesOk === 0,
+     `第 2 次（图没变）：整帧跳过 —— 设备侧一个帧都没收到（${twice.second.reason}）`);
+  ok(/整帧跳过/.test(twice.sum), `摘要如实写「整帧跳过」：「${twice.sum.slice(0, 60)}」`);
+
+  // ③ 改一小块 → 只发那个包围盒：把图案换成"同尺寸但只有 8×8 不同"的图
+  const partial = await ev(`
+    const v = window.__tools.panel;
+    const p = window.__tools.spiSession.mockProbe;
+    // 用同一个图案当底，再在 (100,100) 涂一个 8×8 的白块 —— 模拟"画面几乎没动"
+    const g = v.geometry();
+    const src = window.__tools.spiSession;   // 只为拿引用，不用它
+    const base = { w: g.w, h: g.h, rgba: v.src.rgba.slice(), name: '局部测试' };
+    for (let y = 100; y < 108; y++) for (let x = 100; x < 108; x++){ const i = (y * g.w + x) * 4; base.rgba[i] = base.rgba[i+1] = base.rgba[i+2] = 255; }
+    v.src = base;
+    p.resetState();
+    await v.sendImage();
+    const r = v.summary();
+    return { action: r.partial.lastAction, win: r.partial.lastWin, area: r.partial.lastArea, fullArea: r.partial.lastFullArea,
+             bytes: r.lastRun.bytes, frames: r.lastRun.frames, framesOk: p.stats.framesOk, framesErr: p.stats.framesErr,
+             slices: r.lastRun.slices, reason: r.partial.lastReason };`);
+  ok(partial.action === 'partial' && partial.win && partial.win.x0 === 100 && partial.win.x1 === 107,
+     `第 3 次（只有 8×8 变了）：局部开窗 ${JSON.stringify(partial.win)}`);
+  ok(partial.bytes === 8 * 8 * 2, `只发 ${partial.bytes} B（8×8×2），整帧要 142080 B —— 省 ${(100 - partial.bytes / 142080 * 100).toFixed(2)}%`);
+  ok(partial.framesErr === 0, `局部刷屏设备侧零错误（frames_err=${partial.framesErr}）`);
+  ok(partial.area < partial.fullArea / 100, `包围盒面积只有整窗的 ${(partial.area / partial.fullArea * 100).toFixed(2)}%`);
+
+  // ④ 动画：换一个"只有小球在动"的源（网格弹跳球），局部刷新开/关各播一段
+  //    ⚠️ 不能用 9c 那个 bars-sweep：它每帧都在底部重画一行**计数字**，变化像素横跨大半个屏，
+  //       包围盒必然超过 60% → 按设计回落到整帧。那是"动效里有没有大范围变化"的真实分界，
+  //       拿它测局部刷新只会得到"没省"的结论。
+  const anim = await ev(`
+    const r = await fetch('samples/anim/ball-grid-240x296.gif').catch(() => null);
+    if (!r || !r.ok) return { skip: r ? 'HTTP ' + r.status : '取不到' };
+    const b = await r.blob();
+    const input = document.getElementById('pn-anim-input');
+    const dt = new DataTransfer(); dt.items.add(new File([b], 'ball-grid-240x296.gif', { type: 'image/gif' }));
+    input.files = dt.files;
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    for (let i = 0; i < 60 && !/ball-grid/.test(window.__tools.panel.summary().anim?.src || ''); i++) await new Promise(r => setTimeout(r, 100));
+    const p = window.__tools.spiSession.mockProbe;
+    const pc = document.getElementById('pn-partial');
+    const run = async (on, ms) => {
+      pc.checked = on; pc.dispatchEvent(new Event('change', { bubbles: true }));
+      await new Promise(r => setTimeout(r, 100));
+      p.resetState();
+      document.getElementById('pn-anim-play').click();
+      await new Promise(r => setTimeout(r, ms));
+      document.getElementById('pn-anim-stop').click();
+      await new Promise(r => setTimeout(r, 500));
+      const a = window.__tools.panel.summary().anim;
+      return { frames: a.frames, partial: a.partial, skipped: a.skipped, savePct: a.savePct, fps: a.fps,
+               perFrame: a.frames ? p.stats.framesOk / a.frames : 0, framesErr: p.stats.framesErr,
+               info: document.getElementById('pn-anim-info').textContent };
+    };
+    const off = await run(false, 1500);
+    const on = await run(true, 1500);
+    return { off, on };`);
+  if (anim.skip){
+    console.log(`  ⚠ 跳过动画局部刷新：${anim.skip}（先跑 make samples-anim）`);
+  } else {
+    ok(anim.off.perFrame > 250, `局部刷新关：每帧 ${anim.off.perFrame.toFixed(1)} 个协议帧（整帧 292）`);
+    ok(anim.on.perFrame < anim.off.perFrame * 0.9,
+       `局部刷新开：每帧只有 ${anim.on.perFrame.toFixed(1)} 个协议帧（省 ${(100 - anim.on.perFrame / anim.off.perFrame * 100).toFixed(0)}%）`);
+    ok(anim.on.partial > 0 && anim.on.savePct > 10,
+       `像素省了 ${anim.on.savePct.toFixed(1)}%（局部 ${anim.on.partial} 帧 / 跳过 ${anim.on.skipped} / 共 ${anim.on.frames} 帧）`);
+    ok(anim.on.framesErr === 0 && anim.off.framesErr === 0, `两条路都零错误（${anim.off.framesErr} / ${anim.on.framesErr}）`);
+    ok(/fps/.test(anim.on.info), `状态行照样有 fps：「${anim.on.info.slice(0, 72)}」`);
+  }
+
+  // 收尾：局部刷新放回默认开，图案放回色条
+  await ev(`const pc = document.getElementById('pn-partial');
+            pc.checked = true; pc.dispatchEvent(new Event('change', { bubbles: true }));
+            window.__tools.panel.setPattern('BAR'); return 1;`);
 }
 
 // ==================================================================== 9e

@@ -1207,6 +1207,13 @@
               </select></label>
             <label class="chk"><input type="checkbox" id="pn-swap"> R/B 交换（等价 MADCTL 的 BGR 位）</label>
             <label class="row"><span>电平</span><input id="pn-level" class="num" value="255" inputmode="numeric" title="255 = 不改；把满量程分量压到这个值，用来做灰阶测试"></label>
+            <label class="chk" title="只把与上一帧不同的那块包围盒发出去（静止区域完全不碰面板）。勾上后：连刷同一张图第二次会「整帧跳过」；播放动画时按变化面积提速。开窗坐标会按 4 像素对齐。与动画行那个开关是同一个状态。"><input type="checkbox" id="pn-partial" checked> 局部刷新（只发变化区）</label>
+            <label class="row"><span>容差</span>
+              <select id="pn-partial-tol" title="比较两帧时每个颜色分量丢弃的低位数。视频/JPEG 每帧都有量化噪声，精确比较会导致「整屏都算变了」而失去意义 —— 丢掉最低 1~2 位即可判出真正的静止区；代价是颜色量化到 4~5 bit/分量（屏本身就是 RGB565，肉眼无差）">
+                <option value="0">0 位（逐位精确）</option>
+                <option value="1" selected>1 位（推荐）</option>
+                <option value="2">2 位（噪声大时）</option>
+              </select></label>
             <div class="row btnrow"><button id="pn-img-send" class="primary">刷这一张</button></div>
             <p class="hint" id="pn-img-sum" style="margin:0"></p>
           </div>
@@ -1214,15 +1221,16 @@
         <p class="hint">预览里的<b>橙色虚线</b>是探针真正下发的对齐窗口（列地址按 4 像素对齐，多出来的列用边缘填充）。
           每片 492 B，一屏 ST77916 是 <b>527 片</b>；只有最后一片要应答。</p>
 
-        <!-- 动画 / 视频：整帧刷（用户 2026-09-30 拍板先不做局部开窗）。
+        <!-- 动画 / 视频：整帧刷，或勾「局部刷新」后按差异包围盒只发变化区（开关在右上「刷屏」页里）。
              发送是节拍器：解码跟得上就丢帧，绝不在 USB 队列里堆延迟。 -->
         <div class="animbox">
           <div class="row"><span>动画 / 视频</span>
             <button id="pn-anim-file" class="mini" title="MP4 / WebM / GIF / APNG —— 浏览器原生解码，零依赖">选择文件…</button>
             <input type="file" id="pn-anim-input" accept="video/*,.gif,.webp,.png,.apng" hidden>
-            <button id="pn-anim-play" class="primary mini" disabled title="按当前屏几何 / 面板档把每一帧整屏发出去（与「刷这一张」同一条路）">播放到屏</button>
+            <button id="pn-anim-play" class="primary mini" disabled title="按当前屏几何 / 面板档把每一帧发出去（与「刷这一张」同一条路；勾了局部刷新就只发变化区）">播放到屏</button>
             <button id="pn-anim-stop" class="mini" disabled>停止</button>
             <label class="chk"><input type="checkbox" id="pn-anim-loop" checked> 循环</label>
+            <label class="chk" title="与右上「刷屏」页里的那个是同一个开关：勾上 = 只发与上一帧不同的包围盒"><input type="checkbox" id="pn-anim-partial" checked> 局部刷新</label>
           </div>
           <div class="animrow">
             <video id="pn-anim-video" muted playsinline></video>

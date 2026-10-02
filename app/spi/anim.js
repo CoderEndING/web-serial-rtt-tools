@@ -1,21 +1,19 @@
 /**
  * 「动画 / 视频」播放器：把一段视频（或 GIF）**解码 → 逐帧发给屏**。
  *
- * 口径（用户 2026-09-30 拍板："先不做局部刷新"，先用最简洁的那条路）：
- *   · **每帧整屏刷**：`CASET/RASET` +〔档 1 的 RAMWR 命令帧〕+ 像素片 ×N —— 与「刷这一张」完全同一条路，
- *     所以线上字节、错误统计、面板档语义全都现成；
+ * 口径：
  *   · **发送当节拍器**：解码比发送快就**丢帧**（只保留最新一帧），绝不把队列堆起来 ——
  *     按 30 fps 无条件灌会在 USB 队列里积压，延迟越滚越大，最后看起来像"卡住"；
  *   · 视频走 `<video>` + `requestVideoFrameCallback`（浏览器原生解码，零依赖）；
- *     GIF 走 `ImageDecoder`（Chrome 支持就直接用，逐帧解码、不需要队列）。
+ *     GIF 走 `ImageDecoder`（Chrome 支持就直接用，逐帧解码、不需要队列）；
+ *   · **局部刷新**（2026-10 加）：勾上之后每帧只发"与上一帧不同的包围盒"，
+ *     静止区域完全不碰面板 —— 帧率按面积比提升（见 `image.PartialRefresh`）。
+ *     没勾 = 每帧整屏刷，与「刷这一张」完全同一条路。
  *
  * 为什么不用 WebCodecs / ffmpeg.wasm：本页每帧要发 142 KB（AXS15352）、链路实测 ~3.2 MB/s ⇒
  * 一帧 ~43 ms；而解码 + 缩放 + RGB565 打包只有 1~3 ms（**不到 5%**）。瓶颈在 SPI/USB，
  * 换解码器一分钱都省不下来，还要背 mp4box 之类的依赖（ffmpeg.wasm 更是要 COOP/COEP 响应头，
  * GitHub Pages 给不了）。
- *
- * 想再快只有一个大招：**局部开窗**（只发与上一帧不同的包围盒）—— 按面积比提升帧率，
- * 这一版有意没做（用户：先不做），所以整帧刷。
  */
 import * as P from './protocol.js';
 import * as I from './image.js';
@@ -47,23 +45,26 @@ export function fitRects(sw, sh, dw, dh, mode = 'fill'){
 /**
  * 一帧像素 → 帧序列（开窗 + 〔RAMWR〕+ 像素片）。
  *
- * `cache` 里缓存"每帧都一样"的那几条（开窗 2 帧 + 档 1 的 RAMWR 命令帧）：同一个窗口刷 N 帧时，
- * 它们逐字节相同，没必要每帧重建（每帧省 3 个对象与 3 次分配，20 fps 下也是白拿）。
- * @param {Uint8Array} px RGB565 字节流（窗口尺寸）
- * @param {{geometry:object, profile:number, lines:number, sliceBytes?:number, cache?:object}} o
+ * `cache` 里缓存"同一个窗口下每帧都一样"的那几条（开窗 2 帧 + 档 1 的 RAMWR 命令帧）。
+ * 🚨 **缓存键必须带窗口**：局部刷新时每帧的窗口都不一样，只按"有没有建过"来判断
+ *    会把上一块的 CASET/RASET 拿去用 —— 症状是"画的区域和发的数据对不上"。
+ * @param {Uint8Array} px RGB565 字节流（**这块窗口**的）
+ * @param {{geometry:object, profile:number, lines:number, window?:object, sliceBytes?:number, cache?:object}} o
  */
 export function frameItems(px, o){
   const g = o.geometry;
   const profile = o.profile | 0;
   const lines = o.lines ?? g.lines;
   const cache = o.cache || (o.cache = {});
-  if (!cache.head){
-    const win = o.window || I.alignWindow(o.x ?? 0, o.y ?? 0, g.w, g.h, { align: g.align, scrW: g.w, scrH: g.h });
-    cache.head = [
-      ...I.windowItems(win, g),
-      ...(profile === 1 ? [I.ramwrCommandItem({ ramWr: g.ramWr, lines })] : []),
-    ];
+  const win = o.window || I.alignWindow(o.x ?? 0, o.y ?? 0, g.w, g.h, { align: g.align, scrW: g.w, scrH: g.h });
+  const key = `${win.x0},${win.y0},${win.x1},${win.y1}|${profile}|${lines}`;
+  if (cache.key !== key){
+    /* 档 2 的窗口必须走 QSPI XFER（opcode + 24 bit 地址），不能落回 STEP：
+     * 静图那条路（imageToFrames）一直带 profile，这里以前漏了 —— 两条路的线上字节不一致，
+     * 而"静图能刷、动画刷不出"正是这种不一致最容易咬人的地方。 */
+    cache.head = I.headItems(win, { geometry: g, profile, lines, qspiWrOpcode: o.qspiWrOpcode, qspiAddrBytes: o.qspiAddrBytes });
     cache.window = win;
+    cache.key = key;
   }
   return [
     ...cache.head,
@@ -84,20 +85,24 @@ export class PanelAnim {
    * @param {(kind:string,text:string)=>void} [o.log]
    * @param {(px:Uint8Array,win:object)=>void} [o.onFrame]  每帧（预览用）
    * @param {(st:object)=>void} [o.onState]                 状态/统计变化
+   * @param {()=>({enabled:boolean,tolerance:number,fullRatio:number})} [o.partial] 局部刷新开关
    */
   constructor(o = {}){
     this.session = o.session;
     this.geometry = o.geometry || (() => I.PANEL_GEOMETRY.st77916);
     this.profile = o.profile || (() => 0);
     this.pixelOpts = o.pixelOpts || (() => ({ swap: false, littleEndian: false, level: 255, fit: 'fill' }));
+    this.partialOpts = o.partial || (() => ({ enabled: false, tolerance: 1 }));
     this.log = o.log || (() => {});
     this.onFrame = o.onFrame || null;
     this.onState = o.onState || null;
     this.video = o.video || null;          // 页面里那个 <video>（rVFC 需要它真的在渲染）
     this.batchBytes = o.batchBytes || (() => undefined);   // 攒批档位（见 protocol.batchPacks）
     this.callsOf = o.callsOf || null;      // transport.writes 的取值器（统计"调用/帧"）
+    this.partial = new I.PartialRefresh({ enabled: false });
     this.src = null;                       // { kind:'video'|'gif', name, w, h, frames? }
-    this.stat = { frames: 0, bytes: 0, calls: 0, dropped: 0, t0: 0, ms: 0, fps: 0, kbs: 0, lastMs: 0 };
+    this.stat = { frames: 0, bytes: 0, calls: 0, dropped: 0, partial: 0, skipped: 0,
+                  pxSent: 0, pxFull: 0, t0: 0, ms: 0, fps: 0, kbs: 0, lastMs: 0 };
     this._stop = false;
     this._running = false;
     this._q = [];                          // 已解码待发的帧（RGB565）
@@ -115,6 +120,9 @@ export class PanelAnim {
     const sec = s.ms / 1000;
     this.onState?.({ running: this._running, frames: s.frames, dropped: s.dropped, bytes: s.bytes,
                      calls: s.calls, callsPerFrame: s.frames ? s.calls / s.frames : 0,
+                     partial: s.partial, skipped: s.skipped,
+                     pxSent: s.pxSent, pxFull: s.pxFull,
+                     savePct: s.pxFull ? (1 - s.pxSent / s.pxFull) * 100 : 0,
                      ms: s.ms, fps: sec > 0 ? s.frames / sec : 0, kbs: sec > 0 ? s.bytes / 1024 / sec : 0,
                      lastMs: s.lastMs, src: this.src });
   }
@@ -171,6 +179,7 @@ export class PanelAnim {
     const win = I.alignWindow(0, 0, g.w, g.h, { align: g.align, scrW: g.w, scrH: g.h });
     this.win = win;
     this._cache = null;                        // 几何/档位可能变了，帧头缓存作废
+    this.partial.reset();                      // 局部刷新的基准帧也作废（窗口/颜色开关可能变了）
     if (!this._cap){
       this._cap = document.createElement('canvas');
       this._ctx = this._cap.getContext('2d', { willReadFrequently: true });
@@ -236,12 +245,17 @@ export class PanelAnim {
     this._prep();
     this._stop = false;
     this._running = true;
-    this.stat = { frames: 0, bytes: 0, calls: 0, dropped: 0, t0: performance.now(), ms: 0, fps: 0, kbs: 0, lastMs: 0 };
+    this.stat = { frames: 0, bytes: 0, calls: 0, dropped: 0, partial: 0, skipped: 0,
+                  pxSent: 0, pxFull: 0, t0: performance.now(), ms: 0, fps: 0, kbs: 0, lastMs: 0 };
+    this.partial.stat = { frames: 0, sent: 0, partial: 0, full: 0, skipped: 0, pxSent: 0, pxFull: 0 };
     this._emit();
     const g = this.geometry();
     const prof = this.profile();
+    const po = this.partialOpts();
     this.log('i', `动画开始：${this.src.name} · 窗口 ${this.win.w}×${this.win.h} · 档 ${prof} · ` +
-      `每帧 ${this.win.w * this.win.h * 2} 字节（整帧刷，未做局部开窗）`);
+      (po.enabled
+        ? `**局部刷新**（只发与上一帧不同的包围盒，容差 ${po.tolerance ?? 1} bit；静止区域完全不发）`
+        : `每帧 ${this.win.w * this.win.h * 2} 字节（整帧刷）`));
     s.setBusy(true);
     try {
       if (this.src.kind === 'video') await this._runVideo();
@@ -258,6 +272,10 @@ export class PanelAnim {
       this.log(st.frames ? 'g' : 'w', `动画结束：${st.frames} 帧 · ${(st.bytes / 1024).toFixed(0)} KB · ` +
         `${(st.ms / 1000).toFixed(1)} s · 实测 ${st.fps.toFixed(1)} fps · ${st.kbs.toFixed(0)} KB/s` +
         (st.frames ? ` · 每次提交 ${(st.calls / st.frames).toFixed(1)} 个（攒批档 ${this.batchBytes() || 512} B）` : '') +
+        (st.partial || st.skipped
+          ? ` · 局部 ${st.partial} 帧 / 整帧 ${st.frames - st.partial - st.skipped} / 跳过 ${st.skipped}` +
+            ` · 像素省 ${(100 - st.pxSent / Math.max(1, st.pxFull) * 100).toFixed(1)}%`
+          : '') +
         (st.dropped ? ` · 丢帧 ${st.dropped}（发送跟不上解码，正常）` : ''), st.frames ? 'g' : 'w');
     }
   }
@@ -326,10 +344,35 @@ export class PanelAnim {
     }
   }
 
-  /** 发一帧（整帧）：开窗 +〔RAMWR〕+ 像素片；只有末片要应答 —— 与「刷这一张」同一条路 */
+  /**
+   * 发一帧。默认整帧（开窗 +〔RAMWR〕+ 像素片，只有末片要应答 —— 与「刷这一张」同一条路）；
+   * 勾了局部刷新就只发"与上一帧不同的包围盒"（一个像素都没变 → 这一帧一次 USB 都不喊）。
+   */
   async _sendOne(px){
     const t0 = performance.now();
-    const items = frameItems(px, { ...this._opts, cache: this._cache });
+    const g = this.geometry();
+    const po = this.partialOpts();
+    this.partial.enabled = !!po.enabled;
+    if (po.tolerance != null) this.partial.tolerance = po.tolerance;
+    if (po.fullRatio != null) this.partial.fullRatio = po.fullRatio;
+    if (po.littleEndian != null) this.partial.littleEndian = !!po.littleEndian;
+    else this.partial.littleEndian = !!this.pixelOpts().littleEndian;
+
+    const plan = this.partial.plan(px, this.win, { align: g.align, scrW: g.w, scrH: g.h });
+    /* 像素账：`pxSent` 是**真发出去的字节**，`pxFull` 是"每帧都整刷"的等效字节 —— 省了多少看这两个。
+     * 跳过的那一帧记 0（`plan.bytes` 在 skip 时就是 0）。 */
+    this.stat.pxSent += plan.bytes;
+    this.stat.pxFull += plan.full * 2;
+    if (plan.action === 'skip'){                  // 整帧和上一帧一模一样：一个字节都不用发
+      this.stat.frames++;
+      this.stat.skipped++;
+      this.stat.lastMs = performance.now() - t0;
+      this.stat.ms = performance.now() - this.stat.t0;
+      this.onFrame?.(px, this.win);
+      this._emit();
+      return;
+    }
+    const items = frameItems(plan.px, { ...this._opts, window: plan.win, cache: this._cache });
     const r = await this.session.sendFrames(items, {
       tag: 'panel', quiet: true, timeoutMs: 8000,
       shouldStop: () => this._stop,
@@ -339,11 +382,12 @@ export class PanelAnim {
     const bad = r.rsps.filter(x => x && x.status !== P.ST.OK).length;
     if (bad) this.log('e', `动画第 ${this.stat.frames + 1} 帧有 ${bad} 个非 OK 应答`, 'panel');
     this.stat.frames++;
-    this.stat.bytes += px.length;
+    if (plan.action === 'partial') this.stat.partial++;
+    this.stat.bytes += plan.bytes;
     this.stat.calls += r.batches ?? 0;            // 这一帧喊了几次 USB（攒批后应远小于片数）
     this.stat.lastMs = performance.now() - t0;
     this.stat.ms = performance.now() - this.stat.t0;
-    this.onFrame?.(px, this.win);
+    this.onFrame?.(px, this.win);                 // 预览始终画整窗（局部帧的数据只是整窗的一部分）
     if ((this.stat.frames % YIELD_EVERY) === 0) await new Promise(r2 => setTimeout(r2, 0));
     this._emit();
   }

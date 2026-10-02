@@ -96,6 +96,14 @@ export class SpiPanelView {
     this.dockTab = 'img';
     this._act = null;
     this.imgAbort = false;     // 「刷这一张」也能中止：半张图留在屏上无害（不像 flash 擦写）
+    /**
+     * 「刷这一张」那条路的局部刷新跟踪器：记住**上一次真正发出去的整窗像素**。
+     * 第二次点「刷这一张」时只发与它不同的包围盒；一个像素都没变就整帧跳过（一次 USB 都不喊）。
+     * 会重置它的地方：换图/换图案、改摆放或颜色开关、换屏几何、以及任何"面板被清过"的操作
+     * （复位脉冲 / 上下电 / 套用推荐值）—— 屏上内容归零了，基准帧就不能还算数。
+     */
+    this.imgPartial = new I.PartialRefresh({ enabled: false, tolerance: 1 });
+    this.imgPlan = null;       // 最近一次刷图的局部刷新决策（summary/日志用）
   }
 
   init(){
@@ -201,12 +209,27 @@ export class SpiPanelView {
     for (const ev of ['dragenter', 'dragover']) $('pn-drop').addEventListener(ev, e => { e.preventDefault(); $('pn-drop').classList.add('hot'); });
     for (const ev of ['dragleave', 'drop']) $('pn-drop').addEventListener(ev, e => { e.preventDefault(); $('pn-drop').classList.remove('hot'); });
     $('pn-drop').addEventListener('drop', e => this.pickImage(e.dataTransfer.files[0]));
-    for (const id of ['pn-fit', 'pn-x', 'pn-y', 'pn-level']) $(id).addEventListener('change', () => this.renderPreview());
+    for (const id of ['pn-fit', 'pn-x', 'pn-y', 'pn-level']) $(id).addEventListener('change', () => { this.resetPartial('摆放/电平变了'); this.renderPreview(); });
+    for (const id of ['pn-fit', 'pn-x', 'pn-y', 'pn-level']) $(id).addEventListener('input', () => { this.resetPartial('摆放/电平变了'); this.renderPreview(); });
     /* 两个"显示开关"（字节序 / R-B 交换）在**读回 tab 里也有一份**（#pn-read-byteorder / #pn-read-swap）：
      * 读回的画面单独占一张画布，翻颜色不该逼用户切回刷屏 tab。两边是同一组语义、双向同步。 */
     for (const id of ['pn-swap', 'pn-byteorder']) $(id).addEventListener('change', () => {
-      this.syncViewSwitches('img'); this.renderPreview(); this.drawReadBack();
+      this.syncViewSwitches('img'); this.resetPartial('颜色开关变了'); this.renderPreview(); this.drawReadBack();
     });
+    /* 局部刷新：刷屏 tab 一个开关、动画行一个开关，**同一份状态双向同步**（照字节序/交换那两个副本的做法）。
+     * 开关一变就把基准帧丢掉 —— 换了语义再拿旧帧比，会把整屏算成"变了"。 */
+    for (const id of ['pn-partial', 'pn-anim-partial']){
+      $(id)?.addEventListener('change', () => {
+        const on = $(id).checked;
+        for (const other of ['pn-partial', 'pn-anim-partial']) if ($(other)) $(other).checked = on;
+        this.resetPartial(on ? '打开局部刷新' : '关闭局部刷新');
+        this.renderPreview();
+        s.log('i', on
+          ? `局部刷新已开：只发与上一帧不同的包围盒（容差 ${$('pn-partial-tol').value} 位）——「刷这一张」第二次起、以及播放动画都生效`
+          : '局部刷新已关：每帧整屏发', this.tag);
+      });
+    }
+    $('pn-partial-tol')?.addEventListener('change', () => { this.resetPartial('容差变了'); this.renderPreview(); });
     /* 屏幕几何：选命名款 → 把宽高填进自定义框（方便在此基础上微调）并换底座；
      * 选「自定义…」→ 用框里的宽高。两种都要重算画布 / 读回窗口 / 假探针 GRAM ⇒ applyGeometry()。 */
     $('pn-geom').addEventListener('change', () => {
@@ -220,13 +243,13 @@ export class SpiPanelView {
       this.applyGeometry();
     });
     for (const id of ['pn-w', 'pn-h']) $(id)?.addEventListener('change', () => { this.syncCustomGeomInputs(); this.applyGeometry(); });
-    for (const id of ['pn-x', 'pn-y', 'pn-level']) $(id).addEventListener('input', () => this.renderPreview());
     $('pn-img-send').addEventListener('click', () => this.sendImage());
 
     /**
-     * 动画 / 视频：解码（`<video>`+rVFC 或 `ImageDecoder`）→ 逐帧整屏刷。
+     * 动画 / 视频：解码（`<video>`+rVFC 或 `ImageDecoder`）→ 逐帧发给屏。
      * 播放器在 `anim.js`（纯逻辑 + 一个 `<video>` 元素），这里只接按钮与状态显示。
      * 发送是节拍器：解码更快就丢帧（`stat.dropped`），不会在 USB 队列里堆延迟。
+     * 局部刷新：勾了 `#pn-partial`（或动画行那个同状态的副本）就只发变化包围盒。
      */
     this.anim = new PanelAnim({
       session: s,
@@ -239,6 +262,7 @@ export class SpiPanelView {
         level: Math.max(0, Math.min(255, +$('pn-level').value || 255)),
         fit: $('pn-fit').value,
       }),
+      partial: () => this.partialOpts(),
       log: (kind, text, tag) => s.log(kind, text, tag || this.tag),
       onFrame: (px, win) => this.drawAnimFrame(px, win),
       onState: st => this.renderAnim(st),
@@ -747,6 +771,7 @@ export class SpiPanelView {
     const p = I.makePattern(kind, g.w, g.h);
     this.patternKind = kind;
     this.src = { ...p, name: `内置图案 ${kind}` };
+    this.resetPartial('换图案');              // 内容换了一整张，基准帧作废
     for (const b of $('pn-patterns').querySelectorAll('button')) b.classList.toggle('on', b.dataset.kind === kind);
     this.renderPreview();
     this.revealCanvas();
@@ -784,6 +809,7 @@ export class SpiPanelView {
       this.src = src;
       this.patternKind = null;
       for (const b of $('pn-patterns').querySelectorAll('button')) b.classList.remove('on');
+      this.resetPartial('换图');
       this.renderPreview();
       this.revealCanvas();
       this.session.log('g', `已载入 ${src.name}：${src.w}×${src.h}`, this.tag);
@@ -835,6 +861,26 @@ export class SpiPanelView {
   }
 
   /**
+   * 局部刷新的选项（两个开关是同一份状态，读哪个都一样；容差只有刷屏 tab 有）。
+   * 缺元素（页面混版）时按"关"处理 —— 宁可多发包，也不能让页面起不来。
+   */
+  partialOpts(){
+    const el = $('pn-partial') || $('pn-anim-partial');
+    return {
+      enabled: !!el?.checked,
+      tolerance: Math.max(0, Math.min(4, +($('pn-partial-tol')?.value ?? 1) || 0)),
+      littleEndian: ($('pn-byteorder')?.value === 'le'),   // 差异比较的掩码要按字节序换位
+    };
+  }
+
+  /** 丢掉局部刷新的基准帧（换图 / 改摆放 / 换几何 / 面板被清过时必须调）*/
+  resetPartial(reason){
+    this.imgPartial?.reset();
+    this.imgPlan = null;
+    if (reason) this._partialReset = reason;
+  }
+
+  /**
    * 进度回调的**限流器** —— 往 DOM 写进度必须限流，别每次回调都写。
    *
    * 🚨 实测（2026-09-30 真机 A/B，360×360 / 253 KB / 527 片 / 攒批 16 KB）：
@@ -861,6 +907,7 @@ export class SpiPanelView {
 
   applyGeometry(){
     const g = this.geometry();
+    this.resetPartial('换屏几何');            // 尺寸变了，基准帧没法比
     $('pn-canvas').width = g.w;
     $('pn-canvas').height = g.h;
     const rc = $('pn-read-canvas');
@@ -886,13 +933,13 @@ export class SpiPanelView {
       return;
     }
     const x = Math.max(0, +$('pn-x').value || 0), y = Math.max(0, +$('pn-y').value || 0);
-    const win = I.alignWindow(x, y, g.w, g.h, { align: g.align, scrW: g.w, scrH: g.h });
-    const comp = I.composeImage(this.src.rgba, this.src.w, this.src.h, win.w, win.h, { mode: $('pn-fit').value });
-    const px = I.rgbaTo565(comp.rgba, {
+    const cw = I.composeWindow(this.src.rgba, this.src.w, this.src.h, {
+      geometry: g, x, y, fit: $('pn-fit').value,
       swap: $('pn-swap').checked,
       littleEndian: $('pn-byteorder').value === 'le',
       level: Math.max(0, Math.min(255, +$('pn-level').value || 255)),
     });
+    const win = cw.win, px = cw.px;
     const shown = I.rgb565ToRgba(px);
 
     const off = document.createElement('canvas');
@@ -911,16 +958,27 @@ export class SpiPanelView {
 
     const slices = Math.ceil(px.length / I.PIXEL_SLICE);
     const prof = this.session.profile?.profile ?? 0;
+    const po = this.partialOpts();
     $('pn-img-sum').textContent =
       `${this.src.name} · ${this.src.w}×${this.src.h} → 窗口 ${win.x0}..${win.x1} × ${win.y0}..${win.y1}` +
       `（${win.w}×${win.h}${win.padX ? `，对齐补 ${win.padX} 列` : ''}）\n` +
       `${px.length} 字节 → ${slices} 片（每片 ${I.PIXEL_SLICE} B）` +
       (prof === 1 ? ` + RAMWR 命令 + 2 条开窗（CS 一路保持到末片）= ${slices + 3} 帧`
-                  : ` + 2 条开窗 = ${slices + 2} 帧`);
+                  : ` + 2 条开窗 = ${slices + 2} 帧`) +
+      (po.enabled ? `\n局部刷新：开（容差 ${po.tolerance} 位）—— 第二次点「刷这一张」只发与上次不同的那块，` +
+                    `一模一样就整帧跳过` : '\n局部刷新：关（每次整帧发）');
     $('pn-img-info').textContent = `${this.src.name}\n源图 ${this.src.w}×${this.src.h} · 目标 ${win.w}×${win.h}`;
   }
 
-  /** 刷这一张：开窗 2 帧 + 527 片像素（只有末片要应答）*/
+  /**
+   * 刷这一张。
+   *
+   * 默认整帧：开窗 2 帧 +〔档 1 的 RAMWR〕+ 527 片像素（只有末片要应答）。
+   * 勾了「局部刷新」则先与**上一次发出去的整窗**比较：
+   *   · 一个像素都没变 → 整帧跳过（一次 USB 都不喊，日志里说清为什么）；
+   *   · 变了但面积小 → 只发那个包围盒（对齐到 4 像素）；
+   *   · 变化超过整窗 60% → 还是整帧（开窗那几帧的固定开销不值）。
+   */
   async sendImage(){
     const s = this.session;
     if (!this.src){ s.log('w', '先选一张图或图案', this.tag); return; }
@@ -930,13 +988,31 @@ export class SpiPanelView {
     if (!s.profile){ s.log('w', '还没读到面板档 —— 先「读取档位」或点「套用推荐值」', this.tag); }
     const g = this.geometry();
     const x = Math.max(0, +$('pn-x').value || 0), y = Math.max(0, +$('pn-y').value || 0);
-    const out = I.imageToFrames(this.src.rgba, this.src.w, this.src.h, {
+    const opt = {
       geometry: g, x, y, fit: $('pn-fit').value,
       profile: s.profile?.profile ?? 0, lines: g.lines,
       swap: $('pn-swap').checked,
       littleEndian: $('pn-byteorder').value === 'le',
       level: Math.max(0, Math.min(255, +$('pn-level').value || 255)),
-    });
+    };
+    const cw = I.composeWindow(this.src.rgba, this.src.w, this.src.h, opt);
+
+    /* 局部刷新决策。注意 `cw.px` 每帧都是新建的，跟踪器直接存引用（省一次 260 KB 的拷贝）。 */
+    const po = this.partialOpts();
+    this.imgPartial.enabled = po.enabled;
+    this.imgPartial.tolerance = po.tolerance;
+    this.imgPartial.littleEndian = po.littleEndian;
+    const plan = this.imgPartial.plan(cw.px, cw.win, { align: g.align, scrW: g.w, scrH: g.h });
+    this.imgPlan = plan;
+    if (plan.action === 'skip'){
+      s.log('i', `整帧跳过：这一张与上一次发出的**逐像素相同**（局部刷新，容差 ${po.tolerance} 位）——` +
+        `一个字节都没发。要强制重发就取消勾选「局部刷新」。`, this.tag);
+      $('pn-img-sum').textContent = `整帧跳过（与上次相同，容差 ${po.tolerance} 位）· 省下 ${(cw.px.length / 1024).toFixed(0)} KB`;
+      return;
+    }
+    const out = { items: I.itemsForWindow(plan.px, plan.win, opt), px: plan.bytes, slices: 0, bytes: plan.px, window: plan.win };
+    const profile = opt.profile;
+    out.slices = out.items.length - 2 - (profile === 1 ? 1 : 0);
 
     this.imgAbort = false;
     const t0 = performance.now();
@@ -944,7 +1020,9 @@ export class SpiPanelView {
     try {
       this.setActivity('刷图中');
       this.refreshButtons();
-      s.log('i', `刷图开始：${g.w}×${g.h} · ${out.slices} 片 / ${out.px} 字节 · 档 ${s.profile?.profile ?? '?'}`, this.tag);
+      const what = plan.action === 'partial' ? `局部刷新 ${plan.win.x0}..${plan.win.x1} × ${plan.win.y0}..${plan.win.y1}` : '整帧';
+      s.log('i', `刷图开始：${what} · ${g.w}×${g.h} · ${out.slices} 片 / ${out.px} 字节 · 档 ${profile ?? '?'}` +
+        (plan.reason ? `（${plan.reason}）` : ''), this.tag);
       const r = await s.sendFrames(out.items, {
         tag: this.tag, quiet: true, timeoutMs: 5000, batchBytes: this.batchBytes(),
         shouldStop: () => this.imgAbort,
@@ -961,10 +1039,13 @@ export class SpiPanelView {
       const bad = r.rsps.filter(v => v && v.status !== P.ST.OK);
       const kbPerSec = out.px / 1024 / Math.max(0.001, ms / 1000);
       this.lastRun = { ms, bytes: out.px, slices: out.slices, frames: out.items.length,
-                       calls: r.batches ?? null, sclkHz: s.counters.actualSclkHz, kbPerSec, badRsp: bad.length, when: Date.now() };
+                       calls: r.batches ?? null, sclkHz: s.counters.actualSclkHz, kbPerSec, badRsp: bad.length, when: Date.now(),
+                       partial: plan.action === 'partial', area: plan.area, fullArea: plan.full,
+                       win: plan.action === 'partial' ? { x0: plan.win.x0, y0: plan.win.y0, x1: plan.win.x1, y1: plan.win.y1 } : null };
       s.log(bad.length ? 'e' : 'g',
-        `刷图完成：${out.slices} 片 · ${r.batches ?? out.slices} 次提交 · ${fmtBytes(out.px)} · ${ms.toFixed(0)} ms · ` +
+        `刷图完成（${what}）：${out.slices} 片 · ${r.batches ?? out.slices} 次提交 · ${fmtBytes(out.px)} · ${ms.toFixed(0)} ms · ` +
         `${kbPerSec.toFixed(0)} KB/s` +
+        (plan.action === 'partial' ? ` · 像素只有整帧的 ${(plan.area / plan.full * 100).toFixed(1)}%` : '') +
         (this.imgAbort ? ' · 用户中止（屏上是半张图）' : '') +
         (bad.length ? ` · ${bad.length} 个非 OK 应答（${P.ST_TEXT[bad[0].status] || bad[0].status}）` : ''), this.tag);
       this.renderPreview();
@@ -989,9 +1070,11 @@ export class SpiPanelView {
       // 用户看到「rgb-ramp.webp · 36 帧（GIF）」会以为选错文件了。
       const ext = (/\.([a-z0-9]+)$/i.exec(src.name || '')?.[1] || 'gif').toUpperCase();
       $('pn-anim-video').classList.toggle('on', src.kind === 'video');
+      const po = this.partialOpts();
       $('pn-anim-info').textContent = `${src.name} · ${src.w}×${src.h}` +
         (src.kind === 'gif' ? ` · ${src.frames} 帧（${ext}）` : ` · ${(src.duration || 0).toFixed(1)} s（视频）`) +
-        `　→ 开窗后每帧 ${this.geometry().w * this.geometry().h * 2} 字节，整帧刷`;
+        `　→ 开窗后整帧 ${this.geometry().w * this.geometry().h * 2} 字节，` +
+        (po.enabled ? `**局部刷新**（只发变化区，容差 ${po.tolerance} 位）` : '整帧刷');
       this.session.log('g', `动画已就绪：${src.name}（${src.w}×${src.h}）—— 点「播放到屏」开播`, this.tag);
     } catch (e){
       this.session.log('e', '动画源加载失败：' + (e?.message || e), this.tag);
@@ -1032,13 +1115,17 @@ export class SpiPanelView {
     const el = $('pn-anim-info');
     // 「调用」= 这一帧喊了几次 transferOut（`st.calls/frames`）：攒批档位有没有生效，看这个数最直接
     const calls = st.frames ? ` · USB 调用 ${(st.calls / st.frames).toFixed(1)} 次/帧` : '';
+    /* 局部刷新的战果：省下的像素比例 = 1 - 实发/整帧等效 —— 「帧率为什么涨了」的答案就在这个数里 */
+    const part = (st.partial || st.skipped)
+      ? ` · 局部 ${st.partial} / 跳过 ${st.skipped} · 像素省 ${st.savePct.toFixed(1)}%`
+      : '';
     if (el){
       if (st.running){
         el.textContent = `发送中：${st.frames} 帧 · 实测 ${st.fps.toFixed(1)} fps · ${st.kbs.toFixed(0)} KB/s` +
-          ` · 最后帧 ${st.lastMs.toFixed(0)} ms` + calls + (st.dropped ? ` · 丢帧 ${st.dropped}（解码比发送快，正常）` : '');
+          ` · 最后帧 ${st.lastMs.toFixed(0)} ms` + part + calls + (st.dropped ? ` · 丢帧 ${st.dropped}（解码比发送快，正常）` : '');
       } else if (st.frames){
         el.textContent = `上次：${st.frames} 帧 · ${(st.bytes / 1024).toFixed(0)} KB · ${(st.ms / 1000).toFixed(1)} s · ` +
-          `实测 ${st.fps.toFixed(1)} fps · ${st.kbs.toFixed(0)} KB/s` + calls + (st.dropped ? ` · 丢帧 ${st.dropped}` : '');
+          `实测 ${st.fps.toFixed(1)} fps · ${st.kbs.toFixed(0)} KB/s` + part + calls + (st.dropped ? ` · 丢帧 ${st.dropped}` : '');
       }
     }
     // 运行胶囊（在 tab 栏上，切到别的 tab 也看得见）：动画这桩的进度只有这里能跨 tab 看到
@@ -1267,6 +1354,7 @@ export class SpiPanelView {
     const key = $('pn-preset').value;
     const preset = PANEL_PRESETS[key];
     if (!preset) return;
+    this.resetPartial('套用推荐值');          // 档位/引脚可能换了，刷屏基准帧作废
     await this.wrap(async () => {
       const s = this.session;
       s.log('i', `套用推荐值：${preset.label}`, this.tag);
@@ -1283,6 +1371,7 @@ export class SpiPanelView {
   }
 
   async sendResetPulse(){
+    this.resetPartial('面板复位');            // 复位后 GRAM/寄存器归状态机，基准帧不算数了
     await this.wrap(() => this.session.sendFrames([{
       type: P.T.RESET,
       payload: P.resetPayload(Math.max(0, +$('pn-rst-low').value || 0), Math.max(0, +$('pn-rst-post').value || 0)),
@@ -1292,6 +1381,7 @@ export class SpiPanelView {
 
   /** 面板电源/显示：一条 STEP 命令（11h 上电 / 29h 开显示 / 28h 关显示 / 10h 下电）*/
   async sendPowerCmd(cmd, delayMs, label){
+    this.resetPartial(`面板命令 0x${cmd.toString(16)}`);
     await this.wrap(() => this.session.sendFrames([{
       type: P.T.STEP,
       payload: P.stepPayload({ cmd, params: new Uint8Array(0), delayMs }),
@@ -1327,6 +1417,7 @@ export class SpiPanelView {
   async resetAndBacklight({ quiet = false } = {}){
     const s = this.session, c = s.cfg;
     if (!c){ s.log('w', '还没读到桥的引脚配置（先「连接探针」）—— 不知道 RST/BL 脚，跳过', this.tag); return false; }
+    this.resetPartial('复位并开背光');         // 屏上内容被复位冲掉了
     let did = false;
     if (SpiPanelView.isPadUnused(c.padRst)){
       s.log('w', `桥里 RST 脚配的是「不用」（pad ${c.padRst}）—— 跳过复位。到「SPI/QSPI 桥」页把 RST 脚配上再试`, this.tag);
@@ -1383,6 +1474,20 @@ export class SpiPanelView {
       bitpopOpen: this.bitpop.isOpen,
       parseErrors: this.parsed?.errors?.length ?? 0,
       source: this.src ? `${this.src.name} ${this.src.w}×${this.src.h}` : null,
+      /* 局部刷新（2026-10 加）：静图那条路的状态 + 最近一次决策；动画那条在同一条里的 anim.* 里 */
+      partial: {
+        enabled: this.partialOpts().enabled,
+        tolerance: this.partialOpts().tolerance,
+        animSameSwitch: $('pn-anim-partial') ? $('pn-anim-partial').checked === ($('pn-partial') ? $('pn-partial').checked : true) : null,
+        lastAction: this.imgPlan?.action || null,        // 'full' | 'partial' | 'skip'
+        lastWin: this.imgPlan && this.imgPlan.action === 'partial'
+          ? { x0: this.imgPlan.win.x0, y0: this.imgPlan.win.y0, x1: this.imgPlan.win.x1, y1: this.imgPlan.win.y1 } : null,
+        lastArea: this.imgPlan?.area ?? null,
+        lastFullArea: this.imgPlan?.full ?? null,
+        lastReason: this.imgPlan?.reason || null,
+        resetReason: this._partialReset || null,          // 最近一次"基准帧作废"的原因（排查用）
+        stat: { ...this.imgPartial.stat },
+      },
       anim: this.anim ? {
         src: this.anim.src ? `${this.anim.src.name} ${this.anim.src.w}×${this.anim.src.h} ${this.anim.src.kind}` : null,
         kind: this.anim.src?.kind || null,
@@ -1394,6 +1499,9 @@ export class SpiPanelView {
         running: this.anim.running, frames: this.anim.stat.frames, dropped: this.anim.stat.dropped,
         bytes: this.anim.stat.bytes, fps: +this.anim.stat.fps.toFixed(2), kbs: +this.anim.stat.kbs.toFixed(1),
         lastMs: +this.anim.stat.lastMs.toFixed(1),
+        partial: this.anim.stat.partial, skipped: this.anim.stat.skipped,
+        pxSent: this.anim.stat.pxSent, pxFull: this.anim.stat.pxFull,
+        savePct: this.anim.stat.pxFull ? +(100 - this.anim.stat.pxSent / this.anim.stat.pxFull * 100).toFixed(2) : 0,
       } : null,
       lastRun: this.lastRun || null,          // 最近一次刷图的客观数字（脚本/自检直接读，别去解析日志）
       readBack: this.readBack ? {             // 最近一次读回（寄存器另见 lastReg）

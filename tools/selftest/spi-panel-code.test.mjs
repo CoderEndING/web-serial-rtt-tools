@@ -433,6 +433,132 @@ console.log('== E. 动画 / 视频：摆放映射 + 一帧的帧序列（整帧�
      `打包干净：${items.length} 帧 → ${packs.length} 包（3 条帧头 1 包 + 每片 1 包，一帧不跨包）`);
 }
 
+// ==================================================================== E2
+console.log('== E2. 局部刷新：差异包围盒 + 子矩形抠图 + 决策器 ==');
+{
+  const W = 8, H = 4, N = W * H;
+  const mk = fill => { const a = new Uint8Array(N * 2); for (let i = 0; i < N; i++){ a[i * 2] = fill; a[i * 2 + 1] = fill; } return a; };
+  const put = (a, x, y, hi, lo) => { const i = (y * W + x) * 2; a[i] = hi; a[i + 1] = lo; };
+
+  // ① 完全相同 → null（一个像素都不发）
+  const a0 = mk(0x10), b0 = mk(0x10);
+  ok(I.diffRect(a0, b0, W, H) === null, '两帧逐字节相同 → null（整帧可以一次 USB 都不喊）');
+
+  // ② 单像素变化 → 1×1 的包围盒，且 cells = 1
+  const b1 = mk(0x10); put(b1, 3, 2, 0xff, 0xff);
+  const r1 = I.diffRect(a0, b1, W, H);
+  ok(r1 && r1.x0 === 3 && r1.y0 === 2 && r1.x1 === 3 && r1.y1 === 2 && r1.w === 1 && r1.h === 1 && r1.cells === 1,
+     `单像素变化 → 1×1 包围盒 @(3,2)（实测 ${r1 && `${r1.w}×${r1.h} @(${r1.x0},${r1.y0}) cells=${r1.cells}`}）`);
+
+  // ③ 两个分散的点 → 包围盒把它们都框住，cells 仍是 2（包围盒 ≠ 变化像素数）
+  const b2 = mk(0x10); put(b2, 1, 0, 0xaa, 0xaa); put(b2, 6, 3, 0xbb, 0xbb);
+  const r2 = I.diffRect(a0, b2, W, H);
+  ok(r2.x0 === 1 && r2.y0 === 0 && r2.x1 === 6 && r2.y1 === 3 && r2.cells === 2,
+     `两个分散点 → 包围盒 6×4 但只数到 2 个变化像素（cells=${r2.cells}）`);
+
+  // ④ 容差：**被丢掉的那几位**不同 = 不算变（视频/JPEG 的量化噪声就是这种）
+  //    掩码 f7de：低字节丢 bit0（B 的最低位）与 bit5（G 的最低位），高字节丢 bit3（R 的最低位）。
+  const mk565 = (hi, lo) => { const a = new Uint8Array(N * 2); for (let i = 0; i < N; i++){ a[i * 2] = hi; a[i * 2 + 1] = lo; } return a; };
+  const nB = mk565(0x10, 0x10), nB1 = mk565(0x10, 0x11);      // 只差 B 的最低位
+  ok(I.diffRect(nB, nB1, W, H, { tolerance: 0 }) !== null, '容差 0：B 的最低位不同 → 算变（逐位精确）');
+  ok(I.diffRect(nB, nB1, W, H, { tolerance: 1 }) === null, '容差 1：B 的最低位不同 → 不算变（噪声被吃掉）');
+  const nG1 = mk565(0x10, 0x30);                               // 只差 G 的最低位（低字节 bit5）
+  ok(I.diffRect(nB, nG1, W, H, { tolerance: 1 }) === null, '容差 1：G 的最低位不同 → 不算变');
+  const nR1 = mk565(0x18, 0x10);                               // 只差 R 的最低位（高字节 bit3）
+  ok(I.diffRect(nB, nR1, W, H, { tolerance: 1 }) === null, '容差 1：R 的最低位不同 → 不算变');
+  const nR2 = mk565(0x20, 0x10);                               // 差到 R 的第 2 位
+  ok(I.diffRect(nB, nR2, W, H, { tolerance: 1 }) !== null, '容差 1：差到 R 的第 2 位 → 还是算变');
+  ok(I.toleranceMask(0) === 0xffff && I.toleranceMask(1) === 0xf7de && I.toleranceMask(2) === 0xe79c,
+     `容差掩码：0 → ffff / 1 → f7de / 2 → e79c（实测 ${I.toleranceMask(0).toString(16)} ${I.toleranceMask(1).toString(16)} ${I.toleranceMask(2).toString(16)}）`);
+
+  // ⑤ 抠子矩形：逐行紧凑拷贝（不是整段 subarray —— 行间要丢掉窗口外的像素）
+  const full = new Uint8Array(W * H * 2);
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++){ const i = (y * W + x) * 2; full[i] = y; full[i + 1] = x; }
+  const reg = I.regionBytes(full, W, { x0: 2, y0: 1, x1: 4, y1: 3 });
+  ok(reg.length === 3 * 3 * 2, `子矩形 3×3 → ${reg.length} 字节（= 3*3*2）`);
+  ok([...reg].join() === [1,2, 1,3, 1,4, 2,2, 2,3, 2,4, 3,2, 3,3, 3,4].join(),
+     `子矩形内容逐行紧凑：${[...reg].join(' ')}`);
+
+  // ⑥ 决策器：第一帧整帧 → 小改局部 → 完全相同跳过 → 大改回落到整帧
+  const pr = new I.PartialRefresh({ enabled: true, tolerance: 0, fullRatio: 0.6 });
+  const win = { x0: 0, y0: 0, x1: W - 1, y1: H - 1, w: W, h: H };
+  const f0 = mk(0);
+  const p0 = pr.plan(f0, win, { align: 4, scrW: W, scrH: H });
+  ok(p0.action === 'full' && /第一帧/.test(p0.reason), `第 1 帧：整帧建立基准（${p0.reason}）`);
+  const f1 = mk(0); put(f1, 5, 3, 0xee, 0xee);
+  const p1 = pr.plan(f1, win, { align: 4, scrW: W, scrH: H });
+  // x=5 → 对齐到 4 → 4..7；y=3 → 行 3..3 ⇒ 子窗口 4..7 × 3..3 = 4×1
+  ok(p1.action === 'partial' && p1.win.x0 === 4 && p1.win.x1 === 7 && p1.win.y0 === 3 && p1.win.y1 === 3,
+     `第 2 帧：只发 1 个像素 → 对齐成 4×1 的子窗口（${p1.win.x0}..${p1.win.x1} × ${p1.win.y0}..${p1.win.y1}）`);
+  ok(p1.px.length === 4 * 1 * 2 && p1.win.w === 4, `子窗口像素 ${p1.px.length} 字节（对齐补了 3 列）`);
+  ok(p1.px[0] === 0 && p1.px[2] === 0xee && p1.px[3] === 0xee,
+     `那个真变化的像素落在子窗口第 2 格（x=5 − 窗口左沿 4 = 1 → 字节偏移 2）：${[...p1.px].join(' ')}`);
+  const p2 = pr.plan(f1, win, { align: 4, scrW: W, scrH: H });
+  ok(p2.action === 'skip' && pr.stat.skipped === 1, '第 3 帧与第 2 帧相同 → skip（一个字节都不发）');
+  const f3 = mk(0x77);            // 整屏都变
+  const p3 = pr.plan(f3, win, { align: 4, scrW: W, scrH: H });
+  ok(p3.action === 'full' && /整帧更划算/.test(p3.reason), `整屏都变 → 回落到整帧（${p3.reason}）`);
+  ok(pr.stat.partial === 1 && pr.stat.full === 2 && pr.stat.skipped === 1 && pr.stat.frames === 4,
+     `统计：${pr.stat.frames} 帧 = 整帧 ${pr.stat.full} + 局部 ${pr.stat.partial} + 跳过 ${pr.stat.skipped}`);
+
+  // ⑦ 关掉开关 = 永远整帧（并且照样记基准，打开后立刻能用）
+  const pr2 = new I.PartialRefresh({ enabled: false });
+  ok(pr2.plan(f0, win, {}).action === 'full' && pr2.plan(f1, win, {}).action === 'full', '开关关掉：每帧都是整帧');
+  pr2.enabled = true;
+  ok(pr2.plan(f1, win, { align: 4, scrW: W, scrH: H }).action === 'skip',
+     '关着的时候也记基准 —— 一打开就能立刻判"没变"');
+
+  // ⑧ reset() 之后回到"第一帧"
+  pr2.reset();
+  const q0 = pr2.plan(f1, win, { align: 4, scrW: W, scrH: H });
+  ok(q0.action === 'full' && /第一帧/.test(q0.reason), `reset() 后重新建立基准（${q0.reason}）`);
+}
+
+// ==================================================================== E3
+console.log('== E3. 局部刷新：真帧序列（子窗口开窗 + 子窗口像素）==');
+{
+  const g = I.PANEL_GEOMETRY.st77916;                 // 360×360，档 2，对齐 4
+  const W = g.w, H = g.h;
+  const base = new Uint8Array(W * H * 2);
+  const win = I.alignWindow(0, 0, W, H, { align: g.align, scrW: W, scrH: H });
+  const pr = new I.PartialRefresh({ enabled: true, tolerance: 0 });
+  pr.plan(base, win, { align: g.align, scrW: W, scrH: H });
+  const next = base.slice();
+  for (let y = 100; y < 110; y++) for (let x = 200; x < 210; x++){ const i = (y * W + x) * 2; next[i] = 0xff; next[i + 1] = 0xff; }
+  const plan = pr.plan(next, win, { align: g.align, scrW: W, scrH: H });
+  ok(plan.action === 'partial', `10×10 的变化 → 局部（${plan.reason}）`);
+  const items = A.frameItems(plan.px, { geometry: g, profile: 2, lines: g.lines, window: plan.win, cache: {} });
+  ok(items.length === 2 + Math.ceil(plan.px.length / I.PIXEL_SLICE),
+     `档 2 局部帧：开窗 2 + 像素 ${Math.ceil(plan.px.length / I.PIXEL_SLICE)} = ${items.length} 帧`);
+  // 开窗那两条必须是 QSPI 形状（opcode + 24 bit 地址 = 00 XX 00），不是 STEP
+  const w0 = items[0];
+  ok(w0.type === P.T.XFER && w0.payload && /QSPI 0x2/.test(w0.label),
+     `局部开窗走 QSPI XFER（${w0.label}）`);
+  const colCmd = (0x2a << 8) >>> 0;
+  const addrOf = p => (p[8] | (p[9] << 8) | (p[10] << 16) | (p[11] << 24)) >>> 0;   // xferPayload 的 addr（小端 u32，低 3 字节上线）
+  ok(addrOf(w0.payload) === colCmd, `CASET 的 24 bit 地址 = 命令字 << 8（线上 00 2a 00 = 0x${colCmd.toString(16)}，实测 0x${addrOf(w0.payload).toString(16)}）`);
+  // 10×10 的变化：整帧 259200 B → 子窗口 12×10 像素（x 对齐到 4）
+  ok(plan.px.length < base.length / 100, `子窗口像素 ${plan.px.length} B，只有整帧 ${base.length} B 的 ${(plan.px.length / base.length * 100).toFixed(2)}%`);
+  ok(pr.stat.pxSent === base.length + plan.px.length,
+     `整轮发出 ${pr.stat.pxSent} B = 一次整帧 ${base.length} + 一次局部 ${plan.px.length}（不省的话要 2×${base.length}）`);
+  const packs = P.packFrames(items.map(it => P.frame(it.type, it.payload, { flags: it.flags })));
+  ok(P.checkPacks(packs).length === 0, `局部帧也打包干净（${packs.length} 包，一帧不跨 512 B 包）`);
+
+  // 档 1：局部帧应该是 开窗2 + RAMWR1 + 像素N
+  const g1 = I.PANEL_GEOMETRY.axs15352;
+  const items1 = A.frameItems(plan.px, { geometry: g1, profile: 1, lines: g1.lines, window: plan.win, cache: {} });
+  ok(items1.length === 3 + Math.ceil(plan.px.length / I.PIXEL_SLICE) && /RAMWR/.test(items1[2].label),
+     `档 1 局部帧：开窗 2 + RAMWR 1 + 像素 ${Math.ceil(plan.px.length / I.PIXEL_SLICE)} = ${items1.length} 帧`);
+  ok((items1[items1.length - 1].flags & P.F.RSP) !== 0, '局部帧的末片照样带 RSP（不然不知道成没成）');
+
+  // 帧头缓存必须按窗口分键：换了窗口不能沿用上一块的 CASET/RASET
+  const cache = {};
+  const itA = A.frameItems(plan.px, { geometry: g, profile: 2, lines: g.lines, window: { x0: 0, y0: 0, x1: 19, y1: 19, w: 20, h: 20 }, cache });
+  const itB = A.frameItems(plan.px, { geometry: g, profile: 2, lines: g.lines, window: { x0: 40, y0: 40, x1: 59, y1: 59, w: 20, h: 20 }, cache });
+  ok(itA[0] !== itB[0], '换窗口 → 帧头重新生成（缓存按窗口分键，不会拿上一块的 CASET 去用）');
+  ok(itB[0].label !== itA[0].label, `新窗口的 CASET 标签也换了（${itB[0].label}）`);
+}
+
 // ==================================================================== A6
 console.log('== A6. samples/panel-init 的样例表（整段贴进页面就能用）==');
 {

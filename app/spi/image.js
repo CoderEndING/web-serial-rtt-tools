@@ -373,30 +373,212 @@ export function alignWindow(x, y, w, h, o = {}){
 }
 
 /**
- * 把一张 RGBA 源图变成"开窗 + 像素"的完整帧序列（页面上一次刷屏就调它）。
+ * 源图 → 屏窗口：开窗计算 + 摆放 + RGB565（**只算像素，不拼帧**）。
  *
- * 顺序（档 1 与档 2 的差别只在中间那一帧）：
- *   CASET / RASET（STEP 帧）
- *   → 〔档 1 才有的 RAMWR 命令帧，DC=0 + CS_HOLD〕
- *   → 像素片 ×N（档 1 除末片都带 CS_HOLD；档 2 每片自成窗口）
- * @returns {{items:Array, placed:object, px:number, slices:number}}
+ * 单独拎出来是为了给**局部刷新**用：局部刷新要先拿到"整窗的 RGB565"才能与上一帧比，
+ * 比完再决定发整窗还是发子矩形。原来这套算术躲在 `imageToFrames` 里，外面拿不到。
+ * @returns {{win:object, placed:object, px:Uint8Array}}
  */
-export function imageToFrames(src, sw, sh, o = {}){
+export function composeWindow(src, sw, sh, o = {}){
   const g = o.geometry || PANEL_GEOMETRY.st77916;
   const x = o.x ?? 0, y = o.y ?? 0;
-  const profile = o.profile ?? 0;
-  const lines = o.lines ?? g.lines;
   const win = alignWindow(x, y, o.w ?? sw, o.h ?? sh, { align: g.align, scrW: g.w, scrH: g.h });
   const composed = composeImage(src, sw, sh, win.w, win.h, { mode: o.fit || 'fill' });
   const px = rgbaTo565(composed.rgba, { swap: o.swap, littleEndian: o.littleEndian, level: o.level });
-  const items = [
+  return { win, placed: composed.placed, px };
+}
+
+/**
+ * 开窗那几条**帧头**（每帧都一样，可以缓存）：CASET / RASET +〔档 1 的 RAMWR 命令帧〕。
+ * 抽出来是为了让"逐帧推送"能按窗口缓存它们（见 anim.frameItems）。
+ */
+export function headItems(win, o = {}){
+  const g = o.geometry || PANEL_GEOMETRY.st77916;
+  const profile = o.profile ?? 0;
+  const lines = o.lines ?? g.lines;
+  return [
     ...windowItems(win, g, { profile, qspiWrOpcode: o.qspiWrOpcode, qspiAddrBytes: o.qspiAddrBytes ?? 3 }),
     ...(profile === 1 ? [ramwrCommandItem({ ramWr: g.ramWr, lines })] : []),
+  ];
+}
+
+/**
+ * 「一块窗口 + 它的像素」→ 帧序列（开窗 2 帧 +〔档 1 的 RAMWR〕+ 像素片）。
+ *
+ * 顺序（档 1 与档 2 的差别只在中间那一帧）：
+ *   CASET / RASET（档 0/1 = STEP 帧；档 2 = QSPI XFER）
+ *   → 〔档 1 才有的 RAMWR 命令帧，DC=0 + CS_HOLD〕
+ *   → 像素片 ×N（档 1 除末片都带 CS_HOLD；档 2 首片带 cmd+地址、CS 一路保持）
+ *
+ * ⚠️ `win` 是**屏坐标**，`px` 必须正好是这块窗口的像素（局部刷新时就是子矩形的像素）。
+ */
+export function itemsForWindow(px, win, o = {}){
+  const profile = o.profile ?? 0;
+  return [
+    ...headItems(win, o),
     ...pixelItems(px, {
-      profile, qspiColorOpcode: g.colorOpcode ?? o.qspiColorOpcode,
-      qspiAddrBytes: o.qspiAddrBytes ?? 3, ramWr: g.ramWr, lines,
+      profile, qspiColorOpcode: (o.geometry || PANEL_GEOMETRY.st77916).colorOpcode ?? o.qspiColorOpcode,
+      qspiAddrBytes: o.qspiAddrBytes ?? 3, ramWr: (o.geometry || PANEL_GEOMETRY.st77916).ramWr,
+      lines: o.lines ?? (o.geometry || PANEL_GEOMETRY.st77916).lines,
       sliceBytes: o.sliceBytes ?? PIXEL_SLICE,
     }),
   ];
-  return { items, placed: composed.placed, window: win, px: px.length, slices: items.length - 2 - (profile === 1 ? 1 : 0), bytes: px };
+}
+
+/**
+ * 把一张 RGBA 源图变成"开窗 + 像素"的完整帧序列（页面上一次刷屏就调它）。
+ * @returns {{items:Array, placed:object, window:object, px:number, slices:number, bytes:Uint8Array}}
+ */
+export function imageToFrames(src, sw, sh, o = {}){
+  const g = o.geometry || PANEL_GEOMETRY.st77916;
+  const profile = o.profile ?? 0;
+  const cw = composeWindow(src, sw, sh, o);
+  const items = itemsForWindow(cw.px, cw.win, o);
+  return {
+    items, placed: cw.placed, window: cw.win, bytes: cw.px,
+    px: cw.px.length, slices: items.length - 2 - (profile === 1 ? 1 : 0),
+  };
+}
+
+// ============================================================================
+// 局部刷新（只发与上一帧不同的那一块）
+// ============================================================================
+
+/**
+ * 容差掩码：RGB565 的三个分量各丢掉最低 `drop` 位后再比较。
+ *
+ * 为什么需要它：**视频/JPEG 每一帧的像素都在抖**（DCT 量化噪声），逐位精确比较的话
+ * 129600 个像素里几乎每个都"变了" → 包围盒 = 整屏 → 局部刷新一点收益都没有。
+ * 丢掉低 1~2 位后，静止区域能真正判成"没变"，运动区域才留下。
+ * 代价是颜色量化到 4~5 bit/分量 —— 屏本身就是 565，肉眼看不出。
+ */
+export function toleranceMask(drop = 0){
+  const d0 = Math.max(0, Math.min(5, drop | 0));
+  let mask = 0xffff;
+  for (const [shift, bits] of [[11, 5], [5, 6], [0, 5]]){
+    const d = Math.min(d0, bits - 1);
+    if (d > 0) mask &= ~(((1 << d) - 1) << shift);
+  }
+  return mask & 0xffff;
+}
+
+/**
+ * 两帧（同一窗口的 RGB565 字节流）逐像素比较 → **变化像素的包围盒**（窗口内坐标）。
+ *
+ * 🚨 掩码可以逐字节施加（省掉 13 万次"拼回 16 位"），但**必须知道字节序**：
+ *    RGB565 的 R/G/B 位域是定义在 16 位**值**上的，而线上是先高字节还是先低字节由
+ *    「字节序」开关决定 —— 掩码的两个字节要跟着换位。搞错了的后果很隐蔽：
+ *    容差会作用到错误的分量上（该忽略的噪声照样触发"变了"），局部刷新看起来"时灵时不灵"。
+ * @param {{tolerance?:number, mask?:number, littleEndian?:boolean}} o
+ * @returns {{x0,y0,x1,y1,w,h,cells:number}|null} null = 一个像素都没变（可以整帧不发）
+ */
+export function diffRect(prev, next, w, h, o = {}){
+  if (!prev || !next || prev.length !== next.length || prev.length !== w * h * 2) return null;
+  const mask = o.mask != null ? (o.mask & 0xffff) : toleranceMask(o.tolerance ?? 0);
+  const le = !!o.littleEndian;
+  const m0 = le ? (mask & 0xff) : ((mask >> 8) & 0xff);      // 线上第 1 个字节用的掩码
+  const m1 = le ? ((mask >> 8) & 0xff) : (mask & 0xff);      // 第 2 个字节
+  let x0 = w, y0 = h, x1 = -1, y1 = -1, cells = 0;
+  for (let y = 0; y < h; y++){
+    const base = y * w * 2;
+    let rowHit = false;
+    for (let x = 0; x < w; x++){
+      const i = base + x * 2;
+      if (((prev[i] ^ next[i]) & m0) || ((prev[i + 1] ^ next[i + 1]) & m1)){
+        if (x < x0) x0 = x;
+        if (x > x1) x1 = x;
+        cells++;
+        rowHit = true;
+      }
+    }
+    if (rowHit){ if (y < y0) y0 = y; y1 = y; }
+  }
+  if (x1 < 0) return null;
+  return { x0, y0, x1, y1, w: x1 - x0 + 1, h: y1 - y0 + 1, cells };
+}
+
+/** 从"整窗 RGB565"里抠出一块子矩形，逐行紧凑排列（= 子窗口要发的像素流）*/
+export function regionBytes(px, w, r){
+  const rw = r.x1 - r.x0 + 1, rh = r.y1 - r.y0 + 1;
+  const out = new Uint8Array(rw * rh * 2);
+  for (let y = 0; y < rh; y++){
+    const src = ((r.y0 + y) * w + r.x0) * 2;
+    out.set(px.subarray(src, src + rw * 2), y * rw * 2);
+  }
+  return out;
+}
+
+/**
+ * 局部刷新的**决策器**（纯逻辑，无 DOM）：记住上一帧，算出"这一帧发哪块"。
+ *
+ * 三条纪律：
+ *   1) **上一帧存的是整窗**，不是发出去的那块 —— 否则下一帧比较的基准就残了；
+ *   2) 传进来的 `px` 必须**每帧新建**（调用方都是新建的），这里直接存引用不拷贝（省 260 KB/帧的拷贝）；
+ *   3) 窗口几何/像素选项一变必须 `reset()` —— 尺寸不同没法比，颜色开关变了整屏都算"变了"。
+ */
+export class PartialRefresh {
+  constructor(o = {}){
+    this.enabled = !!o.enabled;
+    this.tolerance = o.tolerance ?? 1;
+    this.littleEndian = !!o.littleEndian;    // 跟着页面的「字节序」开关走（掩码按字节序换位）
+    this.fullRatio = o.fullRatio ?? 0.6;     // 包围盒超过整窗这个比例 → 直接整帧（开窗开销不值）
+    this.prev = null;
+    this.stat = { frames: 0, sent: 0, partial: 0, full: 0, skipped: 0, pxSent: 0, pxFull: 0 };
+  }
+
+  reset(){ this.prev = null; }
+
+  /**
+   * @param {Uint8Array} px   本帧整窗像素（RGB565）
+   * @param {object} win      本帧整窗（屏坐标，含 x0/y0/w/h）
+   * @param {{align?:number, scrW?:number, scrH?:number, geometry?:object}} o
+   * @returns {{action:'full'|'partial'|'skip', win:object, px:Uint8Array,
+   *            rect:object|null, area:number, full:number, reason:string, bytes:number}}
+   */
+  plan(px, win, o = {}){
+    const full = { x0: win.x0, y0: win.y0, x1: win.x1, y1: win.y1, w: win.w, h: win.h };
+    const area = win.w * win.h;
+    this.stat.frames++;
+    const base = { action: 'full', win: full, px, rect: null, area, full: area, reason: '', bytes: px.length };
+
+    const had = !!this.prev;
+    if (!this.enabled){
+      this.prev = px;
+      this.stat.full++; this.stat.sent++; this.stat.pxSent += px.length; this.stat.pxFull += area;
+      return base;
+    }
+    if (!had || this.prev.length !== px.length){                        // 第一帧 / 几何变了
+      this.prev = px;
+      this.stat.full++; this.stat.sent++; this.stat.pxSent += px.length; this.stat.pxFull += area;
+      base.reason = had ? '窗口尺寸变了（整窗重发）' : '第一帧（整窗建立基准）';
+      return base;
+    }
+
+    const rect = diffRect(this.prev, px, win.w, win.h, { tolerance: this.tolerance, littleEndian: this.littleEndian });
+    this.prev = px;
+    this.stat.pxFull += area;
+    if (!rect){                                                        // 一个像素都没变
+      this.stat.skipped++;
+      base.action = 'skip';
+      base.bytes = 0;                                                  // 一个字节都没发（别记成整帧）
+      base.reason = '与上一帧完全相同';
+      return base;
+    }
+    if (rect.w * rect.h > this.fullRatio * area){
+      this.stat.full++; this.stat.sent++; this.stat.pxSent += px.length;
+      base.reason = `变化区 ${rect.w}×${rect.h} 占 ${(rect.w * rect.h / area * 100).toFixed(0)}%（超过阈值，整帧更划算）`;
+      return base;
+    }
+    // 子矩形 → 对齐 → 抠像素
+    const sub = o.align > 1 || o.scrW != null
+      ? alignWindow(win.x0 + rect.x0, win.y0 + rect.y0, rect.w, rect.h,
+                    { align: o.align ?? 0, scrW: o.scrW ?? 1 << 16, scrH: o.scrH ?? 1 << 16 })
+      : { x0: win.x0 + rect.x0, y0: win.y0 + rect.y0, x1: win.x0 + rect.x1, y1: win.y0 + rect.y1, w: rect.w, h: rect.h, padX: 0 };
+    const inner = { x0: sub.x0 - win.x0, y0: sub.y0 - win.y0, x1: sub.x0 - win.x0 + sub.w - 1, y1: sub.y0 - win.y0 + sub.h - 1 };
+    const bytes = regionBytes(px, win.w, inner);
+    this.stat.partial++; this.stat.sent++; this.stat.pxSent += bytes.length;
+    return { action: 'partial', win: sub, px: bytes, rect, area: sub.w * sub.h, full: area,
+             reason: `只发变化区 ${sub.x0}..${sub.x1} × ${sub.y0}..${sub.y1}（${(sub.w * sub.h / area * 100).toFixed(1)}%）`,
+             bytes: bytes.length };
+  }
 }
