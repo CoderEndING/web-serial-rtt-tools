@@ -36,7 +36,13 @@ export const PANEL_PRESETS = {
      *   · 🚨 PA10（J3[33]）别用：板载 LED 任务每 50 ms 写它，驱动不出持续电平（2026-09-30 LA 实测） */
     cfg: { sclkHz: 40000000, csPolicy: 0, padDc: 14 /*PA26 J3[24]*/, padRst: 5 /*PA02 J3[7]*/, padBl: 13 /*PA31 J3[11]*/, padActiveLow: 0x06 },
     geom: 'axs15352',
-    note: '档 1：同一 CS 窗口内「命令 → 翻 DC → 参数」。2026-09-30 起桥在 SPI2：SCLK=J3[13] MOSI=J3[28] CS=J3[26]',
+    /* 推荐值说明：拆成三段（协议 / 接线 / 注意）渲染成小表 —— 原来是一整段密排文字塞在
+     * 230px 宽的侧栏里，用户（2026-10-02 review）明确说读不动。 */
+    note: {
+      proto: '档 1：同一个 CS 窗口里「命令 → 翻 DC → 参数」；像素管道化刷（除末片都保持 CS）',
+      wire: 'SPI2：SCLK=J3[13] MOSI=J3[28] CS=J3[26]　DC=PA26(J3[24]) RST=PA02(J3[7]) BL=PA31(J3[11])',
+      tips: 'RST/BL 两根都经 LA 实测；PA10(J3[33]) 别用（板载 LED 任务每 50 ms 写它）',
+    },
   },
   st77916: {
     label: 'ST77916（圆屏 360×360 · QSPI 四线）',
@@ -69,7 +75,11 @@ export const PANEL_PRESETS = {
      */
     cfg: { sclkHz: 40000000, mode: 0, csPolicy: 0, padDc: 0, padRst: 5 /*PA02 J3[7]*/, padBl: 13 /*PA31 J3[11]*/, padActiveLow: 0x06 },
     geom: 'st77916',
-    note: '档 2：0x02 + 24 bit 地址（00 XX 00，命令在中间字节）+ 参数；像素用 0x32 + 四线。SPI2：CS=J3[26] SCLK=J3[13] D0=J3[28] D1=J3[27] D2=J3[10] D3=J3[8]；RST=PA02 J3[7]、BL=PA31 J3[11]（都经 LA 实测；PA10 J3[33] 被固件 LED 任务占用，驱动不出持续电平）',
+    note: {
+      proto: '档 2：QSPI 四线。开窗 = 0x02 + 24bit 地址（00 XX 00，**命令字在中间字节**）；像素 = 0x32 + 四线连续流',
+      wire: 'SPI2：CS=J3[26] SCLK=J3[13] D0=J3[28] D1=J3[27] D2=J3[10] D3=J3[8]　RST=PA02(J3[7]) BL=PA31(J3[11])',
+      tips: 'RST/BL 都经 LA 实测；PA10(J3[33]) 被固件 LED 任务占用（50 ms 写一次，驱动不出持续电平）；mode 必须 0',
+    },
   },
 };
 
@@ -514,8 +524,31 @@ export class SpiPanelView {
     $('pn-qspiaddr').value = String(p.qspiAddrBytes);
   }
 
+  /**
+   * 推荐值说明：渲染成「协议 / 接线 / 注意」三行小表。
+   *
+   * 🚨 原来是一次 `textContent = note`，把十来行信息密排在一段里塞进 230px 宽的侧栏 ——
+   *    用户 2026-10-02 review 明确说读不动。现在按字段渲染成对齐的小表（label 定宽 + 值自动换行）。
+   *    为兼容仍然接受纯字符串（老调用/外部注入）。
+   */
   fillPresetNote(){
-    $('pn-preset-note').textContent = PANEL_PRESETS[$('pn-preset').value]?.note || '';
+    const el = $('pn-preset-note');
+    if (!el) return;
+    const note = PANEL_PRESETS[$('pn-preset').value]?.note;
+    el.textContent = '';
+    if (!note) return;
+    if (typeof note === 'string'){ el.textContent = note; return; }
+    for (const [k, label] of [['proto', '协议'], ['wire', '接线'], ['tips', '注意']]){
+      if (!note[k]) continue;
+      const row = document.createElement('div');
+      row.className = 'noterow';
+      const b = document.createElement('b');
+      b.textContent = label;
+      const s = document.createElement('span');
+      s.textContent = note[k];
+      row.append(b, s);
+      el.appendChild(row);
+    }
   }
 
   refreshButtons(){

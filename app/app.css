@@ -84,6 +84,16 @@ legend{font-size:11.5px;color:var(--fg2);padding:0 5px;letter-spacing:.4px}
 .row{display:flex;align-items:center;gap:6px;margin:5px 0}
 .row>span:first-child{flex:none;width:60px;color:var(--fg2);font-size:12px}
 .row input,.row select{flex:1}
+/* ---- 装不下时**换行**，而不是被裁掉（2026-10-02 全站 review 的 #1 问题）----
+   `.row` 是 flex 且**不换行**：里面一旦有"压不下去"的子项（`.num` 是 flex:none!important、
+   按钮、复选框、原生下拉）就顶宽整行的 min-content，父容器又带 overflow:hidden
+   → **右侧控件被裁掉而且拉不回来**（SPI 桥页那条擦写行实测 809px 挤进 640px 的盒子，
+   "擦除 / 写+校验 / 写测速"直接看不见）。
+   两个变体按需开，不动默认行为：
+     .row.wrap —— 允许换行；控件换到下一行后 flex:1 会把它撑满
+     .row.wide —— 同上，但控件**一定**独占一行（值很长的路径输入框用：多看见十几个字符） */
+.row.wrap,.row.wide{flex-wrap:wrap}
+.row.wide>input,.row.wide>select{flex:1 1 100%}
 /* cfg 行：输入框要占满剩余宽度（之前被挤成几十像素，占位文字都溢出框外），右边挂「选择…」 */
 .cfgrow{align-items:center}
 .cfgrow>input{flex:1 1 auto;min-width:0;width:100%}
@@ -244,8 +254,22 @@ dialog form{margin-top:16px;text-align:right}
 /* ---- SPI/QSPI 两页（#spi 桥 / #panel 屏）----
    日志框是"帧流水"（每帧一行 + 应答一行），所以用等宽 + 预换行；颜色只分四档。 */
 #tab-spi .side .row>span:first-child,#tab-panel .side .row>span:first-child{width:74px}
+/* 屏页「型号与推荐值」的说明：三行小表（协议 / 接线 / 注意），label 定宽 34px、值自动换行。
+   原来是一整段密排文字（见 panel-view.fillPresetNote 的注释）。 */
+#pn-preset-note{margin:4px 0 0}
+#pn-preset-note .noterow{display:flex;gap:6px;margin:2px 0;font-size:11.5px;line-height:1.45;color:var(--fg2)}
+#pn-preset-note .noterow>b{flex:0 0 34px;color:var(--fg3,var(--fg2));font-weight:500}
+#pn-preset-note .noterow>span{flex:1 1 auto;min-width:0;overflow-wrap:anywhere;font-family:var(--mono)}
 #tab-spi .row>span:first-child,#tab-panel .row>span:first-child{width:74px}
 #tab-spi .framegrid,#tab-panel .framegrid{display:grid;grid-template-columns:1fr 1fr;gap:0 8px}
+/* 🚨 grid 项默认 `min-width:auto`：里面那行一旦压不下去（长下拉 / 多个按钮），
+   整个 grid 就会被顶宽、把兄弟列挤出容器（review 实测 809px 挤进 640px）。
+   给每一项 `min-width:0` 是 grid 里"允许收缩"的标准开关。 */
+#tab-spi .framegrid>*,#tab-panel .framegrid>*{min-width:0}
+/* 数字格默认 `.num{width:64px;flex:none!important}`（全局规则，别的地方靠它对齐）。
+   在格子（grid 列）里它压不下去：dock 一出现纵向滚动条，列宽少 11px，这一格就顶出去
+   （review 复测实测 `#sp-flash-card 642>631`）。这里允许它在格子里收缩到 44px 起步。 */
+#tab-spi .framegrid .num,#tab-panel .framegrid .num{width:auto;min-width:44px;flex:1 1 44px!important}
 #tab-spi .framegrid .row>span:first-child,#tab-panel .framegrid .row>span:first-child{width:62px}
 #tab-spi .tx,#tab-panel .tx{min-height:44px}
 /* ---- 桥页右区：**一个带 tab 的面板**（命令表 / 脚本 / Flash 测试 / 回环自检）+ 常驻日志 ----
@@ -262,6 +286,16 @@ dialog form{margin-top:16px;text-align:right}
 #tab-spi .dockpage{display:none;flex:1 1 auto;min-height:0;flex-direction:column;gap:6px}
 #tab-spi .dockpage.on{display:flex}
 #tab-spi .dockpage .toolrow{margin:0}
+/* ---- 窄窗 / 矮窗别把控件吃掉（review 实测两处）----
+   ① 横向：dock 里的**按钮行**默认不换行 → 擦写行（复选框 + 下拉 + 3 个按钮）压不下去，
+      整行 809px 挤进 640px 的盒子，右边两个按钮被 overflow:hidden 裁掉且拉不回来。
+      🚨 只给 `.btnrow`（一整行按钮那种）开换行：`.framegrid` 里的"标签 + 控件"行**不能换行**——
+      一换行输入框就掉到标签下面，反而更难读；那种行靠 `.framegrid>*{min-width:0}` + 控件自身
+      `min-width:0` 收缩就够了。
+   ② 纵向：`.dockpage` 是 flex 容器且没滚动 —— 里面固定高度的块加起来超过盒子高度时，
+      底部内容同样被裁掉（1200x700 实测 427 > 381）。给它自己的纵向滚动兜底。 */
+#tab-spi .dockpage{overflow-y:auto;overflow-x:hidden}
+#tab-spi .dockpage .row.btnrow{flex-wrap:wrap;row-gap:4px}
 /* tab 里的滚动区吃满剩余高度（共用规则里的 `.scroll{max-height:200px}` 在这里必须让位 ——
    那是给屏页的，动它会连带改到 #tab-panel） */
 #tab-spi .scroll.fill{flex:1 1 auto;min-height:0;max-height:none;margin-top:0}
@@ -822,7 +856,10 @@ fieldset.folded > legend::after{content:' · 已折叠';color:var(--fg2);font-si
   border:1px solid var(--line);border-radius:6px;padding:2px;background:var(--bg)}
 #tab-dbg .wrow{display:flex;align-items:baseline;gap:6px;padding:0 3px;border-radius:4px}
 #tab-dbg .wrow:hover{background:var(--bg3)}
-#tab-dbg .wrow .nm{flex:0 0 auto;max-width:13ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* 变量名列：原来 13ch（≈91px）连 `_SEGGER_RTT_` 都放不下，一律截成 `_SEGGER_RT…`。
+   放宽到 20ch 并允许它按内容伸缩（`flex:0 1 auto` + `min-width:0`）：短名字不多占地方，
+   长名字尽量显全；完整的表达式/地址/类型本来就在 title 里（悬浮可见）。 */
+#tab-dbg .wrow .nm{flex:0 1 auto;min-width:0;max-width:20ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #tab-dbg .wrow .vl{flex:1 1 auto;min-width:0;text-align:right;color:var(--ok);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #tab-dbg .wrow .ty{flex:none;color:var(--fg2);font-size:11px;max-width:8ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #tab-dbg .wrow .x{padding:0 4px;font-size:11.5px;flex:none}

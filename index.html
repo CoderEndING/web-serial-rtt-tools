@@ -1608,7 +1608,10 @@
         </label>
         <label class="row"><span>PyOCD 目标</span><input id="g-pyocd-target" value="stm32f103rb" title="pyocd -t 的 target 名（pyocd pack 里能查到）"></label>
         <label class="row"><span>PyOCD Hz</span><input id="g-pyocd-freq" class="num" value="10000000" inputmode="numeric"></label>
-        <label class="row"><span>OpenOCD 根</span><input id="g-openocd-root" value="E:/MounRiver/MounRiver_Studio2/resources/app/resources/win32/components/WCH/OpenOCD/OpenOCD" title="OpenOCD 安装/解压目录（里面要有 bin 和 scripts）。留空 = 产物里也留空"></label>
+        <!-- 路径类输入框用 `row wide`：控件独占一行、撑满侧栏宽度（原来 179px 的框里塞 605px 的路径，
+             看到的永远是开头那截）。浏览器出于安全拿不到真实目录名（showDirectoryPicker 只给文件夹名），
+             所以这里没有"选择…"可挂；完整值看 title。 -->
+        <label class="row wide"><span>OpenOCD 根</span><input id="g-openocd-root" value="E:/MounRiver/MounRiver_Studio2/resources/app/resources/win32/components/WCH/OpenOCD/OpenOCD" title="OpenOCD 安装/解压目录（里面要有 bin 和 scripts）。留空 = 产物里也留空"></label>
         <label class="row"><span>OpenOCD 接口</span><select id="g-openocd-if"></select></label>
         <label class="row"><span>OpenOCD 目标</span><input id="g-openocd-target" list="g-openocd-targets" value="target/stm32f1x.cfg"></label>
         <datalist id="g-openocd-targets"></datalist>
@@ -1645,9 +1648,9 @@
             <option value="stm32h7b0">STM32H7B0（cmsis-dap + stm32h7x）</option>
             <option value="custom">自定义 cfg…</option>
           </select></label>
-        <label class="row"><span>自定义 cfg</span><input id="g-bk-cfgs" value="interface/cmsis-dap.cfg, target/stm32f1x.cfg" title="逗号分隔；相对 OpenOCD 的 scripts 目录（也可写绝对路径）。只有「目标 = 自定义」时才用"></label>
+        <label class="row wide"><span>自定义 cfg</span><input id="g-bk-cfgs" value="interface/cmsis-dap.cfg, target/stm32f1x.cfg" title="逗号分隔；相对 OpenOCD 的 scripts 目录（也可写绝对路径）。只有「目标 = 自定义」时才用"></label>
         <label class="row"><span>OpenOCD kHz</span><input id="g-bk-speed" class="num" value="4000" inputmode="numeric"></label>
-        <label class="row"><span>openocd.exe</span><input id="g-bk-openocd" placeholder="留空 = 自动探测" title="找不到 OpenOCD 时填绝对路径（例：C:/Users/你/.espressif/tools/openocd-esp32/vX/openocd-esp32/bin/openocd.exe）"></label>
+        <label class="row wide"><span>openocd.exe</span><input id="g-bk-openocd" placeholder="留空 = 自动探测" title="找不到 OpenOCD 时填绝对路径（例：C:/Users/你/.espressif/tools/openocd-esp32/vX/openocd-esp32/bin/openocd.exe）"></label>
         <label class="row"><span>scripts 目录</span><input id="g-bk-scripts" placeholder="留空 = 跟着 openocd.exe 推断"></label>
         <label class="row"><span>J-Link 器件</span><input id="g-bk-jdev" value="STM32F103C8" title="给 J-Link 的 -Device（留空用默认 STM32F103C8）"></label>
         <label class="row"><span>J-Link kHz</span><input id="g-bk-jspeed" class="num" value="50000" inputmode="numeric" title="本机 J-Link PRO + F103 实测 50 MHz 可用"></label>
