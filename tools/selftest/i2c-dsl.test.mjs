@@ -426,12 +426,21 @@ console.log('== 10. 示例脚本必须零错误（示例写错比功能写错更
   ok(siText.includes('0x03 输出使能'), 'Si5351 写明 0x03 是输出使能（低有效，写 1 = 关掉那一路）');
   ok(siText.includes('0x10 CLK0 控制'), '……CLK0 控制在 0x10');
   ok(!siText.includes('0x03 CLK0 控制'), '……不再把 CLK0 控制写成 0x03');
-  ok(siText.includes('0xB1') && siText.includes('0xAC'), '……带上必须的 PLL 软复位 0xB1 = 0xAC');
   ok(!siText.includes('00 01 0A 00'), '……参数块 8 B 不再漏掉 P1[17:16] 那一位');
 
-  // Si5351 不许塞"看着像对"的魔法序列
+  // Si5351 现在是"**真机验过的三路配置**"：字节、OEB 掩码、PLL 复位写法都得在
+  ok(siText.includes('00 01 00 04 00 00 00 00') && siText.includes('00 01 00 16 00 00 00 00')
+     && siText.includes('00 01 01 2A 00 00 00 00'), 'Si5351 三路参数块字节齐全（50 / 12.5 / 1 MHz）');
+  ok(siText.includes('00 01 01 2A'), '……MS2 那 8 B 带上了 P1[17:16]（P1 = 0x012A00，÷600）');
+  ok(siText.includes('wr 0x60 0x10 0F 0F 0F'), '……三路控制字一次写完（0x10 ← 0F 0F 0F）');
+  ok(siText.includes('wr 0x60 0x09 FF'), '……带上 OEB 掩码那一笔（0x09 = 0xFF，输出交给 0x03 管）');
+  ok(siText.includes('0xB1 A0'), '……PLL 软复位写 0xA0（不是流程图的 0xAC）');
+  ok(siText.includes('0xAC') && siText.includes('残留 0x0C'), '……并说明为什么不照抄 0xAC（实测会留下 Reserved 位）');
+
+  // 标了"会写器件"就得写清楚：标题带 ⚠、正文写明 RAM/掉电、空白件没有上电频率
   const si = PRESETS.find(p => p.id === 'si5351');
-  ok(si.text.includes('没在硬件上验过'), 'Si5351 示例明确标注频率合成部分未经硬件验证');
+  ok(si.name.includes('⚠') && si.note.includes('真机验证'), 'Si5351 示例标题带 ⚠、注明字节已真机验证');
+  ok(si.text.includes('no boot-up frequency') && si.text.includes('掉电'), '……写明空白件上电没频率、配置在 RAM 掉电即失');
   const siParsed = D.parseScript(si.text);
   const siLoop = buildTasks(siParsed.items).tasks[0];
   eq(siLoop.count, 20, 'Si5351 的状态监视循环带次数（跑 20 轮自停）');
