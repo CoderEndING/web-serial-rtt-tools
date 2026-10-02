@@ -218,6 +218,24 @@ let haltWait = null;                     // 轮询等目标停下（页面里由
   await session.step();
   ok(session.pc === 0x08000302, '在断点处单步能走开（临时摘比较器）', '0x' + session.pc.toString(16));
   ok(session.bpList().length === 1, '单步之后比较器装回去了');
+  ok(session.lastStepMode === 'dhcsr', `C_STEP 能用时走主路径（mode=${session.lastStepMode}）`);
+
+  /* ---- 兜底：这颗探针/内核**不执行 C_STEP**（2026-10-02 真机 akaLinkPro + F103ZE 实测）----
+   * 症状：DHCSR 恒回 0x30007、S_HALT 从不掉、PC 一动不动；旧代码静默当成功返回
+   *       → 用户看到"点了单步没反应"。现在必须自己发现并改用「断点单步」。 */
+  session.probe.brokenCStep = true;
+  const pcBefore = session.pc;
+  const logsBefore = logs.length;
+  const mode = await session.step();
+  ok(mode === 'breakpoint', `C_STEP 不生效时自动改用断点单步（mode=${mode}）`);
+  ok(session.pc === pcBefore + 2, `兜底单步真的让 PC 前进了 ${pcBefore.toString(16)} → ${session.pc.toString(16)}`);
+  ok(session.bpList().length === 1, '兜底的临时比较器收干净了（只剩用户那一个断点）');
+  ok(logs.slice(logsBefore).some(l => /C_STEP 没让目标前进/.test(l)), '日志里说清了"为什么改走断点单步"（不许静默降级）');
+  const mode2 = await session.step();
+  ok(mode2 === 'breakpoint' && session.pc === pcBefore + 4, `连续单步也稳（连续两次都前进：0x${session.pc.toString(16)}）`);
+  session.probe.brokenCStep = false;
+  const mode3 = await session.step();
+  ok(mode3 === 'dhcsr' && session.pc === pcBefore + 6, `关掉坏组合后立刻回到 C_STEP 主路径（0x${session.pc.toString(16)}）`);
 
   // 删断点 / 清空
   ok(await session.bpDel(0x08000300) === true, '删断点');

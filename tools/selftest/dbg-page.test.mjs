@@ -95,7 +95,9 @@ console.log('== 1. 标签页与初始状态 ==');
 {
   const s = await ev('return window.__tools.summary();');
   ok(Array.isArray(s.tabs) && s.tabs.includes('dbg'), '标签栏里有 dbg（调试器）');
-  ok(s.tabs[s.tabs.length - 4] === 'dbg', `调试器排在烧录器之后（${s.tabs.join(' → ')}）`, s.tabs.join(','));
+  /* 「调试器」紧跟「烧录器」——用 indexOf 定位而不是数倒数第几个：
+   * 标签页数量会变（后来又加了 SPI/I2C/工程生成），写死下标会变成"数量一变就红"的假故障。 */
+  ok(s.tabs[s.tabs.indexOf('flash') + 1] === 'dbg', `调试器排在烧录器之后（${s.tabs.join(' → ')}）`, s.tabs.join(','));
   ok(s.ok === true, '页面无 JS 错误', JSON.stringify(s.errors));
   ok(s.dbg && s.dbg.connected === false, 'summary 里有 dbg 段且初始未连接');
 

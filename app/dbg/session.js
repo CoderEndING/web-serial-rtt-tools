@@ -29,6 +29,14 @@ const DHCSR = 0xe000edf0, DFSR = 0xe000ed30, AIRCR = 0xe000ed0c;
 const DBGKEY = 0xa05f0000;
 const C_DEBUGEN = 1, C_HALT = 2, C_STEP = 4, C_MASKINTS = 8;
 
+/**
+ * Thumb 指令长度（16 位半字 → 2 或 4 字节）。
+ * 判据是 ARMv7-M 的编码分组：`11101`/`11110`/`11111` 开头才是 32 位，
+ * 而 `11100`（0xE000~0xE7FF）是 **16 位**的无条件分支 B —— 差这一档就会把 B 当成 4 字节，
+ * 断点单步的落点整体偏 2 字节。
+ */
+const thumbLen = hw => ((hw & 0xf800) >= 0xe800 ? 4 : 2);
+
 /** 调试页默认 SWD 时钟（kHz）。
  *  🚨 2026-10-02 由用户拍板改成 **10 MHz**（原来是 1 MHz）：真机实测（akaLinkPro + STM32F103ZE）
  *  10/20/30 MHz 下 DHCSR/FPB/寄存器/RAM 全都正确，内存读 32 KB 从 1 MHz 的 ~100 KB/s 提到 **375 KB/s**
@@ -285,26 +293,95 @@ export class DebugSession {
 
   /**
    * 单步一条指令。
+   *
+   * 主路径：DHCSR 写 C_STEP。
    * 🚨 先看到 S_HALT 变 0 再等它变回 1 —— 写 C_STEP 的那一刻 DHCSR 还是旧值，
-   *    只等"=1"会立刻返回（等于没等），界面上就是"单步没动"。
-   * C_MASKINTS 让这一步不响应中断（gdb 的 stepi 语义），停下后由 run() 清掉。
+   *    只等"=1"会立刻返回（等于没等）。C_MASKINTS 让这一步不响应中断（gdb 的 stepi 语义）。
+   *
+   * 兜底（2026-10-02 真机实测加）：**有的探针/内核组合根本不执行 C_STEP**。
+   *    本机 akaLinkPro(CMSIS-DAP v2) + STM32F103ZE 实测：写完 C_STEP 后 DHCSR 回读**恒定**
+   *    `0x30007`（C_STEP 位一直在、S_HALT 从不掉），PC 一动不动 —— 换个姿势（带/不带 C_MASKINTS）、
+   *    换干净状态（AIRCR 复位后线程模式、CFSR/HFSR 全 0）都一样；而**同一个地址上
+   *    "放 FPB 比较器 + 运行"能精确停在下一条指令**（实测 pc → pc+2 命中）。
+   *    旧代码在这种情况下**静默当成功返回**，用户看到的是"点了单步没反应"，还以为是页面坏了。
+   *    现在：C_STEP 没让 PC 前进就自动改用**断点单步**，并把这件事写进日志（不许静默降级）。
    */
   async step(){
     if (!this.halted) throw new Error('目标在运行 —— 先「暂停」再单步');
     const pc = (await this.readReg('PC')) & ~1;
+    this.lastStepMode = null;
     await this._withBpCleared(pc, async () => {
-      await this.probe._dhcsr(DBGKEY | C_DEBUGEN | C_HALT | C_STEP | C_MASKINTS);
-      let sawRun = false;
-      for (let i = 0; i < 400; i++){
-        const v = await this.probe._readWord(DHCSR);
-        const h = ((v >>> 17) & 1) === 1;
-        if (!h) sawRun = true;
-        else if (sawRun) break;
-        await waitMs(1);
-      }
+      if (await this._stepByDhcsr(pc)){ this.lastStepMode = 'dhcsr'; return; }
+      this.lastStepMode = 'breakpoint';
+      await this._stepByBreakpoint(pc);
     });
     await this.refresh();
     await this.refreshRegs();
+    return this.lastStepMode;
+  }
+
+  /** C_STEP 主路径。@returns {Promise<boolean>} PC 是否**真的**前进了 */
+  async _stepByDhcsr(pc){
+    try { await this.probe._dhcsr(DBGKEY | C_DEBUGEN | C_HALT | C_STEP | C_MASKINTS); }
+    catch (e){ this._log('写 C_STEP 失败：' + (e?.message || e), 'warn'); return false; }
+    let sawRun = false;
+    for (let i = 0; i < 400; i++){
+      let v;
+      try { v = await this.probe._readWord(DHCSR); }
+      catch (e){ this._log('读 DHCSR 失败：' + (e?.message || e), 'warn'); return false; }
+      const h = ((v >>> 17) & 1) === 1;
+      if (!h) sawRun = true;
+      else if (sawRun) break;
+      /* 「根本没跑起来」不用等满 400 轮：C_STEP 生效的话 S_HALT 在前几轮就该掉下去。
+         这一步在坏组合上会白等 400 次 USB 往返（每次 ~0.3 ms + 1 ms 延时）。 */
+      if (!sawRun && i >= 60) break;
+      await waitMs(1);
+    }
+    /* 判据用 PC，不用 S_HALT —— S_HALT 位本身也可能读滞后/读脏（本仓有过先例） */
+    try { return ((await this.readReg('PC')) & ~1) !== pc; }
+    catch { return false; }
+  }
+
+  /**
+   * 断点单步：在 PC 的**下一条指令**上放一个临时比较器，然后运行 —— 核跑到那儿被 FPB 拦下。
+   *
+   * Thumb 指令长度：`(hw & 0xF800) >= 0xE800` → 32 位（前缀 11101/11110/11111），否则 16 位。
+   * ⚠️ 下一条若是分支，核会跳到别处 —— 这一步**依然只执行了一条指令**，语义正确，
+   *    只是落点 ≠ pc+len，所以这里只用"有没有停下来"当判据，不假定落点。
+   */
+  async _stepByBreakpoint(pc){
+    let hw;
+    try { hw = await this._readHalfword(pc); }
+    catch (e){ this._log('断点单步：读不到 PC 处的指令（' + (e?.message || e) + '）—— 这一步没执行', 'err'); return false; }
+    const len = thumbLen(hw);
+    const next = (pc + len) >>> 0;
+    this._log(`⚠ C_STEP 没让目标前进（这颗探针/内核不执行 C_STEP）—— 改用「断点单步」：` +
+      `在 0x${next.toString(16)} 放个临时比较器再运行（本条指令 ${len} 字节）`, 'warn');
+    try { await this.bpAdd(next); }
+    catch (e){ this._log('断点单步失败（比较器放不下）：' + (e?.message || e) + ' —— 这一步没执行', 'err'); return false; }
+    try {
+      await this._clearDfsr();
+      await this.run();
+      const t0 = Date.now();
+      while (Date.now() - t0 < 2000){                     // 最多等 2 s
+        try {
+          const v = await this.probe._readWord(DHCSR);
+          this.halted = ((v >>> 17) & 1) === 1;
+        } catch { /* 读一次失败不算停 */ }
+        if (this.halted) return true;
+        await waitMs(4);
+      }
+      this._log('断点单步：目标没在 2 s 内停下来（可能下一条是分支，跑到别处去了）', 'warn');
+      await this.probe.halt().catch(() => {});
+      return false;
+    } finally {
+      await this.bpDel(next).catch(() => {});
+    }
+  }
+
+  async _readHalfword(addr){
+    const b = await this.probe.readMem(addr >>> 0, 2);
+    return (b[0] | (b[1] << 8)) & 0xffff;
   }
 
   /** 清调试事件标志（命中过断点后 DFSR.BKPT 会一直挂着，清掉才能判断下一次是怎么停的） */

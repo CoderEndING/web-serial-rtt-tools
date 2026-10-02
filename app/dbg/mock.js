@@ -61,6 +61,12 @@ export class MockTarget {
     this._stepsPerMs = 6;                      // "主频"（每毫秒执行几条假指令）——只影响多久撞上断点
     this._dhcsrPhase = 0; this._dhcsrVal = 0;  // 一次字读的 4 个字节要返回同一个值（见 _dhcsrWord）
     this._stepPending = false; this._stepRunning = false;
+    /**
+     * 模拟"这颗探针/内核不执行 C_STEP"（2026-10-02 真机 akaLinkPro + STM32F103ZE 实测）：
+     * 写完 C_STEP 后 DHCSR 恒定回 0x30007（C_STEP 位一直在、S_HALT 从不掉），PC 一动不动。
+     * 上层 `step()` 的兜底（改用断点单步）就靠这个开关做离线回归。
+     */
+    this.brokenCStep = false;
     this._initMemory();
   }
 
@@ -272,6 +278,9 @@ export class MockTarget {
     const dbg = val & 1, halt = (val >>> 1) & 1, step = (val >>> 2) & 1;
     this.dhcsr = val & 0xf;
     if (step && halt){
+      /* 🚨 brokenCStep = 真机实测的那种坏组合：C_STEP 位写进去了、但核一步都不走，
+       *    S_HALT 一直是 1（DHCSR 读回恒定 0x30007）。上层必须自己发现"PC 没动"再兜底。 */
+      if (this.brokenCStep) return;
       // 单步：执行一条指令。**不要**立刻把 running 归零 —— 交给 _dhcsrWord 的状态机，
       // 让上层能观察到 "S_HALT 0 → 1" 这个过程（真硬件上这一步是真实发生的）。
       this._exec(1);
