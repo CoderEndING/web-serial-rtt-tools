@@ -1,8 +1,12 @@
 # STM32H7B0 RTT 饱和吞吐测试 —— 实测结果与踩坑记录
 
+> ⚠️ **2026-10 更新：本目录现在只有 HAL/SDK 版一种构建，"寄存器版（`-Minimal` / `-SlowClock`）"
+> 已删除**（用户定调：双轨各自漂过，维护成本大于收益）。下面正文里提到"寄存器版"的地方
+> 是**当时的实测记录**，保留作历史；第 152 节的"两种版本怎么选"已改成"只剩一种"。
+
 目标板：**STM32H7B0VBT6 KIT**（板载 25MHz 晶振，128KB Flash 单 Bank）
 主机通路：① 网页 WebUSB（CMSIS-DAP v2）② 桥 + OpenOCD（Tcl RPC）
-固件：本目录（`build.ps1` 默认编 **HAL/SDK 版**，`-Minimal` 编寄存器版）
+固件：本目录（`build.ps1` 只编 **HAL/SDK 版**；寄存器版已于 2026-10 删除）
 
 ---
 
@@ -39,11 +43,11 @@ g_ms        持续递增          ← 目标活着（卡死时它不涨）
 ## 二、可复现的测速步骤
 
 ```powershell
-# 1) 编译（默认 HAL/SDK 版；时钟配置 = 板子 demo 的 SystemClock_Config 原文）
+# 1) 编译（只有 HAL/SDK 版；时钟配置 = 板子 demo 的 SystemClock_Config 原文）
 pwsh -File tools\target-firmware\stm32h7b0_rtt_speed\build.ps1
-#    想要最小体积/无 SDK 依赖： 加 -Minimal ；只想跑 64MHz 保命档： 加 -SlowClock
+#    （早先的 -Minimal / -SlowClock 两个开关已随"寄存器版"一起删除 —— 见文件头与第四节）
 
-# 2) 烧录（OpenOCD 兜底；也可以直接用网页「烧录器」零安装烧 build\fw.elf）
+# 2) 烧录（OpenOCD 兜底；也可以直接用网页「烧录器」零安装烧本目录的 fw.elf）
 pwsh -File tools\target-firmware\stm32h7b0_rtt_speed\flash.ps1
 #    🚨 烧完确认板子 BOOT0 处于**正常启动(0)**，否则每次复位都回 ROM bootloader，应用不跑
 
@@ -149,15 +153,15 @@ DP IDCODE 读得到、AP0 IDR/CSW 正常（AP1/AP2/AP3 FAULT 是正常的，那�
 
 ---
 
-## 四、两种固件版本怎么选
+## 四、固件版本（2026-10 起只剩一种）
 
-| | HAL/SDK 版（默认） | 寄存器版（`-Minimal`） |
-|---|---|---|
-| 时钟配置 | **板子 demo 的 `SystemClock_Config()` 原文** | 手写，带三级降级 |
-| 依赖 | 要带 `sdk\` 目录（HAL+CMSIS，~4MB） | 零外部依赖 |
-| 体积 | 8 KB | 1.6 KB |
-| 降级保护 | 无（HAL 失败直接 `Error_Handler` 停机） | VOS0/晶振/PLL 任一步失败都自动退到 64MHz，并把出错位记在 `g_clk_err` |
-| 建议 | **正常用这个**（ST 验证过的时钟写法） | bring-up 对照实验、SDK 不在身边时 |
+| | HAL/SDK 版（唯一） |
+|---|---|
+| 时钟配置 | **板子 demo 的 `SystemClock_Config()` 原文**（280MHz / VOS0） |
+| 依赖 | 要带 `sdk\` 目录（HAL+CMSIS，~4MB，51 文件） |
+| 体积 | 8 KB |
+| 降级保护 | 无（HAL 失败直接 `Error_Handler` 停机）—— 要"保命档"就改 `sdk\Core\Src\main.c` 的 `SystemClock_Config()` |
+| 说明 | 早先的"寄存器版（`-Minimal`/`-SlowClock`，零依赖、1.6KB、三级降级）"**已于 2026-10 删除**：它和 HAL 版双轨，两边各自漂过（DIVM1 写成"值-1"→ 350MHz 却自报 280MHz；`PWR_CR3` 偏移写成 0x08 → 读到 CR2），收益不抵维护成本 |
 
 `sdk\` 目录是从板子自带 SDK 拷来的（`<板子SDK>\SDK\DEMO\USART`），只保留了编译需要的
 HAL/CMSIS 文件，**改动只有 `Core\Src\main.c`**：主循环换成 RTT 灌流 + 加几个对账用的全局量，

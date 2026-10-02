@@ -1,5 +1,16 @@
 # STM32H7B0 · SEGGER RTT 吞吐（饱和速度）测试固件
 
+> 📌 本目录在**工具仓库**（`web-serial-rtt-tools`）与**探针仓库**（`akaLinkPro/script_test/`）里
+> **逐字节一致**（65 个文件，含 `sdk/`；两仓的 `fw.elf` 也相同）。文中出现的 `make fw-h7-*`、
+> `tools\selftest\*`、`tools\target-firmware\...` 这些路径属于**工具仓库**；在探针仓库那边，
+> 对应的跑法用 `script_test\*.py`（例如 `rtt_h743_bridge.py`）或网页。
+> 改这边就同步那边，别让两边漂开。
+> **只有一种构建：HAL/SDK 版**（280MHz，时钟配置 = 板子 demo 的 `SystemClock_Config()` 原文）。
+> ⚠️ 2026-10 用户定调：早先那个"寄存器版（`-Minimal` / `-SlowClock`）"**已删除** ——
+> 它与 HAL 版双轨、两边各自漂过（DIVM1 写成"值-1"→ 实际 350MHz 却自报 280MHz；`PWR_CR3`
+> 偏移写成 0x08 → 读到 CR2），维护成本大于收益。需要"只跑 HSI 64MHz 的保命档"时，
+> 改 `sdk\Core\Src\main.c` 的 `SystemClock_Config()` 即可，不再单独维护寄存器级实现。
+
 拿这块板子量 **RTT 端到端能跑多快**：目标死循环灌数据，主机（网页 WebUSB / 桥+OpenOCD）拼命取，
 页面上「读取 xxx KB/s」就是这块板子 + 这条主机通路的**饱和吞吐**。
 套路与 [`../stm32f103_rtt_speed`](../stm32f103_rtt_speed) 完全一致，方便两块板子横向对比。
@@ -25,11 +36,10 @@ RTT 用 **BLOCK_IF_FIFO_FULL**（`segger_rtt/SEGGER_RTT_Conf.h`）：缓冲满�
 ## 快速开始
 
 ```powershell
-# 1) 编译（两条命令，不需要 Keil/Make）
-pwsh -File build.ps1              # 默认 HSI→PLL1 280MHz（VOS0）
-pwsh -File build.ps1 -SlowClock   # 保命档：只用 HSI 64MHz，完全不碰 PLL/VOS
+# 1) 编译（一条命令，不需要 Keil/Make）
+pwsh -File build.ps1              # HSE→PLL1 280MHz（VOS0）；产物复制到本目录 fw.elf
 
-# 2) 烧录（首选：网页「烧录器」→ 后端 WebUSB → 芯片 stm32h7b0 → 选 build\fw.elf）
+# 2) 烧录（首选：网页「烧录器」→ 后端 WebUSB → 芯片 stm32h7b0 → 选本目录的 fw.elf）
 pwsh -File flash.ps1              # 兜底通道：OpenOCD（target/stm32h7x.cfg）
 
 # 3) 测速：网页 RTT Viewer → 后端 WebUSB → 连接探针
@@ -75,8 +85,8 @@ CLOCKS=4000,8000,12000,20000 SECS=4 node tools\selftest\rtt-speed-webusb-sweep.m
 |---|---|---|---|
 | 1 | 探针接 SWD、给板子上电，读 DP IDCODE | **0x6BA02477**（H7 的 SW-DP）<br>F103 是 0x1BA01477 | 接线/共地/上电；SWCLK-SWDIO 有没有接反 |
 | 2 | OpenOCD 认芯片：`make fw-h7-flash`（或桥连一次） | 日志里 `RM0455 (id 0x480) M7` | 晶振/BOOT 引脚；RDP 等级（读保护会挡住调试口） |
-| 3 | `make fw-h7-slow` 编译 + 烧录 + 网页 RTT 连接 | 控制块在 `0x2000xxxx`（DTCM）；<br>`hello world!` 刷屏；**能出 KB/s 数字** | 这一步只验证"接线+启动+DTCM 布局"，不碰 PLL |
-| 4 | `make fw-h7-build`（280MHz）再烧 | 同上，且速度数字与第 3 步接近 | 若挂：看是不是 VOS0/PLL/latency（第 2~4 条坑） |
+| 3 | `make fw-h7-build` 编译 + 烧录 + 网页 RTT 连接 | 控制块在 `0x2000xxxx`（DTCM）；<br>`hello world!` 刷屏；**能出 KB/s 数字** | 接线/启动/DTCM 布局；控制块地址要选对 `stm32h7b0` 那颗芯片 |
+| 4 | 再确认 `g_sysclk_hz` = 280000000、`g_clk_err` = 0 | 时钟真的切到 PLL1 | 若挂：看是不是 VOS0/PLL/latency（第 2~4 条坑）；要"完全不碰 PLL"的保命档就改 `sdk\Core\Src\main.c` |
 | 5 | 网页上把 SWD 时钟从「自动」切到 8/12/20MHz 各测一遍 | 找到这块板子最快的档 | 高了会 NO ACK 或错位读（页面会提示） |
 
 > 真机步骤与预期数字见 `docs/backends.md` 的「五点八」。
@@ -130,9 +140,9 @@ turnaround 1~4、线复位 64/256 位、重新发激活序列、DAP WriteABORT �
 ## 目录
 
 ```
-src/main.c              死循环发 RTT + 时钟初始化（HSI→PLL1 280MHz / -SlowClock 64MHz）
+sdk/Core/Src/main.c     死循环发 RTT + 时钟初始化（`SystemClock_Config()` = 板子 demo 原样，280MHz）
+sdk/                    HAL + CMSIS + 板级 Core（51 个文件，本工程只编其中 14 个 .c）
 src/startup.c           向量表 + .data/.bss + FPU 使能（M7）
-src/stm32h7b0_regs.h    只列本工程碰的寄存器（RCC/PWR/SYSCFG/FLASH/DBGMCU/SysTick）
 ld/stm32h7b0.ld         FLASH 128KB + DTCM 128KB
 segger_rtt/             SEGGER RTT 源码（与 F103 那份同版本，Conf 里 BUFFER_SIZE_UP=4096）
 build.ps1 / flash.ps1   编译 / 烧录

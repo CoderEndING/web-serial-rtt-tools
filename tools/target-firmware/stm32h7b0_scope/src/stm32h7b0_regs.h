@@ -81,7 +81,10 @@
  *   VOS0 = 0b11 = 0xC000 → 280MHz 必需。写完等 VOSRDY[13]。
  *   （H743 那套 "先 SYSCFG_PWRCR.ODEN=1" 在 H7B0 上不存在，别照搬。） */
 #define PWR_BASE        0x58024800u
-#define PWR_CR3         REG32(PWR_BASE + 0x08)   /* LDOEN[1] BYPASS[0] —— **只读** */
+/* 🚨 偏移是 **0x0C**，不是 0x08（0x08 是 CR2）。依据：本目录同名 SDK 的 stm32h7b0xx.h
+ *    `PWR_TypeDef` = CR1(0x00) CSR1(0x04) CR2(0x08) **CR3(0x0C)** CPUCR(0x10) SRDCR(0x18)。
+ *    本文件**只读**这一格判"供电是不是 LDO"，读错寄存器会让那条报警失真。 */
+#define PWR_CR3         REG32(PWR_BASE + 0x0C)   /* LDOEN[1] BYPASS[0] —— **只读** */
 #define PWR_SRDCR       REG32(PWR_BASE + 0x18)   /* VOS[15:14] VOSRDY[13] */
 
 #define PWR_CR3_LDOEN       (1u << 1)

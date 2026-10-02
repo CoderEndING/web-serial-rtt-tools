@@ -30,7 +30,7 @@ LA       = tools/la/kingst_la.py
 
 .DEFAULT_GOAL := help
 .PHONY: help serve serve-dev serve-stop browser open page-prep test test-ui test-gen test-gen-page gen-embed samples-anim test-hid test-dwarf test-scope test-scope-page test-scope-render test-spi test-read test-spi-page test-hw test-record test-bridge test-bridge-gate test-hpm test-image test-all test-dbg test-dbg-page test-dbg-hw test-idcode test-dsl test-flash flash-timing hw-campaign hw-campaign-hpm campaign-summary \
-        bridge bridge-stop fw-build fw-flash fw-restore fw-h7-build fw-h7-slow fw-h7-flash \
+        bridge bridge-stop fw-build fw-flash fw-restore fw-h7-build fw-h7-flash \
         algo-check flash-plan la-info la-capture git-status git-log check clean spi-hw spi-flow i2c-hw spi-partial-hw dbg-step-hw
 
 help:
@@ -319,9 +319,6 @@ H7_DIR = tools/target-firmware/stm32h7b0_rtt_speed
 
 fw-h7-build:
 	pwsh -NoProfile -File $(H7_DIR)/build.ps1
-
-fw-h7-slow:
-	pwsh -NoProfile -File $(H7_DIR)/build.ps1 -SlowClock
 
 fw-h7-flash:
 	pwsh -NoProfile -File $(H7_DIR)/flash.ps1

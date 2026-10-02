@@ -81,7 +81,18 @@
  *    无条件写供电寄存器在 H7 上出过"AP 事务恒 WAIT、只能整板断电"的事故
  *    （见 ../stm32h7b0_rtt_speed/RESULTS.md 第 1 条）。 */
 #define PWR_BASE        0x58024800u
-#define PWR_CR3         REG32(PWR_BASE + 0x08)   /* LDOEN[1] BYPASS[0] SCUEN[2] */
+/* 🚨 偏移是 **0x0C**，不是 0x08！厂商头文件 PWR_TypeDef 的顺序是
+ *      CR1(0x00) CSR1(0x04) CR2(0x08) **CR3(0x0C)** CPUCR(0x10) D3CR(0x18)
+ *    （依据：实验39/.../USER/stm32h743xx.h 的 PWR_TypeDef 定义）。
+ *    这里曾写成 +0x08（那是 **CR2**）—— 后果是 **SCUEN 永远清不掉**（写到了别的寄存器），
+ *    而 SCUEN=1 时硬件会**静默忽略 VOS 的写**，于是 PWR_D3CR.VOSRDY 恒为 0：
+ *      · 固件走"保命档"降级到 HSI 64MHz（g_z_clk_err = 0x81、g_z_hclk_hz = 64e6）；
+ *      · 供电档没生效时内存/总线访问不可靠 → 实测随后在 D-Cache 失效那段吃到
+ *        BFSR.IMPRECISERR + HFSR.FORCED，死在 Default_Handler（变量全程是初值 →
+ *        J-Scope 一个数都采不到）。
+ *    同一块板、同一套序列，兄弟例程 ../stm32h743_rtt_speed 用的是 0x0C，实测 VOSRDY=1、
+ *    480MHz、g_clk_err=0 —— 差异就在这一个偏移上。 */
+#define PWR_CR3         REG32(PWR_BASE + 0x0C)   /* LDOEN[1] BYPASS[0] SCUEN[2] */
 #define PWR_D3CR        REG32(PWR_BASE + 0x18)   /* VOS[15:14] VOSRDY[13]（⚠️ 偏移 0x18，不是 0x10） */
 
 #define PWR_CR3_SCUEN       (1u << 2)
@@ -115,11 +126,58 @@
 #define SCB_CPACR       REG32(0xE000ED88u)       /* CP10/CP11 = FPU 访问许可 */
 #define FPU_FPCCR       REG32(0xE000EF34u)       /* ASPEN[31] / LSPEN[30] */
 
+/* ---------------- D-Cache 识别 / 维护（ARMv7-M，地址固定）----------------
+ * 为什么需要：**使能 D-Cache 之前必须让整片 cache 失效**（CMSIS 的 `SCB_EnableDCache()`
+ * 也是"先按 set/way 失效、再置 CCR.DC"）—— 复位后 cache 里是什么，ARM 的说法是 UNKNOWN。
+ * ⚠️ 曾经把这次崩溃归因于"少了一次 invalidate"，**2026-10 上板定因后更正**：真因是
+ *    `SCB_DCISW` 的地址写错（见下面那段偏移表），失效操作打到了 DCIMVAC 上。
+ *
+ * 几何从 CCSIDR 读，不写死（本机 H743 读回 **0xF00FE019**：组数-1 = [27:13] = 0x7F → 128 组、
+ * 相联度-1 = [12:3] = 3 → 4 路；CTR.DminLine 另证行长 32 B ⇒ 128×4×32 = 16 KB）。
+ * 复位后 CSSELR = 0 = L1 D-Cache，本文件不去动它。 */
+#define SCB_CCSIDR      REG32(0xE000ED80u)       /* Cache Size ID：几何 */
+#define SCB_CSSELR      REG32(0xE000ED84u)       /* Cache Size Selection（0 = L1 D-Cache） */
+/* 🚨 这几个偏移**一格都不能错**，而且错了不会报编译错，只会在运行时炸总线。
+ *    权威表（厂商 core_cm7.h 的 SCB_Type，SCB_BASE = 0xE000ED00）：
+ *      0x250 ICIALLU / 0x258 ICIMVAU / 0x25C **DCIMVAC** / 0x260 **DCISW**
+ *      0x264 DCCMVAU / 0x268 DCCMVAC / 0x26C DCCSW / 0x270 DCCIMVAC / 0x274 DCCISW
+ *    本文件曾把 DCISW 写成 0xE000EF5C（那是 **DCIMVAC = 按地址失效**）——
+ *    于是 set/way 编码（0、32、64…）被当成**内存地址**送进 cache 维护引擎，
+ *    实测立刻吃到 BFSR.IMPRECISERR + HFSR.FORCED，死在 Default_Handler
+ *    （压栈现场 PC 正好是那条 `str.w r7,[r2,#0xF5C]`；两版时钟下都必现）。
+ *    ⇒ 使能 D-Cache 之前的那次"整片失效"必须打到 0xE000EF60。 */
+#define SCB_DCISW       REG32(0xE000EF60u)       /* 按 set/way 让 D-Cache 失效（0x260） */
+#define SCB_DCIMVAC     REG32(0xE000EF5Cu)       /* 按地址无效到 PoC（0x25C） */
+#define SCB_DCCMVAC     REG32(0xE000EF68u)       /* 按地址清到 PoC（0x268） */
+
+/* ---------------- MPU（ARMv7-M，0xE000ED90 起）----------------
+ * 只用到"把 AXI SRAM 配成 Normal / Non-cacheable"这一个 region。 */
+#define MPU_TYPE        REG32(0xE000ED90u)       /* [15:8] DREGION = region 个数 */
+#define MPU_CTRL        REG32(0xE000ED94u)
+#define MPU_RNR         REG32(0xE000ED98u)
+#define MPU_RBAR        REG32(0xE000ED9Cu)
+#define MPU_RASR        REG32(0xE000EDA0u)
+
+#define MPU_CTRL_ENABLE      (1u << 0)
+#define MPU_CTRL_HFNMIENA    (1u << 1)
+#define MPU_CTRL_PRIVDEFENA  (1u << 2)           /* 没被 region 覆盖的地址走默认内存映射 */
+#define MPU_RASR_ENABLE      (1u << 0)
+#define MPU_RASR_SIZE(s)     (((s) & 0x1Fu) << 1)   /* 区域 = 2^(SIZE+1) 字节，SIZE = log2(大小)-1 */
+#define MPU_RASR_AP(n)       (((n) & 0x7u) << 24)   /* 011 = 特权/非特权全访问 */
+#define MPU_RASR_TEX(n)      (((n) & 0x7u) << 19)
+#define MPU_RASR_S           (1u << 18)          /* shareable */
+#define MPU_RASR_C           (1u << 17)          /* cacheable */
+#define MPU_RASR_B           (1u << 16)          /* bufferable */
+#define MPU_RASR_XN          (1u << 28)          /* 不可取指 */
+
+/* ---------------- 内存布局（与 ld 脚本一致）---------------- */
+#define AXI_SRAM_BASE   0x24000000u              /* AXI SRAM 512KB：被采样的变量全住这里 */
+
 /* ---------------- 本板时钟目标 ---------------- */
 #define HSE_HZ          25000000u                /* 阿波罗 H743 板载 25MHz 晶振 */
 #define HSI_HZ          64000000u                /* H7 的 HSI = 64MHz（无晶振时的后备） */
-#define SYSCLK_HZ       400000000u               /* HSE/5 ×160 /2 = 400MHz（VCO 800MHz） */
-#define HCLK_HZ         200000000u               /* HPRE=/2，且 D1CPRE 也 =/2 → CPU 与 AXI 同为 200MHz */
+#define SYSCLK_HZ       480000000u               /* HSE/5 ×192 /2 = 480MHz（VCO 960MHz）—— 与兄弟例程 rtt_speed 一致 */
+#define HCLK_HZ         240000000u               /* HPRE=/2，且 D1CPRE 也 =/2 → CPU 与 AXI 同为 240MHz */
 #define TICK_HZ         10000u                   /* 采样靶子的时基 */
 
 /* 时钟路径（g_clk_src） */
