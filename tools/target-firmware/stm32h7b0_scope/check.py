@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""stm32h743_scope 测试固件的**客观验收脚本**（不依赖 scope 页面，也不依赖探针固件）。
+"""stm32h7b0_scope 测试固件的**客观验收脚本**（不依赖 scope 页面，也不依赖探针固件）。
 
 做三件事：
   1) **静态检查**：从 ELF 符号表取地址，断言**每个被采样的量都落在 AXI SRAM(0x24000000 起)** ——
@@ -15,7 +15,7 @@
 
 关于 pyOCD：本脚本走的是 OpenOCD（与 stm32f103_scope/check.py 同一套）。
 不想装 OpenOCD 也可以用 pyOCD 手动做同样的事，目标名分别是
-    STM32H743 → `pyocd commander -t stm32h743xx`
+    STM32H7B0 → `pyocd commander -t stm32h7b0xx`
 （本脚本没有实现 pyOCD 通路，别以为跑的就是它。）
 
 退出码：0 = 通过；1 = 有断言失败；2 = 环境/连接问题。
@@ -44,11 +44,11 @@ DEFAULT_ELF = os.path.join(HERE, 'build', 'fw.elf')
 DUMP_BASE = 0x24000000
 DUMP_LEN = 0x4000                 # 16 KB（.data+.bss 一共才 ~4.2 KB，留足余量）
 AXI_BASE = 0x24000000
-AXI_LEN = 0x80000                 # H743 的 AXI SRAM = 512 KB
+AXI_LEN = 0x100000                # H7B0 的 AXI SRAM = 1 MB
 
 TICK_HZ = 10000.0
 SLEEP_MS = 3000
-TARGET_CFG = 'stm32h7x.cfg'       # H743（RM0433）也吃 stm32h7x.cfg
+TARGET_CFG = 'stm32h7x.cfg'       # H7B0（RM0455）也吃 stm32h7x.cfg
 
 # sin(2πi/100)×1000 —— 与 src/main.c 里的 SIN100 表同一份定义
 SIN100 = [int(round(1000 * math.sin(2 * math.pi * i / 100))) for i in range(100)]

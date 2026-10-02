@@ -864,13 +864,19 @@ tools/
   dev/                  extract-algo.py（从 pyOCD 抽 flash 算法，别手抄 base64）、help.ps1、
                         make-40pin-figure.mjs（生成 README 开头那张 **J3 40pin 引脚定义图**）、
                         make-anim-samples.py（造屏页动画/视频示例素材，`make samples-anim`）
-  target-firmware/
+  target-firmware/          **靶子固件总索引见 tools/target-firmware/README.md**；
+                            每个目录根上的 `fw.elf` 是**编好的产物（入库）**，用户不必装工具链
     stm32f103/          STM32F103 测试固件（UART + RTT，含 SEGGER RTT 源码）
     stm32f103_rtt_speed/      F103 RTT 吞吐测试（死循环灌 hello world）；
                               **`-Board ze` 出 96 MHz + 32 KB 缓冲版**（本机板子用这份，见 README 的真机验收一节）
     stm32f103_scope/          **F103 J-Scope 靶子固件**：**96 MHz** 时基 + 契约已知的波形/变量，
                               `-Board ze|c8`（默认 ze）、check.py 客观验收（含 4 KB 地址空洞 → 两个 span 的读计划场景）；与探针仓库里那份逐字节同步
+    stm32h743_rtt_speed/      **H743 RTT 吞吐测试**：同 F103 那套量法；RTT 缓冲必须放 AXI SRAM
+                              （H7 的 DTCM 外部调试器读不到），另出 `-Ram` 版（这块板子 flash 写不进）
+    stm32h743_scope/          **H743 J-Scope 靶子**：与 F103 同一套变量契约，变量放 AXI SRAM；
+                              `-DDCACHE_ON=1` 可打开 D-cache，专门用来复现"H7 上 AHB-AP 读到 cache 旧值"
     stm32h7b0_rtt_speed/      **H7B0 RTT 吞吐测试**（HSI→PLL1 280MHz，DTCM 布局，见其 README）
+    stm32h7b0_scope/          **H7B0 J-Scope 靶子**：同一套契约的 H7B0 版（变量放 AXI SRAM）
     hpm6800evk_rtt_flood/     **HPM6800EVK（RISC-V）RTT 吞吐靶子**：96 MHz 死循环灌 hello world，
                               RTT 控制块放**非缓存 AXI SRAM**（`_SEGGER_RTT = 0x01240000`）
     hpm6800evk_scope/         **HPM6800EVK J-Scope 靶子**：契约变量块 `g_v`（非缓存）+ 对照 `g_v_cached`

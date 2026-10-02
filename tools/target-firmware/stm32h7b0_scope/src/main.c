@@ -1,21 +1,24 @@
 /*
- * STM32H743 · **J-Scope 波形页（探针侧 HSS 采样）专用测试固件**
+ * STM32H7B0 · **J-Scope 波形页（探针侧 HSS 采样）专用测试固件**
  *
  * 目的与 stm32f103_scope **完全同一套**：把"采样率对不对、有没有混叠、丢了多少、有没有撕裂读"
  * 从"看着像"变成**可客观判定** —— 每个被采样的量都有精确已知的数学波形，
  * 主机按取到的 `i_tick` 就能反算其余通道的应有值，从而逐点断言。
  *
  * 与 F103 那份的差别（**只有这三条**，变量契约一字不改）：
- *   ① 时钟：HSE 25MHz → PLL1 → SYSCLK 400MHz（CPU 200 / AXI 200，见 clock_init()）；
+ *   ① 时钟：HSE 25MHz → PLL1 → **SYSCLK/HCLK 280MHz**（VOS0 + FLASH 7 等待；见 clock_init()）。
+ *      数值与板子自带 SDK 的 SystemClock_Config() 一致（那份在同一块板上实测跑到 280MHz）。
  *   ② **所有被采样的量都在 AXI SRAM(0x24000000)** —— H7 的 DTCM(0x20000000) 是内核私有总线，
- *      外部调试器走 AHB-AP **读不到**（本仓库 README 与 H743 兄弟例程都写明），
+ *      外部调试器走 AHB-AP **读不到**（本仓库 ../stm32h7b0_rtt_speed/RESULTS.md 里就记着这条），
  *      所以链接脚本把 .data/.bss 整个放到 AXI SRAM（栈留在 DTCM，探针不需要读栈）。
  *      `arm-none-eabi-nm` 可以直接验：所有 g_* 的地址都是 0x24xxxxxx。
  *   ③ D-Cache **默认关**（AHB-AP 读到的就是真内存）；想复现"H7 D-cache 干扰"，
  *      用 `build.ps1 -DCache`（= `-DDCACHE_ON=1`）编一版，main() 里会把 SCB.CCR.bit16 置起来
  *      （配 DSB/ISB）。开关与现象见 README 第 4 节。
  *
- * ⚠️ **时基仍是 10 kHz**（SysTick，H7 跑 10 kHz 毫无压力）：ISR 里所有量一次更新完。
+ * ⚠️ 寄存器布局是 **RM0455**（H7B0），不是 H743 的 RM0433 —— 详见 src/stm32h7b0_regs.h 里的清单。
+ * ⚠️ **绝不无条件写 PWR_CR3**（供电来源）：那样会把板子带进"AP 事务恒 WAIT、只能整板断电"的
+ *    死状态（../stm32h7b0_rtt_speed/RESULTS.md 第 1 条，本机真踩过）。这里只**读**。
  *
  * ---------------------------------------------------------------------------
  * 变量表（t = 10 kHz tick 序号；两组变量在地址上刻意分开，用来对比"读计划"的两条路径）
@@ -57,13 +60,14 @@
  */
 #include <stdint.h>
 
-#include "stm32h743_regs.h"
+#include "stm32h7b0_regs.h"
 
 #ifndef DCACHE_ON
 #define DCACHE_ON 0
 #endif
 
-/* 向量表（定义在 startup.c）。flash 版它在 0x08000000，RAM 版在 0x24000000 —— 都要显式告诉 VTOR。 */
+/* 向量表（定义在 startup.c）。flash 版它在 0x08000000 —— 也要显式告诉 VTOR，
+ * 免得以后想搬去 RAM 跑时忘了这一句。 */
 extern void (*const g_vectors[])(void);
 
 /* 所有等待都必须有上限：PLL 锁不上时宁可退到慢时钟，也不要让固件静静卡死在 while 里
@@ -135,27 +139,24 @@ static int wait_field(uintptr_t addr, uint32_t mask, uint32_t want, uint32_t spi
 }
 
 /**
- * 时钟初始化：目标 SYSCLK 400MHz / HCLK 200MHz（**寄存器级，不依赖 HAL**）。
+ * 时钟初始化：目标 SYSCLK = HCLK = **280MHz**（寄存器级，不依赖 HAL）。
  *
- * 数值出处：正点原子阿波罗 H743 标准例程 SYSTEM/sys/sys.c 的 `Stm32_Clock_Init(160,5,2,2)`
- *   （板子实测过的配置；同板兄弟例程 script_test/stm32h743_rtt_speed 也是这一套）
- *     HSE 25MHz --/DIVM1=5--> 5MHz 参考 --×N1=160--> **800MHz VCO** --/P1=2--> **SYSCLK 400MHz**
- *     RGE = 4~8MHz 档（5MHz 参考正落在这一档）、VCOSEL = 0（宽量程 192~836MHz，800MHz 在里面）
- *     HPRE = /2  → AXI/HCLK **200MHz**（AHB-AP 读内存的速度就看这个）
- *     D1CPRE = /2 → CPU 也是 200MHz
- *     APB1/2/3 = /2 (100MHz)、APB4 = /4 (50MHz)
- *     FLASH_ACR: LATENCY = 4 + WRHIGHFREQ = 0b11
- *        （厂商例程用 2 且不动 WRHIGHFREQ、兄弟例程用 4 + 0b10 —— 三种都能跑，等待周期只影响
- *          速度不影响正确性，这里取最保守的一组）
- *     VOS = D3CR.VOS = 0b11（老文档叫 Scale1 = 400MHz，新文档叫 Scale0 = 480MHz，都是 0b11）
+ * 数值出处 = **板子自带 SDK（STM32H7B0VBT6 KIT）SystemClock_Config()**，那份在同一块板子上
+ * 实测跑到 280MHz（../stm32h7b0_rtt_speed/RESULTS.md）：
+ *     HSE 25MHz --/DIVM1=5--> 5MHz 参考 --×N1=112--> **560MHz VCO** --/P1=2--> **SYSCLK 280MHz**
+ *     RGE = 4~8MHz 档（5MHz 参考正落在这一档）、VCOSEL = 0（宽量程 192~836MHz）
+ *     HPRE = /1、CDCPRE = /1 → CPU 与 AXI/HCLK **都是 280MHz**（这样 SysTick 的时基没有歧义）
+ *     APB3(CDPPRE)/APB1/APB2/APB4(SRDPPRE) = /2 → 140MHz
+ *     FLASH_ACR: LATENCY = 7 + WRHIGHFREQ = 0b11
+ *     VOS = SRDCR.VOS = 0b11（Scale 0，280MHz 必需）
  *
- * 🚨 **D1CPRE 与 HPRE 故意都取 /2**：H7 上"CPU 时钟"和"HCLK"可以是两个频率，而 SysTick 到底跟
- *    哪一个说法不一（ARM 说跟 processor clock，ST 的 HAL 却按 HCLK 算）。让两者相等，
- *    10 kHz 时基就不存在这个歧义 —— 反正被采样量的刷新与 AHB-AP 读只关心 HCLK。
+ * 🚨 DIVM1 写的是**分频值本身**（5 = /5），不是 5-1 —— 兄弟例程的 -Minimal 版就是在这里
+ *    写成了 `divm - 1`，实际跑的是 350MHz 而固件自报 280MHz。证据见 src/stm32h7b0_regs.h 头注释。
  *
- * 三条纪律（H7 上都是踩过的坑）：
- *   ① **VOS 的写会被硬件静默忽略**，除非 PWR_CR3.SCUEN 已经清 0（这里只在它置位时才去清，
- *      绝不像 HAL 那样整块写 CR3 —— 无条件写供电寄存器出过"AP 事务恒 WAIT、只能整板断电"的事故）；
+ * 三条纪律：
+ *   ① **绝不无条件写 PWR_CR3**（供电来源）—— 本机真踩过：写它 → ACTVOSRDY 永不置位 →
+ *      目标内部时钟域停摆 → DP 还能读 IDCODE 但**所有 AP 事务恒 WAIT/FAULT** → 只有整板断电
+ *      才能恢复。这里只**读**它，不是 LDO 就记个标志位，绝不替板子的硬件做决定；
  *   ② **升频之前**先把 flash 等待周期给够；
  *   ③ 每一步等待都有上限，任何一步失败就整档放弃、留在 HSI 64MHz，并把出错位记进 g_z_clk_err。
  */
@@ -163,18 +164,20 @@ static void clock_init(void)
 {
   uint32_t err = 0u;
 
-  /* ① SCUEN：只在它置位时才清（其余情况一个字节都不写 PWR_CR3） */
-  if (PWR_CR3 & PWR_CR3_SCUEN) { PWR_CR3 &= ~PWR_CR3_SCUEN; }
+  /* ① PWR_CR3：只读不写（判据见函数头注释） */
+  if ((PWR_CR3 & (PWR_CR3_LDOEN | PWR_CR3_BYPASS)) != PWR_CR3_LDOEN) {
+    err |= CLK_ERR_SUPPLY_NOLDO;
+  }
 
-  /* ② VOS：最高电压档 */
-  PWR_D3CR = (PWR_D3CR & ~PWR_D3CR_VOS_MASK) | PWR_D3CR_VOS_HIGH;
-  if (!wait_field(PWR_BASE + 0x18u, PWR_D3CR_VOSRDY, PWR_D3CR_VOSRDY, WAIT_SPINS)) {
+  /* ② VOS0（Scale 0）—— 280MHz 必需 */
+  PWR_SRDCR = (PWR_SRDCR & ~PWR_SRDCR_VOS_MASK) | PWR_SRDCR_VOS0;
+  if (!wait_field(PWR_BASE + 0x18u, PWR_SRDCR_VOSRDY, PWR_SRDCR_VOSRDY, WAIT_SPINS)) {
     err |= CLK_ERR_VOSRDY;
   }
 
   /* ③ Flash 等待周期 + WRHIGHFREQ —— **必须在升频之前** */
   FLASH_ACR = (FLASH_ACR & ~0x3Fu)
-            | FLASH_ACR_LATENCY(4)
+            | FLASH_ACR_LATENCY(7)
             | FLASH_ACR_WRHIGHFREQ(3);
 
   /* ④ HSE 25MHz 起振 */
@@ -183,12 +186,12 @@ static void clock_init(void)
     err |= CLK_ERR_HSE_RDY;
   }
 
-  /* ⑤ PLL1：HSE/5 = 5MHz 参考，×160 = 800MHz VCO，/2 = 400MHz */
-  if (err == 0u) {
+  /* ⑤ PLL1：HSE/5 = 5MHz 参考，×112 = 560MHz VCO，/2 = 280MHz */
+  if ((err & ~CLK_ERR_SUPPLY_NOLDO) == 0u) {
     /* 🚨 DIVM1 写的是**分频值本身**（5 = /5），不是 5-1 */
     RCC_PLLCKSELR = RCC_PLLCKSELR_PLLSRC_HSE | (5u << RCC_PLLCKSELR_DIVM1_SHIFT);
     RCC_PLL1FRACR = 0u;                                    /* 不用小数分频 */
-    RCC_PLL1DIVR  = ((160u - 1u) << 0)                     /* N1[8:0]  */
+    RCC_PLL1DIVR  = ((112u - 1u) << 0)                     /* N1[8:0]  */
                   | ((2u - 1u) << 9)                       /* P1[15:9] */
                   | ((2u - 1u) << 16)                      /* Q1[22:16] */
                   | ((2u - 1u) << 24);                     /* R1[30:24] */
@@ -201,24 +204,24 @@ static void clock_init(void)
   }
 
   /* ⑥ 总线分频 + 切 SYSCLK 到 PLL1 */
-  if (err == 0u) {
-    RCC_D1CFGR = (8u << 8)      /* D1CPRE = /2 → CPU  200MHz */
-               | (4u << 4)      /* D1PPRE = /2 → APB3 100MHz */
-               | (8u << 0);     /* HPRE   = /2 → AXI/HCLK 200MHz */
-    RCC_D2CFGR = (4u << 8)      /* D2PPRE2 = /2 → APB2 100MHz */
-               | (4u << 4);     /* D2PPRE1 = /2 → APB1 100MHz */
-    RCC_D3CFGR = (5u << 4);     /* D3PPRE  = /4 → APB4  50MHz */
+  if ((err & ~CLK_ERR_SUPPLY_NOLDO) == 0u) {
+    RCC_CDCFGR1 = (0u << 8)     /* CDCPRE  = /1 → CPU  280MHz */
+                | (4u << 4)     /* CDPPRE  = /2 → APB3 140MHz */
+                | (0u << 0);    /* HPRE    = /1 → AXI/HCLK 280MHz */
+    RCC_CDCFGR2 = (4u << 8)     /* CDPPRE2 = /2 → APB2 140MHz */
+                | (4u << 4);    /* CDPPRE1 = /2 → APB1 140MHz */
+    RCC_SRDCFGR = (4u << 4);    /* SRDPPRE = /2 → APB4 140MHz */
     RCC_CFGR = (RCC_CFGR & ~RCC_CFGR_SW_MASK) | RCC_CFGR_SW_PLL1;
     if (!wait_field(RCC_BASE + 0x10u, RCC_CFGR_SWS_MASK, RCC_CFGR_SWS_PLL1, WAIT_SPINS)) {
       err |= CLK_ERR_SW_PLL1;
     }
   }
 
-  if (err == 0u) {
+  if ((err & ~CLK_ERR_SUPPLY_NOLDO) == 0u) {
     g_z_clk_src   = CLK_SRC_HSE_PLL;
     g_z_sysclk_hz = SYSCLK_HZ;
     g_z_hclk_hz   = HCLK_HZ;
-    g_z_clk_err   = 0u;
+    g_z_clk_err   = err;                       /* 只有"供电不是 LDO"这一条警告时也算成功 */
     return;
   }
 
@@ -227,9 +230,9 @@ static void clock_init(void)
   RCC_CR &= ~RCC_CR_PLL1ON;
   RCC_CFGR = (RCC_CFGR & ~RCC_CFGR_SW_MASK) | RCC_CFGR_SW_HSI;
   (void)wait_field(RCC_BASE + 0x10u, RCC_CFGR_SWS_MASK, 0u, WAIT_SPINS);
-  RCC_D1CFGR = 0u;                     /* HPRE/D1PPRE/D1CPRE 全 /1 */
-  RCC_D2CFGR = 0u;
-  RCC_D3CFGR = 0u;
+  RCC_CDCFGR1 = 0u;                  /* HPRE/CDPPRE/CDCPRE 全 /1 */
+  RCC_CDCFGR2 = 0u;
+  RCC_SRDCFGR = 0u;
   g_z_clk_src   = CLK_SRC_HSI;
   g_z_sysclk_hz = HSI_HZ;
   g_z_hclk_hz   = HSI_HZ;
@@ -271,8 +274,7 @@ int main(void){
 
   clock_init();                        /* 先把主频顶上去 —— SysTick 重载值是按实际 HCLK 算的 */
 
-  /* 向量表基址：flash 版 = 0x08000000，RAM 版（build.ps1 -Ram）= 0x24000000。
-   * 🚨 RAM 版必须显式设，否则 VTOR 还是复位默认的 0（= flash 别名），SysTick 一进中断就取到错向量。 */
+  /* 向量表基址显式指到本固件的向量表（flash 版就是 0x08000000，与复位默认一致；写一次更稳） */
   SCB_VTOR = (uint32_t)(uintptr_t)g_vectors;
 
   /* 取指走 I-Cache；**D-Cache 由编译开关决定**（见文件头第 ③ 条） */
@@ -287,7 +289,7 @@ int main(void){
   g_z_dcache = 0u;
 #endif
 
-  SYST_RVR = (g_z_hclk_hz / TICK_HZ) - 1u;   /* 10 kHz：200MHz → 19999，降级到 64MHz → 6399 */
+  SYST_RVR = (g_z_hclk_hz / TICK_HZ) - 1u;  /* 10 kHz：280MHz → 27999，降级到 64MHz → 6399 */
   SYST_CVR = 0;
   SYST_CSR = 7;                            /* 内核时钟 + 中断使能 + 计数使能 */
 
