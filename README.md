@@ -13,7 +13,7 @@
 | **RTT 转发** | akaLinkPro 的**探针侧** RTT→CDC：探针自己通过 SWD 轮询目标控制块、把数据塞进它的 CDC 串口；本页开那个 COM 口收数据。**纯输出，没有发送**：ASCII/ANSI/HEX、时间戳、暂停、保存数据、记录到文件、高速自动关显示 | akaLinkPro 探针（配置走它的自定义 HID；接收走它的 CDC 口） |
 | **J-Scope 波形** | 类 SEGGER J-Scope 的**变量示波器**：探针自己按固定周期读目标 RAM（HSS，目标固件不用改），数据走 WebUSB 的独立批量端点，网页画多通道波形、带**触发**、导出 CSV、原始包可回放 | **网页侧已可用**：勾「用假探针」或打开 `.jsp` 回放即可体验；真机需要探针固件支持 `HID 0x32`（见 [`docs/scope-page.md`](docs/scope-page.md)） |
 | **烧录器** | .elf/.hex/.bin 写进目标：**零安装 WebUSB**（页面跑 flashloader，擦/写/校验/复位一条龙）或**本地桥 OpenOCD** | 零安装：同上探针；桥：OpenOCD |
-| **SPI/QSPI 桥** | 探针当 USB→SPI/QSPI 主站：通用命令表 / 手写帧 DSL / 回环自检 / 外接 NOR Flash 测试；SCLK、模式、CS 策略、辅助脚与有效电平都在这里配 | akaLinkPro 探针（HID `0x35` 控制面 + bulk 帧流）；方案见 [`docs/spi-bridge-page.md`](docs/spi-bridge-page.md) |
+| **SPI/QSPI 桥** | 探针当 USB→SPI/QSPI 主站。右列分四个 tab：**命令表**（一行一条 `XFER`）· **脚本**（贴 C 表 / 手写帧 DSL）· **Flash 测试**（外接 NOR：读 ID/SFDP/状态、读测速、擦写校验）· **回环自检**（MOSI↔MISO 跳线）。tab 栏常驻**运行胶囊**与共享「中止」；SCLK、模式、CS 策略、辅助脚与有效电平在左栏配 | akaLinkPro 探针（HID `0x35` 控制面 + bulk 帧流）；方案见 [`docs/spi-bridge-page.md`](docs/spi-bridge-page.md) |
 | **SPI/QSPI 屏** | 把屏点亮那一页：**面板初始化**（贴 C 数组 → 解析成步骤表 → 重放；每个字节可直接改、点开看/改它的 8 个 bit）+ **图片/图案刷屏**（开窗对齐、492 B 切片、两档面板档）+ **动画/视频**（MP4/WebM/GIF 逐帧整屏刷，发送当节拍器） | 与「SPI/QSPI 桥」页**共用同一次连接** |
 | **USB→I2C** | 探针当 **USB 转 I2C 主机**。右列分四个 tab：**扫描总线**（0x08..0x77）· **命令表**（读/写/探测/延时，一行一次事务）· **脚本**（贴 C 表或写脚本，`loop 100ms … end` 就是 while(1) 定时读/写）· **实时值**（`as` 解码把字节变成有名字的量：g / ℃ / V + 迷你曲线）。**长读自动分片**（`rd 0x50 0x00 256` 直接写，内部拆成 5 笔、日志只出一行）；tab 栏常驻**运行胶囊**与「停止」，切到哪个 tab 都知道任务还在跑。内置 **AT24C02 / MPU6050 / ADS1115 / Si5351** 四个模块示例，后两个是传感器，示例里直接做成 while(1) 连续采样 | akaLinkPro 探针（HID `0x36`，**只走 HID** 一条通路）；**仅 HPM5301EVKLite** 固件；方案见 [`docs/i2c-page.md`](docs/i2c-page.md) |
 | **工程生成** | 拖进 Keil `.uvprojx` 就能生成调试/下载配套文件：`Makefile.jlink`、`jlink_gdb.script`、`Makefile.pyocd`、`Makefile.openocd`（连带 `rtt_logger.py`）、`test_sram.bin`；参数可填可勾，产物**实时预览** | 不需要任何硬件/后端（纯前端生成） |
@@ -50,6 +50,10 @@
 | USB→I2C（假探针 · 右列四个 tab：扫描 / **命令表** / 脚本 / 实时值 · 命令表在跑 while(1)：MPU6050 每 50 ms 读 14 B 解出 ax/ay/az，ADS1115 每 200 ms 读电压，还有一条 `rd 0x50 0x00 256` 的长读 —— 日志里只出一行「256 B · 分 5 笔」） |
 |---|
 | ![USB→I2C](docs/shots/15-i2c.png) |
+
+| SPI/QSPI 桥（假探针 · 右列四个 tab：**命令表** / 脚本 / Flash 测试 / 回环自检 · 命令表 10 行全展开、结果列逐行显示读回的字节） |
+|---|
+| ![SPI/QSPI 桥](docs/shots/16-spi.png) |
 
 （截图里第一个标签用的是**内置演示串口**，所以显示的是假设备；`?demo=serial` 就能自己试。）
 

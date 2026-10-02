@@ -85,13 +85,61 @@ console.log('== 1. 标签页与初始状态 ==');
   const s = await ev('return window.__tools.summary();');
   ok(Array.isArray(s.tabs) && s.tabs.includes('spi'), '标签栏里有 spi（桥页）');
   ok(s.tabs.includes('panel'), '标签栏里有 panel（屏页）');
-  ok(s.tabs[s.tabs.length - 3] === 'spi' && s.tabs[s.tabs.length - 2] === 'panel' && s.tabs[s.tabs.length - 1] === 'gen',
-     `最后三个标签是 桥 → 屏 → 工程生成（${s.tabs.slice(-3).join(' → ')}）`, s.tabs.join(','));
+  ok(s.tabs[s.tabs.length - 3] === 'panel' && s.tabs[s.tabs.length - 2] === 'i2c' && s.tabs[s.tabs.length - 1] === 'gen',
+     `末尾三个标签是 屏 → USB→I2C → 工程生成（${s.tabs.slice(-3).join(' → ')}）`, s.tabs.join(','));
   ok(s.ok === true, '页面无 JS 错误', JSON.stringify(s.errors));
   ok(s.spi && s.spi.connected === false && s.spi.dataReady === false, '初始：未连接（HID 与数据面都空）');
   ok(s.panel && s.panel.connected === false, '屏页看到的是**同一个**会话（初始也未连接）');
   const logs = await ev(`return document.getElementById('sp-log').textContent;`);
   ok(/就绪/.test(logs), '日志区有启动提示');
+}
+
+// ==================================================================== 1b
+console.log('== 1b. 右列分 tab（照 #dbg 那套：一次只显示一个）==');
+{
+  const t = await ev(`
+    const ids = [...document.querySelectorAll('#sp-dock-tabs button[data-dock]')].map(b => b.dataset.dock);
+    const pages = [...document.querySelectorAll('#sp-box-dock .dockpage')].map(p => p.dataset.dock);
+    return { ids, pages,
+             shown: [...document.querySelectorAll('#sp-box-dock .dockpage.on')].map(p => p.dataset.dock),
+             saved: (JSON.parse(localStorage.getItem('serial-rtt-tools:v1') || '{}') || {})['spi.dock'] };`);
+  ok(t.ids.join(',') === 'cmd,dsl,flash,loop', `四个 tab：命令表/脚本/Flash/回环（${t.ids.join(',')}）`, t.ids.join(','));
+  ok(t.pages.join(',') === t.ids.join(','), '每个 tab 都有对应的内容块（顺序一致）');
+  ok(t.shown.length === 1, '🚨 同时**只有一个**内容块可见', JSON.stringify(t.shown));
+
+  const sw = await ev(`
+    const click = d => document.querySelector('#sp-dock-tabs button[data-dock="' + d + '"]').click();
+    const out = [];
+    for (const d of ['dsl', 'flash', 'loop', 'cmd', 'dsl']){
+      click(d);
+      out.push({ d,
+        on: [...document.querySelectorAll('#sp-box-dock .dockpage.on')].map(p => p.dataset.dock),
+        btnOn: [...document.querySelectorAll('#sp-dock-tabs button.on')].map(b => b.dataset.dock),
+        saved: (JSON.parse(localStorage.getItem('serial-rtt-tools:v1') || '{}') || {})['spi.dock'],
+        rows: document.querySelectorAll('#sp-cmd-body tr').length,
+        lbRows: document.getElementById('sp-lb-body').children.length });
+    }
+    click('cmd');
+    return out;`);
+  for (const r of sw){
+    ok(r.on.length === 1 && r.on[0] === r.d, `切到「${r.d}」：只有它显示`, JSON.stringify(r.on));
+    ok(r.btnOn.length === 1 && r.btnOn[0] === r.d, `……tab 按钮也只有一个高亮`, JSON.stringify(r.btnOn));
+    ok(r.saved === r.d, '……选择落进 localStorage（刷新/切页回来还在）', String(r.saved));
+  }
+  ok(sw.every(r => r.rows === 10), '切 tab 不重建命令表（10 行始终在）', JSON.stringify(sw.map(r => r.rows)));
+  ok(sw.every(r => r.lbRows === 0), '切 tab 不污染回环结果表（还没跑过）');
+
+  // tab 栏那一行（胶囊 + 中止）不在任何 dockpage 里 —— 切到哪个 tab 都看得见
+  const pill = await ev(`
+    return { inPage: !!document.querySelector('#sp-box-dock .dockpage #sp-run-pill'),
+             inLegend: !!document.querySelector('#sp-box-dock > legend #sp-run-pill'),
+             abortInLegend: !!document.querySelector('#sp-box-dock > legend #sp-run-abort'),
+             text: document.getElementById('sp-run-pill').textContent,
+             abortDisabled: document.getElementById('sp-run-abort').disabled };`);
+  ok(pill.inLegend && !pill.inPage, '运行胶囊挂在 legend 上（不属于任何 tab，切 tab 都在）');
+  ok(pill.abortInLegend === true, '「中止」按钮同理');
+  ok(/空闲|忙/.test(pill.text), `空闲时胶囊写着状态：「${pill.text}」`);
+  ok(pill.abortDisabled === true, '没在跑回环时「中止」是灰的');
 }
 
 // ==================================================================== 2
@@ -197,9 +245,11 @@ console.log('== 6. 通用命令表（一行一条，最多 10 条）+ 文本面�
     const cols = [...document.querySelectorAll('#sp-cmd-card thead th')].map(e => e.textContent);
     const old = ['sp-x-cmd','sp-x-token','sp-x-dcen','sp-x-csaux','sp-x-nodma'].map(i => !!document.getElementById(i));
     return { cards, rows, cells, cols, old, stack: !!document.querySelector('#tab-spi .busstack'),
+             dock: !!document.querySelector('#tab-spi .spdock'),
              spcols: !!document.querySelector('#tab-spi .spcols') };`);
-  ok(shape.cards.length === 4, `右区就是那四块：${shape.cards.join(' / ')}`);
-  ok(shape.stack === true && shape.spcols === false, '改成单列堆叠（不再是两列 spcols）');
+  ok(shape.cards.length === 4, `右区就是那四块（现在是四个 tab 的内容）：${shape.cards.join(' / ')}`);
+  ok(shape.dock === true && shape.stack === false && shape.spcols === false,
+     '右列是 tab 面板（不再是单列堆叠 .busstack，也不是两列 .spcols）', JSON.stringify(shape));
   ok(shape.rows === 10, `命令表 10 行（实际 ${shape.rows}）`);
   ok(shape.cols.join(',').includes('cmd') && shape.cols.join(',').includes('tx 数据'), `表头是参数项：${shape.cols.join(' | ')}`);
   ok(shape.cells.join(',') === 'cmd,lines,addrLen,addr,dummy,rx,tx,res', `每行的字段：${shape.cells.join(',')}`);
@@ -311,6 +361,38 @@ console.log('== 7. 回环自检（假探针自带回环）==');
   ok(lb.rows.length === 16, `8 个长度 × 2 条路径 = 16 行结果（实际 ${lb.rows.length}）`);
   ok(lb.sum === '16/16 PASS', `回环自检全部通过：${lb.sum}`, lb.rows.slice(0, 3).join(' / '));
   ok(/回环自检完成：16\/16 PASS/.test(lb.log), '日志里有总结行');
+
+  // 🚨 tab 化之后的两条：跑的过程中胶囊要显示进度、**切 tab 不能打断**、中止按钮要亮
+  //    ⚠️ 不要用"跑起来等 xx ms 再看"—— 假探针 8 帧是毫秒级的，等一下就结束了（实测这么红过）。
+  //    `loopbackTest()` 里 `setBusy` / 胶囊 / 中止按钮都在**第一个 await 之前**同步做完，
+  //    所以点完立刻读就是确定的。
+  const mid = await ev(`
+    document.getElementById('sp-lb-lens').value = '1,2,32,99,100,101,256,492';
+    document.getElementById('sp-lb-dma').checked = false;
+    document.getElementById('sp-lb-run').click();          // 故意不 await
+    const pill0 = document.getElementById('sp-run-pill').textContent;
+    const busyNow = window.__tools.spiSession.busy;
+    const abortOn = document.getElementById('sp-run-abort').disabled === false;
+    // 紧接着切到「Flash 测试」—— 同一个同步块里，回环还在跑
+    document.querySelector('#sp-dock-tabs button[data-dock="flash"]').click();
+    const busyAfterSwitch = window.__tools.spiSession.busy;
+    const pillInOtherTab = document.getElementById('sp-run-pill').textContent;
+    const shownInOtherTab = [...document.querySelectorAll('#sp-box-dock .dockpage.on')].map(p => p.dataset.dock);
+    for (let i = 0; i < 100 && window.__tools.spiSession.busy; i++) await new Promise(r => setTimeout(r, 50));
+    await new Promise(r => setTimeout(r, 150));
+    const sum = document.getElementById('sp-lb-sum').textContent;
+    const pillEnd = document.getElementById('sp-run-pill').textContent;
+    const abortOff = document.getElementById('sp-run-abort').disabled;
+    document.querySelector('#sp-dock-tabs button[data-dock="cmd"]').click();
+    return { pill0, busyNow, abortOn, busyAfterSwitch, pillInOtherTab, shownInOtherTab, sum, pillEnd, abortOff,
+             rows: document.querySelectorAll('#sp-lb-body tr').length };`);
+  ok(mid.busyNow === true && /回环自检 0\/8/.test(mid.pill0), `起跑瞬间胶囊就显示进度：「${mid.pill0}」`);
+  ok(mid.abortOn === true, '……「中止」按钮变成可点');
+  ok(mid.busyAfterSwitch === true && mid.shownInOtherTab.join() === 'flash',
+     '🚨 切到别的 tab 不打断回环自检（同步块里读仍是 busy，且确实切过去了）', JSON.stringify(mid.shownInOtherTab));
+  ok(/回环自检/.test(mid.pillInOtherTab), `……胶囊在别的 tab 上照样是进度：「${mid.pillInOtherTab}」`);
+  ok(mid.sum === '8/8 PASS' && mid.rows === 8, `跑完 8/8 PASS（实际 ${mid.sum} / ${mid.rows} 行）`);
+  ok(/回环/.test(mid.pillEnd) && mid.abortOff === true, `结束后胶囊转成结果、中止按钮变灰：「${mid.pillEnd}」`);
 }
 
 // ==================================================================== 8

@@ -4,17 +4,28 @@
  * 与「SPI/QSPI 屏」页（`#panel`）共用同一个 `SpiSession`（一次连接，两页共用）：
  * 这里只管"桥本身能不能用、链路通不通"，屏相关的事（面板档、初始化表、刷图）在那一页。
  *
+ * 右列是**一个带 tab 的面板**（照「调试器」页 `.docktabs`/`.dockpage` 那套）：
+ *   [命令表] [脚本] [Flash 测试] [回环自检]     + 运行胶囊 / 中止
+ * 下面常驻**日志**（帧流水）+ 统计条。tab 化之前是四张卡纵堆在一个滚动区、每张各自限高
+ * （命令表只露约 7 行），"正在跑什么"和"命令表"没法同屏 —— 那正是"繁琐"的来源。
+ *
  * 口径：
  *   · 所有发送都走 `session.sendFrames()`（分配 seq → 打包 → 发 → 等应答）；
  *   · 配置写入一律**回读对账**（状态字的 err 是"最近一次错误"，不能判断本次成功）；
- *   · 回环自检把每个长度原样发出去、原样读回来逐字节比对 —— 真机没接跳线时会 FAIL，那正是它的用处。
+ *   · 回环自检把每个长度原样发出去、原样读回来逐字节比对 —— 真机没接跳线时会 FAIL，那正是它的用处；
+ *   · **`refreshButtons()` 是唯一的可用性中枢**，tab 化之后也不能改成"只更新可见 tab"：
+ *     隐藏 tab 里的按钮同样得是对的，切过去要立刻能用。
  */
 import { $, setStatus, appendLogLine } from '../ui/dom.js';
 import { yieldTask, waitMs } from '../core/pace.js';
+import { store } from '../core/store.js';
 import * as P from './protocol.js';
 import * as D from './frames-dsl.js';
 import * as FL from './flash.js';
 import { fmtBytes, bytesEqual, parseHexByte, parseHexBytes } from './session.js';
+
+/** 右列 tab 的 id（与 HTML 的 data-dock 一一对应）*/
+const DOCK_IDS = ['cmd', 'dsl', 'flash', 'loop'];
 
 /** HTML 转义（DSL 的错误表要原样显示用户写的那行）*/
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -44,6 +55,9 @@ export class SpiBusView {
     this.session = session;
     this.tag = 'bus';
     this.loopAbort = false;
+    this.loopRunning = false;  // 回环自检是否在跑（决定 tab 栏那个「中止」亮不亮）
+    this.loopRows = [];        // 回环结果（切回该 tab 时要重画）
+    this.dockTab = 'cmd';      // 右列当前 tab（cmd / dsl / flash / loop）
     this.unsub = null;
     this.lastRead = null;      // 最近一次 flash 读回的数据（写校验用）
     /* CS 辅助脚（pad 2）与它的有效电平：**不再在「引脚设置」里配**（用户 2026-10 要求去掉那一行），
@@ -152,19 +166,12 @@ export class SpiBusView {
 
     // 回环自检
     $('sp-lb-run').addEventListener('click', () => this.loopbackTest());
-    $('sp-lb-cancel').addEventListener('click', () => { this.loopAbort = true; });
+    // 「中止」挪到了 tab 栏（切到任何 tab 都能停回环）—— 见 _dockSelect 附近的说明
+    $('sp-run-abort').addEventListener('click', () => this.abortLoop());
 
     $('sp-log-clear').addEventListener('click', () => { $('sp-log').innerHTML = ''; });
 
-    // 两张新卡可以折叠（按钮文字按**初始状态**同步一次，别写死"收起"跟 class 对不上）
-    for (const b of document.querySelectorAll('#tab-spi .foldbtn')){
-      const card = $(b.dataset.fold);
-      b.textContent = card.classList.contains('folded') ? '展开' : '收起';
-      b.addEventListener('click', () => {
-        card.classList.toggle('folded');
-        b.textContent = card.classList.contains('folded') ? '展开' : '收起';
-      });
-    }
+    this._bindDock();
 
     this.unsub = s.subscribe(this);
     s.log('i', '就绪。真机：先「连接探针」再「连接数据端点」；没板子就勾「用假探针」。');
@@ -172,11 +179,111 @@ export class SpiBusView {
     this.renderCounters(s.counters, s.lastStatus);
   }
 
+  // ==================================================================== 右列局部 tab
+
+  /**
+   * 右列 tab（照「调试器」页那套）。**壳在页面里，这里只负责切换与持久化。**
+   *
+   * 为什么桥页比 I2C 页更需要那个运行胶囊：桥有**全局 busy**（`session.busy` 一处置位，
+   * `refreshButtons()` 就把二十多个按钮一起灰掉），tab 化之后"为什么全都灰了"如果不写在
+   * tab 栏上，就只能去翻日志。所以胶囊显示 `空闲 / 忙 / 回环 3/8`，中止按钮也放在它旁边。
+   *
+   * ⚠️ 中止**只对回环自检有效**：擦/写不能中途停 —— 那会把 flash 留在半擦状态，比跑完更糟。
+   *    所以按钮在非回环的忙期保持灰，title 里也写明了。
+   */
+  _bindDock(){
+    const tabs = $('sp-dock-tabs');
+    const btns = tabs ? [...tabs.querySelectorAll('button[data-dock]')] : [];
+    for (const b of btns) b.addEventListener('click', () => this._dockSelect(b.dataset.dock));
+    const saved = store.get('spi.dock', 'cmd');
+    this._dockSelect(DOCK_IDS.includes(saved) ? saved : 'cmd', { save: false });
+
+    // 日志高度可拖（存 localStorage；刷新后还在）
+    const box = $('sp-logbox');
+    const h = Number(store.get('spi.logH', 0)) || 0;
+    if (box && h > 0) box.style.height = Math.round(h) + 'px';
+    this._bindGrip($('sp-grip-log'), {
+      get: () => box?.getBoundingClientRect().height || 0,
+      apply: v => { if (box) box.style.height = Math.round(v) + 'px'; },
+      min: () => 72,
+      max: () => Math.max(120, (document.querySelector('#tab-spi .main')?.clientHeight || 700) - 220),
+      save: v => store.set('spi.logH', Math.round(v)),
+    });
+  }
+
+  /** 切右列 tab（只显示一个，选择记进 localStorage）*/
+  _dockSelect(name, { save = true } = {}){
+    const tabs = $('sp-dock-tabs');
+    if (tabs) for (const b of tabs.querySelectorAll('button[data-dock]')) b.classList.toggle('on', b.dataset.dock === name);
+    const box = $('sp-box-dock');
+    if (box) for (const p of box.querySelectorAll('.dockpage')) p.classList.toggle('on', p.dataset.dock === name);
+    this.dockTab = name;
+    if (save) store.set('spi.dock', name);
+    // 刚显示出来的内容补一次刷新：整个页面被切走时浏览器会把 rAF 挂起，
+    // 隐藏期间攒下的渲染可能还没落地（`display:none` 本身不影响 rAF）。
+    if (name === 'loop') this.renderLoopRows(this.loopRows || []);
+  }
+
+  /** 通用分隔条拖拽（不用 setPointerCapture：合成的 CDP 事件也能驱动它 —— 抄的 #dbg）*/
+  _bindGrip(el, { get, apply, min, max, save }){
+    if (!el) return;
+    el.addEventListener('pointerdown', e => {
+      e.preventDefault();
+      const startY = e.clientY;
+      const startVal = get();
+      if (!startVal) return;
+      const move = ev => apply(Math.max(min(), Math.min(max(), startVal - (ev.clientY - startY))));
+      const up = () => {
+        window.removeEventListener('pointermove', move);
+        window.removeEventListener('pointerup', up);
+        window.removeEventListener('pointercancel', up);
+        save(get());
+      };
+      window.addEventListener('pointermove', move);
+      window.addEventListener('pointerup', up);
+      window.addEventListener('pointercancel', up);
+    });
+  }
+
+  /** 中止回环（没在跑回环时什么也不做，只把原因说清楚）*/
+  abortLoop(){
+    if (this.loopRunning){ this.loopAbort = true; return; }
+    if (this.session.busy) this.session.log('w', '当前这桩操作不能中止（擦/写中途停会把 flash 留在半擦状态）', this.tag);
+  }
+
+  /**
+   * 运行胶囊。`kind`：
+   *   `idle` 空闲 / `busy` 有操作在跑（说不出是什么）/ `loop` 回环自检 / `done` 刚跑完
+   */
+  renderRunPill(kind, text){
+    const el = $('sp-run-pill');
+    const btn = $('sp-run-abort');
+    if (!el) return;
+    const cls = { idle: 'hint dockrun', busy: 'hint dockrun warn', loop: 'hint dockrun on', done: 'hint dockrun' }[kind] || 'hint dockrun';
+    el.className = cls;
+    el.textContent = text;
+    if (btn){
+      // 只有回环可中止；其余忙期灰着（title 已经写明原因）
+      btn.disabled = !this.loopRunning;
+      btn.title = this.loopRunning
+        ? '中止正在跑的回环自检'
+        : '只有回环自检可中止；擦/写不能中途停 —— 那会把 flash 留在半擦状态';
+    }
+  }
+
+  /** 由 session 的 busy 事件驱动的"兜底"胶囊（回环自己有更具体的文案）*/
+  syncRunPill(){
+    const s = this.session;
+    if (this.loopRunning) return;                       // 回环自己会更新
+    if (s.busy) this.renderRunPill('busy', '▶ 忙（有操作在跑，按钮暂时灰掉）');
+    else this.renderRunPill('idle', '空闲');
+  }
+
   /** session 的事件入口 */
   onSession(type, payload){
     if (type === 'log') this.appendLog(payload);
     else if (type === 'state'){ this.renderState(payload); this.refreshButtons(); }
-    else if (type === 'busy') this.refreshButtons();
+    else if (type === 'busy'){ this.refreshButtons(); this.syncRunPill(); }
     else if (type === 'cfg') this.fillCfg(payload);
     else if (type === 'profile') this.refreshPads();
     else if (type === 'counters') this.renderCounters(payload.counters, payload.lastStatus);
@@ -260,7 +367,9 @@ export class SpiBusView {
     $('sp-reset').disabled = !c; $('sp-abort').disabled = !c; $('sp-status').disabled = !c;
     $('sp-cmd-send').disabled = !d || busy;
     $('sp-lb-run').disabled = !d || busy;
-    $('sp-lb-cancel').disabled = !busy;
+    // 「中止」在 tab 栏上（切到任何 tab 都能停）—— 它的可用性由 renderRunPill 统一管，
+    // 因为**只有回环可中止**：擦/写中途停会把 flash 留在半擦状态，按钮必须保持灰
+    this.syncRunPill();
     for (const id of ['sp-bl-on', 'sp-bl-off', 'sp-pin-rst-send']) $(id).disabled = !d || busy;
     // 通用命令（文本）/ flash：没数据端点或正忙时不能发
     for (const id of ['sp-dsl-parse', 'sp-dsl-send']) $(id).disabled = !d || busy;
@@ -1039,9 +1148,12 @@ export class SpiBusView {
     const modes = $('sp-lb-dma').checked ? [['轮询', 0], ['强制DMA', P.F.FORCE_DMA]] : [['轮询', 0]];
     if (!lens.length){ s.log('e', '长度列表是空的', this.tag); return; }
 
-    s.setBusy(true); this.loopAbort = false; this.refreshButtons();
+    s.setBusy(true); this.loopAbort = false; this.loopRunning = true; this.refreshButtons();
     const t0 = performance.now();
     const rows = [];
+    this.loopRows = rows;
+    const total = lens.length * modes.length;
+    this.renderRunPill('loop', `▶ 回环自检 0/${total}`);
     s.log('i', `回环自检开始：${lines} 线 · ${lens.length} 个长度 × ${modes.length} 种路径` +
       (s.usingMock ? '（假探针：读回 = 发出去的字节）' : '（真机需要 J3[28]↔J3[27] 跳线）'), this.tag);
     try {
@@ -1066,26 +1178,32 @@ export class SpiBusView {
           s.log(good ? 'g' : 'e', `  len=${String(len).padStart(3)} ${name.padEnd(6)} ` +
             (good ? 'PASS' : `FAIL${err ? ' · ' + err : ` · status=${status}/${P.ST_TEXT[status] || '?'}`}`), this.tag);
           this.renderLoopRows(rows);
+          // 胶囊跟着走：切到别的 tab 也看得到进度（tab 栏那一行不属于任何 tab）
+          this.renderRunPill('loop', `▶ 回环自检 ${rows.length}/${total}` + (this.loopAbort ? ' · 正在中止…' : ''));
           await yieldTask();
         }
         if (this.loopAbort) break;
       }
     } finally {
+      this.loopRunning = false;
       s.setBusy(false); this.refreshButtons();
     }
     const pass = rows.filter(r => r.ok).length;
     s.log(pass === rows.length ? 'g' : 'e',
-      `回环自检完成：${pass}/${rows.length} PASS · ${(performance.now() - t0).toFixed(0)} ms` +
+      `回环自检${this.loopAbort ? '（已中止）' : '完成'}：${pass}/${rows.length} PASS · ${(performance.now() - t0).toFixed(0)} ms` +
       (pass === rows.length ? '' : '（检查跳线 / 使能状态 / SCLK 档位）'), this.tag);
     this.renderLoopRows(rows);
+    this.renderRunPill('done', `回环 ${pass}/${rows.length} PASS` + (this.loopAbort ? '（已中止）' : ''));
     await s.pollStatus(true);
   }
 
   renderLoopRows(rows){
-    $('sp-lb-body').innerHTML = rows.map(r => `<tr class="${r.ok ? 'ok' : 'bad'}"><td>${r.len}</td><td>${r.mode}</td>` +
+    this.loopRows = rows || [];
+    $('sp-lb-body').innerHTML = this.loopRows.map(r => `<tr class="${r.ok ? 'ok' : 'bad'}"><td>${r.len}</td><td>${r.mode}</td>` +
       `<td>${r.ok ? 'PASS' : 'FAIL'}</td><td>${r.err || (r.status === 0 ? 'OK' : `${r.status}/${P.ST_TEXT[r.status] || '?'}`)}</td></tr>`).join('');
-    const pass = rows.filter(r => r.ok).length;
-    setStatus($('sp-lb-sum'), rows.length ? `${pass}/${rows.length} PASS` : '未跑', rows.length ? (pass === rows.length ? 'ok' : 'err') : '');
+    const pass = this.loopRows.filter(r => r.ok).length;
+    setStatus($('sp-lb-sum'), this.loopRows.length ? `${pass}/${this.loopRows.length} PASS` : '未跑',
+      this.loopRows.length ? (pass === this.loopRows.length ? 'ok' : 'err') : '');
   }
 
   // ==================================================================== 生命周期
@@ -1093,6 +1211,7 @@ export class SpiBusView {
   onShow(){
     this.renderLogFromRing();
     this.refreshButtons();
+    this.syncRunPill();
     this.session.pollStatus(true);
   }
 

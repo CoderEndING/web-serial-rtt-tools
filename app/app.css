@@ -248,28 +248,51 @@ dialog form{margin-top:16px;text-align:right}
 #tab-spi .framegrid,#tab-panel .framegrid{display:grid;grid-template-columns:1fr 1fr;gap:0 8px}
 #tab-spi .framegrid .row>span:first-child,#tab-panel .framegrid .row>span:first-child{width:62px}
 #tab-spi .tx,#tab-panel .tx{min-height:44px}
-/* ---- 桥页右区：**单列 4 块**（命令表 / 命令文本 / flash / 回环），整体滚动，日志钉在下面 ----
-   两列那版在 1078px 窗口下会塌成一列 + 卡片互相挤（用户："右边面板区这个布局好丑啊"）。 */
-#tab-spi .busstack{display:flex;flex-direction:column;gap:9px;overflow:auto;flex:1 1 auto;min-height:0;padding-right:2px}
-#tab-spi .busstack>fieldset{min-width:0}
+/* ---- 桥页右区：**一个带 tab 的面板**（命令表 / 脚本 / Flash 测试 / 回环自检）+ 常驻日志 ----
+   以前是"单列 4 块、整体滚动、每块各自限高"，用户反馈"有点繁琐"：命令表只露约 7 行
+   （限高 146px 是为了别把中列占满），Flash 卡的输出/写数据框又钉死 150px，想同时看
+   "命令表"和"它在跑什么"得在三张卡之间滚。改成照 #dbg / #i2c 那套 .docktabs/.dockpage 之后
+   每块**吃满整块高度**；日志与运行胶囊仍然常驻（tab 化不该把过程视图藏起来）。
+   🚨 下面**没有任何 max-height 限高**：高度由 `.dockpage{flex:1}` 分配。 */
+#tab-spi .spdock{display:flex;flex-direction:column;min-width:0;min-height:0;overflow:hidden;flex:1 1 auto}
+#tab-spi .spdock>legend{white-space:nowrap;overflow:hidden;display:flex;align-items:center;gap:6px;width:100%;box-sizing:border-box}
+#tab-spi .spdock>legend .hint{margin:0;display:inline}
+#tab-spi .docktabs{margin-left:2px;vertical-align:middle}
+#tab-spi .docktabs button{font-size:11.5px;padding:2px 10px}
+#tab-spi .dockpage{display:none;flex:1 1 auto;min-height:0;flex-direction:column;gap:6px}
+#tab-spi .dockpage.on{display:flex}
+#tab-spi .dockpage .toolrow{margin:0}
+/* tab 里的滚动区吃满剩余高度（共用规则里的 `.scroll{max-height:200px}` 在这里必须让位 ——
+   那是给屏页的，动它会连带改到 #tab-panel） */
+#tab-spi .scroll.fill{flex:1 1 auto;min-height:0;max-height:none;margin-top:0}
+#tab-spi .log.fill{flex:1 1 auto;min-height:70px;height:auto;max-height:none}
+#tab-spi .dockpage>p.hint{flex:none;margin:0}
+#tab-spi .dockpage>.row{flex:none}
+/* 运行胶囊：切到哪个 tab 都看得到"桥在跑什么"（busy 会把大半个页面的按钮灰掉，原因就在这） */
+#tab-spi .dockrun{color:var(--fg2);font-size:11.5px;font-family:var(--mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#tab-spi .dockrun.on{color:var(--ok)}
+#tab-spi .dockrun.warn{color:var(--warn)}
+#tab-spi .dockrun.err{color:var(--err)}
+#tab-spi .grip{flex:none;background:transparent;border-radius:4px;position:relative}
+#tab-spi .grip::after{content:"";position:absolute;background:var(--line);border-radius:2px;opacity:.7}
+#tab-spi .grip:hover::after{background:var(--acc);opacity:1}
+#tab-spi .grip-h{height:9px;margin:0;cursor:row-resize}
+#tab-spi .grip-h::after{left:35%;right:35%;top:3px;height:3px}
 #tab-spi .toolrow{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:0 0 6px}
 #tab-spi .toolrow.nw{flex-wrap:nowrap;overflow:hidden}
 #tab-spi .toolrow>span:first-child{color:var(--fg2);font-size:12px;flex:none}
 #tab-spi .toolrow select{max-width:340px}
 #tab-spi .toolrow.nw #sp-dsl-sum{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #tab-spi .toolrow.nw button{flex:none}
-/* 命令表：行高压紧（10 行 + 表头，矮窗口下这是最大的一块）
-   🚨 表格自己限高 + 滚动：不限的话这一块就有 310px 高，在 580px 高的窗口里
-   会把中列可视区（~287px）**整个占满**，刷新后另外三块完全看不见（用户："页面一刷新变成这样？"）。
-   限到 158px（约 7 行、表头吸顶）后下一块的标题会露出来，一眼就知道下面还有东西。
-   ⚠️ 这里必须写 `.scroll.cmdscroll`（两个类）：`.scroll{max-height:200px}` 在本文件里**排在后面**，
-   同优先级会反过来盖掉单类的 `.cmdscroll` —— 上一版就是这么静默失效的（量出来还是 200px）。 */
-#tab-spi .scroll.cmdscroll{max-height:146px;overflow:auto;margin-top:2px}
-#tab-spi table.cmdtab{font-size:11.5px}
+/* 命令表：10 行**全展开**（tab 化之前被限到 146px，只露约 7 行 —— 那是"繁琐"的主要来源之一）。
+   🚨 `table-layout:fixed` 是必需的：auto 布局下 `td{max-width}` **不生效**，结果列里的长文本
+   会把列宽撑开、把表格顶出横向滚动条（I2C 页实测踩过）。fixed 之后**没写宽度的列会平分剩余
+   空间**，所以序号列必须显式给死，否则会分到一大块。 */
+#tab-spi table.cmdtab{table-layout:fixed;font-size:11.5px}
 #tab-spi table.cmdtab th{padding:1px 4px;white-space:nowrap;position:sticky;top:0;background:var(--bg2);z-index:1}
-#tab-spi table.cmdtab td{padding:0 3px}
+#tab-spi table.cmdtab td{padding:0 3px;overflow:hidden}
 #tab-spi table.cmdtab td.idx{color:var(--fg2);width:18px;text-align:right;padding-right:5px}
-#tab-spi table.cmdtab td.res{font-size:11px;white-space:nowrap;max-width:none;overflow:hidden;text-overflow:ellipsis}
+#tab-spi table.cmdtab td.res{font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 #tab-spi table.cmdtab td.res.ok{color:var(--ok)}
 #tab-spi table.cmdtab td.res.bad{color:var(--err)}
 #tab-spi input.cell,#tab-spi select.cell{
@@ -277,6 +300,7 @@ dialog form{margin-top:16px;text-align:right}
   border:1px solid var(--line);border-radius:5px;color:var(--fg);
 }
 #tab-spi input.cell:focus{outline:1px solid var(--acc);border-color:var(--acc)}
+#tab-spi table.cmdtab th:nth-child(1){width:26px}
 #tab-spi table.cmdtab th:nth-child(2){width:56px}
 #tab-spi table.cmdtab th:nth-child(3){width:52px}
 #tab-spi table.cmdtab th:nth-child(4){width:62px}
@@ -288,21 +312,26 @@ dialog form{margin-top:16px;text-align:right}
 #tab-spi table.cmdtab th:nth-child(8){width:auto}
 #tab-spi table.cmdtab th:nth-child(9){width:180px}
 /* 🚨 `.tx` 是 `width:100%;flex:none`：放在 flex 行里会**比容器宽出一个 label 的宽度**，
-   于是 .busstack 冒出一条"拖了也没用"的横向滑条（用户现场：滑条能左右拖但什么也不动）。
+   于是冒出一条"拖了也没用"的横向滑条（用户现场：滑条能左右拖但什么也不动）。
    在行内让它参与收缩即可。 */
 #tab-spi .row>.tx{width:auto;flex:1 1 auto;min-width:0}
 #sp-dsl-text{
-  width:100%;min-height:92px;max-height:220px;font-family:var(--mono);font-size:12px;line-height:1.45;
-  resize:vertical;white-space:pre-wrap;overflow-wrap:anywhere;overflow-x:hidden;overflow-y:auto;
+  width:100%;flex:1 1 auto;min-height:110px;max-height:none;font-family:var(--mono);font-size:12px;
+  line-height:1.45;resize:vertical;white-space:pre-wrap;overflow-wrap:anywhere;overflow-x:hidden;overflow-y:auto;
 }
-#sp-flash-card #sp-fl-out{margin-top:4px}
-/* flash 卡的「读数据 / 写数据」两个窗口**等高**（2026-10 用户要求：都按读数据那个高度来） */
-#sp-flash-card #sp-fl-out,#sp-flash-card #sp-fl-data{height:150px;min-height:150px;max-height:150px}
+/* flash 卡：输出框与「写数据」**平分剩余高度**。
+   🚨 用户 2026-10 明确要求过"两个窗口等高（都按读数据那个高度来）"，tab 化之后要保持：
+   两个都给 `flex:1 1 0`，矮窗口下一起缩、宽窗口下一起长，不会一个撑爆一个只剩两行。
+   （「写数据」外面那层 <label class="datarow"> 本身得是 flex 项，里面的 textarea 才吃得到高度。） */
+#sp-flash-card #sp-fl-out{margin-top:0;flex:1 1 0;min-height:90px}
+#sp-flash-card .datarow{flex:1 1 0;min-height:90px;align-items:stretch}
+#sp-flash-card #sp-fl-data{flex:1 1 auto;height:auto;min-height:0}
+#sp-flash-card .datarow>span{padding-top:4px}
 #sp-flash-card .framegrid .row>span:first-child{width:56px}
 /* 语法速查：折叠块里是**预排文本**（等宽 + 保留换行），别被挤成一坨 */
-#tab-spi .dslhelp{margin-top:5px}
+#tab-spi .dslhelp{margin-top:0;flex:none}
 #tab-spi .dslhelp summary{color:var(--fg2);font-size:12px;cursor:pointer}
-#tab-spi .dslhelp .hint{white-space:pre-wrap;font-family:var(--mono);font-size:11.5px;line-height:1.5;margin:5px 0 0}
+#tab-spi .dslhelp .hint{white-space:pre-wrap;font-family:var(--mono);font-size:11.5px;line-height:1.5;margin:5px 0 0;max-height:240px;overflow:auto}
 .log{
   flex:0 0 auto;height:30%;min-height:126px;overflow:auto;background:#010409;border:1px solid var(--line);
   border-radius:9px;padding:6px 8px;font-family:var(--mono);font-size:12px;line-height:1.5;
