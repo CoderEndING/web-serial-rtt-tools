@@ -47,6 +47,11 @@ $cmds += "program `"$elfTcl`" verify reset exit"
 Write-Output "board   : $Board  ($out)"
 Write-Output "openocd : $OpenOcd"
 Write-Output "cfg     : $cfg"
-& $OpenOcd -s $Scripts -f $cfg -c ($cmds -join '; ') 2>&1 | ForEach-Object { $_ }
+# 🚨 PS 5.1 坑：EAP=Stop 时 `2>&1` 会把 native 程序写到 stderr 的**第一行**（OpenOCD 的 banner
+#    就走 stderr）当成终止错误 —— 烧录还没开始就被打断。pwsh 7 手动跑没这个行为，回归脚本经
+#    powershell 5.1 调用就踩到了。这里临时降级，退出码照常判。（探针仓库那份已修，这里补上。）
+$ErrorActionPreference = 'Continue'
+& $OpenOcd -s $Scripts -f $cfg -c ($cmds -join '; ') 2>&1 | ForEach-Object { "$_" }
+$ErrorActionPreference = 'Stop'
 if ($LASTEXITCODE -ne 0) { throw "烧录失败 (exit $LASTEXITCODE)" }
 Write-Output "烧录完成"

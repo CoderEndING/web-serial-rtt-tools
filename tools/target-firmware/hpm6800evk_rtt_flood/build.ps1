@@ -19,15 +19,21 @@ $env:HPM_SDK_TOOLCHAIN_VARIANT = 'gcc'
 
 $bdir = Join-Path $here "build\$buildType"
 Write-Output "building $buildType -> $bdir"
-& cmake -G Ninja -DBOARD=hpm6800evk -DHPM_BUILD_TYPE=$buildType -DCMAKE_BUILD_TYPE=debug -B $bdir -S $here
+# ⚠️ 参数必须**加引号**：PowerShell 7 把以 `-` 开头的裸 token 当参数名，里面的 $buildType 不做变量展开
+#    （原样传给 cmake，SDK 会报 invalid HPM_BUILD_TYPE: $buildtype）。Windows PowerShell 5.1 会展开，
+#    所以这个坑只在 pwsh 下出现 —— scope 那份早就这么修了，flood 这份一直没修，等于编不出来。
+& cmake -G Ninja "-DBOARD=hpm6800evk" "-DHPM_BUILD_TYPE=$buildType" "-DCMAKE_BUILD_TYPE=debug" -B $bdir -S $here
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 & cmake --build $bdir
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-$elf = Join-Path $bdir 'output\hpm6800evk_rtt_flood.elf'
+$elf = Join-Path $bdir 'output\demo.elf'      # SDK 统一把可执行文件叫 demo.elf
 if (Test-Path $elf) {
     $nm = "$sdkEnv\toolchains\rv32imac_zicsr_zifencei_multilib_b_ext-win\bin\riscv32-unknown-elf-nm.exe"
     Write-Output ""
     Write-Output "RTT control block:"
     & $nm -S $elf | Select-String '_SEGGER_RTT'
+    # 📦 复制到目录根：仓库里"给用户直接下载"的那份就是它（与其它靶子同约定）
+    Copy-Item -Force $elf (Join-Path $here 'fw.elf')
+    Write-Output ("入库： {0} ({1} KB)" -f (Join-Path $here 'fw.elf'), [int]((Get-Item (Join-Path $here 'fw.elf')).Length / 1024))
 }

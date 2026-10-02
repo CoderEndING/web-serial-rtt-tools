@@ -71,3 +71,8 @@ void Reset_Handler(void){
 void Default_Handler(void){
   for (;;) { }                    /* 留在这里等调试器接住 */
 }
+
+/* 🚨 极简档（build.ps1 -Minimal）**不编** SDK 的 system_stm32h7xx.c，于是没人提供 SystemInit，
+ *    而上面的 Reset_Handler 要调它 —— 原来这里会 `undefined reference to 'SystemInit'`，链不过。
+ *    给个**弱定义**兜底：HAL/SDK 版里有强定义，链接器优先用它，这份会被 --gc-sections 丢掉。*/
+__attribute__((weak)) void SystemInit(void) { }
