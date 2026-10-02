@@ -476,5 +476,59 @@ console.log('== 11. 新命令：w / wl / wd / sl / src + Ctrl+C 取消 ==');
   ok(/界面/.test(noView), '没有界面时 w 说明"需要界面支持"', noView);
 }
 
+// ==================================================================== 12
+console.log('== 12. SWD 时钟：默认 10 MHz + PPB 坏读自动退回 1 MHz ==');
+{
+  ok(S.DEFAULT_CLOCK_KHZ === 10000, `默认时钟是 10 MHz（${S.DEFAULT_CLOCK_KHZ} kHz）`);
+  const s4 = new S.DebugSession();
+  s4.log = () => {};
+  await s4.connect({ mock: true, clockKhz: 10000 });
+  const p = s4.probe;
+
+  // ① 好探针：10 MHz 下 DHCSR 读得干净 → 不动时钟
+  p.clockHz = 10_000_000; s4.clockHz = 10_000_000;
+  p.ppbGarbage = false;
+  const okRes = await s4.verifyClock();
+  ok(okRes.ok === true && okRes.checked === true && s4.clockHz === 10_000_000, 'PPB 读数正常 → 保持 10 MHz', JSON.stringify(okRes));
+
+  // ② 坏探针（高时钟读 PPB 回 0）→ 自动退回 1 MHz，并把证据写进日志
+  const logs = [];
+  s4.log = (t) => logs.push(t);
+  p.ppbGarbage = true;
+  const badRes = await s4.verifyClock();
+  ok(badRes.ok === false && s4.clockHz === S.PPB_SAFE_HZ, 'PPB 读回 0 → 自动退回 1 MHz', JSON.stringify(badRes));
+  ok(p.clockHz === S.PPB_SAFE_HZ, '探针那边的 SWJ_Clock 也真的改了', String(p.clockHz));
+  ok(logs.some(l => /已自动退回 1 MHz/.test(l)), '日志里说清"为什么退回"（不许静默降级）', logs.join(' | ').slice(0, 140));
+
+  // ③ 已经 ≤1 MHz 就不再折腾（不白读三次）
+  const skip = await s4.verifyClock();
+  ok(skip.ok === true && skip.checked === false, '已经 ≤1 MHz 时跳过检查', JSON.stringify(skip));
+  await s4.disconnect();
+}
+
+// ==================================================================== 13
+console.log('== 13. SWD 串行化（后台轮询不许和用户动作交错）==');
+{
+  const s5 = new S.DebugSession();
+  s5.log = () => {};
+  await s5.connect({ mock: true });
+  const order = [];
+  const op = s5.exclusive(async () => { order.push('op:start'); await sleep(60); order.push('op:end'); });
+  await sleep(10);
+  const bg = await s5.tryExclusive(async () => { order.push('bg'); });
+  ok(bg.skipped === true && !order.includes('bg'), '独占动作进行中 → 后台轮询跳过这一拍（不排队、不交错）', JSON.stringify(order));
+  await op;
+  const bg2 = await s5.tryExclusive(async () => { order.push('bg2'); return 7; });
+  ok(bg2.skipped === false && bg2.value === 7 && order[order.length - 1] === 'bg2', '空闲时后台轮询正常执行', JSON.stringify(order));
+
+  const seq = [];
+  const a = s5.exclusive(async () => { seq.push('A1'); await sleep(40); seq.push('A2'); });
+  const b = s5.exclusive(async () => { seq.push('B1'); await sleep(10); seq.push('B2'); });
+  await Promise.all([a, b]);
+  ok(seq.join(',') === 'A1,A2,B1,B2', '两个独占动作排队：A 全程跑完才轮到 B', seq.join(','));
+  ok(s5._opBusy === false, '队列跑空后锁已释放', String(s5._opBusy));
+  await s5.disconnect();
+}
+
 console.log(`\n== 汇总：${pass} 通过 / ${fail} 失败 ==`);
 process.exit(fail ? 1 : 0);

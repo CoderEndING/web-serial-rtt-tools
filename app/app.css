@@ -131,6 +131,9 @@ legend{font-size:11.5px;color:var(--fg2);padding:0 5px;letter-spacing:.4px}
   background:var(--bg2);border:1px solid var(--line);border-radius:9px;padding:5px 9px;
 }
 .num{width:64px;flex:none!important}
+/* 🚨 `.tx` 是给「文本发送」那个 textarea 用的（min-height:52px 是**输入框**的最小高度）。
+   调试页的源码行原来也叫 `.tx`（`<span class="tx">`）→ 被这条全局规则命中，**每一行源码都被
+   撑到 52px**（用户看到的"行距太大太大了"就是这个）。源码行已改名 `.srctx`，别再用 `.tx`。 */
 .tx{width:100%;flex:none;resize:vertical;min-height:52px;font-family:var(--mono)}
 .rtt-in{flex:1;font-family:var(--mono)}
 
@@ -544,7 +547,7 @@ fieldset.folded > legend::after{content:' · 已折叠';color:var(--fg2);font-si
 
 /* 源码：占左列剩余高度（默认大头）。basis 必须是 0 —— 见上面 .dbgleft 那段 🚨 */
 #tab-dbg .dbgsrc{flex:1 1 0;min-height:120px}
-#tab-dbg .srclist{flex:1 1 auto;min-height:0;overflow:auto;font-size:12px;line-height:1.45;
+#tab-dbg .srclist{flex:1 1 auto;min-height:0;overflow:auto;font-size:12px;line-height:1.4;
   background:#010409;border-radius:6px;padding:2px 0}
 #tab-dbg .srcrow{display:flex;gap:8px;padding:0 6px;white-space:pre}
 #tab-dbg .srcrow .ln{flex:none;width:44px;text-align:right;color:#4a5563;cursor:pointer;user-select:none}
@@ -552,8 +555,10 @@ fieldset.folded > legend::after{content:' · 已折叠';color:var(--fg2);font-si
 #tab-dbg .srcrow.bp .ln{color:var(--err);font-weight:600}
 #tab-dbg .srcrow.cur{background:#16281a}
 #tab-dbg .srcrow.cur .ln{color:var(--acc)}
-#tab-dbg .srcrow.cur .tx{color:#fff}
-#tab-dbg .srcrow .tx{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis}
+#tab-dbg .srcrow.cur .srctx{color:#fff}
+/* 🚨 类名是 `.srctx` 不是 `.tx`：`.tx` 被「文本发送」那个 textarea 的全局规则占着（min-height:52px），
+   用它会把每一行源码撑到 52px —— 就是用户报的"行距太大"。 */
+#tab-dbg .srcrow .srctx{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis}
 #tab-dbg #d-src-file{font-size:11.5px;color:var(--fg2)}
 
 /* 命令行：占左列下面（默认 flex-basis 38%，拖动后是 px），输出区 + 贴底输入行 */

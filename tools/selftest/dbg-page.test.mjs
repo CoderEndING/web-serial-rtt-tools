@@ -114,8 +114,32 @@ console.log('== 1. 标签页与初始状态 ==');
 }
 
 // ==================================================================== 2
-console.log('== 2. 载入 ELF 符号（页面自己 fetch 仓库里的真 ELF）==');
+console.log('== 2. SWD 时钟默认值（老设置迁移）+ 载入 ELF 符号 ==');
 {
+  // ① 迁移：塞一个老版本的 1 MHz 设置 → 重载页面 → 应该被迁到新的 10 MHz 默认
+  await ev(`
+    const st = JSON.parse(localStorage.getItem('serial-rtt-tools:v1') || '{}');
+    st['dbg.clock'] = '1000';
+    localStorage.setItem('serial-rtt-tools:v1', JSON.stringify(st));
+    return 1;`);
+  await send('Page.reload', { ignoreCache: true });
+  let back = false;
+  for (let i = 0; i < 40; i++){
+    await sleep(300);
+    try { if (await ev('return !!window.__tools?.dbg;')){ back = true; break; } } catch {}
+  }
+  ok(back, '重载页面（验证时钟默认值迁移）');
+  const mig = await ev(`
+    document.querySelector('#tabs .tab[data-tab="dbg"]').click();
+    await new Promise(r => setTimeout(r, 120));
+    const sel = document.getElementById('d-clock');
+    return { clk: sel.value, opts: [...sel.options].map(o => o.value),
+             stored: JSON.parse(localStorage.getItem('serial-rtt-tools:v1') || '{}')['dbg.clock'] };`);
+  ok(mig.opts.includes('10000') && mig.opts.includes('20000') && mig.opts.includes('1000') && mig.opts.includes('200'),
+    'SWD 时钟候选：200 / 1000 / 2000 / 5000 / 10000 / 20000 都在', JSON.stringify(mig.opts));
+  ok(mig.clk === '10000' && mig.stored === '10000', '老版本留下的 1 MHz 会被迁到新的 10 MHz 默认（手选过 500/200 的不动）', JSON.stringify(mig));
+
+  // ② 载入 ELF（真文件，页面自己 fetch）
   const r = await ev(`
     const res = await fetch('/tools/fixtures/dwarf/stm32f103_rtt_speed.elf');
     if (!res.ok) throw new Error('取 ELF 失败 ' + res.status);
@@ -127,18 +151,19 @@ console.log('== 2. 载入 ELF 符号（页面自己 fetch 仓库里的真 ELF）
 }
 
 // ==================================================================== 3
-console.log('== 3. 连接模拟目标 + 寄存器表 ==');
+console.log('== 3. 连接模拟目标 + 寄存器表（SWD 时钟 10 MHz）==');
 {
   const r = await ev(`
+    const d = window.__tools.dbg;
     document.getElementById('d-backend').value = 'mock';
     document.getElementById('d-backend').dispatchEvent(new Event('change'));
-    const okc = await window.__tools.dbg.connect();
-    return { okc, sum: window.__tools.dbg.summary() };`);
+    const okc = await d.connect();
+    return { okc, sum: d.summary(), clk: document.getElementById('d-clock').value };`);
   ok(r.okc === true && r.sum.connected, '连上模拟目标', JSON.stringify(r.sum));
   ok(r.sum.regs === 23, `读到 23 个寄存器（含 CFBP 拆出的 4 个）`, String(r.sum.regs));
   ok(r.sum.bpCap === 8, '读到 FPB 硬件断点上限 8');
   ok(r.sum.pc === 0x08000100, 'PC = 复位向量', '0x' + r.sum.pc.toString(16));
-  ok(r.sum.clockKhz === 1000, '默认 SWD 时钟 1 MHz（PPB 访问的硬要求）');
+  ok(r.sum.clockKhz === 10000 && r.clk === '10000', 'SWD 时钟 10 MHz（下拉与 session 一致）', JSON.stringify({ sum: r.sum.clockKhz, clk: r.clk }));
 
   const dom = await ev(`
     const rows = [...document.querySelectorAll('#d-regs .regrow')];
@@ -504,9 +529,19 @@ console.log('== 13. 源码行（停下来显示当前代码行 + 点行号下断
     const rows = [...document.querySelectorAll('#d-src .srcrow')];
     const cur = document.querySelector('#d-src .srcrow.cur');
     return { rows: rows.length, first: rows[0]?.dataset.line, last: rows[rows.length - 1]?.dataset.line,
-             curLine: cur?.dataset.line, curText: cur?.querySelector('.tx').textContent };`);
+             curLine: cur?.dataset.line, curText: cur?.querySelector('.srctx').textContent,
+             rowH: Math.round((cur?.getBoundingClientRect().height || 0) * 10) / 10,
+             paneH: Math.round(document.getElementById('d-src').getBoundingClientRect().height),
+             rowsVisible: Math.floor(document.getElementById('d-src').getBoundingClientRect().height / (cur?.getBoundingClientRect().height || 1)) };`);
   ok(view.rows >= 30 && view.curLine === '24', '有源码文本时画出行号窗口并高亮当前行', JSON.stringify(view).slice(0, 150));
   ok(/code line 24/.test(view.curText), '当前行的源码文本正确', view.curText);
+  /**
+   * 🚨 回归护栏：源码行原来叫 `.tx`，被「文本发送」输入框那条全局规则（`.tx{min-height:52px}`）命中，
+   *    **每一行都被撑到 52px**（用户原话"行距太大太大了"，一屏只看得见 5 行）。
+   *    现在类名是 `.srctx`，一行就是一行高（12px 字号 × 1.4 ≈ 17px）。
+   */
+  ok(view.rowH > 0 && view.rowH <= 22, `源码行高是正常的一行：${view.rowH}px（不是被撑到 52px）`, JSON.stringify(view));
+  ok(view.rowsVisible >= 12, `一屏能看 ${view.rowsVisible} 行源码（面板 ${view.paneH}px）`, JSON.stringify(view));
   ok(Number(view.first) === 12 && Number(view.last) === 49, `上下文窗口是当前行前后若干行（${view.first}~${view.last}）`, JSON.stringify(view));
 
   const bpMark = await ev(`

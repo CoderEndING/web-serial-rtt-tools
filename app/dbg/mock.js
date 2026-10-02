@@ -40,6 +40,12 @@ export class MockTarget {
     this.name = '模拟目标（内置 Cortex-M7 模型）';
     this.idcode = 0x6ba02477;                  // 与真机那颗 STM32H7B0 的 SW-DP 一致，便于对照
     this.clockHz = 1_000_000;
+    /**
+     * 假目标的"高时钟下 PPB 读回垃圾"开关：真机上那颗探针固件历史上有这个毛病，
+     * `DebugSession.verifyClock()` 就是为它写的兜底 —— 自测靠这个开关把回退路径也跑一遍。
+     * 打开后：任何 PPB 地址（0xE0000000 起）读回全 0。
+     */
+    this.ppbGarbage = false;
     this.fast = false;
     this.lastOkAt = 0;
     this.onLog = null;
@@ -341,7 +347,13 @@ export class MockTarget {
   async run(){ this._writeDhcsr(0xa05f0001); }
   async halt(){ this._writeDhcsr(0xa05f0003); }
   async isHalted(){ return !this.running; }
-  async _readWord(addr){ const b = await this.readMem(addr, 4); return this._u32(b, 0); }
+  /** 真探针有 SWJ_Clock（0x11）；假目标只改个数字，够上层判断"实际用的是哪个档" */
+  async setClock(hz){ this.clockHz = hz >>> 0; return true; }
+  async _readWord(addr){
+    // 模拟"高时钟读 PPB 回 0"的坏探针（见 ppbGarbage）
+    if (this.ppbGarbage && (addr >>> 0) >= 0xe0000000) return 0;
+    const b = await this.readMem(addr, 4); return this._u32(b, 0);
+  }
   async _targetInit(){ return true; }
   async regRead(sel){ this._writeDcrsr(sel & 0x1f); return this.regs[RI.DCRDR] >>> 0; }
   async regWrite(sel, value){ this.regs[RI.DCRDR] = value >>> 0; this._writeDcrsr((sel & 0x1f) | 0x10000); }

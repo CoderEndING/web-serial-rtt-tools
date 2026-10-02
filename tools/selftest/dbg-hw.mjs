@@ -94,14 +94,16 @@ console.log('== 0. 探针授权与就绪 ==');
   }
 }
 
-console.log('== 1. 连接（WebUSB · 1 MHz）==');
+console.log('== 1. 连接（WebUSB · 10 MHz，与页面默认一致）==');
 {
   const r = await ev(`
     const d = window.__tools.dbg;
+    d._stopWatch();          // 🚨 脚本自己独占 SWD：观察循环还在读的话会和这里的每次调用交错（实测 18% 读到废值）
     document.getElementById('d-backend').value = 'webusb';
     document.getElementById('d-backend').dispatchEvent(new Event('change'));
-    document.getElementById('d-clock').value = '1000';
+    document.getElementById('d-clock').value = '10000';        // 页面默认档：真机实测 PPB/内存都正常
     const okc = await d.connect();
+    d._stopWatch();          // connect() 见目标在跑会重新开观察循环，这里再关一次
     /**
      * 🚨 目标可能是**运行中**的（上一次冒烟收尾会把它放跑/板子本来就在跑）——
      * 先停下来再读寄存器。不停的话 regList 是空的，下面两条会莫名其妙地红（实测踩过）。
@@ -119,6 +121,7 @@ console.log('== 1. 连接（WebUSB · 1 MHz）==');
     process.exit(1);
   }
   if (r.wasRunning) info('连上时目标在跑 —— 已先「暂停」再读寄存器（脚本自己保证幂等）');
+  ok(r.sum.clockKhz === 10000, `实际用的是 10 MHz（${r.sum.clockKhz} kHz；若探针在 10 MHz 下读 PPB 回 0，session 会自动退回 1 MHz 并在页面日志里说明）`, String(r.sum.clockKhz));
   info(`后端 ${r.sum.backend} · SWD ${r.sum.clockKhz} kHz · 断点容量 ${r.sum.bpCap}（FPB rev${(await ev('return window.__tools.dbg.session.caps.rev;'))}）`);
   ok(r.sum.bpCap > 0, '读到了 FPB 比较器个数（>0）', String(r.sum.bpCap));
   info('IDCODE = 0x' + (await ev('return window.__tools.dbg.session.idcode.toString(16);')).toUpperCase());

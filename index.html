@@ -690,9 +690,13 @@
             <option value="mock">模拟目标（不需要硬件）</option>
           </select>
         </label>
-        <label class="row"><span>SWD kHz</span>
-          <select id="d-clock" title="内核调试寄存器（DHCSR/DCRSR/FPB）在 PPB 区，这颗探针固件在时钟偏高时会读回 0 —— 所以默认 1 MHz，别随手调高。">
-            <option value="1000">1000（1 MHz，推荐）</option>
+        <label class="row"><span>SWD 时钟</span>
+          <select id="d-clock" title="SWD 时钟。2026-10 真机实测（akaLinkPro + STM32F103ZE）：10 / 20 / 30 MHz 下寄存器（PPB）、FPB、内存全都正确，内存读比 1 MHz 快 3~4 倍 —— 所以默认 10 MHz。若换了探针固件发现寄存器读回 0/0xFFFFFFFF，连接时会自动退回 1 MHz 并在日志里说明原因（历史上这颗固件高时钟读 PPB 会回 0）。">
+            <option value="10000">10000（10 MHz，默认）</option>
+            <option value="20000">20000（20 MHz，实测最快）</option>
+            <option value="5000">5000（5 MHz）</option>
+            <option value="2000">2000（2 MHz）</option>
+            <option value="1000">1000（1 MHz，PPB 保守档）</option>
             <option value="500">500</option>
             <option value="200">200</option>
           </select>

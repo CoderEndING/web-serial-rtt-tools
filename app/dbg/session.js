@@ -29,8 +29,14 @@ const DHCSR = 0xe000edf0, DFSR = 0xe000ed30, AIRCR = 0xe000ed0c;
 const DBGKEY = 0xa05f0000;
 const C_DEBUGEN = 1, C_HALT = 2, C_STEP = 4, C_MASKINTS = 8;
 
-/** 调试页默认 SWD 时钟（kHz）：PPB 访问必须 ≤1 MHz（见文件头 🚨1） */
-export const DEFAULT_CLOCK_KHZ = 1000;
+/** 调试页默认 SWD 时钟（kHz）。
+ *  🚨 2026-10-02 由用户拍板改成 **10 MHz**（原来是 1 MHz）：真机实测（akaLinkPro + STM32F103ZE）
+ *  10/20/30 MHz 下 DHCSR/FPB/寄存器/RAM 全都正确，内存读 32 KB 从 1 MHz 的 ~100 KB/s 提到 **375 KB/s**
+ *  （20 MHz 最高 488 KB/s）。历史"时钟偏高 DHCSR 读回 0"的坑由 `verifyClock()` 兜底：
+ *  连上之后先验一次 PPB，读回不可信就**自动退回 1 MHz** 并写日志。 */
+export const DEFAULT_CLOCK_KHZ = 10000;
+/** PPB（DHCSR/DCRSR/FPB/AIRCR）的保守时钟上限：高时钟读数不可信时回退到这里 */
+export const PPB_SAFE_HZ = 1_000_000;
 
 export class DebugSession {
   constructor(){
@@ -49,12 +55,50 @@ export class DebugSession {
     this.log = null;                       // (text, cls) => void
     this._prev = null;                     // 上一次读到的寄存器值（算 changed 高亮）
     this._cfbp = 0;
+    this._opChain = Promise.resolve();     // 串行化用的队列（见 exclusive/tryExclusive）
+    this._opBusy = false;
   }
 
   get connected(){ return !!this.probe; }
   get bpCapacity(){ return this.caps.numCode || 0; }
 
   _log(t, c){ try { this.log?.(t, c); } catch { /* 日志不影响主流程 */ } }
+
+  // ------------------------------------------------------------ SWD 串行化
+
+  /**
+   * 🚨 一条 SWD 链路上**任何两次操作交错都会读出垃圾**。
+   *
+   * 2026-10-02 真机实测（10 MHz + STM32F103ZE）：页面那个 150 ms 的观察循环（`refresh()` 读 DHCSR/PC）
+   * 与脚本/用户的一次 `readReg()` 撞在一起时，**100 次里有 18 次读到 0x0 / 0x1 / 0x999 这种废值**
+   * （连续读 DCRDR 前被别人的 DCRSR 插了一脚）。停掉观察循环后 100 次 0 错。
+   * 这不是时钟问题（1 MHz 下同样会撞），是**并发**问题。
+   *
+   * 规则（改代码时守住）：
+   *   · 后台轮询（观察循环、RTT 泵）用 `tryExclusive()` —— **忙就跳过这一拍**，绝不排队堆积；
+   *   · 用户动作 / 自动化脚本用 `exclusive()` —— 排队执行，保证整段操作不与任何东西交错。
+   * 两者都不会互相嵌套（嵌套会死锁），所以这里是简单的"整段独占"，不做可重入。
+   */
+  async exclusive(fn){
+    const prev = this._opChain;
+    let release;
+    this._opChain = new Promise(res => { release = res; });
+    this._opBusy = true;
+    try {
+      await prev.catch(() => {});
+      return await fn();
+    } finally {
+      this._opBusy = false;
+      release();
+    }
+  }
+
+  /** 后台轮询专用：正忙就返回 `{ skipped: true }`（不排队、不等待） */
+  async tryExclusive(fn){
+    if (this._opBusy) return { skipped: true };
+    const r = await this.exclusive(fn);
+    return { skipped: false, value: r };
+  }
 
   // ------------------------------------------------------------ 连接
 
@@ -125,8 +169,36 @@ export class DebugSession {
     }
     this._log(`已连接：${this.name}　SWD ${(this.clockHz / 1000).toFixed(0)} kHz　IDCODE=0x${this.idcode.toString(16).toUpperCase()}`, 'ok');
     await this.refresh();
+    if (!mock) await this.verifyClock();
     await this.bpInit();
     return this;
+  }
+
+  /**
+   * 连接后核对一次"选中的 SWD 时钟在这颗探针上能不能读 PPB"。
+   *
+   * 历史坑（docs/dbg-page.md §3.1）：DHCSR/DCRSR/FPB/AIRCR 都在 PPB（0xE0000000 那一片），
+   * 这颗探针固件在时钟偏高时**读回 0** → 寄存器表全是 0、断点静默失效，看着像"页面坏了"。
+   * 2026-10 真机实测（akaLinkPro + STM32F103ZE）：10/20/30 MHz 的 DHCSR/FPB/RAM 全都正常，
+   * 但换一块探针固件未必 —— 所以这里**主动验一次**，不合格就自动退回 1 MHz，
+   * 并把证据写进日志（不许静默降级，用户得知道为什么寄存器不灵了）。
+   */
+  async verifyClock(){
+    if (!this.probe || this.clockHz <= PPB_SAFE_HZ) return { ok: true, hz: this.clockHz, checked: false };
+    const seen = [];
+    for (let i = 0; i < 3; i++){
+      try { seen.push((await this.probe._readWord(DHCSR)) >>> 0); }
+      catch { seen.push(0xdeadbeef); }
+    }
+    const bad = seen.some(v => v === 0 || v === 0xffffffff || v === 0xdeadbeef) || new Set(seen).size > 1;
+    if (!bad) return { ok: true, hz: this.clockHz, checked: true, seen };
+    const was = this.clockHz;
+    await this.probe.setClock(PPB_SAFE_HZ);
+    this.probe.clockHz = PPB_SAFE_HZ;
+    this.clockHz = PPB_SAFE_HZ;
+    this._log(`⚠ SWD ${Math.round(was / 1000)} kHz 下 PPB 读回不可信（DHCSR=${seen.map(v => '0x' + v.toString(16)).join(' / ')}）`
+      + ` —— 已自动退回 1 MHz（寄存器/断点只能在 ≤1 MHz 下用）`, 'warn');
+    return { ok: false, hz: PPB_SAFE_HZ, was, seen };
   }
 
   async disconnect(){

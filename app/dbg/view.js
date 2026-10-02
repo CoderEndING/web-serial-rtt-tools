@@ -18,7 +18,7 @@
  *   ④ 命令行是**主窗口**：上面的寄存器/内存/源码都能折叠，把高度让给它。
  */
 
-import { $, setFlag, appendLogLine } from '../ui/dom.js';
+import { $, setFlag, appendLogLine, ensureSelectOption } from '../ui/dom.js';
 import { toast } from '../ui/toast.js';
 import { store } from '../core/store.js';
 import { waitMs } from '../core/pace.js';
@@ -71,7 +71,23 @@ export class DbgView {
     const be = $('d-backend');
     if (be){ store.bind(be, 'dbg.backend'); be.addEventListener('change', () => this._syncBackend()); }
     const clk = $('d-clock');
-    if (clk){ store.bind(clk, 'dbg.clock'); clk.value = clk.value || String(DEFAULT_CLOCK_KHZ); }
+    if (clk){
+      store.bind(clk, 'dbg.clock');
+      /**
+       * 时钟默认值迁移（2026-10-02）：老版本的默认是 1 MHz，那时下拉里也只有 1000/500/200 ——
+       * 所以"没存过"和"存着 1000"的都属于**旧默认**，跟着新默认走到 10 MHz；
+       * 手选过 500/200 的保持不动（真需要的场景就是探针不肯跑高时钟）。
+       */
+      const saved = store.get('dbg.clock', '');
+      if (!saved || saved === '1000'){
+        clk.value = String(DEFAULT_CLOCK_KHZ);
+        store.set('dbg.clock', clk.value);
+        if (saved === '1000') this.clockMigrated = true;
+      } else {
+        ensureSelectOption(clk, saved, saved + ' kHz');    // 老值不在候选里时补一个，别静默改设置
+      }
+      clk.addEventListener('change', () => store.set('dbg.clock', clk.value));
+    }
     on('d-connect', 'click', () => this.connect());
     on('d-disconnect', 'click', () => this.disconnect());
     on('d-elf-pick', 'click', () => $('d-elf-file')?.click());
@@ -185,7 +201,10 @@ export class DbgView {
 
   onShow(){
     // 切回本页时对账一次状态（目标可能在别的页签里被复位/被烧录器抢走）
-    if (this.session.connected) this.refreshAll().catch(() => {});
+    // 🚨 用 tryExclusive：观察循环正在读的时候直接跳过这一拍，别和它抢 SWD
+    if (this.session.connected){
+      this.session.tryExclusive(() => this.refreshAll()).catch(() => {});
+    }
   }
 
   // ================================================================ 工作区版式（右侧 tab + 可拖分隔条）
@@ -304,12 +323,23 @@ export class DbgView {
     const clockKhz = Number($('d-clock')?.value) || DEFAULT_CLOCK_KHZ;
     this._out('', 'dim');
     this._out(`──── 连接（${mock ? '模拟目标' : 'WebUSB'}${mock ? '' : ` · ${clockKhz} kHz`}）────`, 'dim');
+    if (this.clockMigrated){ this._out('（SWD 时钟默认值已从 1 MHz 改为 10 MHz —— 真机实测 PPB/内存都正常；不想要就在上面改回去）', 'dim'); this.clockMigrated = false; }
     try {
       await this.session.connect({ mock, clockKhz, bus: this.bus });
     } catch (e){
       this._out('✗ 连接失败：' + (e?.message || e), 'err');
       toast('连接失败：' + (e?.message || e), 'err', 7000);
       return false;
+    }
+    /**
+     * 连接时 session 会做一次"这个时钟能不能读 PPB"的健康检查，不合格就自动退回 1 MHz ——
+     * 下拉框得跟着改，否则界面显示的档位和实际用的不一致（用户会以为寄存器坏了）。
+     */
+    const nowKhz = Math.round((this.session.clockHz || 0) / 1000);
+    if (nowKhz && nowKhz !== clockKhz){
+      const clk = $('d-clock');
+      if (clk){ ensureSelectOption(clk, String(nowKhz), nowKhz + ' kHz'); clk.value = String(nowKhz); store.set('dbg.clock', clk.value); }
+      this._out(`（实际用的是 SWD ${nowKhz} kHz —— 上面那格已同步）`, 'warn');
     }
     await this.refreshAll();
     this._syncButtons(true);
@@ -334,11 +364,15 @@ export class DbgView {
     else if (info) info.textContent = '已断开。';
   }
 
-  /** 一次用户动作的统一包装：忙碌标记 + 错误回显（别让异常静默消失） */
+  /** 一次用户动作的统一包装：忙碌标记 + **独占 SWD** + 错误回显（别让异常静默消失） */
   async _act(name, fn){
     if (this.session.busy){ this._out(`（正在忙，先等上一个动作跑完）`, 'warn'); return false; }
     this.session.busy = true;
-    try { await fn(); return true; }
+    try {
+      // 🚨 整段动作要独占 SWD：观察循环/ RTT 泵随时可能在读，交错一次就读出垃圾（真机实测 18%）
+      await this.session.exclusive(fn);
+      return true;
+    }
     catch (e){
       this._out(`✗ ${name}失败：${e?.message || e}`, 'err');
       toast(`${name}失败：${e?.message || e}`, 'err', 6000);
@@ -715,7 +749,8 @@ export class DbgView {
     this.cancelFlag = false;
     let res;
     try {
-      res = await runCmd(line, this.session, { view: this, signal: () => this.cancelFlag });
+      // 命令也是"一整段独占 SWD"：观察循环 / RTT 泵随时可能在读，交错一次就读出垃圾
+      res = await this.session.exclusive(() => runCmd(line, this.session, { view: this, signal: () => this.cancelFlag }));
     } catch (e){
       if (e?.cancelled){ this._out('（已中断）', 'warn'); return { cancelled: true, lines: [] }; }
       this._out('✗ ' + (e?.message || e), 'err');
@@ -761,25 +796,35 @@ export class DbgView {
       if (this.cancelFlag) break;
       polls++;
       try {
-        await this.session.refresh();
-        if (this.rtt && polls % 2 === 0) await this._rttPump();
+        /**
+         * 🚨 后台轮询一律走 `tryExclusive()`：用户动作/脚本正在用 SWD 时**跳过这一拍**。
+         *    真机实测：不串行化时观察循环与一次 readReg 撞车，100 次里 18 次读到废值
+         *    （0x0 / 0x1 / 0x999…），看起来就是"寄存器表偶发乱码、单步没反应"。
+         */
+        const r = await this.session.tryExclusive(() => this.session.refresh());
+        if (r.skipped) continue;
+        if (this.rtt && polls % 2 === 0) await this.session.tryExclusive(() => this._rttPump());
         // 「运行中也刷新」开关（默认关）：直接读 RAM，目标照跑
-        if ($('d-watch-live')?.checked && polls % 2 === 0 && !this.session.busy) await this.refreshWatch();
+        if ($('d-watch-live')?.checked && polls % 2 === 0) await this.session.tryExclusive(() => this.refreshWatch());
       } catch (e){
         this._out('✗ 观察目标时出错（继续试）：' + (e?.message || e), 'err');
         await waitMs(600);
       }
       if (this.session.halted){
-        await this.session.refreshRegs();
-        this.renderRegs();
-        const pc = this.session.pc >>> 0;
-        const f = this.sym?.funcAt?.(pc & 0xfffffffe);
-        const atBp = this.session.bps.some(b => (b & 0xfffffffe) === (pc & 0xfffffffe));
-        const loc = this.sym?.locText?.(pc & 0xfffffffe) || '';
-        const tail = `${loc ? ' ' + loc : ''}${f ? ' (' + f.name + '+0x' + f.off.toString(16) + ')' : ''}`;
-        this._out(atBp ? `⏹ 命中断点 @ ${hex32(pc)}${tail}` : `⏹ 目标已停止 @ ${hex32(pc)}${tail}`, atBp ? 'ok' : 'warn');
-        await this._followPc();
-        await this.afterStop();
+        // 停住之后的收尾（刷寄存器 / 跟随 PC / 监视值 / 源码行）也在同一把锁里做完，
+        // 否则这些 memory 读又会和别的动作交错
+        await this.session.tryExclusive(async () => {
+          await this.session.refreshRegs();
+          this.renderRegs();
+          const pc = this.session.pc >>> 0;
+          const f = this.sym?.funcAt?.(pc & 0xfffffffe);
+          const atBp = this.session.bps.some(b => (b & 0xfffffffe) === (pc & 0xfffffffe));
+          const loc = this.sym?.locText?.(pc & 0xfffffffe) || '';
+          const tail = `${loc ? ' ' + loc : ''}${f ? ' (' + f.name + '+0x' + f.off.toString(16) + ')' : ''}`;
+          this._out(atBp ? `⏹ 命中断点 @ ${hex32(pc)}${tail}` : `⏹ 目标已停止 @ ${hex32(pc)}${tail}`, atBp ? 'ok' : 'warn');
+          await this._followPc();
+          await this.afterStop();
+        });
       }
     }
     this.watching = false;
@@ -903,7 +948,8 @@ export class DbgView {
     else this._out(`监视 + ${e}${r.item?.addr !== undefined ? ' @ ' + hex32(r.item.addr) : ''}`, 'ok');
     const wi = $('d-watch-in');
     if (wi && wi.value.trim() === e) wi.value = '';
-    this.refreshWatch({ force: true }).catch(() => {});
+    // 立刻读一次值给用户看；正忙（观察循环/别的动作在跑）就跳过，反正停下时会自动刷
+    this.session.tryExclusive(() => this.refreshWatch({ force: true })).catch(() => {});
     return { ok: true, index: r.index, item: r.item };
   }
 
@@ -1061,7 +1107,7 @@ export class DbgView {
       row.className = 'srcrow cur';
       row.dataset.line = String(at.line);
       const ln = document.createElement('span'); ln.className = 'ln'; ln.textContent = String(at.line);
-      const tx = document.createElement('span'); tx.className = 'tx';
+      const tx = document.createElement('span'); tx.className = 'srctx';
       tx.textContent = err ? `（读不到源码：${err}）` : '（还没选源码目录：点上面的「选择源码目录…」，选到工程根目录）';
       row.append(ln, tx);
       box.appendChild(row);
@@ -1078,7 +1124,7 @@ export class DbgView {
       n.textContent = String(ln);
       n.title = '点一下在这行下硬件断点（要有地址信息）；再点一下删掉';
       const t = document.createElement('span');
-      t.className = 'tx';
+      t.className = 'srctx';                       // 🚨 不能叫 `.tx`：那条全局规则是给"文本发送"输入框的（min-height:52px）
       t.textContent = (lines[ln - 1] ?? '').replace(/\t/g, '    ');
       row.append(n, t);
       frag.appendChild(row);
