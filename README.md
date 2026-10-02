@@ -5,6 +5,44 @@
 **👉 [在浏览器里直接打开](https://minichao9901.github.io/web-serial-rtt-tools/)**
 （桌面版 Chrome / Edge；无需安装任何东西，串口/探针在页面里授权一次即可）
 
+## 40pin 引脚定义（HPM5301EVKLite / J3）
+
+探针对外的线**全部走板上的 J3 40pin 排针**。下图是引脚定义（俯视，1 / 2 脚在 USB 那一端），
+标记口径与页面里「SPI/QSPI 桥 → 引脚分配图」**完全一致**；接屏、接 flash、接逻辑分析仪都照它看：
+
+![HPM5301EVKLite J3 40pin 引脚定义](docs/shots/40pin-j3.png)
+
+- ★ **桥固定占用**（SPI2 的 SCLK / MISO / MOSI / CS；四线档再加 D2 / D3）—— 换不了；
+- ○ **空闲，可当辅助脚**（DC / RST / BL / CS_AUX / TE 在页面上随便挑）；
+- △ 能用但要留意（按键脚、板上有 10k 上拉）；⛔ 别用（log 口 / PIOC 域不支持 / 被板载电路按住 / 板载 LED 任务占用）。
+- **实测推荐**：RST = `J3[7] PA02`、BL = `J3[11] PA31`（两根都用逻辑分析仪量过，电平干净）；
+  **GND 必须接**（6 / 9 / 14 / 20 / 25 / 30 / 34 / 39 任一根），VCC 接 `J3[1]` 或 `J3[17]` 的 3V3。
+
+常接的四种（"哪根能释放、哪根被板载电路占着"的逐脚判断见 [`docs/j3-pin-verdict.md`](docs/j3-pin-verdict.md)）：
+
+| 接什么 | 怎么接 |
+|---|---|
+| **4 线 SPI + DC**（AXS15352 档 1） | `SCLK=J3[13]` `MOSI=J3[28]` `CS=J3[26]` `DC=J3[24]` `RST=J3[7]` `BL=J3[11]` |
+| **QSPI 四线**（ST77916 档 2） | `SCLK=J3[13]` `D0=J3[28]` `D1=J3[27]` `D2=J3[10]` `D3=J3[8]` `CS=J3[26]` `RST=J3[7]` `BL=J3[11]` |
+| **外接 SPI NOR flash** | 与屏同一组 SPI2：`CS=J3[26]` `SCLK=J3[13]` `IO0=J3[28]` `IO1=J3[27]`（四线再加 `IO2=J3[10]` `IO3=J3[8]`） |
+| **回环自检**（不接屏） | 一根跳线：`J3[28] MOSI` ── `J3[27] MISO` |
+
+> 这张图是**脚本生成**的，不是手画的：改引脚表就重跑 `node tools/dev/make-40pin-figure.mjs`
+> （产出 `docs/shots/40pin-j3.png` 与同名 `.html`）。引脚数据与可用性标记的唯一真源是
+> `app/spi/protocol.js` 的 `PADS` 表 + 真机实测结论 —— 改了那边记得同步这张图。
+
+## 最近更新（2026-10-02）
+
+| 做了什么 | 在哪 | 真机实测 |
+|---|---|---|
+| **SPI/QSPI 屏「局部刷新」**：只发与上一帧不同的那块**差异包围盒**，静止区域一个字节都不发；同内容重刷直接整帧跳过 | 页面「SPI/QSPI 屏 → 刷屏」的「局部刷新」勾选（动画行也有同一个开关），实现见 `app/spi/image.js` | 8×8 的改动线上只发 **128 B / 4 帧**（整帧要 142 KB / 292 帧），且这 128 B 与整帧里该子矩形**逐字节相同**；动画 28.9 → **53.6 fps**（档 1）、23 → **131 fps**（档 2） |
+| **调试器真机验收**：暂停 / 单步时「PC ↔ 源码行 ↔ 高亮 ↔ 滚动」四者一致（23/23 断言）；并修掉一个真问题 —— 这块板上 `C_STEP` 不执行，之前**静默当成功**（现象是"点了单步没反应"） | `app/dbg/session.js` 的 `step()`，现在发现 PC 没前进就自动改用**断点单步**并在命令行说明原因 | 连续单步 10 次，PC 与高亮行逐步对齐、行号跟着换；断点命中后 PC 落在该行的地址区间内 |
+| **全站布局 review + 修复**：11 个标签页 × 3 档窗口的机器判据体检，修掉 5 处（SPI 桥页 dock 窄窗横向被裁 / 矮窗纵向被裁、屏页推荐值密排文字、监视名字列太窄、生成页长路径框） | `docs/review-2026-10-02.md`（含每条的真因、改法、复测口径与对照图） | 复测 `squash` / `clipped` 全空；`spi-bus-page` 133 · `spi-panel-page` 179 · `gen-page` 57 · `dbg-page` 113 · `ui.page` 19 全绿 |
+| 顺手修 3 个既有小 bug | 档 2 动画开窗漏传 profile（与静图不一致）· 两处短等待用 `setTimeout`（页面不可见时被钳到 ≥1 s）· `dbg-page` 测试写死下标（假故障） | — |
+
+
+## 功能一览（11 个标签页）
+
 | 标签页 | 干什么 | 需要什么 |
 |---|---|---|
 | **串口助手** | SSCOM 那套核心功能：端口/波特率、ASCII/HEX 收发、**ANSI 彩色接收**（像 MobaXterm）、时间戳、定时发送、5 条快捷发送、保存接收数据、**记录到文件**（高速采集不丢数）、**高速自动关显示**（>50KB/s 停渲染、数据照收） | 桌面版 Chrome / Edge（Web Serial） |
@@ -13,8 +51,9 @@
 | **RTT 转发** | akaLinkPro 的**探针侧** RTT→CDC：探针自己通过 SWD 轮询目标控制块、把数据塞进它的 CDC 串口；本页开那个 COM 口收数据。**纯输出，没有发送**：ASCII/ANSI/HEX、时间戳、暂停、保存数据、记录到文件、高速自动关显示 | akaLinkPro 探针（配置走它的自定义 HID；接收走它的 CDC 口） |
 | **J-Scope 波形** | 类 SEGGER J-Scope 的**变量示波器**：探针自己按固定周期读目标 RAM（HSS，目标固件不用改），数据走 WebUSB 的独立批量端点，网页画多通道波形、带**触发**、导出 CSV、原始包可回放 | **网页侧已可用**：勾「用假探针」或打开 `.jsp` 回放即可体验；真机需要探针固件支持 `HID 0x32`（见 [`docs/scope-page.md`](docs/scope-page.md)） |
 | **烧录器** | .elf/.hex/.bin 写进目标：**零安装 WebUSB**（页面跑 flashloader，擦/写/校验/复位一条龙）或**本地桥 OpenOCD** | 零安装：同上探针；桥：OpenOCD |
-| **SPI/QSPI 桥** | 探针当 USB→SPI/QSPI 主站。右列分四个 tab：**命令表**（一行一条 `XFER`）· **脚本**（贴 C 表 / 手写帧 DSL）· **Flash 测试**（外接 NOR：读 ID/SFDP/状态、读测速、擦写校验）· **回环自检**（MOSI↔MISO 跳线）。tab 栏常驻**运行胶囊**与共享「中止」；SCLK、模式、CS 策略、辅助脚与有效电平在左栏配 | akaLinkPro 探针（HID `0x35` 控制面 + bulk 帧流）；方案见 [`docs/spi-bridge-page.md`](docs/spi-bridge-page.md) |
-| **SPI/QSPI 屏** | 把屏点亮那一页。右列分三个 tab：**刷屏**（内置图案 / 拖入图片 → 预览 → 开窗对齐、492 B 切片刷；**动画/视频** MP4/WebM/GIF 逐帧整屏刷，发送当节拍器）· **面板初始化**（贴 C 数组 → 解析成步骤表 → 重放；每个字节可直接改、点开看/改它的 8 个 bit）· **读回**（读寄存器 / 读 GRAM 还原成一帧图 + 存 BMP）。tab 栏常驻**运行胶囊**与共享「中止」，日志常驻底部（高度可拖） | 与「SPI/QSPI 桥」页**共用同一次连接** |
+| **调试器** | 网页里的极简调试器，**不装 OpenOCD、不装 gdb**：暂停 / 继续 / **单步** / 复位、寄存器表（回车即改）、内存 hexdump（点字节即改）、**FPB 硬件断点**、按符号名的 gdb 风格命令行、旁边顺手看 RTT。**载入 .elf 后按源码行下断点**，停下来时源码区跟着 PC 走（DWARF 行号表） | 零安装：同上探针（WebUSB）；无硬件可切「后端 → 模拟目标」；设计与五条硬约束见 [`docs/dbg-page.md`](docs/dbg-page.md) |
+| **SPI/QSPI 桥** | 探针当 USB→SPI/QSPI 主站。右列分四个 tab：**命令表**（一行一条 `XFER`）· **脚本**（贴 C 表 / 手写帧 DSL）· **Flash 测试**（外接 NOR：读 ID/SFDP/状态、读测速、擦写校验）· **回环自检**（MOSI↔MISO 跳线）。tab 栏常驻**运行胶囊**与共享「中止」；SCLK、模式、CS 策略、辅助脚与有效电平在左栏配 | akaLinkPro 探针（HID `0x35` 控制面 + bulk 帧流）；接线照上面的 40pin 图；方案见 [`docs/spi-bridge-page.md`](docs/spi-bridge-page.md) |
+| **SPI/QSPI 屏** | 把屏点亮那一页。右列分三个 tab：**刷屏**（内置图案 / 拖入图片 → 预览 → 开窗对齐、492 B 切片刷；**局部刷新**——只发与上一帧不同的包围盒，同内容重刷整帧跳过；**动画/视频** MP4/WebM/GIF 逐帧发，发送当节拍器）· **面板初始化**（贴 C 数组 → 解析成步骤表 → 重放；每个字节可直接改、点开看/改它的 8 个 bit）· **读回**（读寄存器 / 读 GRAM 还原成一帧图 + 存 BMP）。tab 栏常驻**运行胶囊**与共享「中止」，日志常驻底部（高度可拖） | 与「SPI/QSPI 桥」页**共用同一次连接** |
 | **USB→I2C** | 探针当 **USB 转 I2C 主机**。右列分四个 tab：**扫描总线**（0x08..0x77）· **命令表**（读/写/探测/延时，一行一次事务）· **脚本**（贴 C 表或写脚本，`loop 100ms … end` 就是 while(1) 定时读/写）· **实时值**（`as` 解码把字节变成有名字的量：g / ℃ / V + 迷你曲线）。**长读自动分片**（`rd 0x50 0x00 256` 直接写，内部拆成 5 笔、日志只出一行）；tab 栏常驻**运行胶囊**与「停止」，切到哪个 tab 都知道任务还在跑。内置 **AT24C02 / MPU6050 / ADS1115 / Si5351** 四个模块示例，后两个是传感器，示例里直接做成 while(1) 连续采样 | akaLinkPro 探针（HID `0x36`，**只走 HID** 一条通路）；**仅 HPM5301EVKLite** 固件；方案见 [`docs/i2c-page.md`](docs/i2c-page.md) |
 | **工程生成** | 拖进 Keil `.uvprojx` 就能生成调试/下载配套文件：`Makefile.jlink`、`jlink_gdb.script`、`Makefile.pyocd`、`Makefile.openocd`（连带 `rtt_logger.py`）、`test_sram.bin`；参数可填可勾，产物**实时预览** | 不需要任何硬件/后端（纯前端生成） |
 
@@ -61,7 +100,36 @@
 
 （截图里第一个标签用的是**内置演示串口**，所以显示的是假设备；`?demo=serial` 就能自己试。）
 
-## 实测状态（2026-09-26，真硬件：MicroLink CMSIS-DAP + STM32F103）
+## 实测状态
+
+### 现在（2026-10-02）
+
+**页面自测**（大部分不需要硬件；CDP 类先 `make page-prep` 起 8899 服务 + 9333 浏览器）：
+
+| 套件 | 结果 |
+|---|---|
+| `make test-dbg` 调试器逻辑层（含拿假目标真跑一遍「连接→读寄存器→写内存→下断点→继续→命中→单步→复位」） | **174/174** |
+| `make test-dbg-page` 调试器真页面（CDP + 假目标） | **113/113** |
+| `make test-spi` / `test-read` / `test-dsl` / `test-flash` SPI 桥与屏的逻辑层 | **90 / 54 / 124 / 66** |
+| `make test-spi-page` SPI/QSPI 桥 + 屏 两页真页面（CDP + 假探针） | **133 + 179** |
+| `make test-i2c` / `test-i2c-dsl` USB→I2C 逻辑层 | **170 / 251** |
+| `make test-scope` / `test-dwarf` J-Scope 协议 / DWARF 解析 | **127 / 78** |
+| `make test-rtt` / `test-hid` RTT 协议 / akaLinkPro HID 协议 | **45 / 55** |
+| `make test-gen` / `test-gen-page` 工程生成对账（与 Python 工具逐字节）+ 真页面 | **34 / 57** |
+| `make test-ui` 整页 UI 步进自测 | **19/19** |
+| `make check` 语法/引用体检 + 上面这些的合集入口 | 全绿 |
+
+**真机验收**（板子插在 akaLinkPro 探针上就能跑，带判决、出错立刻停）：
+
+| 目标 | 结果 |
+|---|---|
+| `make hw-campaign` F103 全场景（烧录 / RTT Viewer / 转发 / 10 s 存盘 / J-Scope / 交替烧录） | **20 通过 / 0 失败** |
+| `make hw-campaign-hpm` HPM6800EVK（RISC-V/JTAG，含 RTT Viewer 的 RISC-V 通路） | 见下一节 |
+| `make spi-partial-hw` 屏的**局部刷新**逐字节对账（AXS15352 档 1 · ST77916 档 2） | **23 / 23** |
+| `make dbg-step-hw` 调试器**停止 / 单步 / 断点**时源码区的显示与同步 | **23/23** |
+| `make spi-hw` 真屏刷图（逐档 SCLK，看吞吐与错误计数） | 40 MHz：292 帧 / 0 错 / 32 ms / 4.18 MB/s |
+
+### 历史基线（2026-09-26 · MicroLink CMSIS-DAP + STM32F103）
 
 | 用例集 | 结果 |
 |---|---|
@@ -647,10 +715,16 @@ rtt-bridge-kit/
    （依据 OpenOCD `armv7m.c` 与 pyOCD 的实现，不是猜的）。
 4. **谁在占用探针**：连接前会请别的页签让出探针、并停掉「RTT 转发」的探针桥 ——
    那个桥在**探针侧**一直轮询目标内存，不停的话单步一次要等好几秒。
+5. **`C_STEP` 不是哪儿都能用**（2026-10-02 真机实测）：本机 akaLinkPro + STM32F103ZE 上写完
+   `C_STEP` 后 DHCSR 回读**恒定** `0x30007`（C_STEP 位在、S_HALT 从不掉）、PC 一动不动；
+   带/不带 `C_MASKINTS` 一样，复位到线程模式也一样 —— 但**同一地址"放 FPB 比较器 + 运行"能精确
+   停在下一条指令**。所以 `step()` 现在以 **PC 有没有前进**判定成败（不是 S_HALT，那个位会读滞后），
+   没前进就自动改用**断点单步**并把原因写进命令行 —— 以前这里是**静默当成功**，"点了单步没反应"就是它。
 
 明确**不做**（与"简单"冲突的无底洞）：反汇编、局部变量/表达式求值、RTOS 感知、多核、软件断点。
-自测：`make test-dbg`（纯 Node，98 项：寄存器位域 / FPB 编码 / 命令解析 / 符号表 + 拿假目标真跑一遍
-「连接→读寄存器→写内存→下断点→继续→命中断点→单步→复位」）、`make test-dbg-page`（CDP 真页面，58 项）、
+自测：`make test-dbg`（纯 Node，**174 项**：寄存器位域 / FPB 编码 / 命令解析 / 符号表 + 拿假目标真跑一遍
+「连接→读寄存器→写内存→下断点→继续→命中断点→单步→复位」，含"`C_STEP` 不生效时自动改走断点单步"）、
+`make test-dbg-page`（CDP 真页面，**113 项**）、
 `make test-dbg-hw`（真探针冒烟；**前提是探针没被别的浏览器/页签占着**，否则会明确提示无法认领接口）。
 
 ## 支持的调试后端
@@ -691,6 +765,13 @@ app/
   core/                 bus/store/hex/format/rxview/stats/bin/b64 —— 与界面无关的纯逻辑
   serial/               session(Web Serial 封装) / assistant / terminal / demo(演示串口)
   rtt/                  protocol(RTT 协议) / dap-webusb(CMSIS-DAP) / bridge / elf / mock / view
+  elf/                  ELF 与 DWARF：dwarf(解析 .debug_info/.debug_abbrev 等) / lines(.debug_line v2~v5 行号表)
+  spi/                  SPI/QSPI：protocol(帧协议) / transport(WebUSB bulk) / mock(假探针) / session(共享会话) /
+                        image(图案·BMP·RGB565·切片·**局部刷新的差异包围盒**) / anim(动画/视频逐帧发) /
+                        panel-code + bit-editor(面板初始化表解析与字节编辑) / panel-read(读回) /
+                        flash(外接 NOR) / frames-dsl(手写多帧) / bus-view + panel-view(两页界面)
+  i2c/                  USB→I2C：protocol / transport / mock / session / dsl(命令表·脚本) / expr(实时值表达式) / runner / view
+  scope/                J-Scope 波形：protocol(读计划/包) / transport(WinUSB) / mock / render(画布) / store / view
   gen/                  工程生成：templates(模板移植自 uvprojx2cmake.py) / fixes(固定 4 项修正) / model(参数+器件表+uvprojx 解析) / zip(零依赖打包) / view
   hid/                  akaLinkPro 自定义 HID：probe(协议 + WebHID 客户端) / mock(假探针) / view(桥的面板) / stream(RTT 转发页，纯输出接收)
   dbg/                  **调试器**（零安装的极简调试前端）：session(会话/运行控制/FPB 断点) / cmd(命令行) /
@@ -720,6 +801,7 @@ tools/
   fixtures/dwarf/       DWARF 解析基线：两份**真 ELF**（scope 靶子固件 + RTT 吞吐固件）
   la/                   逻辑分析仪：kingst_la.py（KingstVIS Socket API 单文件工具）+ SWD 流量发生器
   dev/                  extract-algo.py（从 pyOCD 抽 flash 算法，别手抄 base64）、help.ps1、
+                        make-40pin-figure.mjs（生成 README 开头那张 **J3 40pin 引脚定义图**）、
                         make-anim-samples.py（造屏页动画/视频示例素材，`make samples-anim`）
   target-firmware/
     stm32f103/          STM32F103 测试固件（UART + RTT，含 SEGGER RTT 源码）
@@ -732,9 +814,13 @@ tools/
                               RTT 控制块放**非缓存 AXI SRAM**（`_SEGGER_RTT = 0x01240000`）
     hpm6800evk_scope/         **HPM6800EVK J-Scope 靶子**：契约变量块 `g_v`（非缓存）+ 对照 `g_v_cached`
 docs/                   后端配置与排障；逻辑分析仪攻略.md（含 LA 工具完整源码与踩坑）；
+                        j3-pin-verdict.md（**J3 40pin 逐脚：该限制谁 / 该释放谁**，接线前先看它）；
+                        review-2026-10-02.md（**全站布局 review 与修复记录**：真因 / 改法 / 复测口径 / 对照图）；
                         scope-page.md（J-Scope 波形页方案）；真机基准测试.md（**F103 全场景基线与前置**）；
                         真机基准测试-hpm.md（**HPM6800EVK / RISC-V 基线与 RTT Viewer 的 RISC-V 通路**）；
-                        rtt-cdc.md（RTT 转发 + 4.5 节「.crswap 与落盘时机」）
+                        rtt-cdc.md（RTT 转发 + 4.5 节「.crswap 与落盘时机」）；
+                        dbg-page.md（调试器页设计）；spi-bridge-page.md / i2c-page.md（两页方案）
+  shots/                界面截图 + 40pin-j3.png/.html（由 tools/dev/make-40pin-figure.mjs 生成）
 samples/
   anim/                 屏页「动画 / 视频」的示例素材：6 个文件（GIF/APNG/动画 WebP/MP4/WebM），
                         每个都写明"看什么"（彩条·弹跳球·色相·帧号·棋盘·立方体），
@@ -766,6 +852,24 @@ node tools\selftest\dbg-core.test.mjs
 
 # 1f) 调试器页的真页面自测（CDP + 假目标；先 page-prep：8899 服务 + 9333 浏览器）
 node tools\selftest\dbg-page.test.mjs
+
+# 1g) SPI/QSPI 桥 + 屏 + USB→I2C 的逻辑层（纯 Node，不需要浏览器/硬件）
+node tools\selftest\spi-proto.test.mjs          # 帧协议 / 打包 / 假探针（make test-spi）
+node tools\selftest\spi-panel-code.test.mjs     # 面板初始化表解析 + 图片→帧（含局部刷新，make test）
+node tools\selftest\spi-read.test.mjs           # 屏的回读：读计划 / 解码 / BMP（make test-read）
+node tools\selftest\spi-frames-dsl.test.mjs     # 手写多帧 DSL（make test-dsl）
+node tools\selftest\spi-flash.test.mjs          # 外接 NOR flash 的读/擦/写模型（make test-flash）
+node tools\selftest\i2c-proto.test.mjs          # I2C 桥协议（make test-i2c）
+node tools\selftest\i2c-dsl.test.mjs            # I2C 命令表/脚本 DSL（make test-i2c-dsl）
+
+# 1h) 那三页的真页面自测（CDP + 假探针，不需要硬件；先 page-prep）
+node tools\selftest\spi-bus-page.test.mjs       # SPI/QSPI 桥页（make test-spi-page 的第一半）
+node tools\selftest\spi-panel-page.test.mjs     # SPI/QSPI 屏页（含「局部刷新」一节）
+node tools\selftest\i2c-page.test.mjs           # USB→I2C 页（make test-i2c-page）
+
+# 1i) 真机专项（探针 + 板子）
+make spi-partial-hw ARGS="--panel=axs15352"     # 屏的局部刷新：线上字节逐字节对账（换 --panel=st77916 就是档 2）
+make dbg-step-hw ARGS="--steps=10"              # 调试器：停止/单步/断点时源码区的显示与同步
 
 # 2) 页面端到端（内置演示串口，无需硬件）
 python -m http.server 8899 --bind 127.0.0.1        # 仓库根

@@ -31,7 +31,7 @@ LA       = tools/la/kingst_la.py
 .DEFAULT_GOAL := help
 .PHONY: help serve serve-dev serve-stop browser open page-prep test test-ui test-gen test-gen-page gen-embed samples-anim test-hid test-dwarf test-scope test-scope-page test-scope-render test-spi test-read test-spi-page test-hw test-record test-bridge test-bridge-gate test-hpm test-image test-all test-dbg test-dbg-page test-dbg-hw test-idcode test-dsl test-flash flash-timing hw-campaign hw-campaign-hpm campaign-summary \
         bridge bridge-stop fw-build fw-flash fw-restore fw-h7-build fw-h7-slow fw-h7-flash \
-        algo-check flash-plan la-info la-capture git-status git-log check clean spi-hw spi-flow i2c-hw
+        algo-check flash-plan la-info la-capture git-status git-log check clean spi-hw spi-flow i2c-hw spi-partial-hw dbg-step-hw
 
 help:
 	pwsh -NoProfile -ExecutionPolicy Bypass -File tools/dev/help.ps1
@@ -114,6 +114,13 @@ test-dbg-page: page-prep
 #    "Unable to claim interface"（脚本会明确提示，不会假装成功）
 test-dbg-hw: page-prep
 	$(NODE) tools/selftest/dbg-hw.mjs
+
+# 调试器**真机验收**：停止 / 单步 / 断点时「PC ↔ 源码行 ↔ 高亮 ↔ 滚动」是否同步（23 项断言）
+#   需要：真探针 + 真目标板 + 板上有行号信息的固件（默认 tools/target-firmware/stm32f103/build/fw.elf）
+#   make dbg-step-hw ARGS="--steps=10"
+# 里面含"BOOT0=1 那块板"的唤醒配方（AIRCR 软复位 → 手工搬 VTOR/SP/PC），换板子看脚本头注释。
+dbg-step-hw: page-prep
+	$(NODE) tools/selftest/dbg-step-hw.mjs $(ARGS)
 
 # 目标身份解码（「读 IDCODE」按钮）：DP IDCODE / CPUID / STM32 DBGMCU DEV_ID → 型号
 test-idcode:
@@ -212,6 +219,15 @@ test-spi-page: page-prep
 #   make spi-hw ARGS=--loop                      # 先跑回环自检（要 J3[19]↔J3[21] 跳线）
 spi-hw: page-prep
 	$(NODE) tools/selftest/spi-hw.mjs $(ARGS)
+
+# 「SPI/QSPI 屏」的**局部刷新**真机验收（真探针 + 真屏，23 条断言）
+#   make spi-partial-hw                          # 默认 AXS15352（档 1，SPI+DC）
+#   make spi-partial-hw ARGS="--panel=st77916"   # 换 ST77916（档 2，QSPI）
+#   make spi-partial-hw ARGS="--sclk=60"         # 换 SCLK 档
+# 判据（不靠看屏）：同内容重刷 = 线上 0 帧；8x8 改动 = 线上 4/3 帧、CASET/RASET 参数正确、
+# 且那 128 B 与"同一张图整帧里该子矩形"**逐字节相同**；再顺带量一次动画的 fps 与像素节省比。
+spi-partial-hw: page-prep
+	$(NODE) tools/selftest/spi-partial-hw.mjs $(ARGS)
 
 # 「SPI/QSPI 屏」页面功能流程验收（用户 2026-09-29 指定顺序，出错即停）：
 #   打开 web -> 连接探针 -> 初始化屏 -> 发图 x3 -> 再次初始化屏 -> 发图 x3

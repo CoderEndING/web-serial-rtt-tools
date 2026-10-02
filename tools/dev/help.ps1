@@ -20,6 +20,8 @@ $lines = @(
   '  make test-dbg      调试器页的逻辑层（寄存器位域 / FPB 断点编码 / 命令解析 / 符号表 + 假目标跑一遍调试动作）'
   '  make test-dbg-page 调试器页的真页面验收（CDP + 内置假目标，不需要硬件）'
   '  make test-dbg-hw   调试器页的真机冒烟（真探针 + 真目标板；需探针没被别的浏览器占着）'
+  '  make dbg-step-hw   调试器真机验收：停止 / 单步 / 断点时「PC ↔ 源码行 ↔ 高亮 ↔ 滚动」是否同步'
+  '  make spi-partial-hw  屏「局部刷新」真机验收：线上字节逐字节对账（ARGS=--panel=st77916 换档）'
   '  make test-record    记录到文件的落盘语义（.crswap / 积压 / 落盘进度；OPFS 替身，不需硬件）'
   '  make test-hw       真机 WebUSB RTT 验收（探针 + 目标板）'
   '  make flash-timing  烧录耗时体检（真机：慢在哪一步、是不是探针的锅；ARGS=--clamp 模拟后台节流）'
