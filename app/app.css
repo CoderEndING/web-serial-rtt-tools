@@ -842,8 +842,13 @@ fieldset.folded > legend::after{content:' · 已折叠';color:var(--fg2);font-si
 #tab-dbg .memedit input#d-mem-ev{width:136px}
 #tab-dbg .memedit button{flex:none}
 
-/* 变量（符号列表 + 监视窗口，同一个 tab 上下分） */
-#tab-dbg .symlist{flex:1 1 auto;min-height:74px;overflow:auto;font-size:12px;font-family:var(--mono);
+/* 变量（符号列表 + 监视窗口，同一个 tab 上下分）
+   🚨 两个列表都用 `flex:1 1 0`（**basis 0**）—— 用户 2026-10 的要求是"各占一半高度"。
+      写成 `flex:1 1 auto` 时 flex-basis 取的是**内容高度**：符号列表装几十上百行、
+      监视窗口常常只有两三行，于是剩余空间按 100:3 分，监视窗口被压到只剩一条缝
+      （用户截图就是这个现象）。basis 归零之后两边从同一起跑线开始分，才是真正的一半一半。
+      两个 min-height 也必须写成同一个值，否则面板很矮时又会一边多一边少。 */
+#tab-dbg .symlist{flex:1 1 0;min-height:64px;overflow:auto;font-size:12px;font-family:var(--mono);
   border:1px solid var(--line);border-radius:6px;padding:2px;background:var(--bg)}
 #tab-dbg .symrow{display:flex;align-items:center;gap:5px;padding:0 3px;border-radius:4px;cursor:pointer}
 #tab-dbg .symrow:hover{background:var(--bg3)}
@@ -852,7 +857,7 @@ fieldset.folded > legend::after{content:' · 已折叠';color:var(--fg2);font-si
 #tab-dbg .symrow .ty{flex:none;color:var(--acc);font-size:11px;max-width:9ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #tab-dbg .symrow button{padding:0 5px;font-size:11.5px;flex:none}
 #tab-dbg .symmore{color:var(--fg2);font-size:11.5px;padding:2px 3px}
-#tab-dbg .watchlist{flex:1 1 auto;min-height:64px;overflow:auto;font-size:12px;font-family:var(--mono);
+#tab-dbg .watchlist{flex:1 1 0;min-height:64px;overflow:auto;font-size:12px;font-family:var(--mono);
   border:1px solid var(--line);border-radius:6px;padding:2px;background:var(--bg)}
 #tab-dbg .wrow{display:flex;align-items:baseline;gap:6px;padding:0 3px;border-radius:4px}
 #tab-dbg .wrow:hover{background:var(--bg3)}

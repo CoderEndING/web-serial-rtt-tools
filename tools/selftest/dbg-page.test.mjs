@@ -397,6 +397,22 @@ console.log('== 10. 符号列表（载入 ELF 后能一眼看到全局变量）=
     await new Promise(r => setTimeout(r, 80));
     return document.getElementById('d-cmd').value;`);
   ok(click === 'p g_bytes', '点符号名 → 填进命令行（直接回车就能打）', click);
+
+  /**
+   * 版面护栏（用户 2026-10 提的）：符号列表与监视窗口**各占一半高度**。
+   * 之前两个都是 `flex:1 1 auto`，flex-basis 取内容高度 —— 符号列表上百行、监视窗口两三行，
+   * 剩余空间按内容比分配，监视窗口被压到只剩一条缝（截图里就是这样）。
+   * 判据：两边可视高度差 ≤ 25%（同一 tab 内，工具栏占掉的高度不影响这个比较）。
+   */
+  const half = await ev(`
+    const d = window.__tools.dbg;
+    d.addWatch('g_tick'); d.addWatch('g_loops');
+    document.querySelector('#d-dock-tabs button[data-dock="var"]').click();
+    await new Promise(r => setTimeout(r, 250));
+    const a = document.getElementById('d-sym-list').getBoundingClientRect().height;
+    const b = document.getElementById('d-watch-list').getBoundingClientRect().height;
+    return { sym: Math.round(a), watch: Math.round(b), ratio: +(Math.min(a, b) / Math.max(a, b)).toFixed(3) };`);
+  ok(half.ratio >= 0.75, `符号列表与监视窗口差不多各占一半（${half.sym}px vs ${half.watch}px，比值 ${half.ratio}）`, JSON.stringify(half));
 }
 
 // ==================================================================== 11
