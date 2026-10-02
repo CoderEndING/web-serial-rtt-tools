@@ -393,6 +393,17 @@ console.log('== 7. 回环自检（假探针自带回环）==');
   ok(/回环自检/.test(mid.pillInOtherTab), `……胶囊在别的 tab 上照样是进度：「${mid.pillInOtherTab}」`);
   ok(mid.sum === '8/8 PASS' && mid.rows === 8, `跑完 8/8 PASS（实际 ${mid.sum} / ${mid.rows} 行）`);
   ok(/回环/.test(mid.pillEnd) && mid.abortOff === true, `结束后胶囊转成结果、中止按钮变灰：「${mid.pillEnd}」`);
+
+  // 结果表的「清空」按钮（用户："测回环的结果窗口，没有清空按钮，需要一个"）
+  const cleared = await ev(`
+    document.querySelector('#sp-dock-tabs button[data-dock="loop"]').click();
+    document.getElementById('sp-lb-clear').click();
+    await new Promise(r => setTimeout(r, 120));
+    return { rows: document.getElementById('sp-lb-body').children.length,
+             sum: document.getElementById('sp-lb-sum').textContent,
+             cls: document.getElementById('sp-lb-sum').className };`);
+  ok(cleared.rows === 0, '「清空结果」把回环结果表清空了', String(cleared.rows));
+  ok(cleared.sum === '未跑', `……摘要回到「未跑」（实际「${cleared.sum}」）`);
 }
 
 // ==================================================================== 8
@@ -471,6 +482,26 @@ console.log('== 9. 统计对账（页面显示 = 探针计数）==');
 // ==================================================================== 10
 console.log('== 10. NOR flash 卡（假探针里挂着一颗 W25Q128 模型）==');
 {
+  // 10.0 排版回归：按钮别被拉伸、两个数据窗口等高
+  //    （用户现场："布局是不是有点奇怪？高度有点太大？导致有效数据窗口变小了"）
+  const lay = await ev(`
+    document.querySelector('#sp-dock-tabs button[data-dock="flash"]').click();
+    await new Promise(r => setTimeout(r, 200));
+    const b = sel => { const e = document.querySelector(sel); const r = e.getBoundingClientRect(); return Math.round(r.width); };
+    const h = sel => Math.round(document.querySelector(sel).getBoundingClientRect().height);
+    return {
+      read: b('#sp-fl-read'), bench: b('#sp-fl-bench'), erase: b('#sp-fl-erase'),
+      rowW: Math.round(document.querySelector('#sp-flash-card .row.btnrow').getBoundingClientRect().width),
+      out: h('#sp-fl-out'), data: h('#sp-flash-card .datarow'),
+      paramRows: document.querySelectorAll('#sp-flash-card .framegrid .row').length,
+      paramGridRows: new Set([...document.querySelectorAll('#sp-flash-card .framegrid .row')].map(r => Math.round(r.getBoundingClientRect().top))).size,
+    };`);
+  ok(lay.read < 140 && lay.bench < 140, `动作按钮是**内容宽**、没被 flex:1 拉伸（读一段 ${lay.read}px / 读测速 ${lay.bench}px，之前是 591px）`);
+  ok(lay.erase < 140, `擦除按钮同理（${lay.erase}px）`);
+  ok(lay.paramRows === 4 && lay.paramGridRows === 1, `四个参数排**一行**而不是 2×2（实测 ${lay.paramGridRows} 行）`);
+  ok(lay.out === lay.data, `🚨「读数据 / 写数据」两窗**精确等高**（${lay.out} vs ${lay.data}px）`);
+  ok(lay.out >= 120, `两窗都够大（${lay.out}px，之前写数据只有 90px）`);
+
   // 10.1 引脚下拉与固件拒绝规则对齐
   const pads = await ev(`
     const sel = document.getElementById('sp-pad-dc');

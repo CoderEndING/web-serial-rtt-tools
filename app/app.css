@@ -319,13 +319,34 @@ dialog form{margin-top:16px;text-align:right}
   width:100%;flex:1 1 auto;min-height:110px;max-height:none;font-family:var(--mono);font-size:12px;
   line-height:1.45;resize:vertical;white-space:pre-wrap;overflow-wrap:anywhere;overflow-x:hidden;overflow-y:auto;
 }
+/* flash 卡的按钮行：**别再被拉伸**。
+   `.btnrow>button{flex:1}`（全局，第 92 行）在这里的后果是 `读一段`/`读测速` 各被拉到 591px 宽、
+   擦除那行四个控件各 328px（用户："布局是不是有点奇怪？高度有点太大？"—— 宽不是高，但一样怪）。
+   工具栏那些按钮是内容宽的，这里对齐它们；`测速量` 那个 label 自带 margin-left:auto 仍然靠右。 */
+#sp-flash-card .row.btnrow>button,#sp-flash-card .row.btnrow>select{flex:0 0 auto}
+#sp-flash-card .row.btnrow>select{max-width:240px}
+/* 行距压紧：这一卡的控件行多，每行省 4px 攒起来全给下面两个数据窗口 */
+#sp-flash-card>.row,#sp-flash-card>.toolrow{margin:3px 0}
+#sp-flash-card>.hint{margin:4px 0 0}
+/* 四个参数**排一行**（原来是 2×2，读模式那个长下拉把 dummy 顶到最右边，看着很散）——
+   顺带省下一整行的高度。窄窗口下 grid 自己会挤，不会溢出。 */
+#sp-flash-card .framegrid{grid-template-columns:1.35fr .75fr 1.1fr .75fr}
+#sp-flash-card .framegrid .row{margin:3px 0}
 /* flash 卡：输出框与「写数据」**平分剩余高度**。
-   🚨 用户 2026-10 明确要求过"两个窗口等高（都按读数据那个高度来）"，tab 化之后要保持：
-   两个都给 `flex:1 1 0`，矮窗口下一起缩、宽窗口下一起长，不会一个撑爆一个只剩两行。
-   （「写数据」外面那层 <label class="datarow"> 本身得是 flex 项，里面的 textarea 才吃得到高度。） */
-#sp-flash-card #sp-fl-out{margin-top:0;flex:1 1 0;min-height:90px}
-#sp-flash-card .datarow{flex:1 1 0;min-height:90px;align-items:stretch}
-#sp-flash-card #sp-fl-data{flex:1 1 auto;height:auto;min-height:0}
+   🚨 用户 2026-10 明确要求过"两个窗口等高（都按读数据那个高度来）"，tab 化之后要保持。
+   🚨 这里必须写 `#tab-spi #sp-flash-card`（两个 id）：`#tab-spi .dockpage>.row{flex:none}`
+      的特异性 (1,2,0) 比 `#sp-flash-card .datarow` (1,1,0) 高 —— 少了这个 `#tab-spi`，
+      写数据框就只会停在 `min-height` 上（实测 90px，而读数据 183px，"等高"被静默改坏）。 */
+#tab-spi #sp-flash-card #sp-fl-out{margin-top:0;flex:1 1 0;min-height:80px}
+/* 🚨 这一行必须给**和 .log 一样的上下 padding/border**，否则永远差 14px 不等高：
+   `flex-basis:0` 下浏览器按**内容盒**算基准，边框盒再各自加上自己的 padding/border ——
+   两个盒子 padding 不一样，分到的"内容高"一样、边框盒就不一样（实测 175 vs 161，
+   差值 = log 的 6+6 padding + 0.8×2 border = 13.6px）。只补上下，左右不动，标签对齐不受影响。 */
+#tab-spi #sp-flash-card .datarow{
+  flex:1 1 0;min-height:80px;align-items:stretch;margin:0;
+  padding:6px 0;border-top:0.8px solid transparent;border-bottom:0.8px solid transparent;
+}
+#tab-spi #sp-flash-card #sp-fl-data{flex:1 1 auto;height:auto;min-height:0}
 #sp-flash-card .datarow>span{padding-top:4px}
 #sp-flash-card .framegrid .row>span:first-child{width:56px}
 /* 语法速查：折叠块里是**预排文本**（等宽 + 保留换行），别被挤成一坨 */

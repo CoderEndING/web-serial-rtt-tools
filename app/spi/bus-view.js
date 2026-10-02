@@ -166,6 +166,8 @@ export class SpiBusView {
 
     // 回环自检
     $('sp-lb-run').addEventListener('click', () => this.loopbackTest());
+    // 清空结果表（只清屏上的表，探针侧的计数器不动 —— title 里写明了）
+    $('sp-lb-clear').addEventListener('click', () => { this.renderLoopRows([]); });
     // 「中止」挪到了 tab 栏（切到任何 tab 都能停回环）—— 见 _dockSelect 附近的说明
     $('sp-run-abort').addEventListener('click', () => this.abortLoop());
 
