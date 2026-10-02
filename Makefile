@@ -88,6 +88,7 @@ test:
 	$(NODE) tools/selftest/i2c-proto.test.mjs
 	$(NODE) tools/selftest/i2c-dsl.test.mjs
 	$(NODE) tools/selftest/i2c-registers.test.mjs
+	$(NODE) tools/selftest/spi-regs.test.mjs
 	$(NODE) tools/selftest/scenery-samples.test.mjs
 
 # USB→I2C 页的协议层 + 假探针 + 假器件（AT24C02/MPU6050/ADS1115/Si5351）—— 不需要硬件
@@ -97,6 +98,10 @@ test-i2c:
 # USB→I2C 页的命令协议（DSL + C 表 + as 解码 + 表格互转）+ 四个模块示例必须零错误
 test-i2c-dsl:
 	$(NODE) tools/selftest/i2c-dsl.test.mjs
+
+# SPI 桥的「寄存器」面板与定时采集：档位→帧、假器件（寄存器器件/命令型 ADC）端到端、loop/as 采集、DSL 语法
+test-spi-regs:
+	$(NODE) tools/selftest/spi-regs.test.mjs
 
 # USB→I2C 页的「寄存器」面板：长写分片 planWrite + 输入解析/diff/bit + 假探针端到端 + EEPROM 页写回归
 test-i2c-reg:
@@ -396,6 +401,14 @@ check:
 	$(NODE) --check app/spi/image.js
 	$(NODE) --check app/spi/frames-dsl.js
 	$(NODE) --check app/spi/flash.js
+	$(NODE) --check app/spi/regs.js
+	$(NODE) --check app/spi/reg-view.js
+	$(NODE) --check app/spi/runner.js
+	$(NODE) --check app/spi/acq-view.js
+	$(NODE) --check app/ui/reg-grid.js
+	$(NODE) --check app/ui/spark.js
+	$(NODE) --check app/core/bytes.js
+	$(NODE) --check app/core/expr.js
 	$(NODE) --check app/dbg/fmt.js
 	$(NODE) --check app/dbg/regs.js
 	$(NODE) --check app/dbg/bp.js

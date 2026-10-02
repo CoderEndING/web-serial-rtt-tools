@@ -855,6 +855,12 @@
         </div>
         <p class="hint" id="sp-info">未连接</p>
         <label class="chk" title="不需要硬件：HID 与数据面共用同一个假探针，可跑通「配置 → 使能 → 发帧 → 应答 → 统计」整条链路"><input type="checkbox" id="sp-mock"> 用假探针（无需硬件）</label>
+        <label class="row" title="假探针的**末级器件**：SPI 总线上没有器件地址，所以同一时刻只挂一个 —— NOR（回环 + 一颗 W25Q128 模型）/ 寄存器器件（BMP280 风格，给寄存器面板与传感器采集用）/ 命令型 ADC（MCP3008 风格，10 位 8 通道，采样值是活的）"><span>假器件</span>
+          <select id="sp-mock-device">
+            <option value="flash">回环 + NOR（W25Q128）</option>
+            <option value="regs">寄存器器件（BMP280 风格）</option>
+            <option value="adc">命令型 ADC（MCP3008 风格）</option>
+          </select></label>
         <div class="row btnrow">
           <button id="sp-usb" title="授权 WebUSB 并认领 SPI 桥接口（class 0xFF + EP11 双向）：OUT 0x0B 发帧、IN 0x8B 收应答。⚠️ 第一次点会弹出**浏览器的设备选择框**（HID 与 WebUSB 要各授权一次）">连接数据端点…（授权）</button>
         </div>
@@ -946,11 +952,14 @@
         <legend>
           <span class="seg docktabs" id="sp-dock-tabs">
             <button data-dock="cmd" class="on">命令表</button>
+            <button data-dock="reg">寄存器</button>
             <button data-dock="dsl">脚本</button>
+            <button data-dock="live">实时值</button>
             <button data-dock="flash">Flash 测试</button>
             <button data-dock="loop">回环自检</button>
           </span>
           <span class="hint dockrun" id="sp-run-pill" title="桥当前在跑什么（切到哪个 tab 都看得见）——「忙」的时候大部分按钮会被灰掉，原因就在这">空闲</span>
+          <span class="hint dockrun" id="sp-acq-pill" title="定时采集的运行状态（在「脚本」tab 里点「开始定时」）—— 与 I2C 页一样放在 tab 栏，切到任何 tab 都看得见">未运行</span>
           <span class="spacer"></span>
           <button id="sp-run-abort" class="mini" disabled title="中止正在跑的回环自检（只有它可中止；擦/写不能中途停 —— 那会把 flash 留在半擦状态）">中止</button>
         </legend>
@@ -977,6 +986,42 @@
           <p class="hint">每行一条 <code>XFER</code>（一次 CS 窗口）：命令 → 地址 → dummy → 数据；留空的行不发，<b>每行都回应答</b>，成没成看「结果」列。</p>
         </div>
 
+        <!-- 寄存器面板：SPI 没有统一约定，所以先把"怎么把寄存器号发出去"用几个字段说清（档位下拉填默认值），
+             再读一段回来逐位改、只写改动写回。表格与位开关板与 #i2c 的寄存器面板共用 app/ui/reg-grid.js。 -->
+        <div class="dockpage" data-dock="reg" id="sp-reg-card">
+          <div class="toolrow">
+            <label class="row" style="margin:0"><span style="width:auto">器件档位</span><select id="sp-reg-profile" title="内置常见 SPI 器件的寄存器约定（读/写 opcode、dummy、地址宽度、是否自增）；选完下面每个字段仍可改"></select></label>
+            <label class="row" style="margin:0"><span style="width:auto">读命令</span><input id="sp-reg-rdop" value="0x80" size="5" title="读寄存器的基础 opcode（例：0x80 = 0x80|reg）"></label>
+            <label class="row" style="margin:0"><span style="width:auto">写命令</span><input id="sp-reg-wrop" value="0x00" size="5" title="写寄存器的基础 opcode（例：0x00 = reg&0x7F，或 nRF24 的 0x20|reg）"></label>
+            <label class="row" style="margin:0"><span style="width:auto">地址</span><select id="sp-reg-addrmode" title="寄存器号怎么发：并入 opcode 低位（0x80|reg 这类）/ 独立的地址字节（MCP23S17 这类）/ 无地址（命令型器件）">
+              <option value="orOp">并入 opcode</option><option value="bytes">独立字节</option><option value="none">无地址</option></select></label>
+            <label class="row" style="margin:0"><span style="width:auto">占位</span><input id="sp-reg-addrbits" value="7" size="3" inputmode="numeric" title="「并入 opcode」时 opcode 低几位留给地址（MPU/BMP 是 7、ADXL345 是 6、nRF24 是 5）"></label>
+            <label class="row" style="margin:0"><span style="width:auto">地址字节</span><input id="sp-reg-addrbytes" value="1" size="3" inputmode="numeric" title="「独立字节」时地址占几个字节（MCP23S17 是 1）"></label>
+            <label class="row" style="margin:0"><span style="width:auto">dummy</span><input id="sp-reg-dummy" value="0" size="3" inputmode="numeric" title="读之前插几个 dummy 字节。⚠️ 多数器件是 0（MPU-9250/LSM6DS3/BMP280/ADXL345 都不要）；只有 BMP380/BMP580 这类才要 1。给错 → 读回的数据整体错位"></label>
+            <label class="row" style="margin:0"><span style="width:auto">B/寄存器</span><input id="sp-reg-databytes" value="1" size="3" inputmode="numeric" title="每个寄存器占几字节（16 位寄存器填 2、24 位填 3）"></label>
+            <label class="chk" style="margin:0" title="多字节读时器件是否自动递增寄存器地址（多数会；不自增的器件连读会原地踏步）"><input type="checkbox" id="sp-reg-autoinc" checked> 地址自增</label>
+            <label class="row" style="margin:0"><span style="width:auto">起始</span><input id="sp-reg-start" value="0x00" size="6" title="起始寄存器号（十六进制）"></label>
+            <label class="row" style="margin:0"><span style="width:auto">个数</span><input id="sp-reg-count" value="128" size="5" inputmode="numeric" title="读多少个寄存器（默认 128；每帧读上限 480 B，超了自动多帧）"></label>
+            <span class="spacer"></span>
+            <button id="sp-reg-read" class="primary mini" title="按当前档位读一段回来（一条命令连读，或按档位一寄存器一帧）">读取</button>
+            <button id="sp-reg-write" class="mini" title="只把改过的字节写回（相邻的合并成一帧）">只写改动</button>
+            <button id="sp-reg-write-all" class="mini" title="整段写回（不管有没有改）—— 慎用">整块写回</button>
+            <button id="sp-reg-discard" class="mini">丢弃改动</button>
+          </div>
+          <div class="scroll fill" id="sp-reg-wrap">
+            <table class="sp regtab">
+              <thead><tr id="sp-reg-head"></tr></thead>
+              <tbody id="sp-reg-body"></tbody>
+            </table>
+          </div>
+          <p class="hint" id="sp-reg-sum">还没读</p>
+          <p class="hint">点表里任意字节 → 8 个 bit 的开关板（<b>点一下就翻转</b>，与原值不同的位套黄框；也能直接敲十六进制）。
+            读到的值 = <b>器件现值</b>，只有点「只写改动 / 整块写回」才真的发 SPI。<br>
+            ⚠️ SPI 没有统一约定，三个最常错的地方就在上面那排字段：<b>读命令怎么带寄存器号</b>、
+            <b>要不要 dummy</b>（MPU-9250/LSM6DS3/BMP280/ADXL345 都是 0 —— 网上"BMP280 要 dummy"是把它和 BMP380 搞混了）、<b>多字节读是否自增</b>。
+            假探针切到「寄存器器件」（BMP280 风格）时，档位选 BMP280 就对得上。</p>
+        </div>
+
         <div class="dockpage" data-dock="dsl" id="sp-dsl-card">
           <div class="toolrow">
             <span>示例</span>
@@ -987,6 +1032,8 @@
             <span class="spacer"></span>
             <button id="sp-dsl-parse" class="mini" title="只解析、不发：先把语法和字段核一遍">只看解析</button>
             <button id="sp-dsl-send" class="primary mini" title="解析整段后一次性发出去（自动打包、按需等应答）">解析并发送</button>
+            <button id="sp-dsl-run" class="primary mini" title="一次性帧先各发一遍，然后 loop/every 的定时部分按各自周期一直跑（这就是 while(1) 采集）">开始定时</button>
+            <button id="sp-dsl-stop" class="mini" disabled title="停止定时采集">停止</button>
           </div>
           <textarea id="sp-dsl-text" class="code" spellcheck="false" placeholder="一行一条命令，`#` 注释。例：&#10;&#10;0x9F rx=3                                   读 RDID（裸字节 = 一条 cmd 帧）&#10;{0x5A, 1, 3, 0x000000, 1, 8, NULL},         C 表行：cmd, lines, addr_len, addr, dummy, rx_len, tx&#10;{0x02, 1, 3, 0x001000, 0, 0, (uint8_t[]){0xAA, 0xBB}},&#10;delay 120ms&#10;gpio DC 1"></textarea>
           <div class="toolrow nw">
@@ -1004,6 +1051,24 @@
             <summary>语法速查</summary>
             <div class="hint" id="sp-dsl-help"></div>
           </details>
+        </div>
+
+        <!-- 实时值：定时采集里 `as` 解码出来的变量（SPI 接口的 ADC / 传感器就靠它看波形） -->
+        <div class="dockpage" data-dock="live" id="sp-live-card">
+          <div class="toolrow">
+            <span class="hint" id="sp-live-sum" style="margin:0">还没有数据</span>
+            <span class="spacer"></span>
+            <label class="chk" style="margin:0"><input type="checkbox" id="sp-live-spark" checked> 画曲线</label>
+            <button id="sp-live-reset" class="mini">清空</button>
+          </div>
+          <div class="scroll fill" id="sp-live-wrap">
+            <table class="sp"><thead><tr><th>变量</th><th>最新</th><th>最小</th><th>最大</th><th>次数</th><th>频率</th><th style="width:300px">曲线（最近 120 点）</th></tr></thead>
+            <tbody id="sp-live-body"></tbody></table>
+          </div>
+          <p class="hint">变量来自脚本里的行尾 <code>as 名字=表达式</code>。例：<br>
+            <code>loop 20ms</code> … <code>xfer cmd=0x80|0x3B rx=6 as ax=i16be(0)/16384, az=i16be(4)/16384</code> … <code>end</code><br>
+            偏移是**这一帧自己的读数据**上的偏移（SPI 一次 xfer 通常就是一个寄存器 / 一次转换）；
+            可用函数与 `#i2c` 页的 `as` 完全一样（u8/i8/u16be/i16be/u32be/f32be… + 常量四则与位运算）。</p>
         </div>
 
         <div class="dockpage" data-dock="flash" id="sp-flash-card">
@@ -1073,6 +1138,27 @@
         <span>协议：<code>HID 0x35</code> 控制面 + <code>bulk 0x0B/0x8B</code> 帧流</span>
       </div>
     </section>
+  </div>
+
+  <!-- 「寄存器」面板的位开关板（与 #i2c 页共用 .bitpop 皮肤与 app/ui/reg-grid.js；
+       DOM 是这一页自己的一份，id 前缀 sp-regpop —— 两页互不干扰） -->
+  <div class="bitpop" id="sp-regpop" hidden>
+    <div class="bp-head">
+      <span class="btitle" id="sp-regpop-title">—</span>
+      <span class="bval" id="sp-regpop-val"></span>
+      <span class="spacer"></span>
+      <label class="row" style="margin:0"><span style="width:auto">十六进制</span>
+        <input id="sp-regpop-hex" class="bx" size="3" maxlength="4" spellcheck="false" title="直接敲十六进制（1~2 位），与点 bit 同步"></label>
+    </div>
+    <div class="bits" id="sp-regpop-bits"></div>
+    <div class="bp-acts">
+      <button class="mini" data-bit="zero" title="这一字节清零">00</button>
+      <button class="mini" data-bit="ones" title="这一字节全置 1">FF</button>
+      <button class="mini" data-bit="inv" title="逐位取反">取反</button>
+      <button class="mini" data-bit="orig" title="恢复到读回来的原值">恢复原值</button>
+      <button class="mini" data-bit="close">完成</button>
+    </div>
+    <p class="hint" id="sp-regpop-hint"></p>
   </div>
 </section>
 

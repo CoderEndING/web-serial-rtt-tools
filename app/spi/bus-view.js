@@ -23,9 +23,11 @@ import * as P from './protocol.js';
 import * as D from './frames-dsl.js';
 import * as FL from './flash.js';
 import { fmtBytes, bytesEqual, parseHexByte, parseHexBytes } from './session.js';
+import { SpiRegView } from './reg-view.js';
+import { AcqView } from './acq-view.js';
 
 /** 右列 tab 的 id（与 HTML 的 data-dock 一一对应）*/
-const DOCK_IDS = ['cmd', 'dsl', 'flash', 'loop'];
+const DOCK_IDS = ['cmd', 'reg', 'dsl', 'live', 'flash', 'loop'];
 
 /** HTML 转义（DSL 的错误表要原样显示用户写的那行）*/
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -113,7 +115,20 @@ export class SpiBusView {
     $('sp-connect').addEventListener('click', () => s.connectHid(true));
     $('sp-reconnect').addEventListener('click', () => s.connectHid(false));
     $('sp-usb').addEventListener('click', () => s.connectUsb(null, { inFlight: +($('sp-inflight').value || 4) }));
-    $('sp-mock').addEventListener('change', e => s.setMock(e.target.checked));
+    $('sp-mock').addEventListener('change', e => s.setMock(e.target.checked, { device: $('sp-mock-device').value }));
+    // 假探针的"末级器件"：SPI 没有器件地址，所以是**换一个末级**（NOR / 寄存器器件 / 命令型 ADC）
+    $('sp-mock-device').value = store.get('spi.mockDevice', 'flash');
+    $('sp-mock-device').addEventListener('change', e => {
+      store.set('spi.mockDevice', e.target.value);
+      s.setMockDevice(e.target.value);
+    });
+
+    /* 「寄存器」面板与「定时采集」：两块的逻辑各自成模块（regs/reg-view、runner/acq-view），
+     * 这里只负责建起来 + 把连接状态转给它们（可用性统一在 refreshButtons 之外再走各自的 setEnabled）。 */
+    this.reg = new SpiRegView({ session: s });
+    this.reg.init();
+    this.acq = new AcqView({ session: s, tag: this.tag });
+    this.acq.init();
 
     // 配置 / 引脚
     $('sp-get').addEventListener('click', () => this.loadCfg());
@@ -375,6 +390,10 @@ export class SpiBusView {
     for (const id of ['sp-bl-on', 'sp-bl-off', 'sp-pin-rst-send']) $(id).disabled = !d || busy;
     // 通用命令（文本）/ flash：没数据端点或正忙时不能发
     for (const id of ['sp-dsl-parse', 'sp-dsl-send']) $(id).disabled = !d || busy;
+    // 「寄存器」面板：连上就能读（它自己还会管"有没有改动"）
+    this.reg?.setEnabled(c && d);
+    // 定时采集：跑起来之后「开始」保持灰、「停止」亮（胶囊在 tab 栏上，切 tab 也看得见）
+    this.acq?.renderPill(this.acq.running ? 'running' : 'idle');
     for (const id of ['sp-fl-readid', 'sp-fl-sfdp', 'sp-fl-sr', 'sp-fl-read', 'sp-fl-bench']) $(id).disabled = !d || busy;
     // 擦写按钮：既要连着，也要勾了「我确认」
     const armed = $('sp-fl-armed').checked;

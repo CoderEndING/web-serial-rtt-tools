@@ -18,6 +18,7 @@
  *      （浏览器会把隐藏页面的 rAF 降频甚至挂起）。
  */
 import { $, appendLogLine, setStatus } from '../ui/dom.js';
+import { drawSpark } from '../ui/spark.js';
 import { store } from '../core/store.js';
 import { I2cSession } from './session.js';
 import { RegView } from './reg-view.js';
@@ -968,25 +969,5 @@ function abbreviateHex(hex, keep){
   return parts.slice(0, keep).join(' ') + ` …+${parts.length - keep}B`;
 }
 
-/** 迷你曲线：一条折线 + 自动量程（不用第三方库，20 px 高够看趋势）*/
-function drawSpark(cv, buf){
-  const ctx = cv.getContext('2d');
-  // 背板宽度跟着 CSS 实际宽度走（否则固定 220 被 CSS 拉到 284 会糊）——
-  // 量不到（元素还藏着）就退回上次的值/默认值，别把背板设成 0。
-  const cssW = Math.round(cv.getBoundingClientRect().width);
-  if (cssW > 0 && cv.width !== cssW) cv.width = cssW;
-  const W = cv.width, H = cv.height;
-  ctx.clearRect(0, 0, W, H);
-  ctx.strokeStyle = getComputedStyle(document.body).getPropertyValue('--acc') || '#4aa3ff';
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  let lo = Infinity, hi = -Infinity;
-  for (const v of buf){ if (v < lo) lo = v; if (v > hi) hi = v; }
-  const span = (hi - lo) || 1;
-  for (let i = 0; i < buf.length; i++){
-    const x = buf.length > 1 ? (i / (buf.length - 1)) * (W - 2) + 1 : W / 2;
-    const y = H - 2 - ((buf[i] - lo) / span) * (H - 4);
-    if (i) ctx.lineTo(x, y); else ctx.moveTo(x, y);
-  }
-  ctx.stroke();
-}
+/** 迷你曲线：抽到 `app/ui/spark.js`（与 `#spi` 的实时值共用一份，别在这儿再写一遍）*/
+

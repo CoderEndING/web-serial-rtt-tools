@@ -79,6 +79,32 @@ for (let i = 0; i < 60; i++){
 }
 if (!ready) throw new Error('页面没起来（__tools.spi 不存在）');
 
+/**
+ * 🚨 **自带前置**：右列 tab 与「假器件」都是**持久化的用户设置**（localStorage）。
+ * 上一个套件/上一轮跑崩了会把它们留在别处 —— 实测踩过：上一轮把假器件留在「命令型 ADC」上，
+ * 这一轮的 Flash 卡那几节就整片红（12 条），看着像功能坏了，其实是状态没清。
+ * 与 `#i2c` 的 page 套件同一个纪律：**起手先把状态钉死**。
+ */
+await ev(`
+  const K = 'serial-rtt-tools:v1';
+  const st = JSON.parse(localStorage.getItem(K) || '{}');
+  delete st['spi.dock'];
+  st['spi.mockDevice'] = 'flash';
+  localStorage.setItem(K, JSON.stringify(st));
+  const sel = document.getElementById('sp-mock-device');
+  if (sel){ sel.value = 'flash'; sel.dispatchEvent(new Event('change')); }
+  const mock = document.getElementById('sp-mock');
+  if (mock){ mock.checked = false; mock.dispatchEvent(new Event('change')); }
+  return true;`);
+await sleep(250);
+await send('Page.reload', { ignoreCache: true });
+for (let i = 0; i < 40; i++){
+  await sleep(400);
+  try { if (await ev('return !!window.__tools?.spi;')) break; } catch {}
+}
+await ev(`document.querySelector('#tabs .tab[data-tab="spi"]').click(); return true;`);
+await sleep(200);
+
 // ==================================================================== 1
 console.log('== 1. 标签页与初始状态 ==');
 {
@@ -103,7 +129,7 @@ console.log('== 1b. 右列分 tab（照 #dbg 那套：一次只显示一个）==
     return { ids, pages,
              shown: [...document.querySelectorAll('#sp-box-dock .dockpage.on')].map(p => p.dataset.dock),
              saved: (JSON.parse(localStorage.getItem('serial-rtt-tools:v1') || '{}') || {})['spi.dock'] };`);
-  ok(t.ids.join(',') === 'cmd,dsl,flash,loop', `四个 tab：命令表/脚本/Flash/回环（${t.ids.join(',')}）`, t.ids.join(','));
+  ok(t.ids.join(',') === 'cmd,reg,dsl,live,flash,loop', `六个 tab：命令表/寄存器/脚本/实时值/Flash/回环（${t.ids.join(',')}）`, t.ids.join(','));
   ok(t.pages.join(',') === t.ids.join(','), '每个 tab 都有对应的内容块（顺序一致）');
   ok(t.shown.length === 1, '🚨 同时**只有一个**内容块可见', JSON.stringify(t.shown));
 
@@ -665,6 +691,154 @@ console.log('== 10. NOR flash 卡（假探针里挂着一颗 W25Q128 模型）==
     await new Promise(r => setTimeout(r, 600));
     return { notes: window.__tools.spiSession.mockProbe.flashNotes.slice(-3), out: document.getElementById('sp-fl-out').textContent };`);
   ok(quad.notes.some(n => /QE=0/.test(n)), '四线读在 QE=0 时器件侧给出明确原因（页面按全 00 显示，与真机一致）');
+}
+
+// ==================================================================== 10b
+console.log('== 10b. 「寄存器」面板：读一段 → 逐位改 → 只写改动 ==');
+{
+  // 假探针换成"寄存器器件"（BMP280 风格：读 0x80|reg + 1 字节 dummy、写 reg&0x7F、地址自增）
+  const setup = await ev(`
+    const s = window.__tools.spiSession, t = window.__tools.spi;
+    const sel = document.getElementById('sp-mock-device');
+    sel.value = 'regs'; sel.dispatchEvent(new Event('change'));
+    await new Promise(r => setTimeout(r, 250));
+    const dev = s.mockProbe.regdev;
+    for (let i = 0; i < 128; i++) dev.regs[i] = (i * 3 + 5) & 0xff;
+    document.querySelector('#sp-dock-tabs button[data-dock="reg"]').click();
+    document.getElementById('sp-reg-profile').value = 'bmp280';
+    document.getElementById('sp-reg-profile').dispatchEvent(new Event('change'));
+    document.getElementById('sp-reg-start').value = '0x00';
+    document.getElementById('sp-reg-count').value = '128';
+    document.getElementById('sp-reg-read').click();
+    await new Promise(r => setTimeout(r, 700));
+    const cells = [...document.querySelectorAll('#sp-reg-body button.rb')];
+    return { device: s.mockProbe.deviceKind, dock: t.dockTab,
+             on: [...document.querySelectorAll('#sp-box-dock .dockpage.on')].map(p => p.dataset.dock),
+             rows: document.querySelectorAll('#sp-reg-body tr').length, cells: cells.length,
+             first: cells[0]?.textContent, last: cells[cells.length - 1]?.textContent,
+             head: [...document.querySelectorAll('#sp-reg-head th')].map(x => x.textContent).join('|'),
+             sum: document.getElementById('sp-reg-sum').textContent,
+             notes: s.mockProbe.flashNotes.slice(-2) };`);
+  ok(setup.device === 'regs', '假器件已切到「寄存器器件」');
+  ok(setup.dock === 'reg' && setup.on.join(',') === 'reg', '切到「寄存器」tab 且只显示它');
+  ok(setup.rows === 8 && setup.cells === 128, `128 个寄存器画成 16×8（实际 ${setup.rows} 行 / ${setup.cells} 格）`);
+  ok(setup.first === '05' && setup.last === '82', `首末字节与假器件图案对账（${setup.first} … ${setup.last}）`);
+  ok(setup.head === '地址|0|1|2|3|4|5|6|7|8|9|A|B|C|D|E|F|ASCII', '表头 = 地址 + 列号 0..F + ASCII', setup.head);
+  ok(setup.notes.length === 0, 'dummy 给对（BMP280 档 = 0，手册核过）→ 器件侧没有报错', JSON.stringify(setup.notes));
+  ok(/128 B/.test(setup.sum) && /一条命令连读|1 帧/.test(setup.sum), '摘要写明读回长度与帧数', setup.sum);
+
+  // 点字节 → 位开关板 → 翻一位
+  const edited = await ev(`
+    const t = window.__tools.spi;
+    document.querySelector('#sp-reg-body button.rb[data-off="0"]').click();
+    await new Promise(r => setTimeout(r, 60));
+    const pop = document.getElementById('sp-regpop');
+    const open = !pop.hidden, bits = pop.querySelectorAll('#sp-regpop-bits button.bit').length;
+    pop.querySelector('#sp-regpop-bits button.bit[data-k="0"]').click();      // 0x05 → 0x04
+    await new Promise(r => setTimeout(r, 60));
+    const cell = document.querySelector('#sp-reg-body button.rb[data-off="0"]');
+    return { open, bits, cell: cell.textContent, chg: cell.classList.contains('chg'),
+             chgBits: pop.querySelectorAll('#sp-regpop-bits button.bit.chg').length,
+             cur: t.reg.cur[0], base: t.reg.base[0],
+             writeDisabled: document.getElementById('sp-reg-write').disabled };`);
+  ok(edited.open && edited.bits === 8, '点表里的字节 → 弹出 8 个 bit 的开关板');
+  ok(edited.cur === 0x04 && edited.base === 0x05, '点 bit0 把 0x05 翻成 0x04（只改缓冲）');
+  ok(edited.cell === '04' && edited.chg, '格子立刻变 04 并套上黄框');
+  ok(edited.chgBits === 1, '开关板上"与原值不同的位"标了 1 个');
+  ok(edited.writeDisabled === false, '有改动时「只写改动」可点');
+
+  // 写回：只写改动落到假器件
+  const wrote = await ev(`
+    const s = window.__tools.spiSession, t = window.__tools.spi;
+    document.getElementById('sp-reg-write').click();
+    await new Promise(r => setTimeout(r, 600));
+    const cell = document.querySelector('#sp-reg-body button.rb[data-off="0"]');
+    return { dev0: s.mockProbe.regdev.regs[0], dev1: s.mockProbe.regdev.regs[1],
+             base0: t.reg.base[0], chg: cell.classList.contains('chg'),
+             writeDisabled: document.getElementById('sp-reg-write').disabled };`);
+  ok(wrote.dev0 === 0x04, '「只写改动」真的写进了假器件（regs[0] = 0x04）');
+  ok(wrote.dev1 === 0x08, '相邻没改的字节没动（regs[1] 仍是 0x08）', String(wrote.dev1));
+  ok(wrote.base0 === 0x04 && wrote.chg === false, '写回成功后"器件现值"更新、黄框清掉');
+  ok(wrote.writeDisabled === true, '没有改动了 → 「只写改动」自动灰掉');
+
+  // dummy 给错 → 数据整体错位（假器件会如实报）。BMP280 的正确值是 **0**，
+  // 所以这里故意填 1（网上"BMP280 要 1 个 dummy"那个误传就是这么来的）
+  const badDummy = await ev(`
+    const s = window.__tools.spiSession;
+    s.mockProbe.flashNotes.length = 0;
+    document.getElementById('sp-reg-dummy').value = '1';
+    document.getElementById('sp-reg-dummy').dispatchEvent(new Event('change'));
+    document.getElementById('sp-reg-read').click();
+    await new Promise(r => setTimeout(r, 500));
+    const out = { notes: s.mockProbe.flashNotes.slice(-2),
+                  first: document.querySelector('#sp-reg-body button.rb')?.textContent };
+    // 还原成 0（BMP280 的正确值）
+    document.getElementById('sp-reg-dummy').value = '0';
+    document.getElementById('sp-reg-dummy').dispatchEvent(new Event('change'));
+    return out;`);
+  ok(badDummy.notes.some(n => /dummy 不符/.test(n)), 'dummy 多给 1 字节 → 器件侧明确报"数据错位"', JSON.stringify(badDummy.notes));
+  ok(badDummy.first !== '05', '……表里读到的第一个字节也确实错了（不是 0x05）', String(badDummy.first));
+}
+
+// ==================================================================== 10c
+console.log('== 10c. 定时采集：loop + as 解码 + 实时值 ==');
+{
+  // 换成命令型 ADC（MCP3008 风格，采样值是活的正弦），跑一段 loop 采集
+  const run = await ev(`
+    const s = window.__tools.spiSession, t = window.__tools.spi;
+    const sel = document.getElementById('sp-mock-device');
+    sel.value = 'adc'; sel.dispatchEvent(new Event('change'));
+    await new Promise(r => setTimeout(r, 250));
+    document.getElementById('sp-dsl-text').value =
+      'xfer tx=01,80,00 rx=3 as v=u16be(1)&0x3FF\\n' +
+      'loop 25ms\\n  xfer tx=01,80,00 rx=3 as v=u16be(1)&0x3FF\\nend';
+    document.getElementById('sp-dsl-run').click();
+    await new Promise(r => setTimeout(r, 700));
+    const liveRows = [...document.querySelectorAll('#sp-live-body tr')];
+    const first = liveRows[0] ? { name: liveRows[0].children[0].textContent, last: liveRows[0].children[1].textContent,
+                                  n: liveRows[0].children[4].textContent } : null;
+    return { device: s.mockProbe.deviceKind, running: t.acq.running, ticks: t.acq.runner.stat.ticks,
+             pill: document.getElementById('sp-acq-pill').textContent,
+             rows: liveRows.length, first,
+             sum: document.getElementById('sp-live-sum').textContent,
+             spark: !!liveRows[0]?.querySelector('canvas'),
+             samples: t.acq.live.get('v')?.n || 0,
+             stopDisabled: document.getElementById('sp-dsl-stop').disabled };`);
+  ok(run.device === 'adc' && run.running, '假器件切到 ADC，采集在跑');
+  ok(run.ticks >= 8, `25 ms 周期在 700 ms 里跑了 ${run.ticks} 拍（≥8）`);
+  ok(/采集/.test(run.pill) && /拍/.test(run.pill), '运行胶囊显示拍数（切到任何 tab 都看得见）', run.pill);
+  ok(run.rows === 1 && run.first?.name === 'v', '实时值表里有 1 个变量 v', JSON.stringify(run.first));
+  ok(run.samples >= 8, `v 采样了 ${run.samples} 次`);
+  ok(run.spark, '……并画了迷你曲线');
+  ok(run.stopDisabled === false, '「停止」可点');
+
+  // 值在动（假 ADC 的采样是活的）
+  const moving = await ev(`
+    const t = window.__tools.spi;
+    const a = t.acq.live.get('v')?.last;
+    await new Promise(r => setTimeout(r, 300));
+    const b = t.acq.live.get('v')?.last;
+    return { a, b, ticks: t.acq.runner.stat.ticks };`);
+  ok(moving.a !== moving.b, `采样值在变（${moving.a} → ${moving.b}）`);
+
+  const stopped = await ev(`
+    const t = window.__tools.spi;
+    document.getElementById('sp-dsl-stop').click();
+    await new Promise(r => setTimeout(r, 150));
+    const ticks = t.acq.runner.stat.ticks;
+    await new Promise(r => setTimeout(r, 200));
+    return { running: t.acq.running, ticks, later: t.acq.runner.stat.ticks,
+             pill: document.getElementById('sp-acq-pill').textContent };`);
+  ok(!stopped.running && stopped.ticks === stopped.later, '点「停止」后不再采样');
+  ok(!/采集 ·/.test(stopped.pill), '胶囊回到「未运行 / 已结束」', stopped.pill);
+
+  // 收尾：假器件还原成 NOR（后面的收尾节与别的套件都按默认器件走）
+  await ev(`
+    const sel = document.getElementById('sp-mock-device');
+    sel.value = 'flash'; sel.dispatchEvent(new Event('change'));
+    document.querySelector('#sp-dock-tabs button[data-dock="cmd"]').click();
+    await new Promise(r => setTimeout(r, 200));
+    return true;`);
 }
 
 // ==================================================================== 11

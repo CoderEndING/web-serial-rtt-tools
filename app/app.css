@@ -746,25 +746,26 @@ fieldset.folded > legend::after{content:' · 已折叠';color:var(--fg2);font-si
 #tab-i2c #i2-dsl-sum.warn{color:var(--warn)}
 #tab-i2c #i2-dsl-sum.err{color:var(--err)}
 
-/* ---- 寄存器面板（#i2c 第 3 个 tab）：16×8 的字节表 + 位开关板 ----
+/* ---- 寄存器面板（`#i2c` 与 `#spi` 各有一个，共用这一套样式）：16 列的字节表 + 位开关板 ----
    表格本身吃满高度（.scroll.fill 已经在管滚动），格子做小一点、密一点：
-   128 个字节要能一屏看完，才谈得上"扫一眼看哪儿变了"。 */
-#tab-i2c .regtab{width:100%;border-collapse:collapse;font-family:var(--mono);font-size:12px}
-#tab-i2c .regtab th,#tab-i2c .regtab td{padding:1px 2px;text-align:center;border:none}
-#tab-i2c .regtab thead th{color:var(--fg2);font-weight:400;font-size:11px;position:sticky;top:0;
+   128 个字节要能一屏看完，才谈得上"扫一眼看哪儿变了"。
+   ⚠️ 这些类**不带页面前缀**（两个页面共用）：`.regtab` 只在寄存器面板里用，别拿它当通用表格类。 */
+.regtab{width:100%;border-collapse:collapse;font-family:var(--mono);font-size:12px}
+.regtab th,.regtab td{padding:1px 2px;text-align:center;border:none}
+.regtab thead th{color:var(--fg2);font-weight:400;font-size:11px;position:sticky;top:0;
   background:var(--bg2,#1b1b1b);z-index:1}
-#tab-i2c .regtab td.ra,#tab-i2c .regtab th.ra{color:var(--fg2);text-align:right;padding-right:8px;white-space:nowrap;font-size:11px}
-#tab-i2c .regtab td.rascii,#tab-i2c .regtab th.rascii{color:#8fa6bb;text-align:left;padding-left:10px;
+.regtab td.ra,.regtab th.ra{color:var(--fg2);text-align:right;padding-right:8px;white-space:nowrap;font-size:11px}
+.regtab td.rascii,.regtab th.rascii{color:#8fa6bb;text-align:left;padding-left:10px;
   white-space:pre;letter-spacing:.5px}
-#tab-i2c .regtab td.rbc{padding:0 1px}
+.regtab td.rbc{padding:0 1px}
 /* 每个字节 = 一个按钮；改过的套黄框（和 .bitpop 的 chg 同一套语义） */
-#tab-i2c .regtab button.rb{width:26px;padding:1px 0;font-family:var(--mono);font-size:11.5px;
+.regtab button.rb{width:26px;padding:1px 0;font-family:var(--mono);font-size:11.5px;
   background:#171b21;color:#cdd6e4;border:1px solid #2b3340;border-radius:3px;cursor:pointer}
-#tab-i2c .regtab button.rb:hover{border-color:var(--acc);background:#1d2530}
-#tab-i2c .regtab button.rb.chg{border-color:var(--warn);background:#3a2f12;color:#ffd479;font-weight:700}
-#tab-i2c .regtab button.rb:focus{outline:1px solid var(--acc)}
-#i2-regpop .bx{width:42px;text-align:center;font-family:var(--mono)}
-#i2-regpop .bx.bad{border-color:var(--err);background:#3a1a1a}
+.regtab button.rb:hover{border-color:var(--acc);background:#1d2530}
+.regtab button.rb.chg{border-color:var(--warn);background:#3a2f12;color:#ffd479;font-weight:700}
+.regtab button.rb:focus{outline:1px solid var(--acc)}
+.bitpop .bx{width:42px;text-align:center;font-family:var(--mono)}
+.bitpop .bx.bad{border-color:var(--err);background:#3a1a1a}
 
 /* ============================ 调试器（#tab-dbg） ============================ */
 /**

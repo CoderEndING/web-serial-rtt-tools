@@ -14,6 +14,15 @@
  * （`session.writeLong`）—— 一份"能不能一次发出去"的知识只放在协议层，别在页面里再抄一遍。
  */
 import { RD_TOTAL_MAX, hex2, bump } from './protocol.js';
+/**
+ * 字节级工具（diff / ASCII / bit）**从 app/core/bytes.js 转出** —— 与 `#spi` 的寄存器面板共一份实现
+ * （两边的线上形状不同，但"拿到字节之后怎么显示/比改动/翻位"必须一致，否则两个面板的语义会漂）。
+ */
+import {
+  diffBytes, changedOffsets, asciiOf, bitsOf, setBit, toggleBit, popcount, bytesEq,
+} from '../core/bytes.js';
+
+export { diffBytes, changedOffsets, asciiOf, bitsOf, setBit, toggleBit, popcount, bytesEq };
 
 export const REG_LEN_DFT = 128;              // 默认一次读 128 B（16 列 × 8 行）
 export const REG_LEN_MAX = RD_TOTAL_MAX;     // 4096（协议侧 RD_TOTAL_MAX）
@@ -69,27 +78,7 @@ export function parseLen(text){
   return v;
 }
 
-/** 与"读回来的原值"逐字节比，返回改动 [{off, from, to}] */
-export function diffBytes(base, cur){
-  const out = [];
-  const n = Math.min(base?.length || 0, cur?.length || 0);
-  for (let i = 0; i < n; i++) if (base[i] !== cur[i]) out.push({ off: i, from: base[i], to: cur[i] });
-  return out;
-}
-
-/** 改动字节的下标（写回「只写改动」用的就是它）*/
-export const changedOffsets = (base, cur) => diffBytes(base, cur).map(d => d.off);
-
-/** hexdump 那种 ASCII 列：可打印 0x20..0x7E 原样，其余一个点 */
-export function asciiOf(bytes, from = 0, len = null){
-  const end = from + (len == null ? bytes.length : len);
-  let s = '';
-  for (let i = from; i < end && i < bytes.length; i++){
-    const v = bytes[i];
-    s += v >= 0x20 && v <= 0x7e ? String.fromCharCode(v) : '.';
-  }
-  return s;
-}
+/** 与"读回来的原值"逐字节比，返回改动 [{off, from, to}] —— 实现在 app/core/bytes.js（与 SPI 面板共用）*/
 
 /**
  * 起始地址 + 偏移 → 表里显示的地址文本。
@@ -102,24 +91,6 @@ export function addrLabel(start, off, addrLen){
   // ⚠️ 自己拼而不是 join(hex2)：hex2 每字节都带 `0x`，拼两字节会得到 `0x010x3C`（踩过）
   return '0x' + bump(start, off).slice(0, addrLen)
     .map(v => (v & 0xff).toString(16).toUpperCase().padStart(2, '0')).join('');
-}
-
-/** 8 个 bit（下标 0 = LSB） */export function bitsOf(v){
-  const out = new Array(8);
-  for (let k = 0; k < 8; k++) out[k] = (v >> k) & 1;
-  return out;
-}
-
-/** 置/清一位（返回新值，0..255）*/
-export const setBit = (v, k, on) => (on ? (v | (1 << k)) : (v & ~(1 << k))) & 0xff;
-/** 翻一位 */
-export const toggleBit = (v, k) => (v ^ (1 << k)) & 0xff;
-
-/** 「1 字节 = 多少位被置 1」—— 表头/摘要里看一眼密度就知道这段是数据还是空白 */
-export function popcount(bytes){
-  let n = 0;
-  for (const b of bytes || []){ let v = b & 0xff; while (v){ v &= v - 1; n++; } }
-  return n;
 }
 
 /** 面板摘要一行字（view 直接贴到 #i2-reg-sum）*/
