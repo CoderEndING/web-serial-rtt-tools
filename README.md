@@ -892,6 +892,12 @@ samples/
   anim/                 屏页「动画 / 视频」的示例素材：6 个文件（GIF/APNG/动画 WebP/MP4/WebM），
                         每个都写明"看什么"（彩条·弹跳球·色相·帧号·棋盘·立方体），
                         `make samples-anim` 重造；用法与两条口径坑见 samples/anim/README.md
+  panel_init_many/      **44 份屏驱动**的初始化档案（从 SiFli-SDK 的 LCD 驱动提取）：
+                        `panel_init.json`（44 drivers / 50 init_sequences / 4361 steps）+
+                        schema + SPEC + 合并/核对脚本 + 44 份机械 dump；见其 README.md
+  test_images/          **BMP 测试图样**：37 张一套，`./` 是 24bpp、`bpp16/` 是**同名同尺寸的
+                        16bpp(RGB565)** 对照（各留一张异格式当反例）；240×296 为主，另有
+                        16×16 / 41×20 / 64×64 / 120×40 边界；见 samples/test_images/README.md
 ```
 
 ## 自测（不需要硬件也能跑一部分）
