@@ -1,9 +1,15 @@
 <#
-  STM32H743 测试固件编译脚本
+  STM32H743 测试固件编译脚本（**只出 flash 版**）
+
     pwsh -File build.ps1
-  依赖：arm-none-eabi-gcc 在 PATH 里
+    pwsh -File build.ps1 -Clean
+
+  依赖：arm-none-eabi-gcc 在 PATH 里（本机在 E:\Share\env-windows\tools\gnu_gcc\arm_gcc\mingw\bin）
+
+  ⚠️ 用户定调：**H743 走 flash 版，不做纯 RAM 运行版**（2026-10）。
+     早先那个 `-Ram` 分支与 `ld/stm32h743_ram.ld` 已删除 —— 需要时从 git 历史里取。
 #>
-param([switch]$Clean, [switch]$Ram)
+param([switch]$Clean)
 
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
@@ -27,10 +33,9 @@ $sources = @(
   (Join-Path $root 'segger_rtt\SEGGER_RTT.c')
 )
 $elf = Join-Path $build 'fw.elf'
-$ld  = if ($Ram) { Join-Path $root 'ld\stm32h743_ram.ld' } else { Join-Path $root 'ld\stm32h743.ld' }
-if ($Ram) { $elf = Join-Path $build 'fw_ram.elf' }
+$ld  = Join-Path $root 'ld\stm32h743.ld'
 
-# Cortex-M7 + 双精度硬浮点（H743 有 FPU）；关掉 D-Cache 相关优化不影响这里
+# Cortex-M7 + 双精度硬浮点（H743 有 FPU）
 $cflags = @(
   '-mcpu=cortex-m7', '-mthumb', '-mfpu=fpv5-d16', '-mfloat-abi=hard', '-Os', '-g3',
   '-ffunction-sections', '-fdata-sections', '-fno-common',
@@ -44,13 +49,13 @@ $cflags = @(
 & $gcc @cflags @sources -o $elf
 if ($LASTEXITCODE -ne 0) { throw "编译失败 (exit $LASTEXITCODE)" }
 
-$binout = if ($Ram) { Join-Path $build 'fw_ram.bin' } else { Join-Path $build 'fw.bin' }
+$binout = Join-Path $build 'fw.bin'
 & $objcopy -O binary $elf $binout
 & $size $elf
 
 # 📦 把 ELF 复制到目录根：仓库里"给用户直接下载"的那份就是它（与 hpm6800evk_* 同约定）。
-#    改了源码重跑本脚本，这两份会被覆盖 —— 别让入库的 ELF 和源码漂开（页面靠它取符号地址）。
-$pub = Join-Path $root $(if ($Ram) { 'fw_ram.elf' } else { 'fw.elf' })
+#    改了源码重跑本脚本，这份会被覆盖 —— 别让入库的 ELF 和源码漂开（页面靠它取符号地址）。
+$pub = Join-Path $root 'fw.elf'
 Copy-Item -Force $elf $pub
 
 Write-Output ""

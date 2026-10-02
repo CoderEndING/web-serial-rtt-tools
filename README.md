@@ -872,7 +872,7 @@ tools/
     stm32f103_scope/          **F103 J-Scope 靶子固件**：**96 MHz** 时基 + 契约已知的波形/变量，
                               `-Board ze|c8`（默认 ze）、check.py 客观验收（含 4 KB 地址空洞 → 两个 span 的读计划场景）；与探针仓库里那份逐字节同步
     stm32h743_rtt_speed/      **H743 RTT 吞吐测试**：同 F103 那套量法；RTT 缓冲必须放 AXI SRAM
-                              （H7 的 DTCM 外部调试器读不到），另出 `-Ram` 版（这块板子 flash 写不进）
+                              （H7 的 DTCM 外部调试器读不到）。只交 **flash 版**（不做纯 RAM 版）
     stm32h743_scope/          **H743 J-Scope 靶子**：与 F103 同一套变量契约，变量放 AXI SRAM；
                               `-DDCACHE_ON=1` 可打开 D-cache，专门用来复现"H7 上 AHB-AP 读到 cache 旧值"
     stm32h7b0_rtt_speed/      **H7B0 RTT 吞吐测试**（HSI→PLL1 280MHz，DTCM 布局，见其 README）

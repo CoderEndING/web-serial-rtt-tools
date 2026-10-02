@@ -107,10 +107,9 @@ span B  0x24001010 .. 0x24001048   56 B   （其余全部；再接 20 B 诊断�
 ```powershell
 pwsh -File build.ps1            # 默认 flash 版（arm-none-eabi-gcc 10.3，-g3 -gdwarf-4）
 pwsh -File build.ps1 -DCache    # ★ D-Cache 干扰实验版（见第 4 节）→ build-dcache\fw.elf
-pwsh -File build.ps1 -Ram       # 全 RAM 版 → build-ram\fw_ram.elf（本机这块板的 flash 算法跑不起来）
 pwsh -File build.ps1 -Clean
 
-pwsh -File flash.ps1            # OpenOCD + CMSIS-DAP 烧录（⚠️ 本机这块板烧不动，见第 5 节第 5 条）
+pwsh -File flash.ps1            # OpenOCD + CMSIS-DAP 烧录（写不进 flash 时见第 5 节第 5 条）
 python check.py                 # ★ 客观验收：静态查地址 + halt→dump RAM→逐项核对 + 复测 10 kHz 时基
 python check.py --static-only   # 只做静态检查（没有硬件也能跑）
 python check.py --hold          # 跑完保持 halt（排障）
@@ -176,11 +175,13 @@ Normal / Write-Back / Write-Allocate）。于是：
    且 `HAL_RCC_GetSysClockFreq()` 里 `pllm = (PLLCKSELR & DIVM1) >> 4` 之后**直接做除**。
    ⚠️ 顺手记一条：兄弟目录 `../stm32h7b0_rtt_speed` 的 `-Minimal` 版在这里写成了 `divm - 1`，
    于是它实际跑 350MHz 而固件自报 280MHz（HAL/SDK 版不受影响）。本目录的两份都按正确写法。
-5. **本机这块阿波罗 H743 板子的 flash 算法跑不起来**（halt 通、AHB-AP 读写正常、flash 全 0xFF、
-   RDP 无保护，但写 flash 时 `timed out while waiting for target halted`；SRST 也没接到探针）——
-   见 `../stm32h743_rtt_speed/README.md`。所以 `flash.ps1` 这条路**在本机没跑通**，
-   真要用请 `build.ps1 -Ram` 出全 RAM 版，用网页「烧录器」把镜像写进 AXI SRAM 再指 SP/PC。
-   RAM 版的固件自带 `SCB_VTOR = g_vectors`（否则中断向量还从 flash 别名取，SysTick 一进中断就飞）。
+5. **只交 flash 版**（2026-10 用户定调：H743 走 flash，不做纯 RAM 运行版；原来的 `-Ram` 分支与
+   `ld/stm32h743_ram.ld` 已删，需要时从 git 历史里取 —— 那份 RAM 版自带 `SCB_VTOR = g_vectors`，
+   否则中断向量还从 flash 别名取，SysTick 一进中断就飞）。
+   早期在本机跑 `flash.ps1` 报过 `timed out while waiting for target halted`（halt 通、AHB-AP
+   读写正常、flash 全 0xFF、RDP 无保护，但 SRST 没接到探针）—— 那是**当时那条连接/复位方式**的
+   问题，不是固件的问题。写不进 flash 时按这几条查：SWD 的 nRESET 有没有接、烧录器用的复位方式
+   （connect-under-reset）、读保护 RDP，或者改用板子自带的下载方式（BOOT 跳线 + 串口/USB DFU）。
 6. **VOS 的写会被硬件静默忽略**，除非 `PWR_CR3.SCUEN` 已经清 0。本固件**只在 SCUEN 置位时**
    才去清它，绝不整块写 `PWR_CR3` —— 无条件写供电寄存器在 H7 上是能把板子写进
    "AP 事务恒 WAIT、只能整板断电"的死状态的（H7B0 那边真踩过）。

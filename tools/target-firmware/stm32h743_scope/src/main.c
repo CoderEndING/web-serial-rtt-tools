@@ -63,7 +63,7 @@
 #define DCACHE_ON 0
 #endif
 
-/* 向量表（定义在 startup.c）。flash 版它在 0x08000000，RAM 版在 0x24000000 —— 都要显式告诉 VTOR。 */
+/* 向量表（定义在 startup.c），flash 版里在 0x08000000 —— 仍然显式告诉 VTOR，别依赖复位默认值。 */
 extern void (*const g_vectors[])(void);
 
 /* 所有等待都必须有上限：PLL 锁不上时宁可退到慢时钟，也不要让固件静静卡死在 while 里
@@ -271,8 +271,9 @@ int main(void){
 
   clock_init();                        /* 先把主频顶上去 —— SysTick 重载值是按实际 HCLK 算的 */
 
-  /* 向量表基址：flash 版 = 0x08000000，RAM 版（build.ps1 -Ram）= 0x24000000。
-   * 🚨 RAM 版必须显式设，否则 VTOR 还是复位默认的 0（= flash 别名），SysTick 一进中断就取到错向量。 */
+  /* 向量表基址：flash 版 = 0x08000000（本目录**只出 flash 版**，早先那个全 RAM 版已删除）。
+   * 显式设 VTOR 而不是依赖复位默认值 0（= flash 别名）—— 将来若真搬去别处运行，
+   * 忘了这行就会出现"SysTick 一进中断就取到错向量"这种极难查的飞。 */
   SCB_VTOR = (uint32_t)(uintptr_t)g_vectors;
 
   /* 取指走 I-Cache；**D-Cache 由编译开关决定**（见文件头第 ③ 条） */

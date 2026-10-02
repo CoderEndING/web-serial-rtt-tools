@@ -4,10 +4,11 @@
     pwsh -File flash.ps1 -Erase       # 先整片擦除
     pwsh -File flash.ps1 -OpenOcd <path\to\openocd.exe> -Scripts <path\to\scripts>
 
-  ⚠️ 本机那块阿波罗 H743 板子的 **flash 算法跑不起来**（写 flash 时
-     "timed out while waiting for target halted"，SRST 也没接到探针）——
-     见 ../stm32h743_rtt_speed/README.md。所以这条烧录路径**在本机并未跑通**，
-     真要用请走 `build.ps1 -Ram` + 网页「烧录器」（AHB-AP 直接写 AXI SRAM 再指 SP/PC）。
+  ⚠️ 早期在本机那块阿波罗 H743 上，这条路径报过 "timed out while waiting for target halted"
+     （SRST 没接到探针）—— 那是**当时那条连接/复位方式**的问题，不是固件的问题。
+     本目录**只交 flash 版**（不再提供纯 RAM 运行版，原因见 ../stm32h743_rtt_speed/README.md）。
+     写不进 flash 时按这几条查：SWD 的 nRESET 有没有接、烧录器用的复位方式（connect-under-reset）、
+     读保护 RDP，或者改用板子自带的下载方式（BOOT 跳线 + 串口/USB DFU）。
 
   OpenOCD 自动查找顺序：
     1) E:\Share\env-windows\xpack-openocd-*\bin\openocd.exe     （xPack 0.12，scripts 在 <root>\openocd\scripts）

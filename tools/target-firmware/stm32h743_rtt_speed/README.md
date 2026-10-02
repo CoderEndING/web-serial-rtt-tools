@@ -5,8 +5,8 @@ RTT 用 `BLOCK_IF_FIFO_FULL`），用来回答「换更快的目标，RTT 交付
 
 板子：正点原子阿波罗 H743（Cortex-M7，SW-DP IDCODE `0x6BA02477`，与 H7B0 同族）。
 
-> 📦 本目录里的 **`fw.elf`（flash 版）与 `fw_ram.elf`（RAM 运行版）是编好的产物** —— 直接在
-> 网页里载入/烧录即可，不必自己装工具链。改了源码就重跑 `build.ps1`（它会把新产物覆盖回这两份）。
+> 📦 本目录里的 **`fw.elf`（flash 版）是编好的产物** —— 直接在网页里载入/烧录即可，不必自己装
+> 工具链。改了源码就重跑 `build.ps1`（它会把新产物覆盖回这一份）。
 
 ## 实测结论（2026-09-28）
 
@@ -32,21 +32,22 @@ RTT 用 `BLOCK_IF_FIFO_FULL`），用来回答「换更快的目标，RTT 交付
    **外部调试器走 AHB-AP 读不到** —— 探针扫默认区间会什么都找不到（H7B0 那份固件也踩过，
    见 `../stm32h7b0_rtt_speed/RESULTS.md`）。本固件的链接脚本就是这么放的，`nm` 可验：
    `_SEGGER_RTT = 0x24000014`。
-2. **这块板子的 flash 算法跑不起来**（halt 通、AHB-AP 读写正常、flash 全 0xFF、`FLASH_OPTR`
-   的 RDP 无保护，但写 flash 时 `timed out while waiting for target halted`；SRST 没接，
-   connect-under-reset 也无效）⇒ 走 **RAM 运行**：`build.ps1 -Ram` 出 `fw_ram.elf`，
-   用 AHB-AP 直接写进 AXI SRAM，再把 SP/PC 指过去 resume（不需要 flash 算法）。
+2. **只交 flash 版**（2026-10 用户定调：H743 走 flash，不做纯 RAM 运行版 —— 原来的 `-Ram` 分支
+   与 `ld/stm32h743_ram.ld` 已删除，需要时从 git 历史里取）。早期在本机跑 `flash.ps1` 报过
+   `timed out while waiting for target halted`（halt 通、AHB-AP 读写正常、flash 全 0xFF、
+   `FLASH_OPTR` 的 RDP 无保护，但 SRST 没接到探针）—— 那是**当时那条连接/复位方式**的问题，
+   不是固件的问题。写不进 flash 时按这几条查：SWD 的 nRESET 有没有接、烧录器用的复位方式
+   （connect-under-reset）、读保护 RDP，或者改用板子自带的下载方式（BOOT 跳线 + 串口/USB DFU）。
 
 ## 编译 / 使用
 
 ```powershell
-pwsh -File build.ps1          # flash 版 → build/fw.elf      （同时覆盖目录根的 fw.elf）
-pwsh -File build.ps1 -Ram     # RAM 版  → build/fw_ram.elf  （同时覆盖目录根的 fw_ram.elf）
+pwsh -File build.ps1          # → build/fw.elf（并覆盖目录根那份 fw.elf，给用户下载的就是它）
 pwsh -File build.ps1 -Clean
 ```
 
-零安装做法（本仓库的正路）：网页「RTT Viewer」→ 后端选探针 → 载入本目录的 `fw.elf` /
-`fw_ram.elf`（页面从 ELF 里取 `_SEGGER_RTT` 的地址，不用手填）；量速率用
+零安装做法（本仓库的正路）：网页「RTT Viewer」→ 后端选探针 → 载入本目录的 `fw.elf`
+（页面从 ELF 里取 `_SEGGER_RTT` 的地址，不用手填）；量速率用
 `node tools\selftest\rtt-speed.mjs`（换固件用 `ELF=<路径>` 覆盖）。
 
 > 复位后 H743 默认就跑 HSI 64 MHz，不配 PLL 也能测。要试更高主频（H7 可到 480 MHz），

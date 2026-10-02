@@ -8,7 +8,7 @@
 |---|---|---|---|
 | `stm32f103_rtt_speed/` | STM32F103ZE（96 MHz） | **RTT 洪水**：死循环灌 `hello world`，量交付率上限 | `fw.elf`（ZE 档 + RTT 上行 32 KB） |
 | `stm32f103_scope/` | STM32F103ZE | **J-Scope 靶子**：契约波形 + 撕裂/混叠自检 + 4 KB 地址空洞（两个 span） | `fw.elf`（ZE 档） |
-| `stm32h743_rtt_speed/` | STM32H743（阿波罗） | RTT 洪水（RTT 缓冲放 **AXI SRAM**） | `fw.elf`、`fw_ram.elf`（这块板子 flash 写不进，走 RAM） |
+| `stm32h743_rtt_speed/` | STM32H743（阿波罗） | RTT 洪水（RTT 缓冲放 **AXI SRAM**） | `fw.elf`（**flash 版；不提供纯 RAM 版**） |
 | `stm32h743_scope/` | STM32H743 | J-Scope 靶子（同一套契约；变量放 AXI SRAM；`-DDCACHE_ON=1` 复现 D-cache 干扰） | `fw.elf` |
 | `stm32h7b0_rtt_speed/` | STM32H7B0VBT6 KIT | RTT 洪水（HAL/SDK 版 + 寄存器版 + `-SlowClock` 保命档） | `fw.elf` |
 | `stm32h7b0_scope/` | STM32H7B0 | J-Scope 靶子（同一套契约，H7B0 布局） | `fw.elf` |
