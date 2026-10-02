@@ -18,6 +18,7 @@
 import { FPB, FP_CTRL_KEY, decodeComparator } from './bp.js';
 import { CFBP_SEL } from './regs.js';
 import { u32leBytes, align4 } from './fmt.js';
+import { thumbLen, decodeCall } from './thumb.js';
 
 const FLASH = 0x08000000, FLASH_SIZE = 0x20000;      // 128 KB
 const RAM = 0x20000000, RAM_SIZE = 0x10000;          // 64 KB
@@ -137,6 +138,7 @@ export class MockTarget {
   }
 
   _u32(buf, o){ return (buf[o] | (buf[o + 1] << 8) | (buf[o + 2] << 16) | (buf[o + 3] << 24)) >>> 0; }
+  _u16(buf, o){ return ((buf[o] | (buf[o + 1] << 8)) & 0xffff) >>> 0; }
   _put32(buf, o, v){ buf[o] = v & 0xff; buf[o + 1] = (v >>> 8) & 0xff; buf[o + 2] = (v >>> 16) & 0xff; buf[o + 3] = (v >>> 24) & 0xff; }
   _put16(buf, o, v){ buf[o] = v & 0xff; buf[o + 1] = (v >>> 8) & 0xff; }
 
@@ -303,7 +305,14 @@ export class MockTarget {
   }
   _now(){ return Date.now(); }
 
-  /** 执行 n 条假指令：PC += 2；撞上 FPB 比较器就停住（PC 停在断点那条指令上） */
+  /**
+   * 执行 n 条假指令：PC 前进（**认 BL/BLX**，跳到目标并把返回地址放进 LR）；
+   * 撞上 FPB 比较器就停住（PC 停在断点那条指令上）。
+   *
+   * 为什么要认 BL/BLX：源码级「单步进入」的实现是"把临时断点放在被调函数的入口"，
+   * 如果假目标永远只会 PC+=2，这条路径就**测不出来**（会上板才发现落点不对）。
+   * flash 默认是 0xBF00（NOP）填充，所以老用例的行为不变。
+   */
   _exec(n){
     for (let k = 0; k < n; k++){
       let pc = this.regs[RI.PC] >>> 0;
@@ -315,7 +324,54 @@ export class MockTarget {
       }
       if ((this.execCount & 0x7ff) === 0) this._pushRtt(`[dbg] tick ${this.execCount >> 11} @0x${pc.toString(16)}\r\n`);
       if (this._bpHit(pc)) return;
-      this.regs[RI.PC] = (pc + 2) >>> 0;
+      let next = (pc + 2) >>> 0;
+      const hw1 = this._u16(this.flash, pc - FLASH);
+      /**
+       * `BX LR`（0x4770）= 函数返回：PC ← LR（抹掉 Thumb 位）。
+       * 有了它，"单步进入 → 单步跳出"才能在假目标上真跑一遍（否则核只会顺序走，
+       * 永远回不到调用点的下一条指令 —— 单步跳出的用例就测不出来）。
+       */
+      if (hw1 === 0x4770){
+        this.regs[RI.PC] = (this.regs[RI.LR] & 0xfffffffe) >>> 0;
+        continue;
+      }
+      /**
+       * `PUSH {r7, lr}`（0xB580）/ `POP {r7, pc}`（0xBD80）：**真的动栈**（SP 减/加 8，值写进 RAM）。
+       *
+       * 为什么假目标也要有栈语义：「单步跳出」在**非叶子函数**里不能只看 LR ——
+       * 本函数内部的 `bl` 早把 LR 覆盖成"那次调用之后的那条指令"了。页面的做法是不碰栈、
+       * 改成"一条条单步走完本函数、用 **SP 有没有弹回去**判断这一帧结没结束"。
+       * 假目标若不动 SP，这条路径就永远走不到终点（测不出来）——
+       * 真机现场：H743 · 6 层嵌套 · 在 engine_deep_l4 里按「跳出」连续 5 次原地不动。
+       */
+      if (hw1 === 0xb580 || hw1 === 0xbd80){
+        const push = hw1 === 0xb580;
+        const sp = this.regs[RI.SP] >>> 0;
+        const nsp = (push ? sp - 8 : sp + 8) >>> 0;
+        const lo = push ? nsp : sp;
+        if (lo >= RAM && lo + 8 <= RAM + RAM_SIZE){
+          const o = lo - RAM;
+          if (push){
+            this._put32(this.ram, o, this.regs[7] >>> 0);            // r7
+            this._put32(this.ram, o + 4, this.regs[RI.LR] >>> 0);    // lr
+          } else {
+            this.regs[7] = this._u32(this.ram, o);
+            next = this._u32(this.ram, o + 4) & 0xfffffffe;          // pc ← 保存的 lr
+          }
+        }
+        this.regs[RI.SP] = nsp;
+        this.regs[RI.PC] = next;
+        continue;
+      }
+      if (thumbLen(hw1) === 4){
+        const hw2 = this._u16(this.flash, pc - FLASH + 2);
+        const call = decodeCall(hw1, hw2, pc);
+        if (call){
+          this.regs[RI.LR] = ((pc + 4) | 1) >>> 0;               // Thumb BL：LR = 返回地址（带 bit0=1）
+          next = call.target >>> 0;
+        } else next = (pc + 4) >>> 0;                           // 其它 32 位指令占 4 字节
+      }
+      this.regs[RI.PC] = next;
     }
   }
 

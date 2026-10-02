@@ -22,20 +22,28 @@ import { closeProbeUsbDevices } from '../core/probe-bus.js';
 import { waitMs, sleep } from '../core/pace.js';
 import { CFBP_SEL, CORE_REGS, SPECIAL_REGS, cfbpGet, cfbpSet, isCfbpSub, regInfo } from './regs.js';
 import { FPB, FP_CTRL_KEY, canBreak, compAddr, decodeFpCtrl, planComparators } from './bp.js';
-import { u32leBytes } from './fmt.js';
+import { hex32, u32leBytes } from './fmt.js';
+import { thumbLen, decodeCall, nextAddrsOf } from './thumb.js';
 
 // Cortex-M 的调试寄存器（PPB）
-const DHCSR = 0xe000edf0, DFSR = 0xe000ed30, AIRCR = 0xe000ed0c;
+const DHCSR = 0xe000edf0, DFSR = 0xe000ed30, AIRCR = 0xe000ed0c, DEMCR = 0xe000edfc;
 const DBGKEY = 0xa05f0000;
 const C_DEBUGEN = 1, C_HALT = 2, C_STEP = 4, C_MASKINTS = 8;
+/** DEMCR.VC_CORERESET：内核一退出复位就停下（"复位并停"停在哪全靠它） */
+const VC_CORERESET = 1;
 
 /**
- * Thumb 指令长度（16 位半字 → 2 或 4 字节）。
- * 判据是 ARMv7-M 的编码分组：`11101`/`11110`/`11111` 开头才是 32 位，
- * 而 `11100`（0xE000~0xE7FF）是 **16 位**的无条件分支 B —— 差这一档就会把 B 当成 4 字节，
- * 断点单步的落点整体偏 2 字节。
+ * 总线 FAULT 的人话。`SWD 块传输 FAULT（读 4 字 @0xc）` 对用户等于天书，
+ * 而真实原因通常就三类：地址没映射（芯片上不存在这个窗口）、外设时钟没开、指向了只写寄存器。
+ * 链路本身由探针层自愈（dap-webusb 的 `_healIfFaulted`），这里只负责把话说清楚。
  */
-const thumbLen = hw => ((hw & 0xf800) >= 0xe800 ? 4 : 2);
+function busFaultText(verb, addr, len){
+  return `${verb} 0x${(addr >>> 0).toString(16)}（${len} 字节）失败：目标回了**总线 FAULT** —— `
+       + '这个地址在当前状态读/写不了（没映射的窗口 / 外设时钟没开 / 只写寄存器 / 跨出了 RAM 末尾）。'
+       + '调试链路会自己重新初始化，不用重连，换一个地址继续即可。';
+}
+
+/* Thumb 的指令长度/调用解码在 app/dbg/thumb.js（那边能单独自测），这里直接用。 */
 
 /** 调试页默认 SWD 时钟（kHz）。
  *  🚨 2026-10-02 由用户拍板改成 **10 MHz**（原来是 1 MHz）：真机实测（akaLinkPro + STM32F103ZE）
@@ -51,6 +59,7 @@ export class DebugSession {
     this.probe = null;
     this.sym = null;                       // SymTab（载入 ELF 后才有）
     this.bps = [];                         // 断点地址（顺序 = 比较器槽位）
+    this.bpNotes = new Map();              // 地址 → 出处备注（如 `main.c:192`；纯显示用，不参与编码）
     this.caps = { numCode: 0, rev: 1, raw: 0 };
     this.halted = false;
     this.pc = 0;
@@ -61,6 +70,12 @@ export class DebugSession {
     this.regs = [];                        // refreshRegs() 的缓存
     this.busy = false;                     // 正在做一次"用户动作"（按钮据此禁用）
     this.log = null;                       // (text, cls) => void
+    /**
+     * C_STEP（DHCSR 单步）到底能不能用：null=还没试过，true/false=试过的结论。
+     * 这颗探针/内核（akaLinkPro + F103ZE/H743）实测**不执行 C_STEP**，一次试探要 ~400 ms，
+     * 所以失败一次就记住，后面全走断点单步（见 `step()`）。
+     */
+    this._cStepWorks = null;
     this._prev = null;                     // 上一次读到的寄存器值（算 changed 高亮）
     this._cfbp = 0;
     this._opChain = Promise.resolve();     // 串行化用的队列（见 exclusive/tryExclusive）
@@ -176,6 +191,7 @@ export class DebugSession {
       this.clockHz = this.probe.clockHz || clockKhz * 1000;
     }
     this._log(`已连接：${this.name}　SWD ${(this.clockHz / 1000).toFixed(0)} kHz　IDCODE=0x${this.idcode.toString(16).toUpperCase()}`, 'ok');
+    this._cStepWorks = null;               // 新的一次连接：C_STEP 支不支持重新探（粘性结论只在本会话内有效）
     await this.refresh();
     if (!mock) await this.verifyClock();
     await this.bpInit();
@@ -214,6 +230,7 @@ export class DebugSession {
     this.probe = null;
     this.halted = false; this.regs = []; this._prev = null;
     this.bps = [];
+    this._cStepWorks = null;              // 换了目标/重连之后重新探一次 C_STEP
     if (p?.disconnect){
       try { await p.disconnect(); this._log('已断开探针', 'dim'); }
       catch (e){ this._log('断开探针时报错（忽略）：' + (e?.message || e), 'warn'); }
@@ -311,7 +328,20 @@ export class DebugSession {
     const pc = (await this.readReg('PC')) & ~1;
     this.lastStepMode = null;
     await this._withBpCleared(pc, async () => {
-      if (await this._stepByDhcsr(pc)){ this.lastStepMode = 'dhcsr'; return; }
+      /**
+       * 🚨 `_cStepWorks` 是**粘性记忆**：这颗探针/内核不执行 C_STEP（DHCSR 写进去 C_STEP、
+       *    回读 0x3000f、PC 纹丝不动 —— 真机实测 F103ZE 与 H743 都是这样），
+       *    而"试一次 C_STEP"要烧掉 400 ms（60 轮 DHCSR 轮询）。不记住的话每次单步都白等半秒，
+       *    「单步跳出」要走上百条指令时就变成"卡死"。失败一次之后直接走断点单步（~15 ms/步）。
+       */
+      if (this._cStepWorks !== false){
+        if (await this._stepByDhcsr(pc)){ this._cStepWorks = true; this.lastStepMode = 'dhcsr'; return; }
+        const wasOk = this._cStepWorks === true;
+        this._cStepWorks = false;
+        this._log((wasOk ? 'C_STEP 没让目标前进（这次；可能刚复位或重连过）'
+                         : '这颗探针/内核不执行 C_STEP（DHCSR 单步位写进去但核纹丝不动）')
+          + ' —— 改用「断点单步」，后面每一步都走这条路，不再重复试探', 'warn');
+      }
       this.lastStepMode = 'breakpoint';
       await this._stepByBreakpoint(pc);
     });
@@ -343,22 +373,41 @@ export class DebugSession {
   }
 
   /**
-   * 断点单步：在 PC 的**下一条指令**上放一个临时比较器，然后运行 —— 核跑到那儿被 FPB 拦下。
+   * 断点单步（C_STEP 不可用时的兜底）：把临时比较器放在**这条指令真正会去的地方**。
    *
-   * Thumb 指令长度：`(hw & 0xF800) >= 0xE800` → 32 位（前缀 11101/11110/11111），否则 16 位。
-   * ⚠️ 下一条若是分支，核会跳到别处 —— 这一步**依然只执行了一条指令**，语义正确，
-   *    只是落点 ≠ pc+len，所以这里只用"有没有停下来"当判据，不假定落点。
+   * 🚨 2026-10 真机压测定因：早先只会把比较器放在"下一条指令"（pc+len）上，
+   *    对**分支/返回**指令是错的 —— 核一跳走，pc+len 永远不会命中，于是白等 2 秒、
+   *    再把核停在某个随机位置（表现："单步跳出"在非叶子函数里连点三次还在原地打转）。
+   *    现在先用 `nextAddrsOf` 把落点算出来（`bx lr` / `pop {pc}` / `b` / `bcc` / `cbz` /
+   *    `bl` 调用 / `ldr pc` …），**条件分支的两个候选都放**比较器，谁被走到都算数。
    */
   async _stepByBreakpoint(pc){
-    let hw;
-    try { hw = await this._readHalfword(pc); }
-    catch (e){ this._log('断点单步：读不到 PC 处的指令（' + (e?.message || e) + '）—— 这一步没执行', 'err'); return false; }
-    const len = thumbLen(hw);
-    const next = (pc + len) >>> 0;
-    this._log(`⚠ C_STEP 没让目标前进（这颗探针/内核不执行 C_STEP）—— 改用「断点单步」：` +
-      `在 0x${next.toString(16)} 放个临时比较器再运行（本条指令 ${len} 字节）`, 'warn');
-    try { await this.bpAdd(next); }
-    catch (e){ this._log('断点单步失败（比较器放不下）：' + (e?.message || e) + ' —— 这一步没执行', 'err'); return false; }
+    let info;
+    try {
+      info = await nextAddrsOf(pc, {
+        readHalf: a => this._readHalfword(a),
+        readWord: async a => { const b = await this.probe.readMem(a >>> 0, 4); return (b[0] | (b[1] << 8) | (b[2] << 16) | (b[3] << 24)) >>> 0; },
+        readReg: n => this.readReg(n),
+      });
+    } catch (e){
+      this._log('断点单步：读不到 PC 处的指令（' + (e?.message || e) + '）—— 这一步没执行', 'err');
+      return false;
+    }
+    const targets = [...new Set(info.addrs.map(a => (a >>> 0) & 0xfffffffe))].filter(a => a !== (pc >>> 0));
+    if (!targets.length){
+      this._log(`断点单步：这条指令（${info.why}）算不出落点 —— 这一步没执行`, 'err');
+      return false;
+    }
+    const placed = [];
+    for (const t of targets){
+      if (this._bpAt(t) !== undefined){ placed.push({ t, mine: false }); continue; }   // 那个地址上本来就有用户断点
+      try { await this.bpAdd(t); placed.push({ t, mine: true }); }
+      catch (e){ this._log(`断点单步：比较器不够，放弃候选落点 0x${t.toString(16)}`, 'warn'); }
+    }
+    if (!placed.length){
+      this._log('断点单步失败（比较器放不下）—— 这一步没执行', 'err');
+      return false;
+    }
     try {
       await this._clearDfsr();
       await this.run();
@@ -368,20 +417,295 @@ export class DebugSession {
           const v = await this.probe._readWord(DHCSR);
           this.halted = ((v >>> 17) & 1) === 1;
         } catch { /* 读一次失败不算停 */ }
-        if (this.halted) return true;
+        if (this.halted){
+          const hit = (await this.readReg('PC')) & 0xfffffffe;
+          if (!info.certain) this._log(`断点单步：这条是「${info.why}」，落点不算确定 —— 实际停在 0x${hit.toString(16)}`, 'dim');
+          return true;
+        }
         await waitMs(4);
       }
-      this._log('断点单步：目标没在 2 s 内停下来（可能下一条是分支，跑到别处去了）', 'warn');
+      this._log(`断点单步：2 s 内没停到任何候选落点（${info.why}；候选 `
+        + targets.map(t => '0x' + t.toString(16)).join(' / ') + '）—— 目标已暂停', 'warn');
       await this.probe.halt().catch(() => {});
       return false;
     } finally {
-      await this.bpDel(next).catch(() => {});
+      for (const p of placed) if (p.mine) await this.bpDel(p.t).catch(() => {});
     }
   }
 
   async _readHalfword(addr){
     const b = await this.probe.readMem(addr >>> 0, 2);
     return (b[0] | (b[1] << 8)) & 0xffff;
+  }
+
+  // ------------------------------------------------------------ 源码级单步 / 运行到光标
+
+  /**
+   * 「放一个临时比较器 → 运行 → 等它停下 → 把比较器收干净」——
+   * 源码级单步与「运行到光标」的共同底座。
+   *
+   * 🚨 三个坑（都会伪装成"点了按钮没反应"）：
+   *   ① **PC 上原本就有用户断点**：不先摘掉它，一放开就原地再命中（看着像没动）——
+   *      交给 `_withBpCleared()`；临时断点加在"摘掉之后"的状态里，收尾顺序反过来。
+   *   ② **临时断点正好落在用户断点上**：不能删（那是用户的）——这种情况干脆不加比较器，
+   *      直接跑，让用户断点替我们拦住。
+   *   ③ **FPB 比较器被用户断点占满**：必须给人话错误（"先删一个"），不能静默走成"没停"。
+   *
+   * @returns {Promise<number|null>} 停下来的 PC（没停下返回 null，且目标已被暂停）
+   */
+  async _tempBpRun(target, { clearAt = null, what = '临时断点', timeoutMs = 3000 } = {}){
+    target = (target >>> 0) & 0xfffffffe;
+    const go = async () => {
+      const mine = this._bpAt(target) === undefined;
+      if (mine){
+        try { await this.bpAdd(target); }
+        catch (e){
+          throw new Error(`${what}：需要在 0x${target.toString(16)} 放一个临时比较器，但硬件断点已用完`
+            + `（${this.bps.length}/${this.caps.numCode}）—— 先删掉一个用户断点再试`);
+        }
+      }
+      try {
+        await this._clearDfsr();
+        await this.run();
+        const t0 = Date.now();
+        while (Date.now() - t0 < timeoutMs){
+          await waitMs(4);
+          try {
+            const v = await this.probe._readWord(DHCSR);
+            this.halted = ((v >>> 17) & 1) === 1;
+          } catch { /* 读一次失败不算停 */ }
+          if (this.halted) return (await this.readReg('PC')) & 0xfffffffe;
+        }
+        await this.probe.halt().catch(() => {});
+        await this.refresh();
+        this._log(`${what}：${timeoutMs} ms 内没停下来（已把目标暂停在 0x${((this.pc >>> 0)).toString(16)}）`, 'warn');
+        return null;
+      } finally {
+        if (mine) await this.bpDel(target).catch(() => {});
+      }
+    };
+    return clearAt != null ? await this._withBpCleared(clearAt, go) : await go();
+  }
+
+  /** 地址 → "文件:行"（没有行号信息时给空串） */
+  _locText(addr){ try { return this.sym?.locText?.(addr >>> 0) || ''; } catch { return ''; } }
+
+  /**
+   * 函数入口的"第一条语句"地址：优先 `prologue_end`（gdb 同款：跳过序言），
+   * 退到第一条 `is_stmt`，都没有就停在入口本身（库函数/汇编块没有行号信息）。
+   */
+  _entryStmt(addr){
+    const a = (addr >>> 0) & 0xfffffffe;
+    const rows = this.sym?.lines?.rowsInRange(a, (a + 64) >>> 0, 64) || [];
+    if (!rows.length) return a;
+    const pe = rows.find(r => r.prologueEnd);
+    if (pe) return pe.addr;
+    const st = rows.find(r => r.isStmt);
+    return st ? st.addr : rows[0].addr;
+  }
+
+  /** 源码级「单步跳过」(F10)：跑到**当前行的下一条语句**停下（函数调用整行跳过） */
+  async stepOver(){
+    if (!this.halted) throw new Error('目标在运行 —— 先「暂停」再单步');
+    if (!this.sym?.lines) throw new Error('这份 ELF 没有行号信息（编译时没带 -g？）—— 源码级单步用不了，用 `s` 走指令级单步');
+    const pc = (await this.readReg('PC')) & 0xfffffffe;
+    const next = this.sym.lines.nextStmtAddr(pc);
+    if (!next){
+      throw new Error(`这一行（${this._locText(pc) || hex32(pc)}）后面没有行号记录了（函数最后一行 / 汇编块）`
+        + '—— 用 s 走指令级单步、c 继续，或 rc 指定目标行');
+    }
+    this.lastStepMode = 'over';
+    /**
+     * 🚨 当前这一行已经是函数的最后一条语句时（`next.tail`），**要像 gdb 那样跳出函数**：
+     *    后面只剩编译器给"右花括号/收尾"挂的非语句记录，若照停不误会停在 `}` 那一行，
+     *    用户按 F10 看着像"没反应"（真机压测：engine_linear 末尾要白按两次才回到调用者）。
+     */
+    if (next.tail && !next.isStmt){
+      const out = await this.stepOut();
+      return `单步跳过：这一行是 ${this.sym.funcAt?.(pc)?.name || '函数'} 的最后一条语句 —— ` + out;
+    }
+    const hit = await this._tempBpRun(next.addr, { clearAt: pc, what: '单步跳过' });
+    if (hit == null){
+      /**
+       * 超时的**典型**原因不是"工具坏了"：行号表里"当前行之后的第一条语句"可能**根本不可达** ——
+       * 比如 `for(;;)` 的末尾（后面紧接着的是别的函数的代码，GCC 常把它们排在同一条行号序列里，
+       * 2026-10 真机在 H743 上就是这个情形：目标行算成了 `main.c:144`（wait_field 的代码））。
+       * MDK/gdb 遇到这种也会一直跑下去，所以这里**如实说明 + 给出替代动作**，不假装成功。
+       */
+      const where = this._locText(next.addr) || hex32(next.addr);
+      return `单步跳过：${Math.round(3000 / 1000)} s 内没停到目标行（${where}）—— 常见原因是这一行的“下一条语句”不可达`
+        + `（例如无限循环的末尾）；目标已暂停在 ${this._locText(this.pc) || hex32(this.pc)}。`
+        + '可以改用 s（指令级单步）、rc <文件:行>（跑到指定行）或 c（继续）';
+    }
+    this.pc = hit;
+    return `单步跳过 → ${this._locText(hit) || hex32(hit)}（0x${hit.toString(16)}）`;
+  }
+
+  /**
+   * 源码级「单步进入」(F11)：当前指令是调用（BL/BLX）→ 停到**被调函数的第一条语句**；
+   * 不是调用（普通语句）→ 等同"单步跳过"；`BLX <reg>` 这类目标算不出来 → 走指令级单步。
+   */
+  async stepInto(){
+    if (!this.halted) throw new Error('目标在运行 —— 先「暂停」再单步');
+    const pc = (await this.readReg('PC')) & 0xfffffffe;
+    let call = null;
+    try {
+      const hw1 = await this._readHalfword(pc);
+      if (thumbLen(hw1) === 4){
+        const hw2 = await this._readHalfword((pc + 2) >>> 0);
+        call = decodeCall(hw1, hw2, pc);
+      }
+    } catch (e){ this._log('读 PC 处指令失败（按指令级单步处理）：' + (e?.message || e), 'dim'); }
+
+    if (!call || !call.target){
+      this._log('这一条不是可静态解析的调用（BL/BLX）—— 按指令级单步进入', 'dim');
+      await this.step();
+      this.lastStepMode = 'into(insn)';
+      const at = (await this.readReg('PC')) & 0xfffffffe;
+      this.pc = at;
+      return `单步进入（指令级）→ ${this._locText(at) || this.sym?.nameOf?.(at) || hex32(at)}`;
+    }
+    const entry = this.sym?.lines ? this._entryStmt(call.target) : (call.target >>> 0);
+    this.lastStepMode = 'into';
+    const hit = await this._tempBpRun(entry, { clearAt: pc, what: '单步进入（函数第一条语句）' });
+    if (hit == null) return `单步进入：没停到函数里（目标 ${this._locText(entry) || hex32(entry)}），已暂停`;
+    this.pc = hit;
+    return `单步进入 → ${this._locText(hit) || this.sym?.nameOf?.(hit) || hex32(hit)}（0x${hit.toString(16)}）`;
+  }
+
+  /**
+   * LR 到底是不是**当前这一帧**的返回地址（"单步跳出"能不能走快路径的判据）。
+   *
+   * 🚨 为什么不能只看"LR 在不在当前函数里"（2026-10 真机压测第二版才定死）：
+   *    函数末尾若是 `pop {r7, pc}`（不含 lr），LR **不会**被恢复 —— 于是"刚从一个内部调用
+   *    返回"之后，LR 里留着的是那次调用的返回地址，它落在**被调函数**里（既不等于当前函数、
+   *    也不等于调用者）。只看"在不在当前函数里"会把这种陈旧值当成合法返回地址，
+   *    于是"跳出"跳到一个**已经返回过的旧位置**（压测现场：从 engine_deep_l3 跳到 deep_l5 里，
+   *    再顺着调用链转一圈回来 —— 连点 5 次跳出还在原地打转）。
+   *
+   * 可信判据（可以静态验证）：**返回地址前面那条指令，必须是一个"调用当前所在函数"的调用** ——
+   * 因为"F 的返回地址"就是这么来的：`bl F` 的下一条。验证不了（间接调用 `blx Rn`、
+   * 读不到代码、当前 PC 不在任何已知函数里）就**老实走慢路径**，不猜。
+   */
+  async _validReturnAddr(pc, lr){
+    const R = (lr & 0xfffffffe) >>> 0;
+    if (!R || lr === 0xffffffff || (lr >>> 28) === 0xf) return false;
+    const self = this.sym?.funcAt?.(pc >>> 0);
+    if (!self?.exact) return false;
+    let b;
+    try { b = await this.memRead((R - 4) >>> 0, 4); }
+    catch { return false; }
+    const hw = o => (b[o] | (b[o + 1] << 8)) & 0xffff;
+    const c32 = decodeCall(hw(0), hw(2), (R - 4) >>> 0);       // 32 位 BL/BLX(imm)
+    if (c32 && c32.kind === 'bl' && this.sym.funcAt(c32.target)?.addr === self.addr) return true;
+    return false;                                              // 16 位间接调用/对不上 → 不可信
+  }
+
+  /**
+   * 源码级「单步跳出」(Shift+F11)：跑到**调用点的下一条指令**。
+   *
+   * 🚨 **为什么不能只看 LR**（2026-10 真机压测抓到的最大的体验坑）：
+   *    LR 只在**叶子函数**里才一直是返回地址。只要本函数里调用过别人（非叶子函数），
+   *    那条 `bl` 就把 LR 覆盖成"这次调用之后的那条指令" —— 此时按「跳出」会原地不动
+   *    （目标地址 == 当前 PC，于是只回报一句"已经在这一行"），而 MDK/Ozone/gdb 会正常跳回调用者。
+   *    实测现场：H743 · 6 层嵌套 · 在 `engine_deep_l4` 里按「跳出」，
+   *    `LR=0x80002bd` 正是本函数里 `bl deep_l5` 的下一条指令。
+   *
+   * 两种走法（都**不碰栈内存** —— H7 的栈常在 DTCM(0x20000000)，虽然实测这颗探针读得到，
+   * 但别的板子/别的探针不一定，所以这条路必须能不依赖"读栈"）：
+   *   ① **LR 通过静态校验**（见 `_validReturnAddr`）→ 直接在返回地址放临时比较器跑过去（最快）；
+   *   ② **通不过校验**（被覆盖 / 陈旧值 / 间接调用）→ **单步走完本函数剩下的部分**，
+   *      边走边看 SP：SP 高过起步值 = 本帧弹掉了 = 回到调用者了。途中"进了别的函数"
+   *      （真调用 / 中断）就用 LR 临时比较器**跨过去**，不跟着钻进去 ——
+   *      代价只有"本函数剩余指令数"，与调用深度、被调函数多大都无关。
+   */
+  async stepOut(){
+    if (!this.halted) throw new Error('目标在运行 —— 先「暂停」再单步');
+    const pc0 = (await this.readReg('PC')) & 0xfffffffe;
+    const sp0 = (await this.readReg('SP')) >>> 0;
+    const lr = (await this.readReg('LR')) >>> 0;
+    const self = this.sym?.funcAt?.(pc0) || null;
+    this.lastStepMode = 'out';
+    if (lr === 0 || lr === 0xffffffff || (lr >>> 28) === 0xf){
+      throw new Error(`LR = 0x${lr.toString(16)} 不是返回地址（0xFFFFFFFx 是 EXC_RETURN：核在异常处理里，`
+        + '或者已经是最外层调用）—— 没法"跳出"');
+    }
+
+    // ① LR 可信：直接跑过去
+    if (await this._validReturnAddr(pc0, lr)){
+      const hit = await this._tempBpRun(lr & 0xfffffffe, { clearAt: pc0, what: '单步跳出（返回地址）' });
+      if (hit == null) return '单步跳出：没停到返回地址，目标已暂停';
+      this.pc = hit;
+      return `单步跳出 → ${this._locText(hit) || this.sym?.nameOf?.(hit) || hex32(hit)}（0x${hit.toString(16)}，按 LR 返回）`;
+    }
+
+    // ② LR 不可信（被内部调用覆盖 / 陈旧值）：单步走完本函数，用 SP 判断"帧弹掉了没有"
+    if (!self){
+      throw new Error('这一层查不到函数信息（ELF 里没有 PC 所属的函数）—— 用 s 走指令级单步，或 c 继续');
+    }
+    const r = await this._stepOutByFrame(sp0, self, pc0);
+    this.lastStepMode = 'out';
+    await this.refresh();
+    await this.refreshRegs();
+    if (r.hit != null){
+      this.pc = r.hit;
+      return `单步跳出 → ${this._locText(r.hit) || this.sym?.nameOf?.(r.hit) || hex32(r.hit)}`
+           + `（0x${r.hit.toString(16)}，LR 不是本帧的返回地址（被内部调用覆盖或已陈旧），`
+           + `走了 ${r.steps} 条指令回到调用者）`;
+    }
+    if (r.error) throw new Error(r.error);
+    return `单步跳出：在本函数（${self.name}）里走了 ${r.steps} 条指令还没回到调用者`
+         + `（可能是死循环、或函数太大）—— 目标已暂停在 ${this._locText(r.pc) || hex32(r.pc)}`;
+  }
+
+  /**
+   * 「跳出」的慢路径：从当前 PC 单步往前走，直到**本函数这一帧被弹掉**（SP 高过起步值且 PC 不在本函数里）。
+   * 遇到别的函数（真调用 / 中断）用 LR 临时比较器跨过去。
+   * @returns {Promise<{hit?:number, steps:number, pc?:number, error?:string}>}
+   */
+  async _stepOutByFrame(sp0, self, pc0){
+    const MAX = 400;                              // 上限：够走完任何正常函数的剩余部分
+    for (let i = 1; i <= MAX; i++){
+      try { await this.step(); }
+      catch (e){ return { steps: i, pc: this.pc >>> 0, error: `单步跳出：单步失败（${e?.message || e}）` }; }
+      const pc = (await this.readReg('PC')) & 0xfffffffe;
+      const sp = (await this.readReg('SP')) >>> 0;
+      const at = this.sym?.funcAt?.(pc) || null;
+      const inSelf = !!at && at.addr === self.addr;
+      if (inSelf) continue;
+      if (sp > sp0) return { hit: pc, steps: i };          // 帧弹掉了 → 已经回到调用者
+      /**
+       * 还在别人的代码里、SP 却没升高 —— 这是**调用或中断**（不是返回）：
+       * 用 LR 放个临时比较器跨过去，别一条条钻。异常里的 LR 是 EXC_RETURN，跨不了，只能让它自己走完。
+       */
+      const lr = (await this.readReg('LR')) >>> 0;
+      const exc = lr === 0 || lr === 0xffffffff || (lr >>> 28) === 0xf;
+      if (!exc){
+        const hit = await this._tempBpRun(lr & 0xfffffffe, { clearAt: pc, what: '单步跳出（跨过调用）', timeoutMs: 2000 });
+        if (hit != null){
+          const sp2 = (await this.readReg('SP')) >>> 0;
+          if (sp2 > sp0) return { hit: (await this.readReg('PC')) & 0xfffffffe, steps: i };
+        }
+      }
+    }
+    return { steps: MAX, pc: (await this.readReg('PC')) & 0xfffffffe };
+  }
+
+  /**
+   * 「运行到光标」：跑到指定地址停下（源码视图双击某一行就是它）。
+   * 目标地址上**已经有用户断点**时直接跑（让那个断点拦住），不再加临时比较器。
+   */
+  async runTo(addr, { label = '', timeoutMs = 8000 } = {}){
+    if (!this.connected) throw new Error('还没连接目标（先点「连接」）');
+    const target = (addr >>> 0) & 0xfffffffe;
+    const pc = this.halted ? ((await this.readReg('PC')) & 0xfffffffe) : null;
+    if (pc != null && target === pc) return `已经停在这一行上（${label || hex32(target)}）`;
+    const hit = await this._tempBpRun(target, {
+      clearAt: pc, what: `运行到 ${label || hex32(target)}`, timeoutMs,
+    });
+    if (hit == null) return `运行到 ${label || hex32(target)}：${Math.round(timeoutMs / 1000)} s 内没到达（目标已暂停）`;
+    this.pc = hit;
+    return `已运行到 ${this._locText(hit) || label || hex32(hit)}（0x${hit.toString(16)}）`;
   }
 
   /** 清调试事件标志（命中过断点后 DFSR.BKPT 会一直挂着，清掉才能判断下一次是怎么停的） */
@@ -391,16 +715,38 @@ export class DebugSession {
 
   /**
    * 复位（软件复位：AIRCR.SYSRESETREQ）。
+   *
    * 🚨 不用探针的 nRESET 引脚：本机好几块板根本没把 NRST 接到探针，"拉复位"看着成功其实没动；
-   *    而 AIRCR 走内核寄存器，一定到。另外**复位前先写 C_HALT**，
-   *    这样复位后内核停在复位向量上（标准的 "reset and halt"），不会跑飞。
+   *    而 AIRCR 走内核寄存器，一定到。
+   *
+   * 🚨🚨 **"复位并停"要在复位向量上停住**（2026-10 压测抓到的体验问题）：
+   *    只写 `C_HALT` 再 SYSRESETREQ 是不够的 —— 实测（H743 + akaLinkPro）复位后内核照样跑，
+   *    等我们去"停"它的时候已经跑到 `main+0x6c` 了：用户点了「复位并停」，PC 却不在复位向量上；
+   *    更糟的是如果此刻挂着断点，内核会**一路跑到断点**（"复位重跑"于是变成"复位后直接停在某个断点"）。
+   *    正解是 **DEMCR.VC_CORERESET（内核复位向量捕获）**：置上它，内核一退出复位就立刻停下、
+   *    一条指令都不执行（OpenOCD / MDK 的 `reset halt` 用的就是这一位）。
+   *    复位完必须把这一位清掉，否则接下来"复位并运行"也会被咬住停在向量上。
    */
   async _resetCore(){
-    await this.probe._dhcsr(DBGKEY | C_DEBUGEN | C_HALT);
-    await this.probe.writeMem(AIRCR, u32leBytes(0x05fa0004));
-    await waitMs(60);                       // 给目标 60 ms 真的复位（yieldTask 不受后台节流影响）
+    const demcr0 = await this._readDemcr();
+    if (demcr0 != null) await this._writeDemcr(demcr0 | VC_CORERESET);   // ① 开向量捕获
+    await this.probe._dhcsr(DBGKEY | C_DEBUGEN | C_HALT);               // ② 再请求停住（双保险）
+    await this.probe.writeMem(AIRCR, u32leBytes(0x05fa0004));           // ③ 软复位
+    await waitMs(60);                                                   // 给目标 60 ms 真的复位（yieldTask 不受后台节流影响）
     try { await this.probe._targetInit(); }
     catch (e){ this._log('复位后重新初始化 SWD 失败（继续试）：' + (e?.message || e), 'warn'); }
+    await this.probe.halt().catch(() => {});
+    if (demcr0 != null) await this._writeDemcr(demcr0 & ~VC_CORERESET);   // ④ 关掉捕获
+    return demcr0;
+  }
+
+  /** 读 DEMCR（读不到就返回 null —— 复位流程不该因为读不到它就断掉） */
+  async _readDemcr(){
+    try { const b = await this.probe.readMem(DEMCR, 4); return (b[0] | (b[1] << 8) | (b[2] << 16) | (b[3] << 24)) >>> 0; }
+    catch { return null; }
+  }
+  async _writeDemcr(v){
+    try { await this.probe.writeMem(DEMCR, u32leBytes(v >>> 0)); return true; } catch { return false; }
   }
 
   async resetHalt(){
@@ -471,15 +817,33 @@ export class DebugSession {
 
   // ------------------------------------------------------------ 内存
 
+
+  /**
+   * 内存读写。**FAULT 要翻译成人话**：`SWD 块传输 FAULT（读 4 字 @0xc）` 对用户等于天书，
+   * 而真实原因通常就三类：地址没映射（读到了芯片上不存在的窗口）、外设时钟没开、
+   * 指向了只写的寄存器。链路本身在探针层会自动修（见 dap-webusb 的 `_healIfFaulted`）。
+   */
   async memRead(addr, len){
     if (!len) return new Uint8Array(0);
+    const a = addr >>> 0;
     const budget = Math.max(3000, Math.ceil(len / 32) * 200);
-    return await withTimeout(this.probe.readMem(addr >>> 0, len >>> 0), budget, `读内存 ${len} 字节`);
+    try {
+      return await withTimeout(this.probe.readMem(a, len >>> 0), budget, `读内存 ${len} 字节`);
+    } catch (e){
+      if (e?.ack === 4 || /FAULT/.test(e?.message || '')) throw new Error(busFaultText('读', a, len));
+      throw e;
+    }
   }
 
   async memWrite(addr, bytes){
+    const a = addr >>> 0;
     const budget = Math.max(3000, Math.ceil(bytes.length / 32) * 200);
-    await withTimeout(this.probe.writeMem(addr >>> 0, bytes), budget, `写内存 ${bytes.length} 字节`);
+    try {
+      await withTimeout(this.probe.writeMem(a, bytes), budget, `写内存 ${bytes.length} 字节`);
+    } catch (e){
+      if (e?.ack === 4 || /FAULT/.test(e?.message || '')) throw new Error(busFaultText('写', a, bytes.length));
+      throw e;
+    }
   }
 
   // ------------------------------------------------------------ 断点（FPB）
@@ -507,11 +871,19 @@ export class DebugSession {
   }
 
   bpList(){
-    return this.bps.map((addr, i) => ({ addr: addr >>> 0, slot: i, sym: this.sym?.funcAt?.(addr & ~1)?.name || this.sym?.find?.(String(addr))?.name || '' }));
+    return this.bps.map((addr, i) => ({
+      addr: addr >>> 0, slot: i,
+      sym: this.sym?.funcAt?.(addr & ~1)?.name || this.sym?.find?.(String(addr))?.name || '',
+      note: this.bpNotes.get(addr & ~1) || '',
+      /** 行号表里反查出来的出处（`main.c:192`）——断点列表显示它，用户才知道自己下在源码哪一行 */
+      loc: this._locText(addr & ~1),
+    }));
   }
 
-  /** 加断点（返回 index 是 0 基，命令层显示时 +1） */
-  async bpAdd(addr){
+  /** 加断点（返回 index 是 0 基，命令层显示时 +1）。
+   *  @param {number} addr
+   *  @param {string} [note] 出处备注（`b main.c:192` 会带上来），只用于显示 */
+  async bpAdd(addr, note = ''){
     addr = (addr >>> 0) & ~1;              // Thumb：断点只能落在半字边界
     if (!this.caps.numCode) throw new Error('这颗内核没有可用的 FPB 比较器（读回 FP_CTRL 说 0 个）—— 本页暂不支持软件断点');
     if (!canBreak(addr, this.caps.rev)) throw new Error(`FPB rev${this.caps.rev} 只能匹配 0x20000000 以下的地址（0x${addr.toString(16)} 超出范围）`);
@@ -519,6 +891,7 @@ export class DebugSession {
     if (dup >= 0) return { index: dup, warn: '这个地址上已经有断点了' };
     if (this.bps.length >= this.caps.numCode) throw new Error(`硬件断点已用完（上限 ${this.caps.numCode} 个）—— 先删掉一个`);
     this.bps.push(addr);
+    if (note) this.bpNotes.set(addr, note);
     await this._programFpb();
     return { index: this.bps.length - 1 };
   }
@@ -528,6 +901,7 @@ export class DebugSession {
     const n = this.bps.length;
     this.bps = this.bps.filter(b => (b & ~1) !== addr);
     if (this.bps.length === n) return false;
+    this.bpNotes.delete(addr);
     await this._programFpb();
     return true;
   }
@@ -535,6 +909,7 @@ export class DebugSession {
   async bpClear(){
     const n = this.bps.length;
     this.bps = [];
+    this.bpNotes.clear();
     await this._programFpb();
     return n;
   }

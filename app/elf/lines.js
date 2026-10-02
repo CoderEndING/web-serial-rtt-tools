@@ -6,8 +6,10 @@
  * 放在 `app/elf/` 下是因为它跟 `dwarf.js` 一样**只依赖 ELF 字节**，能在 Node 里喂真 ELF 自测。
  *
  * 输出：
- *   `at(addr)`        → `{file, line, col, addr, end, isStmt}`：这个地址属于哪一行
+ *   `at(addr)`        → `{file, line, col, addr, end, isStmt, prologueEnd, seqEnd}`：这个地址属于哪一行
  *   `addrOfLine(f,l)` → 反查地址（在源码行上点一下下断点要用）
+ *   `resolveLine(f,l)`→ 同上，但**带出处**（行号表里的完整路径 + isStmt），命令行 `b 文件:行` 用它
+ *   `nextStmtAddr(a)` → 这一行之后的**下一条语句**地址（源码级单步：step over / step into 的地基）
  *   `paths`           → 去重后的源文件清单（界面「选择源码目录」之后按它取文件）
  *
  * 支持 DWARF 2/3/4/5（v5 的目录/文件表是"格式描述 + 值"两段式，跟 v4 完全不同）。
@@ -328,7 +330,15 @@ export class LineTable {
     this.ends = parts.ends || new Uint32Array(0);          // 覆盖到哪（下一条记录 / 序列结束）
     this.lines = parts.lines || new Int32Array(0);
     this.files = parts.files || new Int32Array(0);         // paths 的下标（-1 = 没路径）
-    this.flags = parts.flags || new Uint8Array(0);         // bit0 isStmt / bit1 prologueEnd
+    this.flags = parts.flags || new Uint8Array(0);         // bit0 isStmt / bit1 prologueEnd / bit2 seqEnd
+    /**
+     * **行号序列号**（每条记录属于哪一段"行号程序区间"）。
+     * 🚨 为什么必须有它：DWARF 只保证"**同一条序列内**地址递增"，不同函数的序列在**链接后**
+     *    地址可以交错（2026-10 真机踩到：按地址排序往前走，从 `main` 的循环跳进了 `wait_field`）。
+     *    `nextStmtAddr()` 靠它把"下一行"限制在同一条序列里。
+     */
+    this.seqs = parts.seqs || new Int32Array(0);
+    this.seqCount = parts.seqCount || 0;
     this.paths = parts.paths || [];                        // 源文件表（`/` 分隔的完整路径）
     this.versions = parts.versions || [];
     this.units = parts.units || 0;
@@ -377,7 +387,7 @@ export class LineTable {
       .map(s => [s.addr >>> 0, (s.addr + s.size) >>> 0])
       .sort((a, b) => a[0] - b[0]);
     const inCode = (a) => !execRanges.length || execRanges.some(([lo, hi]) => a >= lo && a < hi);
-    let off = 0, units = 0, note = '';
+    let off = 0, units = 0, note = '', seqBase = 0;
     while (off < buf.length){
       const cu = cuByOffset.get(off);
       let prog;
@@ -400,7 +410,7 @@ export class LineTable {
         if (i === undefined){ i = paths.length; paths.push(pth); pathIdx.set(k, i); }
         return i;
       });
-      flattenProgram(prog, map, recs, inCode);
+      seqBase += flattenProgram(prog, map, recs, inCode, seqBase);
       units++;
       if (prog.end <= off) break;                 // 防死循环
       off = prog.end;
@@ -409,11 +419,12 @@ export class LineTable {
     recs.sort((a, b) => (a.s - b.s) || (a.e - b.e));
     const n = recs.length;
     const starts = new Uint32Array(n), ends = new Uint32Array(n);
-    const lines = new Int32Array(n), files = new Int32Array(n), flags = new Uint8Array(n);
+    const lines = new Int32Array(n), files = new Int32Array(n), flags = new Uint8Array(n), seqs = new Int32Array(n);
     for (let i = 0; i < n; i++){
-      starts[i] = recs[i].s; ends[i] = recs[i].e; lines[i] = recs[i].line; files[i] = recs[i].path; flags[i] = recs[i].flags;
+      starts[i] = recs[i].s; ends[i] = recs[i].e; lines[i] = recs[i].line; files[i] = recs[i].path;
+      flags[i] = recs[i].flags; seqs[i] = recs[i].seq;
     }
-    return new LineTable({ starts, ends, lines, files, flags, paths, versions, units, note });
+    return new LineTable({ starts, ends, lines, files, flags, seqs, seqCount: seqBase, paths, versions, units, note });
   }
 
   /** 地址 → 源码位置（找不到返回 null）。`addr` 是指令地址，Thumb 的 bit0 会被忽略 */
@@ -442,35 +453,123 @@ export class LineTable {
     return {
       addr: s0, end: e, line: this.lines[pick], file: fi >= 0 ? this.paths[fi] : '',
       isStmt: !!(this.flags[pick] & 1), prologueEnd: !!(this.flags[pick] & 2),
+      seqEnd: !!(this.flags[pick] & 4), seq: this.seqs[pick] | 0, idx: pick,
     };
   }
 
   /** 源码位置 → 地址（在源码行上点一下下断点用；找不到返回 null） */
   addrOfLine(file, line){
-    const key = cleanPath(file).toLowerCase();
-    let map = this._lineCache.get(key);
-    if (!map){
-      map = new Map();
-      const want = key;
-      for (let i = 0; i < this.starts.length; i++){
-        const fi = this.files[i];
-        if (fi < 0) continue;
-        const p = cleanPath(this.paths[fi]).toLowerCase();
-        if (p !== want && !p.endsWith('/' + want)) continue;
-        const ln = this.lines[i];
-        const cur = map.get(ln);
-        // 同一行取**最小地址**；isStmt 的那条优先
-        if (cur === undefined) map.set(ln, i);
-        else if ((this.flags[i] & 1) && !(this.flags[cur] & 1)) map.set(ln, i);
-        else if (this.starts[i] < this.starts[cur] && (this.flags[i] & 1) === !!(this.flags[cur] & 1)) map.set(ln, i);
-      }
-      this._lineCache.set(key, map);
-    }
-    const i = map.get(line);
-    return i === undefined ? null : this.starts[i];
+    const r = this.resolveLine(file, line);
+    return r ? r.addr : null;
   }
 
-  /** 指定地址区间里的全部行记录（源码视图画上下文用；已按地址升序） */
+  /**
+   * 源码位置 → **带出处**的地址：`{addr, file(行号表里的完整路径), line, isStmt}`。
+   * `addrOfLine` 是它的薄封装（老调用点不用改）。
+   *
+   * 文件按**后缀**匹配（`main.c` 能匹配 `/proj/src/main.c`），同一个文件里同一行取
+   * **最小地址**、`is_stmt` 优先 —— 这两条与 gdb 的挑法一致。
+   */
+  resolveLine(file, line){
+    const map = this._lineMap(cleanPath(file).toLowerCase());
+    const i = map.get(line);
+    if (i === undefined) return null;
+    const fi = this.files[i];
+    return { addr: this.starts[i] >>> 0, file: fi >= 0 ? this.paths[fi] : '', line, isStmt: !!(this.flags[i] & 1), idx: i };
+  }
+
+  /** 文件（后缀匹配）→ 行号映射；建一次就缓存住（`resolveLine` 与 `lineRange` 共用） */
+  _lineMap(key){
+    const hit = this._lineCache.get(key);
+    if (hit) return hit;
+    const map = new Map();
+    for (let i = 0; i < this.starts.length; i++){
+      const fi = this.files[i];
+      if (fi < 0) continue;
+      const p = cleanPath(this.paths[fi]).toLowerCase();
+      if (p !== key && !p.endsWith('/' + key)) continue;
+      const ln = this.lines[i];
+      const cur = map.get(ln);
+      // 同一行取**最小地址**；isStmt 的那条优先
+      if (cur === undefined) map.set(ln, i);
+      else if ((this.flags[i] & 1) && !(this.flags[cur] & 1)) map.set(ln, i);
+      else if (this.starts[i] < this.starts[cur] && (this.flags[i] & 1) === !!(this.flags[cur] & 1)) map.set(ln, i);
+    }
+    this._lineCache.set(key, map);
+    return map;
+  }
+
+  /**
+   * 某个源文件在行号表里的**行号范围**（`{min,max,count,path}`；行号表里没有这个文件时 null）。
+   * 用途：行号写错时把"这个文件只有 1~95 行"直接说出来，
+   * 而不是含糊地报"这一行没有代码 —— 可能是空行/声明/被优化掉"（2026-10 压测发现的说人话问题）。
+   */
+  lineRange(file){
+    const map = this._lineMap(cleanPath(file).toLowerCase());
+    if (!map.size) return null;
+    let min = Infinity, max = 0, path = '';
+    for (const [ln, i] of map){
+      if (ln < min) min = ln;
+      if (ln > max) max = ln;
+      if (!path) path = this.paths[this.files[i]] || '';
+    }
+    return { min, max, count: map.size, path };
+  }
+
+  /**
+   * **当前行之后的下一条语句地址**（源码级单步的地基：step over / step into 都靠它）。
+   *
+   * 规则（与 MDK/gdb 在硬件断点下的做法一致）：
+   *   · 从"包含 addr 的那条记录"往后找，跳过同一行的其它记录（`is_stmt` 才是语句开头）；
+   *   · 遇到本条就是序列末尾（`seqEnd`）→ 返回 null（**没有下一行**：函数最后一行 / 汇编块）；
+   *   · 找不到 is_stmt 记录时退一步用第一条记录（有些编译器整段不发 is_stmt）。
+   *
+   * ⚠️ 这是"**地址序**的下一条语句"，不是"源码行号 +1"：对 `for`/`while` 回跳、
+   *    以及 `?:`、逗号表达式这类一行多个语句的情况，落点与 MDK 的"下一行"可能差一条语句
+   *    （MDK 同样受行号表精度限制）。要精确跨过某一行时用 `rc <文件:行>` 明确指定。
+   *
+   * @returns {{addr:number,end:number,line:number,file:string,isStmt:boolean}|null}
+   */
+  nextStmtAddr(addr){
+    const n = this.starts.length;
+    if (!n) return null;
+    const cur = this.at(addr);
+    if (!cur) return null;
+    if (cur.seqEnd) return null;                    // 已经是函数/序列的最后一行
+    let fallback = -1;
+    for (let i = (cur.idx ?? 0) + 1; i < n; i++){
+      /**
+       * 🚨 **只在同一条序列里找**：不同函数的序列在链接后地址可能交错，
+       *    不判序列就会"从 main 的循环一步跨进 wait_field"（2026-10 真机踩到：
+       *    目标行被算成另一个函数里的行号，临时断点永远不命中）。
+       */
+      if ((this.seqs[i] | 0) !== (cur.seq | 0)) break;
+      if (this.starts[i] < cur.end) continue;       // 同一行的其它记录
+      const fi = this.files[i];
+      if (fallback < 0) fallback = i;
+      if (this.flags[i] & 1){
+        return { addr: this.starts[i] >>> 0, end: this.ends[i] >>> 0, line: this.lines[i], file: fi >= 0 ? this.paths[fi] : '', isStmt: true, idx: i, tail: false };
+      }
+    }
+    if (fallback < 0) return null;
+    const fi = this.files[fallback];
+    /**
+     * `tail: true` = **这条记录之后同一个序列里再也没有 `is_stmt` 了** ——
+     * 也就是说当前这一行已经是函数的最后一条语句，后面只剩编译器给"收尾/右花括号"
+     * 挂的那些非语句记录（实测：engine_linear 的 0x800020c/0x8000212 都是 L42 且 is_stmt=0）。
+     * 源码级单步靠它决定"该跳出函数了"：gdb 的 `next` 在这种情况下会直接回到调用者，
+     * 而只按"下一条记录"停的话，用户要白按两次 F10（每次都停在右花括号上，看着像没反应）。
+     */
+    const seq = cur.seq | 0;
+    let tail = true;
+    for (let i = fallback + 1; i < this.starts.length; i++){
+      if ((this.seqs[i] | 0) !== seq) break;
+      if (this.flags[i] & 1){ tail = false; break; }
+    }
+    return { addr: this.starts[fallback] >>> 0, end: this.ends[fallback] >>> 0, line: this.lines[fallback], file: fi >= 0 ? this.paths[fi] : '', isStmt: false, idx: fallback, tail };
+  }
+
+  /** 指定地址区间里的全部行记录（源码视图画上下文、找函数序言结束点用；已按地址升序） */
   rowsInRange(from, to, max = 4000){
     const out = [];
     for (let i = 0; i < this.starts.length; i++){
@@ -478,7 +577,11 @@ export class LineTable {
       if (s < from) continue;
       if (s >= to || out.length >= max) break;
       const fi = this.files[i];
-      out.push({ addr: s, end: this.ends[i], line: this.lines[i], file: fi >= 0 ? this.paths[fi] : '', isStmt: !!(this.flags[i] & 1) });
+      out.push({
+        addr: s, end: this.ends[i], line: this.lines[i], file: fi >= 0 ? this.paths[fi] : '',
+        isStmt: !!(this.flags[i] & 1), prologueEnd: !!(this.flags[i] & 2), seqEnd: !!(this.flags[i] & 4),
+        seq: this.seqs[i] | 0,
+      });
     }
     return out;
   }
@@ -493,9 +596,11 @@ export class LineTable {
 
 // ---------------------------------------------------------------- 内部
 
-/** 把一个程序的行记录摊平成"地址区间"（写进 recs） */
-function flattenProgram(prog, pathMap, recs, inCode = () => true){
+/** 把一个程序的行记录摊平成"地址区间"（写进 recs）；返回"用掉了几条序列" */
+function flattenProgram(prog, pathMap, recs, inCode = () => true, seqBase = 0){
   const rows = prog.rows;
+  let seqs = 0;
+  let curSeq = -1;
   /**
    * 先合并"同一地址的多条记录"：只有最后一条能形成区间（前面的区间长度是 0）。
    * 但 `is_stmt`/`prologue_end` 这些标记可能只挂在前面的那条上 —— 直接丢掉的话
@@ -518,15 +623,28 @@ function flattenProgram(prog, pathMap, recs, inCode = () => true){
      * Cortex-M 的 flash 在 0x08000000，HPM 在 0x80000000）。
      */
     if (!r.addr || !inCode(r.addr)) continue;
+    if (curSeq < 0) curSeq = seqBase + seqs++;   // 本程序的第一条有效记录 = 新序列
     const next = rows[i + 1];
     const end = next ? next.addr : (r.addr + 1);
     if (end <= r.addr) continue;                   // 兜底：空区间不要
+    /**
+     * `seqEnd`（flag bit2）= **这一条是它所在"行号序列"的最后一条**（下一条原始记录就是
+     * `end_sequence`）。源码级单步要靠它判断"这一行已经是函数最后一行"——
+     * 序列边界不在输出里的话，"下一行"会跑到隔壁函数去（DWARF 只保证序列内地址递增）。
+     */
+    let j = i;
+    while (j + 1 < rows.length && rows[j + 1].skip) j++;
+    const nxRaw = rows[j + 1];
+    const seqEnd = (!nxRaw || !!nxRaw.endSeq) ? 1 : 0;
     recs.push({
       s: r.addr >>> 0, e: end >>> 0, line: r.line | 0,
       path: pathMap[r.file] ?? -1,
-      flags: (r.isStmt ? 1 : 0) | (r.prologueEnd ? 2 : 0),
+      seq: curSeq,
+      flags: (r.isStmt ? 1 : 0) | (r.prologueEnd ? 2 : 0) | (seqEnd ? 4 : 0),
     });
+    if (seqEnd) curSeq = -1;                       // 下一条有效记录开启新序列
   }
+  return seqs;
 }
 
 export { parseProgram as _parseLineProgram, samePath };

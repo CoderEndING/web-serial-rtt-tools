@@ -13,11 +13,12 @@
  */
 
 export const CMD_NAMES = [
-  'h', 'help', 'c', 'cont', 's', 'step', 'halt', 'reset', 'r', 'md', 'mw', 'ms',
+  'h', 'help', 'c', 'cont', 's', 'step', 'n', 'next', 'si', 'fin', 'out', 'rc',
+  'halt', 'reset', 'r', 'md', 'mw', 'ms',
   'p', 'x', 'b', 'bd', 'bl', 'info', 'sym', 'w', 'wl', 'wd', 'src', 'sl', 'cls',
 ];
 
-const SYM_CMDS = new Set(['b', 'break', 'p', 'x', 'w', 'watch', 'md', 'mw', 'ms', 'sym']);
+const SYM_CMDS = new Set(['b', 'break', 'p', 'x', 'w', 'watch', 'md', 'mw', 'ms', 'sym', 'rc', 'runto']);
 const REG_CMDS = new Set(['r', 'reg', 'regs']);
 
 /** 最长公共前缀 */

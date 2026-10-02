@@ -12,6 +12,8 @@
 
 import { hex32, hex8, hexdump, parseBytes, parseNum, readLE } from './fmt.js';
 import { decodeXpsr, formatXpsr, regInfo, SPECIAL_REGS, cfbpGet, formatSpecial } from './regs.js';
+import { TREE_LIMITS, treeRows, decodeBitfield } from './watch.js';
+import { SCALARS } from '../elf/dwarf.js';
 
 const L = (t, c) => ({ t, c });
 
@@ -33,11 +35,41 @@ function addrOf(s, args = {}){
   throw new Error(`认不出地址/符号：「${s}」${sym ? '' : '（还没载入 .elf，只能写十六进制地址）'}`);
 }
 
+/** 地址的人话：`main+0x4  main.c:192`（有哪部分给哪部分） */
+function atOf(S, addr){
+  const a = (addr >>> 0) & 0xfffffffe;
+  const f = S.sym?.funcAt?.(a);
+  const loc = S.sym?.locText?.(a) || '';
+  const fn = f ? f.name + (f.off ? '+0x' + f.off.toString(16) : '') : hex32(a);
+  return `${fn}${loc ? '  ' + loc : ''}`;
+}
+
+/**
+ * 把命令行里的一段文本解析成**断点/运行目标**（比 `addrOf` 多认 `文件:行` / `函数:行` / `+5`）。
+ * 解析规则全在 `SymTab.breakSpec()`（纯逻辑，Node 自测覆盖），这里只负责"没有符号表时怎么报错"。
+ */
+function breakSpecOf(S, text){
+  const sym = S.sym;
+  if (!sym) throw new Error(`认不出「${text}」：还没载入 .elf（只能写十六进制地址）`);
+  if (!sym.breakSpec){
+    const r = sym.resolve(text);
+    if (r) return { addr: r.addr, label: r.sym?.name || '' };
+    throw new Error(`认不出地址/符号：「${text}」`);
+  }
+  const spec = sym.breakSpec(text, { pc: S.halted ? (S.pc >>> 0) : null });
+  if (spec.error) throw new Error(spec.error);
+  return spec;
+}
+
 const HELP = [
   '命令（大小写不敏感；地址可以是 0x… 或符号名）：',
   '  h / help              这份帮助',
   '  c / cont              继续运行（PC 停在断点上时会自动跨过它）',
-  '  s / step              单步一条指令（会临时屏蔽中断）',
+  '  s / step              单步一条**指令**（会临时屏蔽中断）',
+  '  n / next              单步**跳过**这一行（源码级，F10；函数调用整行跳过）',
+  '  si                    单步**进入**（源码级，F11；进被调函数的第一条语句）',
+  '  fin / out             单步**跳出**（源码级，Shift+F11；跑到调用点的下一条指令）',
+  '  rc <文件:行|地址>     运行到光标（跑到那里停下，源码行双击同效）',
   '  halt                  暂停目标',
   '  reset [run|halt]      复位（默认停住；run = 复位后直接跑）',
   '  r                     打印全部寄存器',
@@ -46,11 +78,11 @@ const HELP = [
   '  md <地址> [长度]      读内存（默认 64 字节）',
   '  mw <地址> <字节…>     写内存（例：mw 0x20000000 01 02 ff）',
   '  ms <地址> <文本>      写字符串（不含结尾 0）',
-  '  p <变量>              打印变量（有 DWARF 时按类型解出数值）',
+  '  p <变量>              打印变量（有 DWARF 时按类型解出数值；**结构体打成缩进的树**）',
   '  x <地址|&变量> [长度] 同 md，但先把符号解释成人话',
-  '  b <地址|符号>         加硬件断点（FPB）',
-  '  bd <编号|地址|all>    删断点（编号见 bl）',
-  '  bl                    列出断点',
+  '  b <地址|符号|文件:行> 加硬件断点（例：b main / b main.c:192 / b +5 / b 0x08000123）',
+  '  bd <编号|地址|符号|文件:行|all>   删断点（编号见 bl）',
+  '  bl                    列出断点（带源码位置）',
   '  w <变量>              加进「监视」窗口（停止时自动刷新；也支持 符号+偏移 / 0x地址）',
   '  wl                    列出监视项与当前值',
   '  wd <编号|名字|all>    删监视项',
@@ -108,10 +140,44 @@ async function runCmdInner(p, session, opts = {}){
       await S.cont();
       return { lines: [L('继续运行（遇到断点或暂停为止）', 'ok'), L(statusLine(S), 'dim')] };
 
-    case 's': case 'step': case 'si': case 'n': case 'next':
+    case 's': case 'step':
       need();
       await S.step();
-      return { lines: [L('单步完成　' + statusLine(S), 'ok'), L(regLine(S, 'PC'), 'dim')] };
+      return { lines: [L('单步（指令级）完成　' + statusLine(S), 'ok'), L(regLine(S, 'PC'), 'dim')] };
+
+    /**
+     * 源码级单步（2026-10 加）：把"一次点一下"的粒度从指令变成**语句**，手感对齐 MDK/Ozone。
+     *   n / next          单步跳过（F10）——函数调用整行跳过
+     *   si                单步进入（F11）——当前是调用就进被调函数的第一条语句
+     *   fin / out         单步跳出（Shift+F11）——跑到调用点的下一条指令
+     * 「跑了几条指令」不重要，落在哪一行才重要 —— 这也是 hook 住硬件断点实现的（见 session）。
+     */
+    case 'n': case 'next': {
+      need();
+      const msg = await S.stepOver();
+      return { lines: [L(msg, /没停到|没停下/.test(msg) ? 'warn' : 'ok'), L(regLine(S, 'PC'), 'dim')] };
+    }
+
+    case 'si': {
+      need();
+      if (!S.stepInto) { await S.step(); return { lines: [L('单步（指令级）完成　' + statusLine(S), 'ok')] }; }
+      const msg = await S.stepInto();
+      return { lines: [L(msg, /没停到/.test(msg) ? 'warn' : 'ok'), L(regLine(S, 'PC'), 'dim')] };
+    }
+
+    case 'fin': case 'finish': case 'out': {
+      need();
+      const msg = await S.stepOut();
+      return { lines: [L(msg, /没停到|没停下/.test(msg) ? 'warn' : 'ok'), L(regLine(S, 'PC'), 'dim')] };
+    }
+
+    case 'rc': case 'runto': {
+      need();
+      if (!args.length) throw new Error('用法：rc <文件:行|地址|符号>（例：rc main.c:192 / rc main+0x20）—— 跑到那里停下');
+      const spec = breakSpecOf(S, args[0]);
+      const msg = await S.runTo(spec.addr, { label: spec.label || hex32(spec.addr) });
+      return { lines: [L(msg, /没到达|已暂停/.test(msg) ? 'warn' : 'ok'), L(regLine(S, 'PC'), 'dim')] };
+    }
 
     case 'halt': case 'stop': case 'pause':
       need();
@@ -192,10 +258,77 @@ async function runCmdInner(p, session, opts = {}){
 
     case 'p': {
       need();
-      if (!args.length) throw new Error('用法：p <变量名>（变量从载入的 .elf 里找）');
+      if (!args.length) throw new Error('用法：p <变量名>（变量从载入的 .elf 里找；结构体/数组会打成缩进的树）');
       const name = args[0];
       const st = S.sym;
       if (!st) throw new Error('还没载入 .elf —— `p` 需要符号表（先在上面点「载入 ELF…」）');
+      /**
+       * 结构体/数组：走 DWARF 的**类型树**（`st.typeOf`），读一次内存、在本地摊平成缩进的行。
+       * 这一步与「监视」窗口的树是同一套代码（app/dbg/watch.js 的 treeRows）。
+       */
+      const ty = st.typeOf?.(name);
+      if (ty?.bad) throw new Error(`「${name}」：${ty.reason}`);
+      if (ty?.type && ty.addr != null
+          && (ty.type.kind === 'struct' || ty.type.kind === 'union' || ty.type.kind === 'array')){
+        const size = Math.max(1, Math.min(ty.type.size || 4, TREE_LIMITS.maxBytes));
+        const raw = await S.memRead(ty.addr, size);
+        checkCancel(opts);
+        const loc = st.locText?.(ty.addr) || '';
+        const rows = treeRows({ type: ty.type, label: name }, raw);
+        const head = `${name} @ ${hex32(ty.addr)}  :  ${ty.type.name || ty.type.kind}`
+          + `（${ty.type.size} 字节，${rows.length} 行）${loc ? '  ' + loc : ''}`;
+        const out = [L(head, 'ok')];
+        for (const r of rows){
+          const indent = '  '.repeat((r.depth || 0) + 1);
+          const hex = r.hex && !String(r.text).includes(r.hex) ? r.hex : '';
+          out.push(L(`${indent}${String(r.name ?? '').padEnd(16, ' ')} ${String(r.text ?? '').padEnd(14, ' ')} ${hex}`.trimEnd(), r.cls === 'dim' ? 'dim' : ''));
+        }
+        if (rows.length >= TREE_LIMITS.maxRows) out.push(L(`  …（只显示前 ${TREE_LIMITS.maxRows} 行；用「监视」窗口展开看同一棵树）`, 'dim'));
+        return { lines: out };
+      }
+      /**
+       * 位域成员（`p g_model.flags.sbits.bias`）：读**存储单元**再按位取。
+       * 不这么做的话打出来的是整个 u32，看着像"值不对"（其实是没按位切）。
+       */
+      if (ty?.bit && ty.addr != null){
+        if (ty.bit.unresolved) throw new Error(`「${name}」是位域（${ty.bit.size} 位），但 DWARF 里读不出它的位偏移`);
+        const size = Math.max(1, Math.min(ty.type?.size || 4, 8));
+        const raw = await S.memRead(ty.addr, size);
+        checkCancel(opts);
+        const bf = decodeBitfield(raw, ty.bit);
+        if (!bf) throw new Error(`「${name}」是位域（${ty.bit.size} 位），但目标里那段字节没读全`);
+        const loc = st.locText?.(ty.addr) || '';
+        const tn = ty.type?.name || ty.type?.scalar || '?';
+        return { lines: [L(`${name} @ ${hex32(ty.addr)}  :  ${tn} 位域[bit ${ty.bit.inUnit} · ${ty.bit.size} 位]${bf.signed ? ' 有符号' : ''} = ${bf.text}  (${bf.hex})${loc ? '  ' + loc : ''}`, 'ok')] };
+      }
+      /**
+       * 复合路径走到的**标量/指针/枚举**：`p g_model.nodes[1].cell.ch`、`p g_model.label`。
+       * 这些成员不在"展平的可采样表"里（数组整体不展平、指针被采样器跳过），
+       * 只能靠 `typeOf` 给的地址 + 类型现读现解；缺了这一段就会报"找不到变量"，
+       * 而用户看到的明明是个合法路径（2026-10 压测抓到）。
+       */
+      if (ty?.type && ty.addr != null && (ty.type.kind === 'scalar' || ty.type.kind === 'pointer' || ty.type.kind === 'enum')){
+        const info = ty.type.scalar ? SCALARS[ty.type.scalar] : null;
+        const size = Math.max(1, Math.min(info?.size || ty.type.size || 4, 8));
+        const raw = await S.memRead(ty.addr, size);
+        checkCancel(opts);
+        const loc = st.locText?.(ty.addr) || '';
+        const tn = ty.type.name || ty.type.scalar || ty.type.kind;
+        let line;
+        if (ty.type.kind === 'pointer'){
+          const p = decodeScalar('u32', raw);
+          line = `${name} @ ${hex32(ty.addr)}  :  ${tn} = ${hex32(p >>> 0)}${p === 0 ? '（NULL）' : ''}`
+               + `　（指针只显示地址本身，要跟进去用 p *${hex32(p >>> 0)}）${loc ? '  ' + loc : ''}`;
+        } else if (info){
+          const v = decodeScalar(ty.type.scalar, raw);
+          const hex = '0x' + readLE(raw, 0, info.size).toString(16);
+          const num = info.float ? (Number.isFinite(v) ? v.toPrecision(6) : String(v)) : String(v);
+          line = `${name} @ ${hex32(ty.addr)}  :  ${tn} = ${num}${info.float ? '' : `  (${hex})`}${loc ? '  ' + loc : ''}`;
+        } else {
+          line = `${name} @ ${hex32(ty.addr)}  :  ${tn} = ${[...raw].map(hex8).join(' ')}${loc ? '  ' + loc : ''}`;
+        }
+        return { lines: [L(line, 'ok')] };
+      }
       const t = st.varType(name);
       if (!t){
         const r = st.resolve(name);
@@ -212,16 +345,16 @@ async function runCmdInner(p, session, opts = {}){
 
     case 'b': case 'break': {
       need();
-      if (!args.length) throw new Error('用法：b <地址|符号>（例：b main / b 0x08000123）');
-      const a = addrOf(args[0], { session: S });
-      const r = await S.bpAdd(a.addr);
-      return { lines: [L(`断点 #${r.index + 1} @ ${hex32(a.addr)}${a.sym ? ` (${a.sym.name})` : ''}`, r.warn ? 'warn' : 'ok'),
+      if (!args.length) throw new Error('用法：b <地址|符号|文件:行|函数:行>（例：b main / b main.c:192 / b 0x08000123 / b +5）');
+      const spec = breakSpecOf(S, args[0]);
+      const r = await S.bpAdd(spec.addr, spec.label || '');
+      return { lines: [L(`断点 #${r.index + 1} @ ${hex32(spec.addr)}  ${atOf(S, spec.addr)}${spec.label && spec.via !== 'sym' ? `　[${spec.label}]` : ''}`, r.warn ? 'warn' : 'ok'),
                        ...(r.warn ? [L('   ' + r.warn, 'warn')] : [])] };
     }
 
     case 'bd': case 'delete': {
       need();
-      if (!args.length) throw new Error('用法：bd <编号|地址|符号|all>');
+      if (!args.length) throw new Error('用法：bd <编号|地址|符号|文件:行|all>');
       if (args[0] === 'all' || args[0] === '*'){
         const n = await S.bpClear();
         return { lines: [L(`已清掉 ${n} 个断点`, 'ok')] };
@@ -231,8 +364,8 @@ async function runCmdInner(p, session, opts = {}){
       let target = null;
       if (asNum !== null && asNum >= 1 && asNum <= list.length) target = list[asNum - 1];
       else {
-        const a = addrOf(args[0], { session: S });
-        target = list.find(x => x.addr === a.addr);
+        const spec = breakSpecOf(S, args[0]);
+        target = list.find(x => (x.addr & 0xfffffffe) === (spec.addr & 0xfffffffe));
       }
       if (!target) throw new Error(`找不到这个断点：「${args[0]}」（bl 看现有哪些）`);
       await S.bpDel(target.addr);
@@ -241,10 +374,15 @@ async function runCmdInner(p, session, opts = {}){
 
     case 'bl': case 'breakpoints': {
       const list = S.bpList();
-      if (!list.length) return { lines: [L('没有断点（b <地址|符号> 添加）', 'dim')] };
-      list.forEach((b, i) => lines.push(L(`  #${i + 1}  ${hex32(b.addr)}${b.sym ? '  ' + b.sym : ''}  比较器 ${b.slot}`, 'ok')));
+      if (!list.length) return { lines: [L('没有断点（b <地址|符号|文件:行> 添加）', 'dim')] };
+      list.forEach((b, i) => {
+        const where = b.loc || b.sym || '';
+        const note = b.note && !String(where).includes(b.note) ? `　(${b.note})` : '';
+        lines.push(L(`  #${i + 1}  ${hex32(b.addr)}  ${where ? where.padEnd(22, ' ') : ''.padEnd(22, ' ')}比较器 ${b.slot}${note}`, 'ok'));
+      });
       const cap = S.caps?.numCode || 0;
-      lines.push(L(`共 ${list.length} 个 / 硬件上限 ${cap} 个（FPB rev${S.caps?.rev ?? '?'}）`, 'dim'));
+      lines.push(L(`共 ${list.length} 个 / 硬件上限 ${cap} 个（FPB rev${S.caps?.rev ?? '?'}）—— 源码行上点行号也能下/删`, 'dim'));
+      if (cap && list.length >= cap) lines.push(L('⚠ 比较器已用完：源码级单步（n / si / fin）需要临时占一个 —— 先删掉一个再单步', 'warn'));
       return { lines };
     }
 

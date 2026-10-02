@@ -12,12 +12,119 @@
  */
 
 import { Elf } from '../elf/elf.js';
-import { listSampleable, SCALARS } from '../elf/dwarf.js';
+import { Dwarf, listSampleable, SCALARS } from '../elf/dwarf.js';
 import { LineTable } from '../elf/lines.js';
 import { hex32, parseNum } from './fmt.js';
 
 const byAddr = (a, b) => a.addr - b.addr;
 const baseName = p => String(p || '').replace(/\\/g, '/').split('/').pop();
+
+/** 类型名的人话（错误信息里用；界面那列在 watch.js 的 typeNameOf） */
+function typeText(t){
+  if (!t) return '未知类型';
+  if (t.alias) return t.alias;
+  if (t.kind === 'array') return `${typeText(t.elem)}[${t.count ?? '?'}]`;
+  if (t.kind === 'pointer') return '指针';
+  if (t.kind === 'struct' || t.kind === 'union') return t.name || t.kind;
+  if (t.kind === 'scalar') return t.name || t.scalar || '标量';
+  return t.kind || '未知类型';
+}
+
+/**
+ * 把 `a.b[2].c` 拆成段；**不是路径就返回 null**（单段名字不算路径，走原来的精确查）。
+ * 认的写法只有：标识符 + `.成员` + `[十进制下标]`，别的（表达式、箭头、强转）一律不认——
+ * 认不出就老实返回 null，绝不去猜用户想算什么。
+ *
+ * @returns {Array<{name:string}|{index:number}>|null}
+ */
+export function parsePath(text){
+  const s = String(text ?? '').trim();
+  if (!s) return null;
+  const segs = [];
+  let i = 0;
+  const ident = () => {
+    const m = /^[A-Za-z_$][\w$]*/.exec(s.slice(i));
+    if (!m) return null;
+    i += m[0].length;
+    return m[0];
+  };
+  const head = ident();
+  if (!head) return null;
+  segs.push({ name: head });
+  while (i < s.length){
+    if (s[i] === '.'){
+      i++;
+      const n = ident();
+      if (!n) return null;
+      segs.push({ name: n });
+      continue;
+    }
+    if (s[i] === '['){
+      const m = /^\[(\d+)\]/.exec(s.slice(i));
+      if (!m) return null;
+      i += m[0].length;
+      segs.push({ index: Number(m[1]) });
+      continue;
+    }
+    return null;
+  }
+  return segs.length > 1 ? segs : null;
+}
+
+/**
+ * 顺着路径往下走：累加地址、缩小类型。走到头把最终类型与地址交出去。
+ * 走不通时**带原因返回**（`reason`），调用方负责显示 —— 不静默返回个错地址。
+ *
+ * 位域成员（`mem.bitSize`）走到底时额外给 `bit`：
+ *   `inUnit` = 该位在**存储单元**（= 最终地址处）里的位偏移。
+ *   DWARF 的 `bitOffset` 是"从所在结构体首字节起算"，所以要减掉成员自身的字节偏移。
+ */
+function walkPath(want, segs, head){
+  let addr = head.addr >>> 0;
+  let type = head.type;
+  let bit = null;
+  let reason = null;
+  for (const seg of segs.slice(1)){
+    if (bit){ reason = '位域成员不能再往下走'; break; }
+    if (!type){ reason = '类型未知'; break; }
+    if (seg.index != null){
+      if (type.kind !== 'array'){ reason = `${typeText(type)} 不是数组，不能下标 [${seg.index}]`; break; }
+      const n = type.count ?? 0;
+      if (seg.index >= n){ reason = `下标 [${seg.index}] 越界（数组只有 ${n} 项）`; break; }
+      addr = (addr + seg.index * (type.elem?.size || 0)) >>> 0;
+      type = type.elem;
+      continue;
+    }
+    if (type.kind !== 'struct' && type.kind !== 'union'){
+      reason = `${typeText(type)} 不是结构体/联合，没有成员「${seg.name}」`;
+      break;
+    }
+    const mem = (type.members || []).find(m => m.name === seg.name);
+    if (!mem){
+      const names = (type.members || []).map(m => m.name).slice(0, 12).join(' · ');
+      reason = `没有成员「${seg.name}」（${typeText(type)} 里有：${names}${(type.members || []).length > 12 ? ' …' : ''}）`;
+      break;
+    }
+    if (mem.offset == null){ reason = mem.reason || `成员「${seg.name}」偏移不是常量`; break; }
+    addr = (addr + mem.offset) >>> 0;
+    type = mem.type;
+    if (mem.bitSize){
+      if (mem.bitOffset == null){ bit = { unresolved: true, size: mem.bitSize }; }
+      else {
+        const inUnit = mem.bitOffset - mem.offset * 8;
+        bit = { inUnit: inUnit < 0 ? mem.bitOffset : inUnit, size: mem.bitSize,
+                scalar: type?.scalar || null, signed: !!SCALARS[type?.scalar]?.signed };
+      }
+    }
+  }
+  /**
+   * 🚨 走到一半走不通（成员名写错、下标越界、标量后面又点成员…）时**必须把结果作废**：
+   *    返回 `bad:true` + 原因，而不是把"走到哪算哪"的那个类型/地址交出去 ——
+   *    否则 `p g_model.nope` 会拿着 `g_model` 的类型画一棵看起来正常的树（2026-10 压测抓到）。
+   */
+  if (reason) return { name: want, addr: null, type: null, reason, bad: true };
+  return { name: want, addr, type, reason: null, bit };
+}
 
 export class SymTab {
   constructor(parts = {}){
@@ -35,6 +142,7 @@ export class SymTab {
     this.ram = parts.ram || null;
     this.versions = parts.versions || [];
     this.lines = parts.lines || null;      // 行号表（源码行显示用；没有 DWARF 行号时为 null）
+    this.dwarf = parts.dwarf || null;      // DWARF 句柄（类型树查询用；没有 DWARF 时为 null）
   }
 
   /** @param {ArrayBuffer|Uint8Array} buf .elf 文件内容 */
@@ -50,8 +158,14 @@ export class SymTab {
     const funcs = all.filter(s => s.isFunc && s.addr).map(s => ({ ...s, addr: (s.addr & ~1) >>> 0 }));
     const objs = all.filter(s => s.isObject && s.addr);
     let vars = [], source = 'symtab', note = '', ram = null, versions = [];
+    /**
+     * DWARF 句柄**建一次、两处用**：① 列可采样变量；② 结构体监视要的"完整类型树"按名字现查。
+     * 解析 `.debug_info` 很贵，建两遍纯属浪费（大 ELF 上是几百毫秒级）。
+     */
+    let dwarf = null;
+    try { if (Dwarf.available(elf)) dwarf = new Dwarf(elf); } catch { dwarf = null; }
     try {
-      const r = listSampleable(elf);
+      const r = listSampleable(elf, dwarf ? { dwarf } : {});
       vars = (r.sampleable || []).map(v => ({
         name: v.name, addr: v.addr >>> 0, size: v.size >>> 0,
         scalar: v.scalar || null, typeName: v.typeName || null, path: v.path || v.name,
@@ -74,7 +188,7 @@ export class SymTab {
     } catch (e){
       note = (note ? note + '；' : '') + `行号表解析失败（${e?.message || e}）`;
     }
-    return new SymTab({ all, funcs, objs, vars, source, note, ram, versions, lines });
+    return new SymTab({ all, funcs, objs, vars, source, note, ram, versions, lines, dwarf });
   }
 
   get size(){ return this.all.length; }
@@ -216,5 +330,108 @@ export class SymTab {
     const v = this.varByName.get(String(name || '').trim());
     if (!v) return null;
     return { ...v, scalarInfo: v.scalar && SCALARS[v.scalar] ? SCALARS[v.scalar] : null };
+  }
+
+  /**
+   * 变量的**完整类型树**（结构体/联合/数组本身也要，监视窗口的树与 `p 结构体` 靠它）。
+   *
+   * 走 DWARF（`listSampleable` 只把成员摊平成 `g_pack.u_hi` 这种名字，树在那边丢了）。
+   * 没有 DWARF、或者这个名字在 DWARF 里没有固定地址（被优化掉）→ 返回 null，
+   * 调用方要如实告诉用户"看不见"，**不要猜一个大小出来**。
+   *
+   * 两种写法都认（2026-10 压测补的第二种）：
+   *   ① 顶层变量名 `g_model`；
+   *   ② **复合路径** `g_model.flags` / `g_model.nodes[1].cell` / `g_model.word.halves.lo`
+   *      —— 从顶层变量出发按 DWARF 成员偏移/数组元素大小一路算地址。
+   *      为什么要有②：DWARF 里只有**顶层**变量，`p g_model.flags` 走"精确查名字"必然查不到，
+   *      而 gdb/Ozone 里这是最自然的写法；摊平名（`g_model.flags.bits.level`）虽然也能查，
+   *      但那是采样器的命名，用户不该被迫去猜它。
+   *
+   * @returns {{name:string, addr:number|null, type:object|null, reason:string|null, bit?:object}|null}
+   */
+  typeOf(name){
+    if (!this.dwarf) return null;
+    const want = String(name ?? '').trim();
+    const r = this.dwarf.varType(want);
+    if (r){
+      if (r.addr == null){
+        // DWARF 里有这个名字但位置不固定（优化进寄存器/栈）→ 用符号表兜底地址，类型仍然给它
+        const s = this.varByName.get(want) || this.byName.get(want);
+        return { name: r.name, addr: s?.addr ?? null, type: r.type, reason: r.reason || null };
+      }
+      return r;
+    }
+    // ② 复合路径：从顶层变量往下走（`a.b[2].c`）
+    const segs = parsePath(want);
+    if (!segs) return null;
+    const head = this.dwarf.varType(segs[0].name);
+    if (!head?.type) return null;
+    return walkPath(want, segs, head);
+  }
+
+  /**
+   * 把命令行里的一段文本解析成**断点目标**。支持：
+   *   `main.c:192`   文件:行（文件按后缀匹配，见 LineTable.resolveLine）
+   *   `main:192`     函数:行（用该函数所在文件 + 绝对行号；文件名对不上时才当函数解）
+   *   `+5` / `-3`    相对**当前 PC 所在行**（需要 pc；gdb 的 `break +5` 同款）
+   *   `main` / `0x08000123` / `g_var+4`   地址或符号（与 `resolve()` 同一套）
+   *
+   * 纯逻辑、不碰会话 —— 命令行与自测都走这里。
+   * @returns {{addr:number, via:string, file:string, line:number, label:string}|{error:string}}
+   */
+  breakSpec(text, { pc = null } = {}){
+    const s = String(text ?? '').trim();
+    if (!s) return { error: '空的' };
+    const lines = this.lines;
+    const needLines = () => '这份 ELF 没有行号信息（编译时没带 -g，或被 strip 过）—— 只能按地址/符号下断点';
+
+    // ① 相对当前行：+N / -N
+    const rel = /^([+-])(\d+)$/.exec(s);
+    if (rel){
+      if (pc == null) return { error: `「${s}」是相对当前 PC 的行号：先停下来（目标在跑时没有"当前行"）` };
+      if (!lines) return { error: needLines() };
+      const at = lines.at(pc >>> 0);
+      if (!at?.file) return { error: 'PC 不在有行号信息的代码里，用不了 +N/-N' };
+      const want = at.line + (rel[1] === '+' ? 1 : -1) * Number(rel[2]);
+      const r = want >= 1 ? lines.resolveLine(at.file, want) : null;
+      if (!r) return { error: `${baseName(at.file)} 里没有第 ${want} 行的代码（当前是第 ${at.line} 行）` };
+      return { addr: r.addr, via: 'rel', file: r.file, line: want, label: `${baseName(r.file)}:${want}` };
+    }
+
+    // ② 名字:数字
+    const m = /^(.*?):(\d+)$/.exec(s);
+    if (m){
+      if (!lines) return { error: needLines() };
+      const name = m[1].trim(), line = Number(m[2]);
+      if (!name) return { error: `「${s}」缺少文件名/函数名` };
+      if (!(line >= 1)) return { error: `行号要是 ≥1 的整数：「${s}」` };
+      const r = lines.resolveLine(name, line);
+      if (r) return { addr: r.addr, via: 'file', file: r.file, line, label: `${baseName(r.file)}:${line}` };
+      const f = this.find(name);
+      if (f?.kind === 'func' && f.addr){
+        const at = lines.at(f.addr);
+        if (at?.file){
+          const r2 = lines.resolveLine(at.file, line);
+          if (r2) return { addr: r2.addr, via: 'func', file: r2.file, line, label: `${f.name} → ${baseName(r2.file)}:${line}` };
+        }
+        return { error: `函数 ${name} 所在文件里没有第 ${line} 行的代码` };
+      }
+      const same = lines.paths.filter(p => baseName(p).toLowerCase() === baseName(name).toLowerCase());
+      let hint;
+      if (same.length){
+        const rg = lines.lineRange?.(name);
+        hint = (rg && (line < rg.min || line > rg.max))
+          ? `（${baseName(name)} 里只有第 ${rg.min}~${rg.max} 行有代码，没有第 ${line} 行）`
+          : '（文件对上了，但这一行没有代码 —— 可能是空行/声明/被优化掉）';
+      } else {
+        hint = `（行号表里没有叫「${name}」的源文件，它也不是函数名；用 src 看有哪些文件）`;
+      }
+      return { error: `解析不了「${s}」：${hint}` };
+    }
+
+    // ③ 地址 / 符号（±偏移、&、*）
+    const a = this.resolve(s);
+    if (a) return { addr: a.addr, via: a.sym ? 'sym' : 'addr', file: '', line: 0, label: a.sym?.name || '' };
+    return { error: `认不出地址/符号/文件行：「${s}」` };
   }
 }

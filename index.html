@@ -741,9 +741,12 @@
         <span id="d-pc" class="mono">PC —</span>
         <span id="d-src-pos" class="mono" title="当前源码位置（停下来 / 单步后更新）">—</span>
         <span class="spacer"></span>
-        <button id="d-halt" disabled>暂停</button>
-        <button id="d-cont" disabled>继续</button>
-        <button id="d-step" disabled>单步</button>
+        <button id="d-halt" disabled title="暂停目标（Halt）">暂停</button>
+        <button id="d-cont" disabled title="继续运行（F5）—— PC 停在断点上时会先跨过它">继续</button>
+        <button id="d-step" disabled title="单步一条**指令**（指令级；探针不执行 C_STEP 时自动改用断点单步）">单步</button>
+        <button id="d-step-over" disabled title="单步**跳过**这一行（源码级，F10）—— 函数调用整行跳过">跳过</button>
+        <button id="d-step-into" disabled title="单步**进入**（源码级，F11）—— 当前是调用就进被调函数的第一条语句">进入</button>
+        <button id="d-step-out" disabled title="单步**跳出**（源码级，Shift+F11 / Ctrl+F11）—— 跑到调用点的下一条指令">跳出</button>
         <label class="chk"><input type="checkbox" id="d-follow-pc" checked> 内存跟随 PC</label>
       </div>
 
@@ -758,17 +761,17 @@
               <input type="file" id="d-src-dir" webkitdirectory directory multiple hidden>
               <span class="hint mono" id="d-src-file">—</span>
             </legend>
-            <div id="d-src" class="srclist mono"><div class="hint">（停下来时这里显示 PC 所在的源码行；点行号可下/删硬件断点）</div></div>
+            <div id="d-src" class="srclist mono"><div class="hint">（停下来时这里显示 PC 所在的源码行；点**行号**下/删硬件断点，**双击正文** = 运行到这一行）</div></div>
           </fieldset>
 
           <div class="grip grip-h" id="d-grip-term" title="拖动：调整命令行高度"></div>
 
           <fieldset class="dbgbox dbgterm" id="d-box-term">
-            <legend>命令行 <span class="hint">h = 帮助 · Tab = 补全 · ↑↓ = 历史 · Ctrl+C = 中断 · Ctrl+L = 清屏</span></legend>
+            <legend>命令行 <span class="hint">h = 帮助 · Tab = 补全 · ↑↓ = 历史 · Ctrl+C = 中断 · Ctrl+L = 清屏 · F5 继续 / F10 跳过 / F11 进入 / Shift+F11 跳出</span></legend>
             <div id="d-out" class="log mono"></div>
             <div class="sendbar terminal">
               <span class="prompt mono" aria-hidden="true">&gt;</span>
-              <input id="d-cmd" class="mono" placeholder="h / r / md 0x20000000 / b main / p g_var / w g_var / c / s" autocomplete="off" spellcheck="false">
+              <input id="d-cmd" class="mono" placeholder="h / r / md 0x20000000 / b main.c:192 / p g_pack / w g_var / n / si / fin / c" autocomplete="off" spellcheck="false">
               <button id="d-run" class="primary mini">执行</button>
             </div>
           </fieldset>
@@ -818,7 +821,7 @@
               <input id="d-watch-in" class="mono" placeholder="监视：变量名 / main+4 / 0x20000000" autocomplete="off" spellcheck="false">
               <button id="d-watch-add">加</button>
             </div>
-            <div id="d-watch-list" class="watchlist"><div class="hint">（还没有监视项：在符号列表点 ＋，或命令行 <code>w 变量</code>；停止时自动刷新）</div></div>
+            <div id="d-watch-list" class="watchlist"><div class="hint">（还没有监视项：在符号列表点 ＋，或命令行 <code>w 变量</code>；<b>结构体/数组点 ▸ 展开成树</b>；停止时自动刷新）</div></div>
             <div class="toolrow nw">
               <button id="d-watch-refresh" class="mini">刷新值</button>
               <button id="d-watch-clear" class="mini">清空</button>

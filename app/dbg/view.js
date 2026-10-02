@@ -25,7 +25,7 @@ import { waitMs } from '../core/pace.js';
 import { DebugSession, DEFAULT_CLOCK_KHZ } from './session.js';
 import { runCmd } from './cmd.js';
 import { SymTab } from './symbols.js';
-import { WatchList, resolveWatch, formatWatchValue } from './watch.js';
+import { WatchList, resolveWatch, formatWatchValue, treeRows, summarizeTree, TREE_LIMITS } from './watch.js';
 import { completeLine } from './complete.js';
 import { SourceStore } from './source.js';
 import { hex32, parseBytes } from './fmt.js';
@@ -125,7 +125,13 @@ export class DbgView {
     if (wl){
       wl.addEventListener('click', (e) => {
         const x = e.target.closest?.('button[data-del]');
-        if (x) this.delWatch(Number(x.dataset.del));
+        if (x){ this.delWatch(Number(x.dataset.del)); return; }
+        const ex = e.target.closest?.('button[data-exp]');
+        if (ex){
+          this.watch.toggle(Number(ex.dataset.exp));
+          this._saveWatch();
+          this.renderWatch();
+        }
       });
     }
     const live = $('d-watch-live');
@@ -141,7 +147,35 @@ export class DbgView {
         const row = ln?.closest?.('.srcrow');
         if (row?.dataset.line) this.toggleSourceBp(Number(row.dataset.line));
       });
+      // 双击**正文**（不是行号）= 运行到这一行；行号单击仍然是"下/删断点"（两者不打架）
+      srcBox.addEventListener('dblclick', (e) => {
+        if (e.target.closest?.('.ln')) return;
+        const row = e.target.closest?.('.srcrow');
+        if (row?.dataset.line) this.runToLine(Number(row.dataset.line));
+      });
     }
+
+    // ---- 快捷键（对齐 MDK / Ozone 的手感）----
+    /**
+     * F10 跳过 / F11 进入 / Shift+F11 跳出。
+     *
+     * ⚠️ 诚实说明：**F11 在 Chrome/Edge 里是"全屏"的浏览器级快捷键，页面拦不住**。
+     *    所以这里同时提供 **Ctrl+F11 / Ctrl+F10 / Ctrl+Shift+F11** 三个不会被抢的组合，
+     *    再加上工具栏上那三个按钮 —— 三者等价（命令行还有 n / si / fin）。
+     *    不绑 F5（继续）也是这个原因：F5 是刷新，抢不过浏览器，按下去会**丢掉整个调试会话**。
+     */
+    document.addEventListener('keydown', (e) => {
+      if (!this._visible()) return;
+      if (e.altKey || e.metaKey) return;
+      const ctrl = e.ctrlKey;
+      if (e.key === 'F10'){ e.preventDefault(); this.stepOver(); return; }
+      if (e.key === 'F11'){
+        e.preventDefault();
+        if (e.shiftKey) this.stepOut(); else this.stepInto();
+        return;
+      }
+      if (ctrl && e.shiftKey && e.key === 'F11'){ e.preventDefault(); this.stepOut(); return; }
+    });
 
     // ---- 工作区版式（右侧 tab 面板 + 可拖分隔条）----
     this._initWorkbench();
@@ -150,6 +184,10 @@ export class DbgView {
     on('d-halt', 'click', () => this._act('暂停', async () => { await s.halt(); this.renderRegs(); this.renderMem(); await this.afterStop(); }));
     on('d-cont', 'click', () => this._act('继续', async () => { await s.cont(); this._startWatch(); }));
     on('d-step', 'click', () => this._act('单步', async () => { await s.step(); this.renderRegs(); this.renderMem(); await this.afterStop(); }));
+    // ---- 源码级单步（2026-10）：跳过 / 进入 / 跳出（对应 MDK-Ozone 的 F10 / F11 / Shift+F11）----
+    on('d-step-over', 'click', () => this.stepOver());
+    on('d-step-into', 'click', () => this.stepInto());
+    on('d-step-out', 'click', () => this.stepOut());
     on('d-mem-read', 'click', () => this._act('读内存', () => this.readMem()));
     // 🚨 writeMemEdit() **自己**已经包了 _act —— 这里再包一层会让内层看到 busy=true 直接退出，
     //    现象是"点了写入、日志只说正在忙、内存一个字节都没改"（本仓自测抓到的）
@@ -307,6 +345,11 @@ export class DbgView {
     }
     const step = $('d-step');
     if (step) step.disabled = !c || !h;            // 运行中不能单步
+    /** 源码级单步同一套规则：连接 + 已停止才能点（它们要读 PC/LR 与行号表） */
+    for (const id of ['d-step-over', 'd-step-into', 'd-step-out']){
+      const el = $(id);
+      if (el) el.disabled = !c || !h;
+    }
     const haltBtn = $('d-halt');
     if (haltBtn) haltBtn.disabled = !c || h;
     const cont = $('d-cont');
@@ -407,14 +450,26 @@ export class DbgView {
     await this.renderSource();
   }
 
+  /**
+   * PC 条：`main.c:192 +0x4  main+0x1c`。
+   *
+   * 🚨 **`+0x4` 那一段是"精准位置"的关键**：一个源码行通常对应好几条指令，
+   *    停在这一行的中间（不是行首）时，MDK/Ozone 靠反汇编显示"到底停在哪条指令"。
+   *    我们不做反汇编视图，但至少要把"离行首还有几个字节"如实说出来 ——
+   *    否则用户会以为单步落点飘了（其实是这一行有多个语句/多条指令）。
+   */
   _updatePcStrip(){
     const pc = this.session.pc >>> 0;
-    const f = this.sym?.funcAt?.(pc & 0xfffffffe);
-    const loc = this.sym?.locText?.(pc & 0xfffffffe) || '';
+    const a = pc & 0xfffffffe;
+    const f = this.sym?.funcAt?.(a);
+    const loc = this.sym?.locText?.(a) || '';
+    const row = this.sym?.at?.(a);
+    const inLine = row && typeof row.addr === 'number' ? (a - row.addr) >>> 0 : 0;
+    const lineTag = row?.line ? `${loc}${inLine ? ` +0x${inLine.toString(16)}` : ''}` : loc;
     const pos = $('d-src-pos');
-    if (pos) pos.textContent = loc ? `${loc}${f ? `  ${f.name}+0x${f.off.toString(16)}` : ''}` : (f ? `${f.name}+0x${f.off.toString(16)}` : '—');
+    if (pos) pos.textContent = lineTag ? `${lineTag}${f ? `  ${f.name}+0x${f.off.toString(16)}` : ''}` : (f ? `${f.name}+0x${f.off.toString(16)}` : '—');
     const leg = $('d-src-file');
-    if (leg) leg.textContent = loc ? `${loc}${f ? ` · ${f.name}+0x${f.off.toString(16)}` : ''}` : (this.sym ? '（PC 不在有行号信息的代码里）' : '—');
+    if (leg) leg.textContent = lineTag ? `${lineTag}${f ? ` · ${f.name}+0x${f.off.toString(16)}` : ''}` : (this.sym ? '（PC 不在有行号信息的代码里）' : '—');
   }
 
   renderRegs(){
@@ -945,6 +1000,11 @@ export class DbgView {
     this._saveWatch();
     this.renderWatch();
     if (r.item?.error) this._out(`⚠ 监视「${e}」：${r.item.error}`, 'warn');
+    else if (r.item?.kind === 'struct' || r.item?.kind === 'union' || r.item?.kind === 'array'){
+      const n = r.item.type?.members?.length ?? r.item.type?.count;
+      this._out(`监视 + ${e}${r.item.addr !== undefined ? ' @ ' + hex32(r.item.addr) : ''}`
+        + `　（${r.item.typeName || '结构体'}${n != null ? `，${n} 项` : ''}：点 ▸ 展开成树）`, 'ok');
+    }
     else this._out(`监视 + ${e}${r.item?.addr !== undefined ? ' @ ' + hex32(r.item.addr) : ''}`, 'ok');
     const wi = $('d-watch-in');
     if (wi && wi.value.trim() === e) wi.value = '';
@@ -983,7 +1043,22 @@ export class DbgView {
       for (const it of this.watch.items){
         if (it.error) continue;
         try {
-          const bytes = await this.session.memRead(it.addr, it.size || 4);
+          /**
+           * 结构体/数组：**一次读整块**（上限 TREE_LIMITS.maxBytes），树在本地按偏移解 ——
+           * 展开时不再多读内存（每个成员一次 SWD 往返的话，一个 20 成员的 struct 就要 20 次）。
+           */
+          const isTree = it.kind === 'struct' || it.kind === 'union' || it.kind === 'array';
+          const want = isTree ? Math.max(1, Math.min(it.size || 1, TREE_LIMITS.maxBytes)) : (it.size || 4);
+          const bytes = await this.session.memRead(it.addr, want);
+          if (isTree){
+            it.bytes = bytes;
+            const f = { text: summarizeTree(it, bytes), hex: null, cls: '', type: it.typeName };
+            it.prev = it.value;
+            it.value = f;
+            if (f.cls !== 'err') ok++;
+            continue;
+          }
+          it.bytes = null;
           const f = formatWatchValue(it, bytes);
           it.prev = it.value;
           it.value = f;
@@ -1007,13 +1082,26 @@ export class DbgView {
     if (!this.watch.length){
       const d = document.createElement('div');
       d.className = 'hint';
-      d.innerHTML = '（还没有监视项：在符号列表点 ＋，或命令行 <code>w 变量</code>）';
+      d.innerHTML = '（还没有监视项：在符号列表点 ＋，或命令行 <code>w 变量</code>；<b>结构体/数组点 ▸ 展开成树</b>）';
       box.appendChild(d);
       return;
     }
     this.watch.items.forEach((it, i) => {
+      const expandable = !it.error && (it.kind === 'struct' || it.kind === 'union' || it.kind === 'array');
       const row = document.createElement('div');
       row.className = 'wrow' + (it.error ? ' bad' : '');
+      if (expandable){
+        const ex = document.createElement('button');
+        ex.className = 'mini exp';
+        ex.textContent = it.expanded ? '▾' : '▸';
+        ex.dataset.exp = String(i);
+        ex.title = it.expanded ? '收起这棵树' : `展开成树（${it.typeName || '结构体'}：成员/数组元素按 DWARF 偏移解析）`;
+        row.appendChild(ex);
+      } else {
+        const sp = document.createElement('span');
+        sp.className = 'exsp';
+        row.appendChild(sp);
+      }
       const nm = document.createElement('span');
       nm.className = 'nm';
       nm.textContent = it.label || it.expr;
@@ -1033,6 +1121,35 @@ export class DbgView {
       x.title = '删掉这一项';
       row.append(nm, vl, ty, x);
       box.appendChild(row);
+
+      // 展开的树：成员 / 数组元素 / 位域（一次读回的字节里解出来的，已按偏移排好）
+      if (expandable && it.expanded){
+        const kids = it.bytes ? treeRows(it, it.bytes) : [];
+        if (!kids.length){
+          const d = document.createElement('div');
+          d.className = 'hint';
+          d.style.paddingLeft = '18px';
+          d.textContent = '（还没读到数据：停下目标，或点「刷新值」）';
+          box.appendChild(d);
+        }
+        for (const k of kids){
+          const kr = document.createElement('div');
+          kr.className = 'wkid' + (k.cls === 'dim' ? ' dim' : '') + (k.bitfield ? ' bf' : '');
+          kr.style.paddingLeft = `${8 + (k.depth || 0) * 13}px`;
+          const kn = document.createElement('span');
+          kn.className = 'nm';
+          kn.textContent = k.name;
+          kn.title = `偏移 +${k.off}${k.size ? ` · ${k.size} 字节` : ''}${k.bitfield ? ' · 位域' : ''}`;
+          const kv = document.createElement('span');
+          kv.className = 'vl';
+          kv.textContent = String(k.text ?? '') + (k.hex && !String(k.text).includes(k.hex) ? `  ${k.hex}` : '');
+          const kt = document.createElement('span');
+          kt.className = 'ty';
+          kt.textContent = k.type || '';
+          kr.append(kn, kv, kt);
+          box.appendChild(kr);
+        }
+      }
     });
   }
 
@@ -1153,6 +1270,56 @@ export class DbgView {
       await this.renderSource();
       this._out(`${has ? '删掉' : '下了'}断点 ${baseName(file)}:${line} @ ${hex32(addr)}`, 'ok');
     });
+  }
+
+  /** 源码行双击：运行到这一行（行号表里没地址就明说，并提示改用断点/单步） */
+  async runToLine(line){
+    if (!this.sym?.lines){ this._out('✗ 这份 ELF 没有行号信息，用不了「运行到这一行」', 'err'); return false; }
+    const file = this.srcCur?.file || $('d-src')?.dataset.file;
+    if (!file) return false;
+    const addr = this.sym.lines.addrOfLine(file, line);
+    if (addr == null){
+      this._out(`✗ ${baseName(file)}:${line} 没有对应的代码地址（空行 / 声明 / 被优化掉了）`, 'err');
+      return false;
+    }
+    const label = `${baseName(file)}:${line}`;
+    return await this._act(`运行到 ${label}`, async () => {
+      const msg = await this.session.runTo(addr, { label });
+      this._out(msg, /没到达|已暂停/.test(msg) ? 'warn' : 'ok');
+      await this.session.refresh();
+      await this.session.refreshRegs();
+      this.renderRegs();
+      this.renderMem();
+      await this.afterStop();
+    });
+  }
+
+  // ---------------------------------------------------------------- 源码级单步
+
+  /** 三个单步动作的统一收尾：报一句"落到哪一行" + 刷寄存器/内存/源码/监视 */
+  async _stepAct(name, fn){
+    return await this._act(name, async () => {
+      const msg = await fn();
+      if (msg) this._out(msg, /没停到|没停下|已暂停/.test(msg) ? 'warn' : 'ok');
+      await this.session.refresh();
+      await this.session.refreshRegs();
+      this.renderRegs();
+      this.renderMem();
+      await this.afterStop();
+    });
+  }
+
+  /** 单步跳过（F10 / Ctrl+F10 / 「跳过」按钮 / 命令 `n`） */
+  async stepOver(){ return await this._stepAct('单步跳过', () => this.session.stepOver()); }
+  /** 单步进入（F11 / Ctrl+F11 / 「进入」按钮 / 命令 `si`） */
+  async stepInto(){ return await this._stepAct('单步进入', () => this.session.stepInto()); }
+  /** 单步跳出（Shift+F11 / 「跳出」按钮 / 命令 `fin`） */
+  async stepOut(){ return await this._stepAct('单步跳出', () => this.session.stepOut()); }
+
+  /** 「调试器」页当前可见吗（快捷键只在可见时生效，免得在别的页签抢键） */
+  _visible(){
+    const p = document.getElementById('tab-dbg');
+    return !!p && p.classList.contains('active');
   }
 
   /** 命令行 `src <文件:行>` 用：把源码视图跳到指定位置 */

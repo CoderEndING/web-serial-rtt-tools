@@ -119,6 +119,12 @@ export class WebUsbDapProbe {
     this.lastOkAt = 0;
     this.xferFails = 0;
     this.recoveries = 0;
+    /**
+     * 总线 FAULT 的"待自愈"标记（见 `_healIfFaulted`）。
+     * 🚨 一次 FAULT 会把整条 SWD 链路打死，abort()/清 sticky 都救不回来，只有 `_targetInit()` 管用。
+     */
+    this._faulted = false;
+    this.faultHeals = 0;
     /** @type {((s:string)=>void)|null} 关键恢复动作的文字回执（页面日志用） */
     this.onLog = null;
   }
@@ -459,6 +465,36 @@ export class WebUsbDapProbe {
     }
   }
 
+  /**
+   * 上一次访问撞上**总线 FAULT**（读了未映射地址/外设时钟没开…）之后的自愈。
+   *
+   * 🚨 2026-10 真机定标（H743 + akaLinkPro）：**一次 FAULT 会把整条 SWD 链路打死** ——
+   *    之后连"读寄存器""读 flash"都一路 FAULT，`abort()`（清 sticky）和写 DP CTRL/STAT
+   *    **都救不回来**，只有重新走一遍 `_targetInit()` 才恢复。
+   *    而 FAULT 太容易撞上了：hexdump 里手输一个不存在的地址、内存跟随 PC 走到未映射区……
+   *    用户看到的是"探针突然瞎了，只能拔插重连"，这在发布前必须自己爬起来。
+   *
+   * 做法：FAULT 当场只**标脏**（把错误如实抛给调用方，那一次操作确实失败了），
+   *       **下一次**访问前先花一次 `_targetInit()` 把口子重新初始化，再照常干活。
+   *       在锁外调用 —— `_targetInit` 内部会用公开的读写路径，锁里调用会自锁死。
+   */
+  async _healIfFaulted(){
+    if (!this._faulted || this._recovering) return false;
+    this._faulted = false;                       // 先清：自愈过程里的访问别再触发一轮
+    this._recovering = true;
+    try {
+      await this._targetInit({ clock: this.clockHz || null });
+      this.faultHeals = (this.faultHeals || 0) + 1;
+      this._note(`上次访问撞上总线 FAULT → 已重新初始化调试口（第 ${this.faultHeals} 次），可以继续操作`);
+      return true;
+    } catch (e){
+      this._note('总线 FAULT 后自愈失败：' + (e?.message || e) + '（可能要拔插一次探针）');
+      return false;
+    } finally {
+      this._recovering = false;
+    }
+  }
+
   async info(id){
     const r = await this._ctrl(CMD.Info, Uint8Array.of(id));
     return r.subarray(1, 1 + (r[0] || 0));                 // r[0] = 长度
@@ -590,7 +626,7 @@ export class WebUsbDapProbe {
     if (ack !== 1){
       // 出过错之后 TAR 已自增到不可知的位置、posted 写也不可信 → 标记作废（下次访问会重写 TAR）
       this._posted = false;
-      if (ack === 4) await this.abort();                    // FAULT → 清 sticky，否则后面全废
+      if (ack === 4){ this._faulted = true; await this.abort(); }   // FAULT → 标脏 + 清 sticky
       const err = new Error(`SWD ${ACK[ack] || ('ACK=' + ack)}（传输 ${n}/${count} 条，地址 0x${(ops[0]?.addr || 0).toString(16)}）`);
       err.ack = ack;
       throw err;
@@ -608,7 +644,7 @@ export class WebUsbDapProbe {
     const ack = res[2] & 0x07;
     if (ack !== 1){
       this._posted = false;
-      if (ack === 4) await this.abort();                    // 同上：FAULT 必须清 sticky
+      if (ack === 4){ this._faulted = true; await this.abort(); }   // 同上：FAULT 必须清 sticky
       const err = new Error(`SWD 块传输 ${ACK[ack] || ('ACK=' + ack)}（${rnw ? '读' : '写'} ${count} 字 @0x${addr.toString(16)}）`);
       err.ack = ack;
       throw err;
@@ -920,6 +956,7 @@ export class WebUsbDapProbe {
   }
 
   async readMem(addr, len, apIndex = 0){
+    await this._healIfFaulted();                 // 上次撞过 FAULT → 先把口子修回来（锁外做）
     return await this._withLock(() => this._readMemLocked(addr, len, apIndex));
   }
 
@@ -1035,6 +1072,7 @@ export class WebUsbDapProbe {
    *    只影响 RAM/调试寄存器的写（都是幂等的），不会对 flash 重复编程。
    */
   async writeMem(addr, bytes, apIndex = 0){
+    await this._healIfFaulted();                 // 同 readMem：上次撞过 FAULT 就先修口子
     return await this._withLock(() => this._writeMemLocked(addr, bytes, apIndex));
   }
 

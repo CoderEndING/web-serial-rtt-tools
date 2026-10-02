@@ -489,12 +489,17 @@ export class Dwarf {
           if (d.tag !== TAG.member) continue;
           const off = this._memberOffset(d);
           const bits = this.num(d, AT.bit_size);
+          const mtype = this.type(this.num(d, AT.type));
+          const bitOff = bits ? this._dataBitOffset(d, off, mtype, bits) : null;
           members.push({
             name: this.name(d) || '(匿名)',
             offset: off,
-            type: this.type(this.num(d, AT.type)),
+            type: mtype,
             bitSize: bits ?? null,
-            reason: bits ? '位域（v1 不支持）' : (off === null ? '成员偏移不是常量（DWARF 表达式）' : null),
+            /** 从**结构体首字节**起算的位偏移（有了它界面就能把位域解出来）；读不出来时为 null */
+            bitOffset: bitOff,
+            reason: off === null ? '成员偏移不是常量（DWARF 表达式）'
+                  : (bits && bitOff == null ? '位域（偏移读不出来）' : null),
           });
         }
         return { kind: rec.tag === TAG.union_type ? 'union' : 'struct', size: size(),
@@ -520,6 +525,54 @@ export class Dwarf {
       default:
         return { kind: 'unknown', size: size(), reason: `未处理的 tag 0x${rec.tag.toString(16)}` };
     }
+  }
+
+  /**
+   * 位域成员：算出**从结构体首字节起算**的位偏移（小端 MCU 的算法）。
+   *
+   * 两个标准写法都得认：
+   *   · DWARF ≥ 4：`DW_AT_data_bit_offset` 本来就是"从结构体起算"，直接用；
+   *   · DWARF ≤ 3：`DW_AT_bit_offset` 是"从**存储单元的最高位**起算"，
+   *     小端下换算成 `成员字节偏移×8 + (存储单元位数 - bit_offset - bit_size)`。
+   *     存储单元位数取成员的声明类型大小（`uint32_t x:4` 就是 32 位）。
+   */
+  _dataBitOffset(rec, memberOffset, type, bitSize){
+    const dbo = this.num(rec, AT.data_bit_offset);
+    if (dbo != null) return dbo;
+    const bo = this.num(rec, AT.bit_offset);
+    if (bo == null || memberOffset == null) return null;
+    const container = (type?.size || 4) * 8;
+    return memberOffset * 8 + Math.max(0, container - bo - bitSize);
+  }
+
+  /**
+   * 按**名字**取一个全局/静态变量的地址与**完整类型树**（调试页的结构体监视靠它）。
+   *
+   * 与 `listVariables()` 的区别：那边只摊平"能采样的叶子"（结构体成员变成 `g_pack.u_hi` 一路），
+   * 这里要的是**整棵树**（结构体 / 联合 / 数组本身也要），界面才能做可展开的树。
+   *
+   * @returns {{name:string, addr:number|null, type:object|null, reason:string|null}|null}
+   */
+  varType(name){
+    const want = String(name || '').trim();
+    if (!want) return null;
+    if (!this._varCache){
+      this._varCache = new Map();
+      this.index();
+      for (const rec0 of this._arr){
+        if (rec0.tag !== TAG.variable) continue;
+        const rec = this.merged(rec0);
+        const nm = this.name(rec);
+        if (!nm || rec.attrs.get(AT.declaration)) continue;
+        if (this._varCache.has(nm)) continue;             // 同名以第一条为准（与符号表口径一致）
+        this._varCache.set(nm, rec);
+      }
+    }
+    const rec = this._varCache.get(want);
+    if (!rec) return null;
+    const fa = this.fixedAddr(rec);
+    if (fa.addr == null) return { name: want, addr: null, type: null, reason: fa.reason };
+    return { name: want, addr: fa.addr >>> 0, type: this.type(this.num(rec, AT.type)), reason: null };
   }
 
   _memberOffset(rec){
@@ -679,10 +732,10 @@ export function listSampleable(elf, opts = {}){
   if (Dwarf.available(elf)){
     let note = '';
     try {
-      const dw = new Dwarf(elf);
+      const dw = opts.dwarf || new Dwarf(elf);          // 调用方已经建过就复用（解析一次很贵）
       const versions = [...new Set(dw.versions())];
       const r = dw.listVariables({ ...opts, ram });
-      return { ...r, source: 'dwarf', versions, note, ram };
+      return { ...r, source: 'dwarf', versions, note, ram, dwarf: dw };
     } catch (e){
       note = `DWARF 解析失败（${e?.message || e}）：已退回符号表（类型要手选）`;
     }

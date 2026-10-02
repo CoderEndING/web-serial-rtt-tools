@@ -865,6 +865,16 @@ fieldset.folded > legend::after{content:' · 已折叠';color:var(--fg2);font-si
 #tab-dbg .wrow .x{padding:0 4px;font-size:11.5px;flex:none}
 #tab-dbg .wrow.chg .vl{color:#ffd479}
 #tab-dbg .wrow.bad .vl{color:var(--err)}
+/* 结构体/数组树：展开箭头 + 缩进的成员行（2026-10 加） */
+#tab-dbg .wrow .exp{padding:0 4px;font-size:11px;line-height:1.1;flex:none;min-width:17px}
+#tab-dbg .wrow .exsp{flex:none;width:17px}
+#tab-dbg .wkid{display:flex;align-items:baseline;gap:6px;padding:0 3px;border-radius:4px;font-size:11.5px;color:var(--fg)}
+#tab-dbg .wkid:hover{background:var(--bg3)}
+#tab-dbg .wkid .nm{flex:0 1 auto;min-width:0;max-width:18ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#tab-dbg .wkid .vl{flex:1 1 auto;min-width:0;text-align:right;color:var(--ok);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#tab-dbg .wkid .ty{flex:none;color:var(--fg2);font-size:11px;max-width:10ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#tab-dbg .wkid.dim .vl{color:var(--fg2)}
+#tab-dbg .wkid.bf .vl{color:#ffd479}
 
 /* RTT tab */
 #tab-dbg #d-rtt{flex:1 1 auto;min-height:0;overflow:auto;margin:0}

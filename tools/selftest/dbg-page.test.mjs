@@ -220,7 +220,7 @@ const outText = () => ev('return document.getElementById("d-out").textContent;')
   };
 
   let t = await run('h');
-  ok(/md <地址>/.test(t) && /b <地址\|符号>/.test(t), 'h 打出帮助', t.slice(-120));
+  ok(/md <地址>/.test(t) && /b <地址\|符号/.test(t) && /文件:行/.test(t), 'h 打出帮助（含新增的「文件:行」下断点）', t.slice(-140));
 
   t = await run('r');
   ok(/R0/.test(t) && /XPSR/.test(t) && /CONTROL/.test(t), 'r 打印全部寄存器（含 CFBP 拆出的特殊寄存器）');
@@ -736,7 +736,203 @@ console.log('== 15. 版式：源码 + 命令行各占一块大的，右侧是「
 }
 
 // ==================================================================== 16
-console.log('== 16. 断开 + 收尾 ==');
+console.log('== 16. 源码级单步：跳过 / 进入 / 跳出（真按钮 + 假目标）==');
+{
+  const has = await ev(`return ['d-step-over','d-step-into','d-step-out'].every(id => !!document.getElementById(id));`);
+  ok(has === true, '工具栏上有「跳过 / 进入 / 跳出」三个按钮');
+
+  const setPc = async (pc) => {
+    await ev(`const d = window.__tools.dbg;
+      await d.session.bpClear();
+      await d.session.writeReg('PC', ${pc});
+      await d.session.refreshRegs();
+      await d.afterStop();
+      await new Promise(r => setTimeout(r, 120));
+      return true;`);
+  };
+
+  // ① 单步跳过：从 0x08000100 走到"下一行"（fixture 的行号表覆盖这里，是 SEGGER_RTT.c）
+  await setPc('0x08000100');
+  const next = await ev(`const L = window.__tools.dbg.sym.lines; const n = L.nextStmtAddr(0x08000100); return n ? n.addr : null;`);
+  ok(typeof next === 'number' && next > 0x08000100, '页面里能算出"下一行地址"：0x' + (next >>> 0).toString(16));
+  const over = await ev(`const d = window.__tools.dbg;
+    document.getElementById('d-step-over').click();
+    await new Promise(r => setTimeout(r, 1500));
+    return { pc: '0x' + (d.session.pc >>> 0).toString(16), mode: d.session.lastStepMode,
+             out: document.getElementById('d-out').textContent.slice(-120),
+             bps: d.session.bps.length, pos: document.getElementById('d-src-pos').textContent };`);
+  ok(over.pc === '0x' + (next >>> 0).toString(16) && over.mode === 'over', '「跳过」落在下一行：' + over.pc + '（' + over.pos + '）', JSON.stringify(over).slice(0, 160));
+  ok(/单步跳过/.test(over.out), '日志里说明这一步做了什么', over.out.slice(-70));
+  ok(over.bps === 0, '临时比较器收干净了');
+
+  // ② 单步进入：当前位置不是调用 → 按指令级单步（并把原因写进日志）
+  const into = await ev(`const d = window.__tools.dbg;
+    const before = d.session.pc >>> 0;
+    document.getElementById('d-step-into').click();
+    await new Promise(r => setTimeout(r, 1500));
+    return { before, pc: d.session.pc >>> 0, mode: d.session.lastStepMode,
+             out: document.getElementById('d-out').textContent.slice(-160) };`);
+  ok(into.pc > into.before && /into/.test(String(into.mode)), '「进入」在非调用处退化成指令级单步（PC 前进）', JSON.stringify(into).slice(0, 160));
+  ok(/不是可静态解析的调用|指令级/.test(into.out), '日志里说清"为什么走指令级"（不许静默）', into.out.slice(-80));
+
+  // ③ 单步跳出：LR 不是返回地址时必须拒绝（不许瞎跳）
+  const outBad = await ev(`const d = window.__tools.dbg;
+    await d.session.writeReg('LR', 0);
+    document.getElementById('d-step-out').click();
+    await new Promise(r => setTimeout(r, 800));
+    return document.getElementById('d-out').textContent.slice(-160);`);
+  ok(/不是返回地址|EXC_RETURN/.test(outBad), 'LR 无效时「跳出」明确拒绝并说明原因', outBad.slice(-90));
+
+  // ④ 单步跳出：LR 被**本函数内部的调用**覆盖时（非叶子函数）也要能正确跳回调用者
+  //    造一个有真栈帧的函数：PUSH{r7,lr} / BL / NOP / POP{r7,pc}，被调函数是 BX LR。
+  //    走到"刚从一个内部调用返回"的位置时 LR 已变成 0x…46|1（不是返回地址）——
+  //    页面必须能识别出这一点，用"单步走完本函数 + 看 SP 弹回"的方式回到调用者。
+  const outOk = await ev(`
+    const d = window.__tools.dbg, P = d.session.probe;
+    const T = await import('/app/dbg/thumb.js');
+    const put16 = (a, v) => { const o = a - 0x08000000; P.flash[o] = v & 0xff; P.flash[o + 1] = (v >> 8) & 0xff; };
+    const [c1, c2] = T.encodeCall(0x08000242, 0x08000260);
+    put16(0x08000240, 0xb580); put16(0x08000242, c1); put16(0x08000244, c2);
+    put16(0x08000246, 0xbf00); put16(0x08000248, 0xbd80); put16(0x08000260, 0x4770);
+    await d.session.bpClear();
+    await d.session.writeReg('PC', 0x08000240);
+    await d.session.writeReg('LR', 0x08000050);          // 真正的返回地址（调用者）
+    await d.session.refreshRegs();
+    await d.session.step();                              // PUSH
+    await d.session.step();                              // BL：LR 被覆盖
+    await d.session.step();                              // BX LR：回到 0x08000246
+    const lrMid = (await d.session.readReg('LR')) >>> 0;
+    const sp0 = (await d.session.readReg('SP')) >>> 0;
+    document.getElementById('d-step-out').click();
+    await new Promise(r => setTimeout(r, 2500));
+    return { lrMid: '0x' + lrMid.toString(16), sp0: '0x' + sp0.toString(16),
+             pc: '0x' + (d.session.pc >>> 0).toString(16), sp: '0x' + ((await d.session.readReg('SP')) >>> 0).toString(16),
+             mode: d.session.lastStepMode, out: document.getElementById('d-out').textContent.slice(-160), bps: d.session.bps.length };
+  `);
+  ok(outOk.pc === '0x8000050' && outOk.mode === 'out',
+    `LR 被内部调用覆盖时「跳出」仍回到调用者：LR=${outOk.lrMid} → PC=${outOk.pc}（SP ${outOk.sp0} → ${outOk.sp}）`, JSON.stringify(outOk).slice(0, 200));
+  ok(/覆盖/.test(outOk.out), '日志说清"LR 被覆盖、所以是一步步走回来的"', outOk.out.slice(-90));
+  ok(outOk.bps === 0, '「跳出」之后比较器也收干净了');
+  // 把造栈帧时占用的几个半字还原成 NOP（假目标的 flash 是共享的，别给后面的用例留坑）
+  await ev(`const P = window.__tools.dbg.session.probe;
+    for (const a of [0x08000240, 0x08000242, 0x08000244, 0x08000246, 0x08000248, 0x08000260]){
+      const o = a - 0x08000000; P.flash[o] = 0x00; P.flash[o + 1] = 0xbf;
+    }
+    return true;`);
+}
+
+// ==================================================================== 17
+console.log('== 17. 结构体树（监视窗口展开 + p 打成树）==');
+{
+  const add = await ev(`const d = window.__tools.dbg;
+    d.clearWatch();
+    const r = d.addWatch('_SEGGER_RTT');
+    await new Promise(r2 => setTimeout(r2, 700));
+    const row = document.querySelector('#d-watch-list .wrow');
+    return { kind: d.watch.items[0]?.kind, typeName: d.watch.items[0]?.typeName,
+             hasExp: !!row?.querySelector('button[data-exp]'), expText: row?.querySelector('button[data-exp]')?.textContent,
+             val: d.watch.items[0]?.value?.text, dom: document.getElementById('d-watch-list').textContent.slice(0, 160) };`);
+  ok(add.kind === 'struct' && add.hasExp === true, '结构体监视项带展开箭头（▸）', JSON.stringify(add).slice(0, 160));
+  ok(add.expText === '▸', '默认是折叠的（▸）', String(add.expText));
+  ok(/^\{/.test(String(add.val)) && /MaxNumUpBuffers/.test(String(add.val)), '折叠时给一行摘要：' + add.val);
+
+  const expanded = await ev(`const d = window.__tools.dbg;
+    document.querySelector('#d-watch-list button[data-exp]').click();
+    await new Promise(r => setTimeout(r, 200));
+    const kids = [...document.querySelectorAll('#d-watch-list .wkid')];
+    return { n: kids.length, names: kids.map(k => k.querySelector('.nm').textContent),
+             indents: kids.slice(0, 6).map(k => parseInt(k.style.paddingLeft) || 0),
+             expText: document.querySelector('#d-watch-list button[data-exp]')?.textContent,
+             text: document.getElementById('d-watch-list').textContent.slice(0, 200) };`);
+  ok(expanded.n >= 4 && expanded.names.includes('MaxNumUpBuffers'), `展开后画出成员行（${expanded.n} 行）`, JSON.stringify(expanded.names));
+  ok(expanded.names.includes('acID') && expanded.names.includes('aUp'), '数组成员也在树里（acID / aUp）', JSON.stringify(expanded.names));
+  ok(expanded.expText === '▾', '展开后箭头变 ▾');
+  ok(Math.max(...expanded.indents) > 8, '成员行有缩进（比父行右）', JSON.stringify(expanded.indents));
+
+  const collapsed = await ev(`const d = window.__tools.dbg;
+    document.querySelector('#d-watch-list button[data-exp]').click();
+    await new Promise(r => setTimeout(r, 150));
+    return { kids: document.querySelectorAll('#d-watch-list .wkid').length,
+             kept: d.watch.items[0].expanded === false };`);
+  ok(collapsed.kids === 0 && collapsed.kept, '再点一下收起（成员行消失）');
+
+  const pTree = await ev(`const d = window.__tools.dbg;
+    await d.runLine('p _SEGGER_RTT');
+    await new Promise(r => setTimeout(r, 400));
+    return document.getElementById('d-out').textContent.slice(-20000);`);
+  ok(/MaxNumUpBuffers/.test(pTree) && /RdOff|Flags/.test(pTree), '命令行 p <结构体> 打出成员行', pTree.slice(-120));
+  ok(/@ 0x2000000c/.test(pTree), '树头写明变量地址（@ 0x2000000c）', pTree.slice(0, 120));
+}
+
+// ==================================================================== 18
+console.log('== 18. 快捷键（F10/F11/Shift+F11）+ 源码行双击运行到光标 ==');
+{
+  const hot = await ev(`
+    const d = window.__tools.dbg;
+    document.querySelector('#tabs .tab[data-tab="dbg"]').click();      // 快捷键只在调试器页可见时生效
+    await new Promise(r => setTimeout(r, 200));
+    await d.session.bpClear();
+    await d.session.writeReg('PC', 0x08000100);
+    await d.session.refreshRegs();
+    await d.afterStop();
+    await new Promise(r => setTimeout(r, 150));
+    const before = d.session.pc >>> 0;
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'F10', bubbles: true }));
+    await new Promise(r => setTimeout(r, 1500));
+    const after = d.session.pc >>> 0;
+    return { visible: d._visible(), before, after, mode: d.session.lastStepMode,
+             out: document.getElementById('d-out').textContent.slice(-120) };`);
+  ok(hot.visible === true, '调试器页当前可见（快捷键生效的前提）');
+  ok(hot.after > hot.before && hot.mode === 'over', `F10 = 单步跳过（0x${hot.before.toString(16)} → 0x${hot.after.toString(16)}）`, JSON.stringify(hot).slice(0, 150));
+  ok(/单步跳过/.test(hot.out), '快捷键走的是与按钮同一条路径（日志一致）', hot.out.slice(-70));
+
+  const other = await ev(`const d = window.__tools.dbg;
+    document.querySelector('#tabs .tab[data-tab="serial"]').click();  // 切走后快捷键必须失效
+    await new Promise(r => setTimeout(r, 200));
+    const before = d.session.pc >>> 0;
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'F10', bubbles: true }));
+    await new Promise(r => setTimeout(r, 600));
+    const after = d.session.pc >>> 0;
+    document.querySelector('#tabs .tab[data-tab="dbg"]').click();
+    await new Promise(r => setTimeout(r, 150));
+    return { before, after };`);
+  ok(other.after === other.before, '切到别的页签后 F10 不再拦（不影响别页）', JSON.stringify(other));
+
+  const dbl = await ev(`const d = window.__tools.dbg;
+    /**
+     * 源码视图要有**行窗口**才能双击别的行 —— 没授权目录时只显示当前那一行。
+     * 这里按 §13 的办法塞一个假文件仓（只实现 view 用到的 ready/read），测完就还原。
+     */
+    window.__srcReal2 = d.src;
+    const text = Array.from({ length: 600 }, (_, i) => '  line ' + (i + 1)).join('\\n');
+    d.src = { ready: true, count: 1, summary: () => '假仓', read: async () => text, resolve: () => ({ rel: 'SEGGER_RTT.c' }) };
+    await d.session.bpClear();
+    await d.session.writeReg('PC', 0x08000100);
+    await d.session.refreshRegs();
+    await d.afterStop();
+    await new Promise(r => setTimeout(r, 300));
+    const file = d.srcCur?.file || document.getElementById('d-src').dataset.file;
+    let hit = null;
+    for (const row of document.querySelectorAll('#d-src .srcrow')){
+      const ln = Number(row.dataset.line);
+      const a = d.sym.lines.addrOfLine(file, ln);
+      if (a != null && a > 0x08000100 && a < 0x08000130){ hit = { row, ln, a }; break; }
+    }
+    if (!hit){ d.src = window.__srcReal2; return { err: '没有找到可用的目标行（源码视图里）' }; }
+    hit.row.querySelector('.srctx').dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+    await new Promise(r => setTimeout(r, 1500));
+    const out = { ln: hit.ln, want: '0x' + hit.a.toString(16), pc: '0x' + (d.session.pc >>> 0).toString(16),
+                  out: document.getElementById('d-out').textContent.slice(-160), bps: d.session.bps.length,
+                  kids: document.querySelectorAll('#d-src .srcrow').length };
+    d.src = window.__srcReal2;                                  // 还原真仓库（不给下一个套件留坑）
+    return out;`);
+  ok(!dbl.err && dbl.pc === dbl.want && dbl.kids >= 20, `双击源码行 = 运行到这一行（第 ${dbl.ln} 行 → ${dbl.pc}）`, JSON.stringify(dbl).slice(0, 170));
+  ok(/已运行到/.test(dbl.out || ''), '日志记下"已运行到哪一行"', String(dbl.out).slice(-70));
+  ok(dbl.bps === 0, '运行到光标不会留下临时断点');
+}
+
+// ==================================================================== 19
+console.log('== 19. 断开 + 收尾 ==');
 {
   const r = await ev(`
     const d = window.__tools.dbg;

@@ -29,7 +29,7 @@ FW_DIR   = tools/target-firmware/stm32f103
 LA       = tools/la/kingst_la.py
 
 .DEFAULT_GOAL := help
-.PHONY: help serve serve-dev serve-stop browser open page-prep test test-ui test-gen test-gen-page gen-embed samples-anim test-hid test-dwarf test-scope test-scope-page test-scope-render test-spi test-read test-spi-page test-hw test-record test-bridge test-bridge-gate test-hpm test-image test-all test-dbg test-dbg-page test-dbg-hw test-idcode test-dsl test-flash flash-timing hw-campaign hw-campaign-hpm campaign-summary \
+.PHONY: help serve serve-dev serve-stop browser open page-prep test test-ui test-gen test-gen-page gen-embed samples-anim test-hid test-dwarf test-scope test-scope-page test-scope-render test-spi test-read test-spi-page test-hw test-record test-bridge test-bridge-gate test-hpm test-image test-all test-dbg test-dbg-page test-dbg-hw test-dbg-stress test-idcode test-dsl test-flash flash-timing hw-campaign hw-campaign-hpm campaign-summary \
         bridge bridge-stop fw-build fw-flash fw-restore fw-h7-build fw-h7-flash \
         algo-check flash-plan la-info la-capture git-status git-log check clean spi-hw spi-flow i2c-hw spi-partial-hw dbg-step-hw
 
@@ -121,6 +121,16 @@ test-dbg-hw: page-prep
 # 里面含"BOOT0=1 那块板"的唤醒配方（AIRCR 软复位 → 手工搬 VTOR/SP/PC），换板子看脚本头注释。
 dbg-step-hw: page-prep
 	$(NODE) tools/selftest/dbg-step-hw.mjs $(ARGS)
+
+# 调试器**真机压力测试**（发布前总验收，76~81 项断言）：
+#   断点 / 代码同步 / 单步(in-out-over) / 复位重跑 / 结构体树与位域 / FPB 泄漏 / 总线 FAULT 自愈 /
+#   连续 60 轮"停—走—停"，并在有 tmp/gdb-oracle.json 时与 gdb **逐地址**比对。
+#   需要先把靶子固件烧进去（tools/target-firmware/stm32h743_dbgstress/build/fw.elf），
+#   烧录：node tmp/dbg-flash.mjs /tools/target-firmware/stm32h743_dbgstress/build/fw.elf
+#   换 DWARF5 靶子：make test-dbg-stress ARGS="--elf=/tools/.../build-dw5/fw.elf --oracle=tmp/none.json"
+#   生成 gdb 对照：node tmp/probe-free.mjs --blank && node tmp/dbg-gdb-oracle.mjs
+test-dbg-stress: page-prep
+	$(NODE) tools/selftest/dbg-hw-stress.mjs $(ARGS)
 
 # 目标身份解码（「读 IDCODE」按钮）：DP IDCODE / CPUID / STM32 DBGMCU DEV_ID → 型号
 test-idcode:
@@ -386,6 +396,8 @@ check:
 	$(NODE) --check app/dbg/cmd.js
 	$(NODE) --check app/dbg/session.js
 	$(NODE) --check app/dbg/mock.js
+	$(NODE) --check app/dbg/thumb.js
+	$(NODE) --check app/dbg/watch.js
 	$(NODE) --check app/dbg/view.js
 	$(NODE) --check app/i2c/protocol.js
 	$(NODE) --check app/i2c/mock.js
