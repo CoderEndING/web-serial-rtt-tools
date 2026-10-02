@@ -24,6 +24,9 @@ const B = await import(url('dbg/bp.js'));
 const SY = await import(url('dbg/symbols.js'));
 const C = await import(url('dbg/cmd.js'));
 const S = await import(url('dbg/session.js'));
+const W = await import(url('dbg/watch.js'));
+const CP = await import(url('dbg/complete.js'));
+const LN = await import(url('elf/lines.js'));
 
 let pass = 0, fail = 0;
 const ok = (cond, name, extra = '') => {
@@ -297,6 +300,180 @@ console.log('== 7. 没连接时的命令（不能崩，要给人话）==');
   ok(/还没连接/.test(threw), '未连接时 c 提示先连接', threw);
   const help = await C.runCmd('h', s2);
   ok(help.lines.length > 5, '未连接时 h 仍然可用');
+}
+
+// ==================================================================== 8
+console.log('== 8. 行号表（DWARF .debug_line）：停下来显示源码行的地基 ==');
+{
+  ok(!!symtab.lines, '载入 ELF 时顺带解析出了行号表');
+  ok(symtab.lines.size > 100, `行号记录 ${symtab.lines.size} 条`, String(symtab.lines?.size));
+  ok(symtab.lines.units === 3, `3 个编译单元（每段一个行号程序）`, String(symtab.lines.units));
+  ok(symtab.lines.versions.includes(4), 'CU 版本是 DWARF 4', JSON.stringify(symtab.lines.versions));
+  ok(symtab.lines.paths.some(p => p.endsWith('/src/main.c')), '源文件表里有 src/main.c');
+  ok(LN.cleanPath('E:\\a\\..\\b/c.c') === 'E:/b/c.c' && LN.cleanPath('/x/./y') === '/x/y', 'cleanPath 归一化（盘符/`..`/`.`）');
+  ok(LN.isAbsPath('E:/x') && LN.isAbsPath('/usr/x') && !LN.isAbsPath('src/main.c'), 'isAbsPath 认盘符与 Unix 根');
+  ok(LN.relTo('E:/proj', 'E:/proj/src/main.c') === 'src/main.c', 'relTo 算相对路径');
+
+  const st = symtab.at(0x08000040);
+  ok(st && st.line === 24 && /main\.c$/.test(st.file) && st.isStmt, 'SysTick_Handler 的首地址 → src/main.c:24', JSON.stringify(st));
+  const mn = symtab.at(0x08000051);
+  ok(mn && mn.line === 28, 'main+0 → src/main.c:28', JSON.stringify(mn));
+  ok(symtab.locText(0x08000040) === 'main.c:24', 'locText 给"文件:行"的人话：' + symtab.locText(0x08000040));
+
+  // 🚨 地址 0 / 非代码段的假记录必须被剔掉（编译器的"占位序列"会落在 0,2,4…）
+  let minAddr = Infinity;
+  for (let i = 0; i < symtab.lines.size; i++) minAddr = Math.min(minAddr, symtab.lines.starts[i]);
+  ok(minAddr >= 0x08000000, `最小记录地址在代码段里（0x${minAddr.toString(16)}）—— 占位序列被剔掉了`);
+  ok(symtab.at(0) === null && symtab.at(0x20000000) === null, '地址 0 / RAM 地址查不到行号（回 null 而不是乱指一行）');
+
+  // 反查：行 → 地址 → 行，必须一一对上（点源码行下断点全靠它）
+  let okN = 0, badN = 0;
+  for (let i = 0; i < symtab.lines.size; i++){
+    const fi = symtab.lines.files[i];
+    if (fi < 0) continue;
+    const p = symtab.lines.paths[fi], ln = symtab.lines.lines[i];
+    const a = symtab.lines.addrOfLine(p, ln);
+    const back = a == null ? null : symtab.lines.at(a);
+    if (back && back.line === ln && back.file === p) okN++; else badN++;
+  }
+  ok(badN === 0 && okN > 100, `行→地址→行 全部自洽（${okN} 条，${badN} 条不一致）`);
+
+  // 没有行号信息的 ELF：不能让整页挂掉
+  const bare = SY.SymTab.fromBuffer(new Uint8Array(elfBuf));
+  ok(bare.lines === null || bare.lines.size > 0, 'SymTab.lines 要么有表要么是 null（两种都不能崩）');
+
+  // 🚨 DWARF 5 + 0x8xxxxxxx 地址：`addr & ~1` 在 JS 里会变成负数，忘了 `>>> 0` 就一条都查不到
+  const rvSym = SY.SymTab.fromBuffer(new Uint8Array(readFileSync(join(here, '..', 'fixtures', 'dwarf', 'riscv_dwarf5.elf'))));
+  ok(!!rvSym.lines && rvSym.lines.size > 0, 'DWARF 5 的行号表也能解析（riscv_dwarf5.elf）', String(rvSym.lines?.size));
+  const rvAt = rvSym.at(0x80000000);
+  ok(rvAt && rvAt.line === 8 && /fixture\.c$/.test(rvAt.file), '0x80000000 查得到行号（有符号位那个坑的回归测试）', JSON.stringify(rvAt));
+}
+
+// ==================================================================== 8.1
+console.log('== 8.1 源码文件仓（选择目录后的匹配与读取）==');
+{
+  const SR = await import(url('dbg/source.js'));
+  const store_ = new SR.SourceStore();
+  const mkFile = (rel, text) => ({ name: rel.split('/').pop(), webkitRelativePath: 'proj/' + rel, text: async () => text, size: text.length });
+  const sum = store_.indexFileList([mkFile('src/main.c', 'int main(void){\n  return 0;\n}\n'), mkFile('src/app/loop.c', 'void loop(void){}\n')]);
+  ok(store_.ready && store_.count === 2, '索引 FileList（webkitdirectory 兜底路径）：' + sum);
+  ok(store_.resolve('E:/proj/src/main.c')?.rel === 'src/main.c', '按后缀匹配 ELF 里的绝对路径（编译机路径 ≠ 本机路径）');
+  ok(store_.resolve('/home/ci/build/src/app/loop.c')?.rel === 'src/app/loop.c', '多级后缀也能匹配');
+  ok(store_.resolve('E:/other/nope.c') === null, '匹配不上就回 null（界面显示"没找到源文件"，不乱猜）');
+  const txt = await store_.read('E:/proj/src/main.c');
+  ok(txt.includes('int main'), '读源码文本（走缓存）');
+  const again = await store_.read('E:/proj/src/main.c');
+  ok(again === txt, '第二次读走缓存（同一份内容）');
+  let msg = '';
+  try { await store_.read('E:/proj/src/missing.c'); } catch (e){ msg = e.message; }
+  ok(/找不到/.test(msg) && /选择源码目录/.test(msg), '读不到时给人话（告诉用户去选目录）', msg);
+}
+
+// ==================================================================== 9
+console.log('== 9. 监视窗口（表达式解析 / 取值 / 增删）==');
+{
+  const v = W.resolveWatch('g_bytes', symtab);
+  ok(v.addr === 0x20000000 && !v.error, 'w 变量名 → 解析到地址', JSON.stringify(v));
+  const off = W.resolveWatch('g_bytes+4', symtab);
+  ok(off.addr === 0x20000004 && off.kind === 'addr', 'w 符号+偏移 → 按 u32 看那个地址', JSON.stringify(off));
+  const raw = W.resolveWatch('0x20000010', symtab);
+  ok(raw.addr === 0x20000010 && raw.scalar === 'u32', 'w 裸地址 → 按 u32 读');
+  ok(W.resolveWatch('没这个符号', symtab).error?.includes('找不到'), 'w 认不出来 → 给错误（不静默）');
+  ok(W.resolveWatch('g_bytes', null).error?.includes('elf'), '没载入 ELF 时 w 说明原因');
+
+  const bytes = Uint8Array.from([0x11, 0x22, 0x33, 0x44]);
+  const fv = W.formatWatchValue({ scalar: 'u32', typeName: 'u32', size: 4 }, bytes);
+  ok(fv.text === String(0x44332211) && fv.hex === '0x44332211', 'u32 取值：十进制 + 十六进制', JSON.stringify(fv));
+  const fraw = W.formatWatchValue({ scalar: null, typeName: '4 字节', size: 4 }, bytes);
+  ok(/44332211/.test(fraw.text + fraw.hex), '没有类型信息时也要给出人看得懂的十六进制', JSON.stringify(fraw));
+
+  const list = new W.WatchList();
+  const a1 = list.add('g_bytes', symtab);
+  ok(!a1.dup && list.length === 1, '加一项监视');
+  const a2 = list.add('g_bytes', symtab);
+  ok(a2.dup && list.length === 1, '同名不重复加（返回 dup）');
+  list.add('g_bytes+4', symtab);
+  list.add('0x20000010', symtab);
+  ok(list.length === 3, '一共 3 项');
+  ok(list.remove('2').removed === 1 && list.length === 2, 'wd 按编号删');
+  ok(list.remove('0x20000010').removed === 1 && list.length === 1, 'wd 按名字删');
+  const json = list.toJSON();
+  ok(Array.isArray(json) && json[0].expr === 'g_bytes' && json[0].value === undefined, 'toJSON 不把值存进 localStorage');
+  const back = W.WatchList.fromJSON(json, symtab);
+  ok(back.length === 1 && back.items[0].addr === 0x20000000, 'fromJSON 重新解析（换 ELF 后地址会跟着变）');
+  ok(list.remove('all').removed === 1 && list.length === 0, 'wd all 全清');
+}
+
+// ==================================================================== 10
+console.log('== 10. Tab 补全（命令名 / 符号 / 寄存器）==');
+{
+  ok(CP.commonPrefix(['main', 'mainloop', 'ma']) === 'ma', 'commonPrefix 取最长公共前缀');
+  const all = CP.completeLine('', {});
+  ok(all.total === CP.CMD_NAMES.length && all.candidates.length > 10, '空行 Tab → 列出全部命令名');
+  const h = CP.completeLine('he', {});
+  ok(h.total === 1 && h.value === 'help ', '唯一候选补全并补一个空格：' + JSON.stringify(h.value));
+
+  const syms = { sym: symtab, regs: ['pc', 'primask'] };
+  const b = CP.completeLine('b ma', syms);
+  ok(/^b (main|mainloop)/.test(b.value) && b.total >= 1, 'b <前缀> → 补符号名：' + JSON.stringify(b.value));
+  const p = CP.completeLine('p _SEG', syms);
+  ok(p.value.startsWith('p _SEGGER_RTT') && p.total >= 1, 'p _SEG → 补出 _SEGGER_RTT*（有多个就补公共前缀）：' + JSON.stringify(p.value));
+  const r = CP.completeLine('r pr', syms);
+  ok(r.value === 'r primask' && r.kind === 'reg', 'r 后面补寄存器名：' + JSON.stringify(r.value));
+  const none = CP.completeLine('md zzz', syms);
+  ok(none.total === 0 && none.value === 'md zzz', '没有候选时原样不动（绝不猜一个最近的）');
+  const many = CP.completeLine('b m', syms);
+  ok(many.total > 1 && many.value.length >= 'b m'.length, '多个候选 → 只补公共前缀（候选交给界面列出来）');
+}
+
+// ==================================================================== 11
+console.log('== 11. 新命令：w / wl / wd / sl / src + Ctrl+C 取消 ==');
+{
+  const s3 = new S.DebugSession();
+  s3.log = () => {};
+  await s3.connect({ mock: true });
+  s3.sym = symtab;
+  const calls = [];
+  const vw = {
+    addWatch(expr){ calls.push('add:' + expr); return { ok: true, index: 0, item: { expr, addr: 0x20000000 } }; },
+    watchItems(){ return [{ expr: 'g_bytes', label: 'g_bytes', addr: 0x20000000, value: { text: '7' } }]; },
+    delWatch(w){ calls.push('del:' + w); return { removed: 1 }; },
+    showSource(f, l){ calls.push(`src:${f}:${l}`); return !/没有这个文件/.test(f); },
+  };
+  const run = async (l) => (await C.runCmd(l, s3, { view: vw })).lines.map(x => x.t);
+
+  const w = await run('w g_bytes');
+  ok(/监视 \+ g_bytes/.test(w[0]) && calls.includes('add:g_bytes'), 'w <变量> 加进监视窗口', w[0]);
+  const wl = await run('wl');
+  ok(wl.some(l => /g_bytes/.test(l) && /#1/.test(l)), 'wl 列出监视项与值', wl[0]);
+  const wd = await run('wd 1');
+  ok(/已删掉 1 项/.test(wd[0]) && calls.includes('del:1'), 'wd 1 删掉监视项', wd[0]);
+  const wbad = await (async () => { try { await run('w'); return ''; } catch (e){ return e.message; } })();
+  ok(/用法/.test(wbad), 'w 缺参数报用法', wbad);
+
+  const sl = await run('sl');
+  ok(sl.some(l => /\.c:\d+/.test(l)), 'sl 打印当前源码位置', sl[0]);
+  ok(calls.some(c => c.startsWith('src:')), 'sl 顺手把源码视图跳过去');
+  const srcList = await run('src');
+  ok(srcList.some(l => /main\.c/.test(l)), 'src 不带参数列出源文件', srcList[1]);
+  const srcJump = await run('src main.c:24');
+  ok(/跳到/.test(srcJump[0]), 'src <文件:行> 跳转', srcJump[0]);
+  const srcBad = await (async () => { try { await run('src 没有这个文件.c:1'); return ''; } catch (e){ return e.message; } })();
+  ok(/没有这个文件/.test(srcBad), 'src 找不到文件时报错（不静默）', srcBad);
+
+  // Ctrl+C：signal 返回 true → 抛 Cancelled，界面显示成 ^C
+  let cancelled = false;
+  try { await C.runCmd('md 0x20000000 16', s3, { signal: () => true }); }
+  catch (e){ cancelled = !!e.cancelled; }
+  ok(cancelled, 'Ctrl+C（signal=true）时命令抛 Cancelled，不再往下跑');
+  let notCancelled = false;
+  try { await C.runCmd('md 0x20000000 16', s3, { signal: () => false }); notCancelled = true; } catch { notCancelled = false; }
+  ok(notCancelled, 'signal=false 时命令照常执行');
+
+  // 没界面时 w/wl/wd 要给人话错误（而不是崩）
+  let noView = '';
+  try { await C.runCmd('w g_bytes', s3); } catch (e){ noView = e.message; }
+  ok(/界面/.test(noView), '没有界面时 w 说明"需要界面支持"', noView);
 }
 
 console.log(`\n== 汇总：${pass} 通过 / ${fail} 失败 ==`);

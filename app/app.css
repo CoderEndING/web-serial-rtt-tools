@@ -503,15 +503,23 @@ fieldset.folded > legend::after{content:' · 已折叠';color:var(--fg2);font-si
 #sp-pinmap-miss:empty{display:none}
 
 /* ============================ 调试器（#tab-dbg） ============================ */
+/* 版式（2026-10 按用户要求调过）：**命令行是主窗口**，上面三块（寄存器 / 内存 / 源码）
+   都压矮 + 可折叠，折叠出来的高度全给命令行。 */
 #tab-dbg .mono{font-family:var(--mono)}
 #tab-dbg .side .row>span:first-child{width:66px}
 #tab-dbg .main{gap:8px;min-height:0}
 #tab-dbg .toolbar{flex:none}
-#tab-dbg #d-pc{font-size:12px;color:var(--fg2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:44ch}
-#tab-dbg .dbggrid{display:grid;grid-template-columns:minmax(248px,1fr) minmax(330px,1.3fr);gap:9px;flex:1 1 auto;min-height:0}
+#tab-dbg #d-pc{font-size:12px;color:var(--fg2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:34ch}
+#tab-dbg #d-src-pos{font-size:12px;color:#ffd479;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:44ch}
+#tab-dbg .dbggrid{display:grid;grid-template-columns:minmax(228px,1fr) minmax(320px,1.35fr);gap:9px;flex:0 1 auto;min-height:118px;max-height:27vh}
 #tab-dbg .dbgbox{display:flex;flex-direction:column;min-width:0;min-height:0;overflow:hidden}
 #tab-dbg .dbgbox>legend{white-space:nowrap}
 #tab-dbg .dbgbox>legend .hint{margin:0;display:inline}
+#tab-dbg .foldbtn{margin-left:6px;padding:0 6px;font-size:11.5px;color:var(--fg2);background:transparent;border-color:transparent}
+#tab-dbg .foldbtn:hover{color:var(--fg);border-color:var(--line);background:var(--bg3)}
+/* 折叠：只剩一行 legend，省下的高度归命令行 */
+#tab-dbg .dbgbox.collapsed{flex:0 0 auto;height:auto !important;max-height:none}
+#tab-dbg .dbgbox.collapsed>*:not(legend){display:none}
 #tab-dbg .reglist{flex:1 1 auto;min-height:0;overflow:auto;font-size:12px;font-family:var(--mono)}
 #tab-dbg .regrow{display:flex;align-items:center;gap:5px;padding:0 3px;border-radius:4px}
 #tab-dbg .regrow:hover{background:var(--bg3)}
@@ -529,11 +537,10 @@ fieldset.folded > legend::after{content:' · 已折叠';color:var(--fg2);font-si
 #tab-dbg .by.w{cursor:pointer}
 #tab-dbg .by.w:hover{background:#1f6feb;color:#fff}
 #tab-dbg .asc{color:var(--fg2);margin-left:8px}
-#tab-dbg .dbgfoot{display:grid;grid-template-columns:minmax(0,1.55fr) minmax(0,1fr);gap:9px;flex:0 0 auto;height:33%;min-height:170px}
-#tab-dbg #d-out{flex:1 1 auto;min-height:0;height:auto;overflow:auto}
+#tab-dbg .dbgfoot{display:grid;grid-template-columns:minmax(0,1.9fr) minmax(0,1fr);gap:9px;flex:1 1 auto;min-height:190px}
+#tab-dbg #d-out{flex:1 1 auto;min-height:0;height:auto;overflow:auto;background:#010409}
 #tab-dbg #d-out .cmdecho{color:#9fd0ff}
 #tab-dbg #d-rtt{flex:1 1 auto;min-height:0;overflow:auto;margin:0}
-#tab-dbg .sendbar{flex:none;margin-top:5px}
 #tab-dbg .bplist{max-height:120px;overflow:auto;font-size:12px}
 #tab-dbg .bprow{display:flex;align-items:center;gap:6px;padding:1px 3px;border-radius:4px}
 #tab-dbg .bprow:hover{background:var(--bg3)}
@@ -544,6 +551,49 @@ fieldset.folded > legend::after{content:' · 已折叠';color:var(--fg2);font-si
 #tab-dbg .memedit input#d-mem-ev{width:136px}
 #tab-dbg .memedit button{flex:none}
 @media (max-width:1180px){ #tab-dbg .dbggrid{grid-template-columns:1fr} }
+
+/* ---- 侧栏：符号列表 ---- */
+#tab-dbg .symlist{max-height:200px;overflow:auto;font-size:12px;font-family:var(--mono);
+  border:1px solid var(--line);border-radius:6px;padding:2px;margin-top:5px;background:var(--bg)}
+#tab-dbg .symrow{display:flex;align-items:center;gap:5px;padding:0 3px;border-radius:4px;cursor:pointer}
+#tab-dbg .symrow:hover{background:var(--bg3)}
+#tab-dbg .symrow .nm{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#tab-dbg .symrow .ad{flex:none;color:var(--fg2);font-size:11px}
+#tab-dbg .symrow .ty{flex:none;color:var(--acc);font-size:11px;max-width:9ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#tab-dbg .symrow button{padding:0 5px;font-size:11.5px;flex:none}
+#tab-dbg .symmore{color:var(--fg2);font-size:11.5px;padding:2px 3px}
+
+/* ---- 侧栏：监视窗口 ---- */
+#tab-dbg .watchlist{max-height:200px;overflow:auto;font-size:12px;font-family:var(--mono);
+  border:1px solid var(--line);border-radius:6px;padding:2px;margin:5px 0;background:var(--bg)}
+#tab-dbg .wrow{display:flex;align-items:baseline;gap:6px;padding:0 3px;border-radius:4px}
+#tab-dbg .wrow:hover{background:var(--bg3)}
+#tab-dbg .wrow .nm{flex:0 0 auto;max-width:13ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#tab-dbg .wrow .vl{flex:1 1 auto;min-width:0;text-align:right;color:var(--ok);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#tab-dbg .wrow .ty{flex:none;color:var(--fg2);font-size:11px;max-width:8ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#tab-dbg .wrow .x{padding:0 4px;font-size:11.5px;flex:none}
+#tab-dbg .wrow.chg .vl{color:#ffd479}
+#tab-dbg .wrow.bad .vl{color:var(--err)}
+
+/* ---- 中间：源码视图（Ozone 那种"停下来高亮当前行"） ---- */
+#tab-dbg .dbgsrc{flex:0 1 auto;height:172px;min-height:84px}
+#tab-dbg .srclist{flex:1 1 auto;min-height:0;overflow:auto;font-size:12px;line-height:1.45;
+  background:#010409;border-radius:6px;padding:2px 0}
+#tab-dbg .srcrow{display:flex;gap:8px;padding:0 6px;white-space:pre}
+#tab-dbg .srcrow .ln{flex:none;width:44px;text-align:right;color:#4a5563;cursor:pointer;user-select:none}
+#tab-dbg .srcrow .ln:hover{color:var(--acc);text-decoration:underline}
+#tab-dbg .srcrow.bp .ln{color:var(--err);font-weight:600}
+#tab-dbg .srcrow.cur{background:#16281a}
+#tab-dbg .srcrow.cur .ln{color:var(--acc)}
+#tab-dbg .srcrow.cur .tx{color:#fff}
+#tab-dbg .srcrow .tx{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis}
+#tab-dbg #d-src-file{font-size:11.5px;color:var(--fg2)}
+
+/* ---- 命令行：xshell 那种"输出区 + 贴底输入行" ---- */
+#tab-dbg .sendbar.terminal{flex:none;margin-top:5px;gap:6px;flex-wrap:nowrap}
+#tab-dbg .sendbar.terminal .prompt{color:var(--ok);flex:none;font-size:13px;padding-left:2px}
+#tab-dbg .sendbar.terminal input{flex:1 1 auto;min-width:0;background:#010409}
+#tab-dbg .sendbar.terminal button{flex:none}
 
 /* RTT 输出窗在没有数据时的占位（.rx 的默认文案是"接收区"，这里说清楚该点什么） */
 #tab-dbg #d-rtt:empty::before{content:"（点「定位并开始」：留空地址就用 .elf 里的 _SEGGER_RTT 符号）";color:#4a5563}

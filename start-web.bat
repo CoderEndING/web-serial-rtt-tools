@@ -1,6 +1,32 @@
 @echo off
+rem ===========================================================================
+rem  UTF-8 bootstrap.  EVERYTHING ABOVE THE GUARD MUST BE ASCII-ONLY.
+rem
+rem  This file is saved as UTF-8, but a Chinese Windows console defaults to
+rem  codepage 936(GBK) -> the Chinese text below shows up as mojibake on a
+rem  plain double-click.  Fix: switch the console to 65001 and RE-ENTER this
+rem  script, so the child parses the file as UTF-8 from its first byte.
+rem
+rem  Why not just one `chcp 65001` line: cmd reads batch files in blocks, and
+rem  switching codepage in the middle of a block can split a multi-byte
+rem  character -> the leftover half gets executed as a command (seen in
+rem  practice: "'切到' is not recognized as an internal or external command").
+rem
+rem  The env var marks "already re-entered"; %* is forwarded untouched.
+rem ===========================================================================
+if not "%RTT_TOOLS_UTF8%"=="1" (
+  chcp 65001 >nul
+  set "RTT_TOOLS_UTF8=1"
+  cmd /c ""%~f0" %*"
+  exit /b %errorlevel%
+)
 rem ============================================================================
 rem  双击即用：起本地网页服务（**不发缓存**的那个）并打开浏览器
+rem
+rem  （上面那段英文是"UTF-8 引导"：这个文件用 UTF-8 存，而中文控制台默认 936，
+rem    所以先切到 65001 再重新进入自己一次 —— 只写一行 chcp 会因为 cmd 按块读文件、
+rem    正好把某个汉字劈成两半而蹦出「'xxx' 不是内部或外部命令」。引导段必须全是英文，
+rem    中文从这一行往后才安全。）
 rem
 rem  为什么不能直接双击 index.html：file:// 下浏览器把 ES 模块当跨域请求挡掉，
 rem  页面直接空；而且 WebUSB/Web Serial 必须跑在 http(s) 源上，file:// 连不了探针。

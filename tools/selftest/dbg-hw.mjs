@@ -102,7 +102,14 @@ console.log('== 1. 连接（WebUSB · 1 MHz）==');
     document.getElementById('d-backend').dispatchEvent(new Event('change'));
     document.getElementById('d-clock').value = '1000';
     const okc = await d.connect();
-    return { okc, sum: d.summary(), err: d.session.lastError || null };`);
+    /**
+     * 🚨 目标可能是**运行中**的（上一次冒烟收尾会把它放跑/板子本来就在跑）——
+     * 先停下来再读寄存器。不停的话 regList 是空的，下面两条会莫名其妙地红（实测踩过）。
+     */
+    const wasRunning = !d.session.halted;
+    if (wasRunning) await d.session.halt();
+    d.renderRegs();
+    return { okc, wasRunning, sum: d.summary(), err: d.session.lastError || null };`);
   ok(r.okc === true && r.sum.connected, '网页连上了探针', JSON.stringify(r.sum));
   if (!r.sum.connected){
     const out = await ev('return document.getElementById("d-out").textContent.slice(-600);');
@@ -111,6 +118,7 @@ console.log('== 1. 连接（WebUSB · 1 MHz）==');
     ws.close();
     process.exit(1);
   }
+  if (r.wasRunning) info('连上时目标在跑 —— 已先「暂停」再读寄存器（脚本自己保证幂等）');
   info(`后端 ${r.sum.backend} · SWD ${r.sum.clockKhz} kHz · 断点容量 ${r.sum.bpCap}（FPB rev${(await ev('return window.__tools.dbg.session.caps.rev;'))}）`);
   ok(r.sum.bpCap > 0, '读到了 FPB 比较器个数（>0）', String(r.sum.bpCap));
   info('IDCODE = 0x' + (await ev('return window.__tools.dbg.session.idcode.toString(16);')).toUpperCase());
@@ -151,8 +159,38 @@ console.log('== 3. 暂停 / 单步 / 继续（不动内存与寄存器）==');
     await d.session.refresh();
     return { a, b, c, h: d.session.halted };`);
   ok(r.a.h === true && r.h === true, '「暂停」把目标停住了');
-  ok(r.b.pc !== r.a.pc && r.c.pc !== r.b.pc, '连续两次单步 PC 都往前走了',
-     `0x${r.a.pc.toString(16)} → 0x${r.b.pc.toString(16)} → 0x${r.c.pc.toString(16)}`);
+  const stepped = r.b.pc !== r.a.pc && r.c.pc !== r.b.pc;
+  if (stepped){
+    ok(true, '连续两次单步 PC 都往前走了', `0x${r.a.pc.toString(16)} → 0x${r.b.pc.toString(16)} → 0x${r.c.pc.toString(16)}`);
+  } else {
+    /**
+     * 🚨 单步不动**不一定是调试链坏了**：目标卡在 `b .`（自己跳自己，HardFault 死循环的典型写法）
+     *    时，C_STEP 执行的就是那条分支，PC 当然不变（本机那块 BOOT0=1 的 F103ZE 就是这样）。
+     *    这里读回 PC 处的机器码与 IPSR，把"目标的锅"和"我们的锅"分开。
+     */
+    const diag = await ev(`
+      const d = window.__tools.dbg;
+      const pc = d.session.pc & 0xfffffffe;
+      let raw = null;
+      try { raw = [...await d.session.probe.readMem(pc, 2)]; } catch {}
+      const dhcsr = await d.session.probe._readWord(0xe000edf0);
+      const dfsr = await d.session.probe._readWord(0xe000ed30);
+      let cfsr = null;
+      try { cfsr = await d.session.probe._readWord(0xe000ed28); } catch {}
+      const xpsr = d.session.regList().find(x => x.name === 'XPSR')?.value | 0;
+      const bits = v => '0x' + (v >>> 0).toString(16);
+      return { pc, raw, isr: xpsr & 0x1ff, dhcsr: bits(dhcsr), dfsr: bits(dfsr), cfsr: cfsr == null ? null : bits(cfsr),
+               selfBranch: !!raw && raw[0] === 0xfe && raw[1] === 0xe7 };`);
+    const hex = diag.raw ? diag.raw.map(b => b.toString(16).padStart(2, '0')).join(' ') : '读不到';
+    if (diag.selfBranch){
+      skip++;
+      console.log(`  SKIP  单步没有前进：目标 PC=0x${diag.pc.toString(16)} 处是 \`b .\`（${hex}，IPSR=${diag.isr} = ${diag.isr === 3 ? 'HardFault' : '异常 ' + diag.isr}）`);
+      info(`DHCSR=${diag.dhcsr} · DFSR=${diag.dfsr} · CFSR=${diag.cfsr} —— 板子自己卡在死循环里，换个正常固件再测这一条`);
+    } else {
+      ok(false, '连续两次单步 PC 都往前走了', `0x${r.a.pc.toString(16)} → 0x${r.b.pc.toString(16)} → 0x${r.c.pc.toString(16)}`);
+      info(`单步诊断：PC 处机器码=${hex} · IPSR=${diag.isr} · DHCSR=${diag.dhcsr} · DFSR=${diag.dfsr} · CFSR=${diag.cfsr}`);
+    }
+  }
   const cont = await ev(`
     const d = window.__tools.dbg;
     await d.session.cont();
@@ -186,7 +224,54 @@ console.log('== 4. 硬件断点（下在 PC 自己身上，跨过一次再删掉
   ok(((ctrlAfter >>> 0) & 1) === 0, '没有断点时 FPB 被关掉（FP_CTRL.ENABLE=0）', '0x' + (ctrlAfter >>> 0).toString(16));
 }
 
-console.log('== 5. 收尾 ==');
+console.log('== 5. 新功能（符号列表 / RTT 地址 / 监视 / 源码行）真机走一遍 ==');
+{
+  // 板上跑的正是 tools/target-firmware/stm32f103_rtt_speed 那份固件，用它的 ELF 当符号源
+  const sym = await ev(`
+    const d = window.__tools.dbg;
+    const res = await fetch('/tools/fixtures/dwarf/stm32f103_rtt_speed.elf');
+    const st = d.loadElfBuffer(await res.arrayBuffer(), 'stm32f103_rtt_speed.elf');
+    await new Promise(r => setTimeout(r, 300));
+    const rows = [...document.querySelectorAll('#d-sym-list .symrow')];
+    return { n: st ? st.size : 0, vars: st ? st.varCount : 0, rows: rows.length,
+             hasRtt: rows.some(x => x.dataset.name === '_SEGGER_RTT'),
+             lines: st?.lines ? st.lines.size : 0,
+             rttSym: document.getElementById('d-rtt-sym').textContent };`);
+  ok(sym.n > 50 && sym.rows > 5, `符号列表在真机页面上渲染出来（${sym.n} 个符号 · 列表 ${sym.rows} 行）`, JSON.stringify(sym));
+  ok(sym.hasRtt, '符号列表里有 _SEGGER_RTT');
+  ok(sym.lines > 50, `行号表解析出 ${sym.lines} 条记录`, String(sym.lines));
+  ok(/_SEGGER_RTT = 0x2000000C/i.test(sym.rttSym), '侧栏 RTT 那格直接显示了 _SEGGER_RTT 的地址', sym.rttSym);
+
+  const watch = await ev(`
+    const d = window.__tools.dbg;
+    d.clearWatch();
+    d.addWatch('_SEGGER_RTT');
+    await new Promise(r => setTimeout(r, 500));
+    return { n: d.watch.items.length, err: d.watch.items[0]?.error || null,
+             val: d.watch.items[0]?.value?.text || null, addr: d.watch.items[0]?.addr,
+             dom: document.getElementById('d-watch-list').textContent.trim().slice(0, 90) };`);
+  ok(watch.n === 1 && watch.addr === 0x2000000c, '监视项加在真目标的 RTT 控制块地址上', JSON.stringify(watch));
+  ok(watch.val != null && !watch.err, `停止时从真目标读回了值：${String(watch.val).slice(0, 40)}`, JSON.stringify(watch));
+
+  const src = await ev(`
+    const d = window.__tools.dbg;
+    await d.afterStop();
+    await new Promise(r => setTimeout(r, 200));
+    const pc = d.session.pc >>> 0;
+    const at = d.sym.at(pc & 0xfffffffe);
+    return { pc, at: at ? { file: at.file, line: at.line } : null,
+             pos: document.getElementById('d-src-pos').textContent,
+             cur: document.querySelector('#d-src .srcrow.cur')?.dataset.line || null };`);
+  if (src.at){
+    ok(new RegExp(`:${src.at.line}\\b`).test(src.pos) && String(src.cur) === String(src.at.line),
+      `停下来时显示当前源码行（${src.at.file.split('/').pop()}:${src.at.line}，PC=0x${src.pc.toString(16)}）`, JSON.stringify(src));
+  } else {
+    info(`PC=0x${src.pc.toString(16)} 不在有行号信息的代码里 —— 源码行这一条本机跳过了（可能是启动代码/库函数）`);
+  }
+  await ev('window.__tools.dbg.clearWatch(); return 1;');
+}
+
+console.log('== 6. 收尾 ==');
 {
   await ev(`
     const d = window.__tools.dbg;

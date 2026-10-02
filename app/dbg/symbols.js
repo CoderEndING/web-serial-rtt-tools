@@ -13,9 +13,11 @@
 
 import { Elf } from '../elf/elf.js';
 import { listSampleable, SCALARS } from '../elf/dwarf.js';
+import { LineTable } from '../elf/lines.js';
 import { hex32, parseNum } from './fmt.js';
 
 const byAddr = (a, b) => a.addr - b.addr;
+const baseName = p => String(p || '').replace(/\\/g, '/').split('/').pop();
 
 export class SymTab {
   constructor(parts = {}){
@@ -32,6 +34,7 @@ export class SymTab {
     this.note = parts.note || '';
     this.ram = parts.ram || null;
     this.versions = parts.versions || [];
+    this.lines = parts.lines || null;      // 行号表（源码行显示用；没有 DWARF 行号时为 null）
   }
 
   /** @param {ArrayBuffer|Uint8Array} buf .elf 文件内容 */
@@ -60,7 +63,18 @@ export class SymTab {
     } catch (e){
       note = `DWARF 解析失败（${e?.message || e}）：只能按符号表显示地址与原始字节`;
     }
-    return new SymTab({ all, funcs, objs, vars, source, note, ram, versions });
+    /**
+     * 行号表（「停下来显示当前源码行」的地基）。**失败不算致命**：
+     * `-g0` 构建或被 strip 的 ELF 没有 `.debug_line`，符号/变量/断点照常用，
+     * 只是源码视图显示"这份 ELF 没有行号信息"。
+     */
+    let lines = null;
+    try {
+      if (LineTable.available(elf)) lines = LineTable.fromElf(elf);
+    } catch (e){
+      note = (note ? note + '；' : '') + `行号表解析失败（${e?.message || e}）`;
+    }
+    return new SymTab({ all, funcs, objs, vars, source, note, ram, versions, lines });
   }
 
   get size(){ return this.all.length; }
@@ -70,7 +84,56 @@ export class SymTab {
   summary(){
     const s = `${this.size} 个符号（函数 ${this.funcs.length} · 数据 ${this.objs.length}）`;
     const t = this.varCount ? `，其中 ${this.varCount} 个带类型变量（${this.source === 'dwarf' ? 'DWARF' : '符号表'}）` : '，没有类型信息（无 DWARF）';
-    return s + t + (this.note ? `　⚠ ${this.note}` : '');
+    const l = this.lines ? `，行号表 ${this.lines.size} 条` : '';
+    return s + t + l + (this.note ? `　⚠ ${this.note}` : '');
+  }
+
+  /** 地址 → 源码位置（没有行号表就返回 null） */
+  at(addr){ return this.lines ? this.lines.at(addr) : null; }
+
+  /** 「文件:行号」的人话（PC 显示、状态条用） */
+  locText(addr){
+    const r = this.at(addr);
+    return r && r.file ? `${baseName(r.file)}:${r.line}` : '';
+  }
+
+  /**
+   * RTT 控制块符号：`_SEGGER_RTT` 是最常见的名字，但有的工程改过名。
+   * 找不到就按名字模糊搜一把 —— 界面「RTT 输出」那格要把它显示出来。
+   */
+  rttSym(){
+    for (const n of ['_SEGGER_RTT', 'SEGGER_RTT', '_SEGGER_RTT_', 'g_rtt', 'rtt_cb']){
+      const s = this.find(n);
+      if (s?.addr) return { name: n, addr: s.addr >>> 0, size: s.size >>> 0 };
+    }
+    const hit = this.search('SEGGER_RTT', 8).find(s => s.addr);
+    return hit ? { name: hit.name, addr: hit.addr >>> 0, size: hit.size >>> 0 } : null;
+  }
+
+  /**
+   * 符号面板用的一行行清单：**带类型的变量排前面**（`p`/`w` 最常用的就是它们），
+   * 然后是函数，最后是没有类型的数据对象。`filter` 是子串（大小写不敏感）。
+   * @returns {{rows:Array, total:number, truncated:boolean}}
+   */
+  list({ filter = '', limit = 300 } = {}){
+    const q = String(filter || '').trim().toLowerCase();
+    const rows = [];
+    let total = 0;
+    const take = (row) => { total++; if (rows.length < limit) rows.push(row); };
+    for (const v of this.vars){
+      if (q && !v.name.toLowerCase().includes(q)) continue;
+      take({ name: v.name, addr: v.addr >>> 0, size: v.size >>> 0, kind: 'var', scalar: v.scalar || null, typeName: v.typeName || v.scalar || '' });
+    }
+    for (const s of this.funcs){
+      if (q && !s.name.toLowerCase().includes(q)) continue;
+      take({ name: s.name, addr: s.addr >>> 0, size: s.size >>> 0, kind: 'func', scalar: null, typeName: '' });
+    }
+    for (const s of this.objs){
+      if (q && !s.name.toLowerCase().includes(q)) continue;
+      if (this.varByName.has(s.name)) continue;                  // DWARF 那份已经列过了
+      take({ name: s.name, addr: s.addr >>> 0, size: s.size >>> 0, kind: 'obj', scalar: null, typeName: '' });
+    }
+    return { rows, total, truncated: total > rows.length };
   }
 
   /** 地址落在哪个函数里（PC 落点显示）：返回 {name, addr, off, exact} */

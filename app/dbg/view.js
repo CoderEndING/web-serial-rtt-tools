@@ -1,17 +1,21 @@
 /**
  * 「调试器」页（#dbg）—— 零安装的极简调试前端：暂停/继续/单步/复位、寄存器、内存、
- * 硬件断点、命令行（gdb 风格的最小子集）、RTT 输出同屏。
+ * 硬件断点、符号列表、监视窗口、源码行、命令行（gdb 风格的最小子集）、RTT 输出同屏。
  *
  * 分工：**这个文件只管 DOM**，所有语义都在
  *   app/dbg/session.js（会话：运行控制 / 寄存器 / 内存 / FPB 断点）
  *   app/dbg/cmd.js    （命令解析与输出，纯逻辑）
- *   app/dbg/symbols.js（ELF 符号）
+ *   app/dbg/symbols.js（ELF 符号 + 行号表）
+ *   app/dbg/watch.js  （监视项解析与显示，纯逻辑）
+ *   app/dbg/complete.js（Tab 补全，纯逻辑）
+ *   app/dbg/source.js （源码目录授权与读取）
  * 里，它们都能在没有浏览器的情况下自测。
  *
- * 三条本仓的界面纪律：
+ * 四条本仓的界面纪律：
  *   ① 短等待一律用 core/pace.js 的 waitMs（页面在后台时 setTimeout 会被钳到 ≥1 s）；
  *   ② 日志/表格的滚动用 ui/dom.js 的 appendLogLine（别每行写 scrollTop：读 scrollHeight 会强制同步布局）；
- *   ③ 新加的元素一律 `if (el)` 判空 —— 旧 index.html + 新 js（或反过来）时不能让初始化整个断掉。
+ *   ③ 新加的元素一律 `if (el)` 判空 —— 旧 index.html + 新 js（或反过来）时不能让初始化整个断掉；
+ *   ④ 命令行是**主窗口**：上面的寄存器/内存/源码都能折叠，把高度让给它。
  */
 
 import { $, setFlag, appendLogLine } from '../ui/dom.js';
@@ -21,10 +25,14 @@ import { waitMs } from '../core/pace.js';
 import { DebugSession, DEFAULT_CLOCK_KHZ } from './session.js';
 import { runCmd } from './cmd.js';
 import { SymTab } from './symbols.js';
+import { WatchList, resolveWatch, formatWatchValue } from './watch.js';
+import { completeLine } from './complete.js';
+import { SourceStore } from './source.js';
 import { hex32, parseBytes } from './fmt.js';
 import { Rtt } from '../rtt/protocol.js';
 
 const on = (id, ev, fn) => { const el = $(id); if (el) el.addEventListener(ev, fn); return el; };
+const baseName = p => String(p || '').replace(/\\/g, '/').split('/').pop();
 
 export class DbgView {
   constructor(){
@@ -41,6 +49,15 @@ export class DbgView {
     this.watching = false;
     this.rttTimer = null;
     this.autoRead = true;
+    this.watch = new WatchList();          // 监视窗口
+    this.watchBusy = false;
+    this.src = new SourceStore();          // 源码文件仓（用户授权一次目录）
+    this.srcCur = null;                    // {file, line, addr} 当前源码位置
+    this.srcShown = null;                  // 已经画出来的视图（用于只在位置变化时滚动）
+    this.cancelFlag = false;               // Ctrl+C
+    this.queue = [];                       // 多行粘贴 → 排队执行
+    this.runningQueue = false;
+    this.folds = store.get('dbg.fold', {}) || {};
   }
 
   // ================================================================ 初始化
@@ -62,29 +79,78 @@ export class DbgView {
     on('d-reset-halt', 'click', () => this._act('复位并停住', async () => { await s.resetHalt(); await this.refreshAll(); }));
     on('d-reset-run', 'click', () => this._act('复位并运行', async () => { await s.resetRun(); this._startWatch(); }));
     on('d-reg-refresh', 'click', () => this._act('刷新寄存器', () => s.refreshRegs().then(() => this.renderRegs())));
-    on('d-bp-clear', 'click', () => this._act('清空断点', async () => { await s.bpClear(); this.renderBps(); }));
+    on('d-bp-clear', 'click', () => this._act('清空断点', async () => { await s.bpClear(); this.renderBps(); this.renderSource(); }));
     on('d-rtt-locate', 'click', () => this.rttStart());
     on('d-rtt-stop', 'click', () => this.rttStop());
     const rttChk = $('d-rtt-on');
     if (rttChk) store.bind(rttChk, 'dbg.rttAuto', 'checked');
     const ra = $('d-rtt-addr');
-    if (ra) store.bind(ra, 'dbg.rttAddr');
+    if (ra){ store.bind(ra, 'dbg.rttAddr'); ra.addEventListener('input', () => this._renderRttSym()); }
+
+    // ---- 符号列表 ----
+    on('d-sym-q', 'input', () => this.renderSyms());
+    const symList = $('d-sym-list');
+    if (symList){
+      symList.addEventListener('click', (e) => {
+        const btn = e.target.closest?.('button[data-watch]');
+        if (btn){ this.addWatch(btn.dataset.watch); return; }
+        const row = e.target.closest?.('.symrow');
+        if (row?.dataset.name) this._fillCmd(`p ${row.dataset.name}`);
+      });
+    }
+
+    // ---- 监视窗口 ----
+    on('d-watch-add', 'click', () => { const i = $('d-watch-in'); if (i?.value) this.addWatch(i.value); });
+    const wi = $('d-watch-in');
+    if (wi) wi.addEventListener('keydown', e => { if (e.key === 'Enter'){ e.preventDefault(); this.addWatch(wi.value); } });
+    on('d-watch-refresh', 'click', () => this.refreshWatch({ force: true }));
+    on('d-watch-clear', 'click', () => this.clearWatch());
+    const wl = $('d-watch-list');
+    if (wl){
+      wl.addEventListener('click', (e) => {
+        const x = e.target.closest?.('button[data-del]');
+        if (x) this.delWatch(Number(x.dataset.del));
+      });
+    }
+    const live = $('d-watch-live');
+    if (live) store.bind(live, 'dbg.watchLive', 'checked');
+
+    // ---- 源码视图 ----
+    on('d-src-pick', 'click', () => this.pickSourceDir());
+    on('d-src-dir', 'change', e => this._indexSrcFiles(e.target.files));
+    const srcBox = $('d-src');
+    if (srcBox){
+      srcBox.addEventListener('click', (e) => {
+        const ln = e.target.closest?.('.ln');
+        const row = ln?.closest?.('.srcrow');
+        if (row?.dataset.line) this.toggleSourceBp(Number(row.dataset.line));
+      });
+    }
+
+    // ---- 折叠按钮（把高度让给命令行）----
+    this._initFolds();
 
     // ---- 主区按钮 ----
-    on('d-halt', 'click', () => this._act('暂停', async () => { await s.halt(); this.renderRegs(); this.renderMem(); }));
+    on('d-halt', 'click', () => this._act('暂停', async () => { await s.halt(); this.renderRegs(); this.renderMem(); await this.afterStop(); }));
     on('d-cont', 'click', () => this._act('继续', async () => { await s.cont(); this._startWatch(); }));
-    on('d-step', 'click', () => this._act('单步', async () => { await s.step(); this.renderRegs(); this.renderMem(); }));
+    on('d-step', 'click', () => this._act('单步', async () => { await s.step(); this.renderRegs(); this.renderMem(); await this.afterStop(); }));
     on('d-mem-read', 'click', () => this._act('读内存', () => this.readMem()));
     // 🚨 writeMemEdit() **自己**已经包了 _act —— 这里再包一层会让内层看到 busy=true 直接退出，
     //    现象是"点了写入、日志只说正在忙、内存一个字节都没改"（本仓自测抓到的）
     on('d-mem-write', 'click', () => this.writeMemEdit());
-    on('d-run', 'click', () => this.runLine($('d-cmd')?.value));
+    on('d-run', 'click', () => { const i = $('d-cmd'); const v = i?.value; if (i) i.value = ''; this.runLine(v); });
     const cmd = $('d-cmd');
     if (cmd){
-      cmd.addEventListener('keydown', e => {
-        if (e.key === 'Enter'){ e.preventDefault(); this.runLine(cmd.value); cmd.value = ''; }
-        else if (e.key === 'ArrowUp'){ e.preventDefault(); this._hist(-1); }
-        else if (e.key === 'ArrowDown'){ e.preventDefault(); this._hist(1); }
+      cmd.addEventListener('keydown', e => this._cmdKey(e));
+      cmd.addEventListener('paste', e => this._cmdPaste(e));
+    }
+    const out = $('d-out');
+    if (out){
+      // 点输出区（没在选文字时）把焦点还给输入行 —— 终端的手感
+      out.addEventListener('mouseup', () => {
+        const sel = window.getSelection?.();
+        if (sel && String(sel).length) return;
+        $('d-cmd')?.focus();
       });
     }
     const ev = $('d-mem-ev');
@@ -107,10 +173,11 @@ export class DbgView {
 
     this._syncBackend();
     this._syncButtons(false);
-    // 先把三个空面板的占位提示画出来（否则刚打开是一片空白，看着像坏了）
-    this.renderRegs(); this.renderMem(); this.renderBps();
+    // 先把空面板的占位提示画出来（否则刚打开是一片空白，看着像坏了）
+    this.renderRegs(); this.renderMem(); this.renderBps(); this.renderSyms(); this.renderWatch(); this.renderSource();
+    this._restoreWatch();
     if (!DbgView.supported()) this._out('这个浏览器没有 WebUSB（桌面版 Chrome/Edge 才有）—— 可以选「模拟目标」体验界面', 'warn');
-    this._out('调试器就绪。连上目标后按 h 看命令，或用上面的大按钮。', 'dim');
+    this._out('调试器就绪。连上目标后按 h 看命令，Tab 补全、↑↓ 翻历史、Ctrl+C 中断。', 'dim');
     return this;
   }
 
@@ -121,6 +188,27 @@ export class DbgView {
     if (this.session.connected) this.refreshAll().catch(() => {});
   }
 
+  // ================================================================ 折叠
+
+  _initFolds(){
+    for (const b of document.querySelectorAll('#tab-dbg [data-fold]')){
+      const id = b.dataset.fold;
+      b.addEventListener('click', () => {
+        const box = $(id);
+        if (!box) return;
+        const nowCollapsed = !box.classList.contains('collapsed');
+        box.classList.toggle('collapsed', nowCollapsed);
+        b.textContent = nowCollapsed ? '⌃' : '⌄';
+        this.folds[id] = nowCollapsed;
+        store.set('dbg.fold', this.folds);
+      });
+      if (this.folds[id]){
+        $(id)?.classList.add('collapsed');
+        b.textContent = '⌃';
+      }
+    }
+  }
+
   _syncBackend(){
     const mock = ($('d-backend')?.value || 'webusb') === 'mock';
     const clk = $('d-clock');
@@ -128,7 +216,7 @@ export class DbgView {
     const hint = $('d-elf-info');
     if (hint && !this.sym) hint.textContent = mock
       ? '模拟目标也有自己的内存/寄存器，可以配合载入 .elf 练手（断点、单步、p 变量都能跑）。'
-      : '载入 .elf 后可用符号名下断点、`p 变量` 看数值、PC 显示函数名。';
+      : '载入 .elf 后可用符号名下断点、`p 变量` 看数值、PC 显示函数名与源码行。';
   }
 
   _syncButtons(connected, halted){
@@ -167,7 +255,7 @@ export class DbgView {
     this._syncButtons(true);
     this.renderBps();
     this._out(`目标${this.session.halted ? '处于**停止**状态' : '**正在运行**'}`, 'dim');
-    if (this.session.halted) await this._followPc();
+    if (this.session.halted) await this.afterStop();
     if ($('d-rtt-on')?.checked) this.rttStart().catch(() => {});
     else if (!this.session.halted) this._startWatch();
     return true;
@@ -214,7 +302,25 @@ export class DbgView {
     if (cap) cap.textContent = this.session.bpCapacity
       ? `硬件断点上限 ${this.session.bpCapacity} 个（FPB rev${this.session.caps.rev}）—— 命令 b <地址|符号> 添加，点列表里的 × 删除`
       : '这颗内核没报告可用的 FPB 比较器（读 FP_CTRL 说 0 个）';
+    if (this.session.halted) await this.afterStop();
     return true;
+  }
+
+  /** 目标停下来之后要刷新的东西：PC 落点、源码行、监视值（三处一起，别漏） */
+  async afterStop(){
+    this._updatePcStrip();
+    await this.refreshWatch();
+    await this.renderSource();
+  }
+
+  _updatePcStrip(){
+    const pc = this.session.pc >>> 0;
+    const f = this.sym?.funcAt?.(pc & 0xfffffffe);
+    const loc = this.sym?.locText?.(pc & 0xfffffffe) || '';
+    const pos = $('d-src-pos');
+    if (pos) pos.textContent = loc ? `${loc}${f ? `  ${f.name}+0x${f.off.toString(16)}` : ''}` : (f ? `${f.name}+0x${f.off.toString(16)}` : '—');
+    const leg = $('d-src-file');
+    if (leg) leg.textContent = loc ? `${loc}${f ? ` · ${f.name}+0x${f.off.toString(16)}` : ''}` : (this.sym ? '（PC 不在有行号信息的代码里）' : '—');
   }
 
   renderRegs(){
@@ -257,8 +363,9 @@ export class DbgView {
       if (note){
         let extra = '';
         if (r.name === 'PC' || r.name === 'LR'){
-          const f = this.sym?.funcAt?.(r.value & ~1);
-          if (f) extra = `→ ${f.name}+0x${f.off.toString(16)}${f.exact ? '' : '(?)'}`;
+          const f = this.sym?.funcAt?.(r.value & 0xfffffffe);
+          const loc = this.sym?.locText?.(r.value & 0xfffffffe) || '';
+          if (f) extra = `→ ${f.name}+0x${f.off.toString(16)}${f.exact ? '' : '(?)'}${loc ? '  ' + loc : ''}`;
           else if (r.value >= 0x1fff0000 && r.value < 0x20000000) extra = '⚠ ROM bootloader';
         } else if (r.name === 'XPSR') extra = this._xpsrText(r.value);
         else if (r.kind === 'cfbp' && r.name === 'CONTROL') extra = (r.value & 1) ? '非特权' : '特权';
@@ -270,7 +377,7 @@ export class DbgView {
     const pcRow = $('d-pc');
     if (pcRow){
       const pc = list.find(r => r.name === 'PC')?.value || 0;
-      const f = this.sym?.funcAt?.(pc & ~1);
+      const f = this.sym?.funcAt?.(pc & 0xfffffffe);
       pcRow.textContent = `PC ${hex32(pc)}${f ? ' ' + f.name + '+0x' + f.off.toString(16) : ''}`;
     }
   }
@@ -306,7 +413,7 @@ export class DbgView {
     if (!list.length){
       const d = document.createElement('div');
       d.className = 'hint';
-      d.textContent = '还没有断点（命令 b main / b 0x08000123）';
+      d.textContent = '还没有断点（命令 b main / b 0x08000123，或点源码行号）';
       box.appendChild(d);
       return;
     }
@@ -315,11 +422,12 @@ export class DbgView {
       row.className = 'bprow';
       const t = document.createElement('span');
       t.className = 'mono';
-      t.textContent = `#${i + 1} ${hex32(b.addr)}${b.sym ? ' ' + b.sym : ''}`;
+      const loc = b.addr ? this.sym?.locText?.(b.addr) : '';
+      t.textContent = `#${i + 1} ${hex32(b.addr)}${b.sym ? ' ' + b.sym : ''}${loc ? '  ' + loc : ''}`;
       const del = document.createElement('button');
       del.textContent = '×';
       del.title = '删掉这个断点';
-      del.addEventListener('click', () => this._act('删断点', async () => { await this.session.bpDel(b.addr); this.renderBps(); }));
+      del.addEventListener('click', () => this._act('删断点', async () => { await this.session.bpDel(b.addr); this.renderBps(); this.renderSource(); }));
       row.append(t, del);
       box.appendChild(row);
     });
@@ -434,6 +542,94 @@ export class DbgView {
 
   // ================================================================ 命令行
 
+  /** 键盘：Tab 补全 / Ctrl+C 中断 / Ctrl+L 清屏 / Ctrl+A·E·U·K·W 行编辑（xshell 那套） */
+  _cmdKey(e){
+    const cmd = e.currentTarget;
+    if (e.key === 'Enter'){ e.preventDefault(); const v = cmd.value; cmd.value = ''; this.runLine(v); return; }
+    if (e.key === 'Tab'){ e.preventDefault(); this._complete(cmd); return; }
+    if (e.key === 'ArrowUp'){ e.preventDefault(); this._hist(-1); return; }
+    if (e.key === 'ArrowDown'){ e.preventDefault(); this._hist(1); return; }
+    if (e.key === 'Escape'){ e.preventDefault(); cmd.value = ''; return; }
+    if (!e.ctrlKey || e.altKey || e.metaKey) return;
+    const k = e.key.toLowerCase();
+    const pos = cmd.selectionStart ?? cmd.value.length;
+    const setPos = (v, p) => { cmd.value = v; cmd.setSelectionRange(p, p); };
+    if (k === 'c'){
+      if (window.getSelection && String(window.getSelection()).length) return;   // 有选中文字 = 复制，不抢
+      e.preventDefault();
+      this.cancelFlag = true;
+      this._stopWatch();
+      this.queue = [];
+      cmd.value = '';
+      this._out('^C', 'warn');
+      return;
+    }
+    if (k === 'l'){ e.preventDefault(); this._clearOut(); return; }
+    if (k === 'a'){ e.preventDefault(); cmd.setSelectionRange(0, 0); return; }
+    if (k === 'e'){ e.preventDefault(); cmd.setSelectionRange(cmd.value.length, cmd.value.length); return; }
+    if (k === 'u'){ e.preventDefault(); setPos(cmd.value.slice(pos), 0); return; }
+    if (k === 'k'){ e.preventDefault(); setPos(cmd.value.slice(0, pos), pos); return; }
+    if (k === 'w'){
+      e.preventDefault();
+      const head = cmd.value.slice(0, pos).replace(/[^\s]*\s*$/, '');
+      setPos(head + cmd.value.slice(pos), head.length);
+      return;
+    }
+  }
+
+  /** 粘贴多行 → 排队一条条跑（终端里粘一段脚本的用法） */
+  _cmdPaste(e){
+    const text = e.clipboardData?.getData('text') || '';
+    if (!text.includes('\n')) return;                    // 单行交给浏览器默认行为
+    e.preventDefault();
+    const lines = text.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+    if (!lines.length) return;
+    const cmd = e.currentTarget;
+    this.queue.push(...lines);
+    cmd.value = '';
+    this._out(`（粘贴了 ${lines.length} 行，排队执行）`, 'dim');
+    this._drainQueue();
+  }
+
+  async _drainQueue(){
+    if (this.runningQueue) return;
+    this.runningQueue = true;
+    try {
+      while (this.queue.length && !this.cancelFlag){
+        const line = this.queue.shift();
+        await this.runLine(line);
+      }
+      if (this.cancelFlag && this.queue.length){ this._out(`（已中断，丢弃剩余 ${this.queue.length} 行）`, 'warn'); this.queue = []; }
+    } finally { this.runningQueue = false; }
+  }
+
+  _complete(cmd){
+    const ctx = {
+      sym: this.sym,
+      regs: this.session.regList().map(r => r.name.toLowerCase()),
+      bps: this.session.bps,
+      files: this.sym?.lines?.paths || [],
+      watch: this.watch.items,
+    };
+    let r;
+    try { r = completeLine(cmd.value, ctx); } catch { return; }
+    if (!r.total) return;
+    if (r.total === 1 || r.value !== cmd.value){
+      cmd.value = r.value;
+      cmd.setSelectionRange(cmd.value.length, cmd.value.length);
+      return;                                            // 补出了唯一候选/更长的公共前缀：先别刷屏
+    }
+    this._out(r.candidates.join('  '), 'dim');
+  }
+
+  _fillCmd(text){
+    const cmd = $('d-cmd');
+    if (!cmd) return;
+    cmd.value = text;
+    cmd.focus();
+    cmd.setSelectionRange(cmd.value.length, cmd.value.length);
+  }
+
   _hist(dir){
     const cmd = $('d-cmd');
     if (!cmd || !this.hist.length) return;
@@ -441,6 +637,7 @@ export class DbgView {
       ? (this.histIdx < 0 ? this.hist.length - 1 : Math.max(0, this.histIdx - 1))
       : (this.histIdx < 0 ? -1 : Math.min(this.hist.length, this.histIdx + 1));
     cmd.value = this.histIdx < 0 || this.histIdx >= this.hist.length ? '' : this.hist[this.histIdx];
+    cmd.setSelectionRange(cmd.value.length, cmd.value.length);
   }
 
   async runLine(text){
@@ -449,10 +646,12 @@ export class DbgView {
     this._out('> ' + line, 'cmd');
     if (line !== this.hist[this.hist.length - 1]) this.hist.push(line);
     this.histIdx = -1;
+    this.cancelFlag = false;
     let res;
     try {
-      res = await runCmd(line, this.session, { view: this });
+      res = await runCmd(line, this.session, { view: this, signal: () => this.cancelFlag });
     } catch (e){
+      if (e?.cancelled){ this._out('（已中断）', 'warn'); return { cancelled: true, lines: [] }; }
       this._out('✗ ' + (e?.message || e), 'err');
       return { error: String(e?.message || e) };
     }
@@ -462,7 +661,7 @@ export class DbgView {
     this.renderRegs(); this.renderBps(); this._syncButtons();
     const changedMem = /^(md|mw|ms|x)$/.test(line.split(/\s+/)[0].toLowerCase());
     if (changedMem) await this.readMem({ silent: true });
-    if (this.session.halted) await this._followPc();
+    if (this.session.halted) await this.afterStop();
     else this._startWatch();
     return res;
   }
@@ -493,10 +692,13 @@ export class DbgView {
     let polls = 0;
     while (this.watching && this.session.connected && !this.session.halted){
       await waitMs(150);
+      if (this.cancelFlag) break;
       polls++;
       try {
         await this.session.refresh();
         if (this.rtt && polls % 2 === 0) await this._rttPump();
+        // 「运行中也刷新」开关（默认关）：直接读 RAM，目标照跑
+        if ($('d-watch-live')?.checked && polls % 2 === 0 && !this.session.busy) await this.refreshWatch();
       } catch (e){
         this._out('✗ 观察目标时出错（继续试）：' + (e?.message || e), 'err');
         await waitMs(600);
@@ -505,12 +707,13 @@ export class DbgView {
         await this.session.refreshRegs();
         this.renderRegs();
         const pc = this.session.pc >>> 0;
-        const f = this.sym?.funcAt?.(pc & ~1);
-        const atBp = this.session.bps.some(b => (b & ~1) === (pc & ~1));
-        this._out(atBp
-          ? `⏹ 命中断点 @ ${hex32(pc)}${f ? ' (' + f.name + '+0x' + f.off.toString(16) + ')' : ''}`
-          : `⏹ 目标已停止 @ ${hex32(pc)}${f ? ' (' + f.name + '+0x' + f.off.toString(16) + ')' : ''}`, atBp ? 'ok' : 'warn');
+        const f = this.sym?.funcAt?.(pc & 0xfffffffe);
+        const atBp = this.session.bps.some(b => (b & 0xfffffffe) === (pc & 0xfffffffe));
+        const loc = this.sym?.locText?.(pc & 0xfffffffe) || '';
+        const tail = `${loc ? ' ' + loc : ''}${f ? ' (' + f.name + '+0x' + f.off.toString(16) + ')' : ''}`;
+        this._out(atBp ? `⏹ 命中断点 @ ${hex32(pc)}${tail}` : `⏹ 目标已停止 @ ${hex32(pc)}${tail}`, atBp ? 'ok' : 'warn');
         await this._followPc();
+        await this.afterStop();
       }
     }
     this.watching = false;
@@ -541,7 +744,13 @@ export class DbgView {
       const el = $('d-elf-info');
       if (el) el.textContent = `${name || 'ELF'}：${info}`;
       this._out(`已载入符号：${name || 'ELF'} —— ${info}`, st.note ? 'warn' : 'ok');
-      this.renderRegs(); this.renderBps();
+      if (st.lines) this._out(`　${st.lines.summary()}`, 'dim');
+      // 监视项重新解析一遍（换了 ELF 之后地址/类型都可能变）
+      for (const it of this.watch.items) Object.assign(it, resolveWatch(it.expr, st), { value: null });
+      this.renderRegs(); this.renderBps(); this.renderSyms(); this.renderWatch();
+      this._renderRttSym();
+      this._updatePcStrip();
+      this.renderSource();
       return st;
     } catch (e){
       this._out('✗ 解析 ELF 失败：' + (e?.message || e), 'err');
@@ -550,15 +759,336 @@ export class DbgView {
     }
   }
 
+  /** 侧栏符号列表（载入 ELF 后一眼看到全局变量） */
+  renderSyms(){
+    const box = $('d-sym-list');
+    if (!box) return;
+    if (!this.sym){
+      box.textContent = '';
+      const d = document.createElement('div');
+      d.className = 'hint';
+      d.textContent = '（载入 .elf 后这里列出全局变量/函数；点名字填进命令行，点 ＋ 加监视）';
+      box.appendChild(d);
+      return;
+    }
+    const q = $('d-sym-q')?.value || '';
+    let r;
+    try { r = this.sym.list({ filter: q, limit: 300 }); }
+    catch { r = { rows: [], total: 0, truncated: false }; }
+    box.textContent = '';
+    if (!r.rows.length){
+      const d = document.createElement('div');
+      d.className = 'hint';
+      d.textContent = q ? `没有匹配「${q}」的符号` : '（这份 ELF 里没有数据符号）';
+      box.appendChild(d);
+      return;
+    }
+    const frag = document.createDocumentFragment();
+    r.rows.forEach((row) => {
+      const el = document.createElement('div');
+      el.className = 'symrow';
+      el.dataset.name = row.name;
+      el.title = `${row.name} @ ${hex32(row.addr)}${row.size ? `（${row.size} 字节）` : ''}${row.typeName ? ' : ' + row.typeName : ''}\n点名字 → 填 p ${row.name}；点 ＋ → 加进监视`;
+      const add = document.createElement('button');
+      add.className = 'mini';
+      add.textContent = '＋';
+      add.dataset.watch = row.name;
+      add.title = '加进监视窗口';
+      const nm = document.createElement('span');
+      nm.className = 'nm';
+      nm.textContent = row.name;
+      if (row.kind === 'func') nm.style.color = 'var(--fg2)';
+      const ad = document.createElement('span');
+      ad.className = 'ad';
+      ad.textContent = hex32(row.addr);
+      const ty = document.createElement('span');
+      ty.className = 'ty';
+      ty.textContent = row.scalar || row.typeName || (row.kind === 'func' ? 'fn' : '');
+      el.append(add, nm, ad, ty);
+      frag.appendChild(el);
+    });
+    if (r.truncated){
+      const more = document.createElement('div');
+      more.className = 'symmore';
+      more.textContent = `共 ${r.total} 条，只显示前 ${r.rows.length} 条 —— 输入关键字缩小范围`;
+      frag.appendChild(more);
+    }
+    box.appendChild(frag);
+  }
+
+  // ================================================================ 监视窗口
+
+  _restoreWatch(){
+    const saved = store.get('dbg.watch', null);
+    if (Array.isArray(saved) && saved.length) this.watch = WatchList.fromJSON(saved, this.sym);
+    this.renderWatch();
+  }
+  _saveWatch(){ store.set('dbg.watch', this.watch.toJSON()); }
+
+  /** 加一项监视（符号面板的 ＋、侧栏输入框、命令行 `w` 都走这里） */
+  addWatch(expr){
+    const e = String(expr || '').trim();
+    if (!e) return { ok: false, error: '空的' };
+    const r = this.watch.add(e, this.sym);
+    if (r.dup){ this._out(`（监视里已经有「${e}」了）`, 'warn'); return { ok: true, dup: true, index: r.index }; }
+    this._saveWatch();
+    this.renderWatch();
+    if (r.item?.error) this._out(`⚠ 监视「${e}」：${r.item.error}`, 'warn');
+    else this._out(`监视 + ${e}${r.item?.addr !== undefined ? ' @ ' + hex32(r.item.addr) : ''}`, 'ok');
+    const wi = $('d-watch-in');
+    if (wi && wi.value.trim() === e) wi.value = '';
+    this.refreshWatch({ force: true }).catch(() => {});
+    return { ok: true, index: r.index, item: r.item };
+  }
+
+  delWatch(what){
+    const r = this.watch.remove(what);
+    if (r.removed){ this._saveWatch(); this.renderWatch(); }
+    return r;
+  }
+
+  /** 供命令行 `wl` 用：一溜溜的监视项（含刚读到的值） */
+  watchItems(){
+    return this.watch.items.map(it => ({ expr: it.expr, label: it.label, addr: it.addr, error: it.error || null, value: it.value || null, typeName: it.typeName }));
+  }
+
+  clearWatch(){
+    if (!this.watch.length) return;
+    this.watch.clear();
+    this._saveWatch();
+    this.renderWatch();
+  }
+
+  /** 把监视项的值读回来（停止时自动调；运行中看「运行中也刷新」开关） */
+  async refreshWatch({ force = false } = {}){
+    if (!this.watch.length) return 0;
+    if (!this.session.connected){ this.renderWatch(); return 0; }
+    if (this.watchBusy) return 0;
+    if (!force && !this.session.halted && !$('d-watch-live')?.checked) return 0;
+    this.watchBusy = true;
+    let ok = 0;
+    try {
+      for (const it of this.watch.items){
+        if (it.error) continue;
+        try {
+          const bytes = await this.session.memRead(it.addr, it.size || 4);
+          const f = formatWatchValue(it, bytes);
+          it.prev = it.value;
+          it.value = f;
+          if (f.cls !== 'err') ok++;
+        } catch (e){
+          it.prev = it.value;
+          it.value = { text: '读失败：' + (e?.message || e), cls: 'err' };
+        }
+      }
+    } finally {
+      this.watchBusy = false;
+    }
+    this.renderWatch();
+    return ok;
+  }
+
+  renderWatch(){
+    const box = $('d-watch-list');
+    if (!box) return;
+    box.textContent = '';
+    if (!this.watch.length){
+      const d = document.createElement('div');
+      d.className = 'hint';
+      d.innerHTML = '（还没有监视项：在符号列表点 ＋，或命令行 <code>w 变量</code>）';
+      box.appendChild(d);
+      return;
+    }
+    this.watch.items.forEach((it, i) => {
+      const row = document.createElement('div');
+      row.className = 'wrow' + (it.error ? ' bad' : '');
+      const nm = document.createElement('span');
+      nm.className = 'nm';
+      nm.textContent = it.label || it.expr;
+      nm.title = `${it.expr}${it.addr !== undefined ? ' @ ' + hex32(it.addr) : ''}${it.typeName ? ' : ' + it.typeName : ''}`;
+      const vl = document.createElement('span');
+      vl.className = 'vl';
+      const v = it.value;
+      vl.textContent = it.error ? it.error : (v ? (v.hex && !String(v.text).includes(v.hex) ? `${v.text}  ${v.hex}` : String(v.text)) : '—');
+      if (v && it.prev && v.text !== it.prev.text) row.classList.add('chg');
+      const ty = document.createElement('span');
+      ty.className = 'ty';
+      ty.textContent = it.error ? '' : (v?.type || it.typeName || '');
+      const x = document.createElement('button');
+      x.className = 'mini x';
+      x.textContent = '×';
+      x.dataset.del = String(i);
+      x.title = '删掉这一项';
+      row.append(nm, vl, ty, x);
+      box.appendChild(row);
+    });
+  }
+
+  // ================================================================ 源码视图
+
+  async pickSourceDir(){
+    try {
+      const sum = await this.src.pick();
+      this._out('源码：' + sum, 'ok');
+      this.srcShown = null;
+      await this.renderSource();
+    } catch (e){
+      if (e?.name === 'AbortError') return;                      // 用户点了取消
+      this._out('✗ 选择源码目录失败：' + (e?.message || e), 'err');
+      toast('选择源码目录失败：' + (e?.message || e), 'err', 6000);
+    }
+  }
+
+  async _indexSrcFiles(files){
+    if (!files?.length) return;
+    try {
+      const sum = this.src.indexFileList(files);
+      this._out('源码：' + sum, 'ok');
+      this.srcShown = null;
+      await this.renderSource();
+    } catch (e){
+      this._out('✗ 索引源码文件失败：' + (e?.message || e), 'err');
+    }
+  }
+
+  /** 停下来时画"当前源码行"（Ozone 那种） */
+  async renderSource(){
+    const box = $('d-src');
+    if (!box) return;
+    const ph = (t) => { box.textContent = ''; const d = document.createElement('div'); d.className = 'hint'; d.textContent = t; box.appendChild(d); };
+    if (!this.sym){ ph('（载入 .elf 后可用：停下来时这里显示 PC 所在的源码行，点行号下断点）'); this.srcCur = null; return; }
+    if (!this.sym.lines){ ph('这份 ELF 没有行号信息（编译时没带 -g，或被 strip 过）—— 只能用 `sym` 找符号地址'); this.srcCur = null; return; }
+    if (!this.session.connected){ ph('（还没连接：连上并停下来后这里显示源码行）'); this.srcCur = null; return; }
+    const pc = this.session.pc >>> 0;
+    const at = this.sym.at(pc & 0xfffffffe);
+    if (!at || !at.file){
+      ph(`PC ${hex32(pc)} 不在有行号信息的代码里（可能在库函数/启动代码里）`);
+      this.srcCur = null;
+      return;
+    }
+    this.srcCur = { ...at };
+    let text = null, err = '';
+    if (this.src.ready){
+      try { text = await this.src.read(at.file); }
+      catch (e){ err = e?.message || String(e); }
+    }
+    this._srcPaint(box, this.srcCur, text != null ? text.split(/\r?\n/) : null, err);
+  }
+
+  _srcPaint(box, at, lines, err){
+    const from = Math.max(1, at.line - 12);
+    const to = lines ? Math.min(lines.length, at.line + 25) : at.line + 25;
+    const key = `${at.file}:${from}:${to}:${at.line}:${this.session.bps.join(',')}`;
+    const sameView = this.srcShown?.key === key;
+    box.textContent = '';
+    box.dataset.file = at.file;
+    const bps = new Set();
+    if (this.sym?.lines){
+      for (const ln of range(from, to)){
+        const a = this.sym.lines.addrOfLine(at.file, ln);
+        if (a == null) continue;
+        if (this.session.bps.some(b => (b & 0xfffffffe) === (a & 0xfffffffe))) bps.add(ln);
+      }
+    }
+    if (!lines){
+      const row = document.createElement('div');
+      row.className = 'srcrow cur';
+      row.dataset.line = String(at.line);
+      const ln = document.createElement('span'); ln.className = 'ln'; ln.textContent = String(at.line);
+      const tx = document.createElement('span'); tx.className = 'tx';
+      tx.textContent = err ? `（读不到源码：${err}）` : '（还没选源码目录：点上面的「选择源码目录…」，选到工程根目录）';
+      row.append(ln, tx);
+      box.appendChild(row);
+      this.srcShown = { key, line: at.line };
+      return;
+    }
+    const frag = document.createDocumentFragment();
+    for (const ln of range(from, to)){
+      const row = document.createElement('div');
+      row.className = 'srcrow' + (ln === at.line ? ' cur' : '') + (bps.has(ln) ? ' bp' : '');
+      row.dataset.line = String(ln);
+      const n = document.createElement('span');
+      n.className = 'ln';
+      n.textContent = String(ln);
+      n.title = '点一下在这行下硬件断点（要有地址信息）；再点一下删掉';
+      const t = document.createElement('span');
+      t.className = 'tx';
+      t.textContent = (lines[ln - 1] ?? '').replace(/\t/g, '    ');
+      row.append(n, t);
+      frag.appendChild(row);
+    }
+    box.appendChild(frag);
+    if (!sameView){
+      const cur = box.querySelector('.srcrow.cur');
+      if (cur?.scrollIntoView) cur.scrollIntoView({ block: 'center' });
+    }
+    this.srcShown = { key, line: at.line };
+  }
+
+  /** 点源码行号 → 下/删硬件断点（行号表里没有地址就明说） */
+  async toggleSourceBp(line){
+    if (!this.sym?.lines) return false;
+    const file = this.srcCur?.file || $('d-src')?.dataset.file;
+    if (!file) return false;
+    const addr = this.sym.lines.addrOfLine(file, line);
+    if (addr == null){ this._out(`✗ ${baseName(file)}:${line} 没有对应的代码地址（可能是空行/声明/被优化掉了）`, 'err'); return false; }
+    const has = this.session.bps.some(b => (b & 0xfffffffe) === (addr & 0xfffffffe));
+    return await this._act(has ? '删断点' : '下断点', async () => {
+      if (has) await this.session.bpDel(addr);
+      else await this.session.bpAdd(addr);
+      this.renderBps();
+      this.srcShown = null;
+      await this.renderSource();
+      this._out(`${has ? '删掉' : '下了'}断点 ${baseName(file)}:${line} @ ${hex32(addr)}`, 'ok');
+    });
+  }
+
+  /** 命令行 `src <文件:行>` 用：把源码视图跳到指定位置 */
+  async showSource(file, line = 1){
+    if (!this.sym?.lines) return false;
+    const want = String(file).toLowerCase();
+    const paths = this.sym.lines.paths;
+    const hit = paths.find(p => p.toLowerCase() === want)
+      || paths.find(p => p.toLowerCase().endsWith('/' + want))
+      || paths.find(p => baseName(p).toLowerCase() === baseName(want));
+    if (!hit) return false;
+    this.srcCur = { file: hit, line, addr: this.sym.lines.addrOfLine(hit, line) ?? 0 };
+    const box = $('d-src');
+    if (!box) return true;
+    let text = null, err = '';
+    if (this.src.ready){ try { text = await this.src.read(hit); } catch (e){ err = e?.message || String(e); } }
+    this.srcShown = null;
+    this._srcPaint(box, this.srcCur, text != null ? text.split(/\r?\n/) : null, err);
+    const leg = $('d-src-file');
+    if (leg) leg.textContent = `${baseName(hit)}:${line}（手动定位）`;
+    return true;
+  }
+
   // ================================================================ RTT 同屏
+
+  /** 把 ELF 里的 `_SEGGER_RTT` 地址显示出来（地址留空就用它） */
+  _renderRttSym(){
+    const el = $('d-rtt-sym');
+    if (!el) return;
+    if (!this.sym){ el.textContent = '（载入 .elf 后这里显示 _SEGGER_RTT 的地址）'; return; }
+    const s = this.sym.rttSym();
+    const manual = parseNumSafe($('d-rtt-addr')?.value);
+    if (s){
+      el.textContent = `ELF 符号 ${s.name} = ${hex32(s.addr)}${s.size ? `（${s.size} 字节）` : ''}`
+        + (manual ? `　·　地址格填了 ${hex32(manual)}（以它为准）` : '　·　地址留空就用它');
+    } else {
+      el.textContent = '这份 ELF 里没找到 _SEGGER_RTT 符号 —— 在「地址」里手填，或用 RTT 转发页的自动搜索';
+    }
+  }
 
   async rttStart(){
     if (!this.session.connected){ this._out('✗ 先连接目标', 'err'); return false; }
     const manual = parseNumSafe($('d-rtt-addr')?.value);
     let addr = manual;
+    let from = manual ? '手填地址' : '';
     if (!addr){
-      const v = this.sym?.find?.('_SEGGER_RTT');
-      if (v?.addr) addr = v.addr;
+      const v = this.sym?.rttSym?.() || this.sym?.find?.('_SEGGER_RTT');
+      if (v?.addr){ addr = v.addr; from = `ELF 符号 ${v.name || '_SEGGER_RTT'}`; }
     }
     if (!addr){
       this._out('✗ 不知道 RTT 控制块地址：载入 .elf（用 _SEGGER_RTT 符号）或在「地址」里手填', 'err');
@@ -568,9 +1098,10 @@ export class DbgView {
       const rtt = new Rtt(this.session.probe, { addr });
       await rtt.init(addr);
       this.rtt = rtt;
-      this._out(`RTT 控制块 @ ${hex32(addr)}：上行通道 ${rtt.maxUp} 个（第 1 个 ${rtt.up[0]?.size || 0} B）、下行 ${rtt.maxDown} 个`, 'ok');
+      this._out(`RTT 控制块 @ ${hex32(addr)}（${from}）：上行通道 ${rtt.maxUp} 个（第 1 个 ${rtt.up[0]?.size || 0} B）、下行 ${rtt.maxDown} 个`, 'ok');
       const info = $('d-rtt-info');
-      if (info) info.textContent = `已连上 @ ${hex32(addr)}`;
+      if (info) info.textContent = `已连上 @ ${hex32(addr)}（${from}）`;
+      this._renderRttSym();
       await this._rttPump();
       this._startWatch();          // 跑着的时候也持续泵
     });
@@ -609,8 +1140,14 @@ export class DbgView {
       regs: s.regList().length,
       bps: s.bps.map(a => hex32(a)),
       bpCap: s.bpCapacity,
-      elf: this.sym ? { name: this.elfName, symbols: this.sym.size, vars: this.sym.varCount, source: this.sym.source } : null,
+      elf: this.sym ? { name: this.elfName, symbols: this.sym.size, vars: this.sym.varCount, source: this.sym.source,
+        lines: this.sym.lines ? this.sym.lines.size : 0, files: this.sym.lines ? this.sym.lines.fileCount : 0,
+        rtt: this.sym.rttSym()?.addr ?? null } : null,
       rtt: this.rtt ? { addr: this.rtt.addr, maxUp: this.rtt.maxUp } : null,
+      watch: this.watch.items.map(it => ({ expr: it.expr, addr: it.addr ?? null, error: it.error || null, value: it.value?.text ?? null })),
+      src: { ready: this.src.ready, files: this.src.count, cur: this.srcCur ? { file: this.srcCur.file, line: this.srcCur.line } : null,
+        shown: $('d-src')?.querySelectorAll('.srcrow').length || 0 },
+      symRows: $('d-sym-list')?.querySelectorAll('.symrow').length || 0,
       memAddr: hex32(this.memAddr),
       memLen: this.mem.length,
       watching: this.watching,
@@ -620,6 +1157,12 @@ export class DbgView {
 }
 
 // ---------------------------------------------------------------- 小工具
+
+function range(from, to){
+  const out = [];
+  for (let i = from; i <= to; i++) out.push(i);
+  return out;
+}
 
 function parseNumSafe(text){
   const s = String(text ?? '').trim();

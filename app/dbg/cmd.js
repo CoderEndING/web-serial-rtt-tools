@@ -51,23 +51,48 @@ const HELP = [
   '  b <地址|符号>         加硬件断点（FPB）',
   '  bd <编号|地址|all>    删断点（编号见 bl）',
   '  bl                    列出断点',
+  '  w <变量>              加进「监视」窗口（停止时自动刷新；也支持 符号+偏移 / 0x地址）',
+  '  wl                    列出监视项与当前值',
+  '  wd <编号|名字|all>    删监视项',
+  '  sl                    当前源码位置（PC 落在哪个文件哪一行）',
+  '  src [文件:行]         列出有行号信息的源文件 / 把源码视图跳到指定位置',
   '  info                  目标信息（后端/时钟/状态/断点容量/符号摘要）',
   '  sym <子串>            搜符号',
   '  cls                   清屏',
+  '',
+  '界面上的手感：Tab 补全 · ↑↓ 翻历史 · Ctrl+C 中断 · Ctrl+L 清屏 · 粘多行会排队执行。',
 ];
+
+/** Ctrl+C 用：命令执行到一半被取消（由 view 捕获并显示成 ^C） */
+export class Cancelled extends Error {
+  constructor(){ super('已中断'); this.cancelled = true; this.name = 'Cancelled'; }
+}
+
+/** 每步操作前问一下"用户按 Ctrl+C 了吗"——浏览器取消不了正在飞的 USB 传输，所以只能逐步检查 */
+export function checkCancel(opts){
+  const s = opts?.signal;
+  const v = typeof s === 'function' ? s() : s?.cancelled;
+  if (v) throw new Cancelled();
+}
 
 /**
  * 执行一条命令。
  * @param {string} line 用户输入
  * @param {object} session 调试会话（见 app/dbg/session.js 的 DebugSession；测试里用假的）
- * @param {object} [opts] `{session, view}` —— session 会被传给 addrOf
+ * @param {object} [opts] `{session, view, signal}` —— view 给监视窗口/源码视图用，signal 是 Ctrl+C 的查询函数
  * @returns {Promise<{lines:Array<{t:string,c?:string}>, clear?:boolean}>}
  */
 export async function runCmd(line, session, opts = {}){
   const p = parseCmd(line);
   if (!p) return { lines: [] };
+  checkCancel(opts);
+  return await runCmdInner(p, session, opts);
+}
+
+async function runCmdInner(p, session, opts = {}){
   const { cmd, args, rest } = p;
   const S = session;
+  const V = opts.view || null;
   const lines = [];
   const need = () => { if (!S?.connected) throw new Error('还没连接目标（先点「连接」）'); };
 
@@ -134,6 +159,7 @@ export async function runCmd(line, session, opts = {}){
       if (len === null) throw new Error(`认不出长度：「${args[1]}」`);
       if (!len || len > 4096) throw new Error('长度要在 1~4096 之间');
       const bytes = await S.memRead(a.addr, len);
+      checkCancel(opts);                                    // 长读之后再看一眼 Ctrl+C
       const head = `${a.sym ? `${a.sym.name}${a.deref ? '（解引用）' : ''} ` : ''}${hex32(a.addr)} 起 ${bytes.length} 字节：`;
       lines.push(L(head, 'dim'));
       for (const l of hexdump(bytes, a.addr)) lines.push(L(l));
@@ -174,11 +200,14 @@ export async function runCmd(line, session, opts = {}){
       if (!t){
         const r = st.resolve(name);
         if (!r) throw new Error(`找不到变量或符号：「${name}」（试试 sym ${name}）`);
-        return { lines: [L(`${name} → ${hex32(r.addr)}${r.sym?.size ? `（${r.sym.size} 字节）` : ''}`, 'dim')] };
+        const loc = st.locText?.(r.addr) || '';
+        return { lines: [L(`${name} → ${hex32(r.addr)}${r.sym?.size ? `（${r.sym.size} 字节）` : ''}${loc ? '  ' + loc : ''}`, 'dim')] };
       }
       const size = t.scalarInfo ? t.scalarInfo.size : Math.min(t.size || 4, 64);
       const raw = await S.memRead(t.addr, size);
-      return { lines: [L(fmtVar(t, raw, S))] };
+      checkCancel(opts);
+      const loc = st.locText?.(t.addr) || '';
+      return { lines: [L(fmtVar(t, raw, S) + (loc ? '  ' + loc : ''))] };
     }
 
     case 'b': case 'break': {
@@ -222,7 +251,10 @@ export async function runCmd(line, session, opts = {}){
     case 'info': {
       lines.push(L(infoLine(S)));
       if (S.connected) lines.push(L(statusLine(S)));
-      if (S.sym) lines.push(L('符号：' + S.sym.summary(), 'dim'));
+      if (S.sym){
+        lines.push(L('符号：' + S.sym.summary(), 'dim'));
+        if (S.sym.lines) lines.push(L('行号：' + S.sym.lines.summary(), 'dim'));
+      }
       return { lines };
     }
 
@@ -231,8 +263,81 @@ export async function runCmd(line, session, opts = {}){
       if (!args.length) throw new Error('用法：sym <子串>');
       const hits = S.sym.search(args[0]);
       if (!hits.length) return { lines: [L(`没有匹配「${args[0]}」的符号`, 'warn')] };
-      for (const h of hits) lines.push(L(`  ${h.kind === 'func' ? 'F' : h.kind === 'var' ? 'V' : 'D'} ${hex32(h.addr)} ${String(h.size || 0).padStart(6)}  ${h.name}${h.scalar ? '  : ' + h.scalar : ''}`));
+      for (const h of hits){
+        const loc = h.kind === 'func' ? (S.sym.locText?.(h.addr) || '') : '';
+        lines.push(L(`  ${h.kind === 'func' ? 'F' : h.kind === 'var' ? 'V' : 'D'} ${hex32(h.addr)} ${String(h.size || 0).padStart(6)}  ${h.name}${h.scalar ? '  : ' + h.scalar : ''}${loc ? '  ' + loc : ''}`));
+      }
       lines.push(L(`共 ${hits.length} 条${hits.length >= 40 ? '（只显示前 40 条）' : ''}`, 'dim'));
+      return { lines };
+    }
+
+    // ---- 监视窗口（w / wl / wd）——「选择 ELF 里的变量，停下来看它的值」 ----
+    case 'w': case 'watch': {
+      if (!V?.addWatch) throw new Error('监视窗口需要界面支持（`w` 只在调试器页可用）');
+      if (!rest.trim()) throw new Error('用法：w <变量名|符号+偏移|0x地址>（例：w g_tick / w g_buf+4 / w 0x20000000）');
+      const expr = rest.trim();
+      const r = V.addWatch(expr);
+      if (r?.error) throw new Error(r.error);
+      if (r?.dup) return { lines: [L(`监视里已经有「${expr}」了`, 'warn')] };
+      const it = r?.item;
+      return { lines: [L(`监视 + ${expr}${it?.addr !== undefined ? ' @ ' + hex32(it.addr) : ''}${it?.error ? '　⚠ ' + it.error : ''}`, it?.error ? 'warn' : 'ok')] };
+    }
+
+    case 'wl': case 'watchlist': {
+      if (!V) throw new Error('监视窗口需要界面支持');
+      const items = V.watchItems ? V.watchItems() : (V.watch?.items || []);
+      if (!items.length) return { lines: [L('监视是空的（w <变量> 加一项）', 'dim')] };
+      items.forEach((it, i) => {
+        const val = it.error ? '⚠ ' + it.error : (it.value?.text ?? '（还没读）');
+        lines.push(L(`  #${i + 1}  ${String(it.label || it.expr).padEnd(18, ' ')} ${it.addr !== undefined ? hex32(it.addr) : '          '}  = ${val}${it.value?.hex && !String(val).includes(it.value.hex) ? ' (' + it.value.hex + ')' : ''}`,
+          it.error ? 'warn' : 'ok'));
+      });
+      lines.push(L(`共 ${items.length} 项 —— 停止（暂停/命中/单步）时自动刷新；运行中刷新看侧栏那个开关`, 'dim'));
+      return { lines };
+    }
+
+    case 'wd': case 'unwatch': {
+      if (!V?.delWatch) throw new Error('监视窗口需要界面支持');
+      if (!args.length) throw new Error('用法：wd <编号|名字|all>（编号见 wl）');
+      const r = V.delWatch(args[0]);
+      if (!r?.removed) throw new Error(`找不到这个监视项：「${args[0]}」（wl 看现有哪些）`);
+      return { lines: [L(`已删掉 ${r.removed} 项监视`, 'ok')] };
+    }
+
+    // ---- 源码位置（sl / src）----
+    case 'sl': {
+      need();
+      if (!S.sym) throw new Error('还没载入 .elf');
+      if (!S.sym.lines) throw new Error('这份 ELF 没有行号信息（编译时没带 -g，或被 strip 过）');
+      const pc = S.pc >>> 0;
+      const at = S.sym.at(pc & 0xfffffffe);
+      if (!at) return { lines: [L(`PC ${hex32(pc)} 不在有行号信息的代码里（可能在库函数/启动代码）`, 'warn')] };
+      lines.push(L(`${at.file}:${at.line}${at.col ? ':' + at.col : ''}  ←  PC ${hex32(pc)} ${S.sym.nameOf(pc)}`, 'ok'));
+      if (V?.showSource) await V.showSource(at.file, at.line);
+      return { lines };
+    }
+
+    case 'src': {
+      if (!S.sym) throw new Error('还没载入 .elf');
+      if (!S.sym.lines) throw new Error('这份 ELF 没有行号信息（编译时没带 -g，或被 strip 过）');
+      const arg = args[0] || '';
+      if (!arg){
+        const paths = S.sym.lines.paths.slice(0, 40);
+        if (!paths.length) return { lines: [L('行号表里没有源文件（这份 ELF 只有汇编？）', 'warn')] };
+        lines.push(L(`行号表里的源文件（${S.sym.lines.fileCount} 个，列前 ${paths.length} 个）：`, 'dim'));
+        for (const p of paths) lines.push(L('  ' + p));
+        lines.push(L('用法：src <文件:行> 把源码视图跳过去（文件名可以只写后几段，例如 src main.c:120）', 'dim'));
+        return { lines };
+      }
+      const m = /^(.*?):(\d+)$/.exec(arg);
+      const file = m ? m[1] : arg;
+      const line = m ? Number(m[2]) : 1;
+      if (V?.showSource){
+        const ok = await V.showSource(file, line);
+        if (!ok) throw new Error(`行号表里没有这个文件：「${file}」（src 不带参数可以列出全部）`);
+        return { lines: [L(`源码视图跳到 ${file}:${line}`, 'ok')] };
+      }
+      lines.push(L(`这个命令需要界面支持`, 'warn'));
       return { lines };
     }
 

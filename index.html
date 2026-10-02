@@ -710,6 +710,10 @@
           <button id="d-elf-pick">载入 ELF…</button>
           <input type="file" id="d-elf-file" accept=".elf,.axf,.out,.bin" hidden>
         </div>
+        <div class="row">
+          <input id="d-sym-q" class="mono" placeholder="搜符号（变量优先，留空看全部）" autocomplete="off" spellcheck="false">
+        </div>
+        <div id="d-sym-list" class="symlist"><div class="hint">（载入 .elf 后这里列出全局变量/函数；点名字填进命令行，点 ＋ 加监视）</div></div>
         <p class="hint" id="d-elf-info">载入 .elf 后可以按符号名下断点（<code>b main</code>）、<code>p 变量</code> 看数值、PC 显示函数名。</p>
       </fieldset>
 
@@ -720,6 +724,20 @@
           <button id="d-reset-run">复位并跑</button>
         </div>
         <p class="hint">走 AIRCR.SYSRESETREQ（软件复位）：本机好几块板没把 NRST 接到探针，拉复位线看着成功其实没动。</p>
+      </fieldset>
+
+      <fieldset>
+        <legend>监视 <span class="hint">停止时刷新</span></legend>
+        <div class="row">
+          <input id="d-watch-in" class="mono" placeholder="变量名 / main+4 / 0x20000000" autocomplete="off" spellcheck="false">
+          <button id="d-watch-add">加</button>
+        </div>
+        <div id="d-watch-list" class="watchlist"><div class="hint">（还没有监视项：在符号列表点 ＋，或命令行 <code>w 变量</code>）</div></div>
+        <div class="row btnrow">
+          <button id="d-watch-refresh">刷新值</button>
+          <button id="d-watch-clear">清空</button>
+        </div>
+        <label class="chk"><input type="checkbox" id="d-watch-live"> 运行中也刷新（约 4 次/秒，目标照跑）</label>
       </fieldset>
 
       <fieldset>
@@ -736,6 +754,7 @@
           <button id="d-rtt-stop">停止</button>
         </div>
         <div class="row"><span>地址</span><input id="d-rtt-addr" class="mono" placeholder="留空 = 用 _SEGGER_RTT 符号"></div>
+        <p class="hint mono" id="d-rtt-sym">（载入 .elf 后这里显示 <code>_SEGGER_RTT</code> 的地址）</p>
         <label class="chk"><input type="checkbox" id="d-rtt-on"> 连接后自动开始</label>
         <p class="hint" id="d-rtt-info">读的是同一个 RTT 环，目标在跑的时候也能看到 printf。</p>
       </fieldset>
@@ -745,6 +764,7 @@
       <div class="toolbar">
         <span id="d-state" class="flag flag-off">未连接</span>
         <span id="d-pc" class="mono">PC —</span>
+        <span id="d-src-pos" class="mono" title="当前源码位置（停下来 / 单步后更新）">—</span>
         <span class="spacer"></span>
         <button id="d-halt" disabled>暂停</button>
         <button id="d-cont" disabled>继续</button>
@@ -753,12 +773,12 @@
       </div>
 
       <div class="dbggrid">
-        <fieldset class="dbgbox">
-          <legend>寄存器 <button id="d-reg-refresh" class="foldbtn">刷新</button></legend>
+        <fieldset class="dbgbox" id="d-box-regs">
+          <legend>寄存器 <button id="d-reg-refresh" class="foldbtn">刷新</button><button class="foldbtn" data-fold="d-box-regs" title="折叠/展开这块，把高度让给下面的命令行">⌄</button></legend>
           <div id="d-regs" class="reglist"></div>
         </fieldset>
-        <fieldset class="dbgbox">
-          <legend>内存</legend>
+        <fieldset class="dbgbox" id="d-box-mem">
+          <legend>内存 <button class="foldbtn" data-fold="d-box-mem" title="折叠/展开这块，把高度让给下面的命令行">⌄</button></legend>
           <div class="toolrow nw">
             <span>地址</span><input id="d-mem-addr" class="mono" value="0x20000000">
             <span>长度</span><input id="d-mem-len" class="num" value="128" inputmode="numeric">
@@ -774,13 +794,24 @@
         </fieldset>
       </div>
 
+      <fieldset class="dbgbox dbgsrc" id="d-box-src">
+        <legend>源码
+          <button class="foldbtn" data-fold="d-box-src" title="折叠/展开这块，把高度让给下面的命令行">⌄</button>
+          <button id="d-src-pick" class="foldbtn" title="用浏览器的目录选择器授权一次工程目录（Chromium；只需选一次，之后按需读文件）">选择源码目录…</button>
+          <input type="file" id="d-src-dir" webkitdirectory directory multiple hidden>
+          <span class="hint mono" id="d-src-file">—</span>
+        </legend>
+        <div id="d-src" class="srclist mono"><div class="hint">（停下来时这里显示 PC 所在的源码行；点行号可下/删硬件断点）</div></div>
+      </fieldset>
+
       <div class="dbgfoot">
-        <fieldset class="dbgbox">
-          <legend>命令行 <span class="hint">h = 帮助；↑↓ = 历史</span></legend>
+        <fieldset class="dbgbox dbgterm">
+          <legend>命令行 <span class="hint">h = 帮助 · Tab = 补全 · ↑↓ = 历史 · Ctrl+C = 中断 · Ctrl+L = 清屏</span></legend>
           <div id="d-out" class="log mono"></div>
-          <div class="sendbar">
-            <input id="d-cmd" class="mono" placeholder="h / r / md 0x20000000 / b main / p g_var / c / s" autocomplete="off">
-            <button id="d-run" class="primary">执行</button>
+          <div class="sendbar terminal">
+            <span class="prompt mono" aria-hidden="true">&gt;</span>
+            <input id="d-cmd" class="mono" placeholder="h / r / md 0x20000000 / b main / p g_var / w g_var / c / s" autocomplete="off" spellcheck="false">
+            <button id="d-run" class="primary mini">执行</button>
           </div>
         </fieldset>
         <fieldset class="dbgbox">

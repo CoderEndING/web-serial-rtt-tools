@@ -149,6 +149,29 @@ export class Dwarf {
     return out;
   }
 
+  /**
+   * 各 CU 的关键属性：`stmt_list`（行号程序在 .debug_line 里的偏移）、`comp_dir`、`name`。
+   * 只读**每个 CU 的根 DIE**（不进子树），所以很便宜 —— 源码行映射（`elf/lines.js`）要靠它：
+   * 行号程序自己只有相对路径，且 v<=4 的头里连地址宽度都没有，都得问 CU。
+   */
+  cuList(){
+    const out = [];
+    for (const cu of this.cus()){
+      try {
+        const abbr = this.abbrevAt(cu.abbrevOff);
+        const die = this._die(new R(this.info, cu.dieOff), abbr, cu);
+        if (!die) continue;
+        out.push({
+          ...cu,
+          name: this.name(die),
+          compDir: this.attr(die, AT.comp_dir)?.value || '',
+          stmtList: this.num(die, AT.stmt_list),
+        });
+      } catch { /* 单个 CU 读坏了不影响别的 CU */ }
+    }
+    return out;
+  }
+
   /** 缩写表（**按 CU 的 DW_AT_abbrev_offset 分别解析**，见下）*/
   abbrevAt(offset){
     if (!this._abbrCache) this._abbrCache = new Map();

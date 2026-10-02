@@ -1,0 +1,532 @@
+/**
+ * DWARF `.debug_line` 行号表 —— 「停下来显示当前源码行」（Ozone 那种）的地基。
+ *
+ * 为什么单独一个文件：行号表是**自成一套**的字节码（自己的头、自己的状态机、
+ * 自己的标准/扩展操作码），跟 `.debug_info` 那套 DIE/abbrev 只是共享"DWARF"这个名字。
+ * 放在 `app/elf/` 下是因为它跟 `dwarf.js` 一样**只依赖 ELF 字节**，能在 Node 里喂真 ELF 自测。
+ *
+ * 输出：
+ *   `at(addr)`        → `{file, line, col, addr, end, isStmt}`：这个地址属于哪一行
+ *   `addrOfLine(f,l)` → 反查地址（在源码行上点一下下断点要用）
+ *   `paths`           → 去重后的源文件清单（界面「选择源码目录」之后按它取文件）
+ *
+ * 支持 DWARF 2/3/4/5（v5 的目录/文件表是"格式描述 + 值"两段式，跟 v4 完全不同）。
+ * 本仓的目标固件是 ARM GCC 的 **DWARF 4** 与 HPM SDK 的 **DWARF 5**，两种都必须过。
+ *
+ * 两个已知取舍：
+ *   · 段选择子（segment_selector_size）非 0 的 ELF 直接放弃 —— 现实里只有 x86 分段那套会用；
+ *   · `at()` 只做"地址 → 行"，不做内联函数展开（DW_TAG_inlined_subroutine）——
+ *     v1 的目标是"停在哪一行"，不求 gdb 级的调用栈还原。
+ */
+
+import { cstrAt } from './elf.js';
+import { Dwarf } from './dwarf.js';
+
+// ---- 标准操作码（DW_LNS_*）----
+const LNS = {
+  copy: 1, advance_pc: 2, advance_line: 3, set_file: 4, set_column: 5, negate_stmt: 6,
+  set_basic_block: 7, const_add_pc: 8, fixed_advance_pc: 9, set_prologue_end: 10,
+  set_epilogue_begin: 11, set_isa: 12,
+};
+// ---- 扩展操作码（DW_LNE_*）----
+const LNE = { end_sequence: 1, set_address: 2, define_file: 3, set_discriminator: 4 };
+// ---- v5 的条目内容类型（DW_LNCT_*）----
+const LNCT = { path: 1, directory_index: 2, timestamp: 3, size: 4, md5: 5 };
+// v5 的条目表单（只列现实里会出现的）
+const LNFORM = {
+  string: 0x08, strp: 0x0e, udata: 0x0f, data1: 0x0b, data2: 0x05, data4: 0x06,
+  data8: 0x07, data16: 0x1e, line_strp: 0x1f, block: 0x09, flag_present: 0x19,
+};
+
+/** 小端/大端都能读的小游标（ELF 是哪种端序就按哪种读） */
+class Rd {
+  constructor(b, o = 0, le = true){ this.b = b; this.o = o; this.le = le; }
+  get eof(){ return this.o >= this.b.length; }
+  get left(){ return this.b.length - this.o; }
+  u8(){ return this.b[this.o++]; }
+  u16(){ const b = this.b, o = this.o; this.o += 2; return this.le ? (b[o] | (b[o + 1] << 8)) : ((b[o] << 8) | b[o + 1]); }
+  u32(){
+    const b = this.b, o = this.o; this.o += 4;
+    return this.le
+      ? ((b[o] | (b[o + 1] << 8) | (b[o + 2] << 16) | (b[o + 3] << 24)) >>> 0)
+      : (((b[o] << 24) | (b[o + 1] << 16) | (b[o + 2] << 8) | b[o + 3]) >>> 0);
+  }
+  u64(){ const lo = this.u32(), hi = this.u32(); return this.le ? hi * 4294967296 + lo : lo * 4294967296 + hi; }
+  s8(){ const v = this.u8(); return v < 0x80 ? v : v - 0x100; }
+  uleb(){ let r = 0, s = 0, x; do { x = this.u8(); r += (x & 0x7f) * Math.pow(2, s); s += 7; } while (x & 0x80); return r; }
+  sleb(){
+    let r = 0, s = 0, x;
+    do { x = this.u8(); r += (x & 0x7f) * Math.pow(2, s); s += 7; } while (x & 0x80);
+    if (s < 32 && (x & 0x40)) r -= Math.pow(2, s);
+    return r;
+  }
+  cstr(){ const s = this.o; while (this.o < this.b.length && this.b[this.o]) this.o++; const v = cstrAt(this.b, s); this.o++; return v; }
+}
+
+// ---------------------------------------------------------------- 路径小工具
+
+/** 统一成分隔符 `/`（比较/展示都用它，Windows 的 `\` 一律换掉） */
+export const normSlash = p => String(p ?? '').replace(/\\/g, '/').replace(/\/{2,}/g, '/');
+
+/** 绝对路径？`E:/x`、`/usr/x`、`//server/x` 都算 */
+export function isAbsPath(p){
+  const s = normSlash(p);
+  return /^[A-Za-z]:\//.test(s) || s.startsWith('/');
+}
+
+/** 拼路径（后段是绝对路径就以后段为准） */
+export function joinPath(dir, name){
+  const n = normSlash(name);
+  if (!n) return normSlash(dir);
+  if (isAbsPath(n)) return n;
+  const d = normSlash(dir);
+  if (!d) return n;
+  return d.endsWith('/') ? d + n : d + '/' + n;
+}
+
+/** 去掉 `a/./b`、`a/../b` 这类（不碰盘符与开头的 `/`） */
+export function cleanPath(p){
+  const s = normSlash(p);
+  const drive = (/^[A-Za-z]:/.exec(s) || [''])[0];
+  const abs = !!drive || s.startsWith('/');        // 🚨 有盘符就一定是绝对路径，别再按"相对"拼
+  const rest = s.slice(drive.length).replace(/^\/+/, '');
+  const out = [];
+  for (const part of rest.split('/')){
+    if (!part || part === '.') continue;
+    if (part === '..'){
+      if (out.length && out[out.length - 1] !== '..') out.pop();
+      else if (!abs) out.push('..');
+      continue;
+    }
+    out.push(part);
+  }
+  return drive + (abs ? '/' : '') + out.join('/');
+}
+
+/** `p` 相对 `base` 的路径（不在 base 下就返回 null） */
+export function relTo(base, p){
+  const b = cleanPath(base).replace(/\/+$/, '').toLowerCase();
+  const q = cleanPath(p);
+  if (!b) return null;
+  const ql = q.toLowerCase();
+  if (ql === b) return '';
+  if (ql.startsWith(b + '/')) return q.slice(b.length + 1);
+  return null;
+}
+
+const samePath = (a, b) => cleanPath(a).toLowerCase() === cleanPath(b).toLowerCase();
+
+// ---------------------------------------------------------------- 头解析
+
+/** v5 的条目格式描述：`(content_type, form)` 对 */
+function readFormats(rd, n){
+  const out = [];
+  for (let i = 0; i < n; i++) out.push([rd.uleb(), rd.uleb()]);
+  return out;
+}
+
+/** v5 的条目值表（目录表 / 文件表共用）*/
+function readV5Entries(rd, fmts, count, lineStr, str){
+  const out = [];
+  for (let i = 0; i < count; i++){
+    const e = {};
+    for (const [ct, form] of fmts){
+      let v = null;
+      switch (form){
+        case LNFORM.string: v = rd.cstr(); break;
+        case LNFORM.line_strp: { const off = rd.u32(); v = cstrAt(lineStr, off); break; }
+        case LNFORM.strp: { const off = rd.u32(); v = cstrAt(str, off); break; }
+        case LNFORM.udata: v = rd.uleb(); break;
+        case LNFORM.data1: v = rd.u8(); break;
+        case LNFORM.data2: v = rd.u16(); break;
+        case LNFORM.data4: v = rd.u32(); break;
+        case LNFORM.data8: v = rd.u64(); break;
+        case LNFORM.data16: rd.o += 16; break;
+        case LNFORM.flag_present: v = 1; break;
+        case LNFORM.block: { const n = rd.uleb(); rd.o += n; break; }
+        default: throw new Error(`.debug_line 头里不认识的 form 0x${form.toString(16)}`);
+      }
+      if (ct === LNCT.path) e.path = v;
+      else if (ct === LNCT.directory_index) e.dir = v;
+    }
+    out.push(e);
+  }
+  return out;
+}
+
+/**
+ * 解析一个行号程序（`.debug_line` 里一个 CU 一段）。
+ * @returns {{end:number, version:number, rows:Array, dirs:string[], files:Array<{name:string,dir:number}>}}
+ */
+function parseProgram(buf, start, { addrSize = 4, compDir = '', lineStr = new Uint8Array(0), str = new Uint8Array(0), le = true } = {}){
+  const rd = new Rd(buf, start, le);
+  let unitLength = rd.u32();
+  const dwarf64 = unitLength === 0xffffffff;
+  if (dwarf64) unitLength = rd.u64();
+  const unitEnd = (dwarf64 ? start + 12 : start + 4) + unitLength;
+  if (!unitLength || unitEnd > buf.length) throw new Error(`行号程序的 unit_length 不合理（${unitLength}）`);
+
+  const version = rd.u16();
+  if (version < 2 || version > 5) throw new Error(`不支持的 .debug_line 版本 ${version}（只做 2~5）`);
+  let addressSize = addrSize;
+  if (version >= 5){
+    addressSize = rd.u8();
+    const segSel = rd.u8();
+    if (segSel) throw new Error('带段选择子的 .debug_line 不支持（x86 分段那套）');
+  }
+  const headerLength = dwarf64 ? rd.u64() : rd.u32();
+  const progStart = rd.o + headerLength;
+
+  const minInstLen = rd.u8();
+  const maxOps = version >= 4 ? rd.u8() : 1;
+  const defaultIsStmt = rd.u8();
+  const lineBase = rd.s8();
+  const lineRange = rd.u8();
+  const opcodeBase = rd.u8();
+  const stdLens = [];
+  for (let i = 1; i < opcodeBase; i++) stdLens[i] = rd.u8();     // stdLens[opcode] = 操作数个数
+
+  /**
+   * 目录表 / 文件表。
+   * 🚨 v4 与 v5 的**下标起点不一样**，这是这段最容易写错的地方：
+   *    · v4：`include_directories` 从 1 开始，**0 = CU 的 comp_dir**（隐式）；
+   *    · v5：目录表自己是 0 起的，第 0 条就是"编译时的工作目录"（producer 写进去的）。
+   *    所以 v4 要手工在头上补一个 compDir，v5 直接用它的第 0 条。
+   * 文件表两边都是 **1 起**（0 号位留空，状态机的 file 寄存器初值就是 1）。
+   */
+  let dirs, files = [{ name: '', dir: 0 }];
+  if (version <= 4){
+    dirs = [compDir];
+    for (;;){ const s = rd.cstr(); if (!s) break; dirs.push(s); }
+    for (;;){
+      const name = rd.cstr();
+      if (!name) break;
+      const dir = rd.uleb(); rd.uleb(); rd.uleb();               // mtime / size：没人用，占位而已
+      files.push({ name, dir });
+    }
+  } else {
+    const dirFmtCount = rd.u8();
+    const dirFmts = readFormats(rd, dirFmtCount);
+    const dirEntries = readV5Entries(rd, dirFmts, rd.uleb(), lineStr, str);
+    dirs = dirEntries.map(e => e.path || '');
+    if (!dirs.length) dirs = [compDir];
+    const fileFmtCount = rd.u8();
+    const fileFmts = readFormats(rd, fileFmtCount);
+    for (const e of readV5Entries(rd, fileFmts, rd.uleb(), lineStr, str)) files.push({ name: e.path || '', dir: e.dir | 0 });
+  }
+
+  // ---- 行号状态机 ----
+  let addr = 0, opIndex = 0, file = 1, line = 1, column = 0;
+  let isStmt = !!defaultIsStmt, prologueEnd = false, epilogueBegin = false;
+  let isa = 0, discriminator = 0, basicBlock = false;
+  /**
+   * 🚨 `addressSet`：DWARF 规定每个序列都要以 `DW_LNE_set_address` 开头，但 GCC 会在
+   * 行号程序最前面先来一段**没有 set_address 的"占位序列"**（把 CU 用到的头文件列一遍，
+   * 地址就从 0 开始按 min_inst_len 累加：0, 2, 4, 6…）。这些行**不是代码**，
+   * 留着会让 `addrOfLine('SEGGER_RTT.c', 983)` 反查到地址 2 —— 点一下就在 0x2 下了个断点。
+   */
+  let addressSet = false;
+  const rows = [];
+  const advance = (opAdv) => {
+    addr = (addr + minInstLen * Math.floor((opIndex + opAdv) / maxOps)) >>> 0;
+    opIndex = (opIndex + opAdv) % maxOps;
+  };
+  const emit = (endSeq) => rows.push({
+    addr: addr >>> 0, file, line, col: column, isStmt, endSeq: !!endSeq, prologueEnd, epilogueBegin, isa, discriminator,
+    noAddr: !addressSet,
+  });
+  const resetFlags = () => { basicBlock = false; prologueEnd = false; epilogueBegin = false; discriminator = 0; };
+  const resetAll = () => {
+    addr = 0; opIndex = 0; file = 1; line = 1; column = 0;
+    isStmt = !!defaultIsStmt; basicBlock = false; prologueEnd = false; epilogueBegin = false; isa = 0; discriminator = 0;
+    addressSet = false;
+  };
+
+  const p = new Rd(buf, progStart, le);
+  const stop = Math.min(unitEnd, buf.length);
+  let guard = 0;
+  while (p.o < stop){
+    if (++guard > 4000000) throw new Error('行号程序跑飞了（操作码数超限）');
+    const op = p.u8();
+    if (op >= opcodeBase){                       // 特殊操作码：推进地址 + 改行号 + 出一行
+      const adj = op - opcodeBase;
+      line += lineBase + (adj % lineRange);
+      advance(Math.floor(adj / lineRange));
+      emit(false);
+      resetFlags();
+      continue;
+    }
+    if (op === 0){                               // 扩展操作码
+      const len = p.uleb();
+      const next = p.o + len;
+      const ext = p.u8();
+      switch (ext){
+        case LNE.end_sequence: emit(true); resetAll(); break;
+        case LNE.set_address: {
+          addr = p.u32();
+          if (addressSize === 8) p.o += 4;       // 只要低 32 位（我们的目标都是 32 位核）
+          opIndex = 0;
+          addressSet = true;
+          break;
+        }
+        case LNE.define_file: {                  // 只有 v<=4 有
+          const name = p.cstr();
+          const dir = p.uleb(); p.uleb(); p.uleb();
+          files.push({ name, dir });
+          break;
+        }
+        case LNE.set_discriminator: discriminator = p.uleb(); break;
+        default: break;                          // 不认识的扩展操作码：长度已经给了，整段跳过
+      }
+      p.o = next;
+      continue;
+    }
+    switch (op){                                 // 标准操作码
+      case LNS.copy: emit(false); resetFlags(); break;
+      case LNS.advance_pc: advance(p.uleb()); break;
+      case LNS.advance_line: line += p.sleb(); break;
+      case LNS.set_file: file = p.uleb(); break;
+      case LNS.set_column: column = p.uleb(); break;
+      case LNS.negate_stmt: isStmt = !isStmt; break;
+      case LNS.set_basic_block: basicBlock = true; break;
+      case LNS.const_add_pc: advance(Math.floor((255 - opcodeBase) / lineRange)); break;
+      case LNS.fixed_advance_pc: addr = (addr + p.u16()) >>> 0; opIndex = 0; break;
+      case LNS.set_prologue_end: prologueEnd = true; break;
+      case LNS.set_epilogue_begin: epilogueBegin = true; break;
+      case LNS.set_isa: isa = p.uleb(); break;
+      default: {                                 // 不认识的标准操作码：按头里的长度表把操作数吃掉
+        const n = stdLens[op] ?? 0;
+        for (let i = 0; i < n; i++) p.uleb();
+        break;
+      }
+    }
+  }
+  return { end: Math.max(unitEnd, p.o), version, rows, dirs, files, addressSize };
+}
+
+/** 把文件名按目录拼成完整路径（**下标与 prog.files 一一对应**：0 号是空位） */
+function resolveFilePaths(prog, compDir){
+  const out = new Array(prog.files.length).fill('');
+  for (let i = 1; i < prog.files.length; i++){
+    const f = prog.files[i];
+    if (!f?.name) continue;
+    // v4：dirs[0] 就是我们补进去的 comp_dir；v5：dirs[0] 是 producer 写的编译目录 —— 两种都能直接下标
+    const dir = prog.dirs[f.dir | 0] ?? prog.dirs[0] ?? compDir ?? '';
+    let full = cleanPath(joinPath(dir || compDir || '', f.name));
+    // dir 本身是相对路径时（GCC 偶尔这么给），拼完还不是绝对路径 —— 再补一次 comp_dir
+    if (!isAbsPath(full) && compDir) full = cleanPath(joinPath(compDir, full));
+    out[i] = full;
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------- 主类
+
+export class LineTable {
+  constructor(parts = {}){
+    this.starts = parts.starts || new Uint32Array(0);      // 每条记录的起始地址（升序）
+    this.ends = parts.ends || new Uint32Array(0);          // 覆盖到哪（下一条记录 / 序列结束）
+    this.lines = parts.lines || new Int32Array(0);
+    this.files = parts.files || new Int32Array(0);         // paths 的下标（-1 = 没路径）
+    this.flags = parts.flags || new Uint8Array(0);         // bit0 isStmt / bit1 prologueEnd
+    this.paths = parts.paths || [];                        // 源文件表（`/` 分隔的完整路径）
+    this.versions = parts.versions || [];
+    this.units = parts.units || 0;
+    this.note = parts.note || '';
+    this._lineCache = new Map();                           // 文件 → (行号 → 地址)
+  }
+
+  get size(){ return this.starts.length; }
+  get fileCount(){ return this.paths.length; }
+
+  static available(elf){ return !!elf.section('.debug_line')?.size; }
+
+  /**
+   * @param {import('./elf.js').Elf} elf
+   * @param {Dwarf} [dwarf] 已经建好的 Dwarf（省一次解析）；不给就自己建
+   */
+  static fromElf(elf, dwarf = null){
+    const buf = elf.data('.debug_line');
+    if (!buf.length) throw new Error('这个 ELF 没有 .debug_line —— 编译时没带 -g，或者被 strip 过');
+    const str = elf.data('.debug_str');
+    const lineStr = elf.data('.debug_line_str');
+    const le = elf.le !== false;
+
+    // CU → 行号程序：v<=4 的行号头里**没有地址宽度**，只能问 CU；顺便拿 comp_dir 解析相对路径
+    const cuByOffset = new Map();
+    let d = dwarf;
+    if (!d && Dwarf.available(elf)){ try { d = new Dwarf(elf); } catch { d = null; } }
+    if (d && typeof d.cuList === 'function'){
+      try {
+        for (const cu of d.cuList()) if (cu.stmtList != null && !cuByOffset.has(cu.stmtList)) cuByOffset.set(cu.stmtList, cu);
+      } catch { /* CU 表读不出来也能干活：退化成"没有 comp_dir" */ }
+    }
+
+    const recs = [];                              // {s,e,line,path,flags}
+    const pathIdx = new Map();                    // 路径（小写）→ 下标
+    const paths = [];
+    const versions = [];
+    /**
+     * 代码段范围（SHF_EXECINSTR 的 PROGBITS 段）。行号记录**只能落在代码里** ——
+     * 有些编译器（本仓的 STM32 固件就是）会在行号程序最前面发一段 `set_address 0`
+     * 的"占位序列"（把用到的头文件列一遍，地址从 0 开始按指令长度累加），
+     * 不滤掉的话 `addrOfLine('x.h', 42)` 会反查到地址 2 —— 点一下就在 0x2 下了个断点。
+     */
+    const execRanges = elf.sections()
+      .filter(s => s.size && s.type === 1 && (s.flags & 0x4))
+      .map(s => [s.addr >>> 0, (s.addr + s.size) >>> 0])
+      .sort((a, b) => a[0] - b[0]);
+    const inCode = (a) => !execRanges.length || execRanges.some(([lo, hi]) => a >= lo && a < hi);
+    let off = 0, units = 0, note = '';
+    while (off < buf.length){
+      const cu = cuByOffset.get(off);
+      let prog;
+      try {
+        prog = parseProgram(buf, off, {
+          addrSize: cu?.addrSize || (elf.bits === 64 ? 8 : 4),
+          compDir: cleanPath(cu?.compDir || ''),
+          lineStr, str, le,
+        });
+      } catch (e){
+        note = note || `行号程序 @${off} 解析失败：${e?.message || e}`;
+        break;                                    // 头都读不出来就不知道下一段在哪 —— 只能收工
+      }
+      const local = resolveFilePaths(prog, cu?.compDir || '');
+      versions.push(cu?.version || prog.version);   // 报"这份固件是 DWARF x"要用 CU 的版本（行号程序版本号是另一回事）
+      const map = local.map(pth => {
+        if (!pth) return -1;
+        const k = pth.toLowerCase();
+        let i = pathIdx.get(k);
+        if (i === undefined){ i = paths.length; paths.push(pth); pathIdx.set(k, i); }
+        return i;
+      });
+      flattenProgram(prog, map, recs, inCode);
+      units++;
+      if (prog.end <= off) break;                 // 防死循环
+      off = prog.end;
+    }
+
+    recs.sort((a, b) => (a.s - b.s) || (a.e - b.e));
+    const n = recs.length;
+    const starts = new Uint32Array(n), ends = new Uint32Array(n);
+    const lines = new Int32Array(n), files = new Int32Array(n), flags = new Uint8Array(n);
+    for (let i = 0; i < n; i++){
+      starts[i] = recs[i].s; ends[i] = recs[i].e; lines[i] = recs[i].line; files[i] = recs[i].path; flags[i] = recs[i].flags;
+    }
+    return new LineTable({ starts, ends, lines, files, flags, paths, versions, units, note });
+  }
+
+  /** 地址 → 源码位置（找不到返回 null）。`addr` 是指令地址，Thumb 的 bit0 会被忽略 */
+  at(addr){
+    const n = this.starts.length;
+    if (!n) return null;
+    // 🚨 `x & ~1` 在 JS 里是**有符号** 32 位运算：0x80000000 & ~1 === -2147483648。
+    //    忘了最后那个 `>>> 0` 的话，0x8xxxxxxx 的地址（HPM / QSPI 代码）会一条都查不到。
+    const a = ((addr >>> 0) & 0xfffffffe) >>> 0;
+    let lo = 0, hi = n - 1, idx = -1;
+    while (lo <= hi){                              // 最后一个 start <= a
+      const mid = (lo + hi) >> 1;
+      if (this.starts[mid] <= a){ idx = mid; lo = mid + 1; } else hi = mid - 1;
+    }
+    if (idx < 0) return null;
+    const s0 = this.starts[idx];
+    let last = idx;                                // 同地址的一组：只有最后一条有非零区间
+    while (last + 1 < n && this.starts[last + 1] === s0) last++;
+    const e = this.ends[last];
+    if (a < s0 || a >= e) return null;             // 落在序列的空隙里（这段没有行号信息）
+    // 组里若有 `is_stmt` 那条就用它 —— 优化之后一个地址常常挂多个行号，
+    // 取 is_stmt 的才是"这一行的开头"（gdb 也是这么挑的）
+    let pick = last;
+    for (let k = last; k >= idx; k--) if (this.flags[k] & 1){ pick = k; break; }
+    const fi = this.files[pick];
+    return {
+      addr: s0, end: e, line: this.lines[pick], file: fi >= 0 ? this.paths[fi] : '',
+      isStmt: !!(this.flags[pick] & 1), prologueEnd: !!(this.flags[pick] & 2),
+    };
+  }
+
+  /** 源码位置 → 地址（在源码行上点一下下断点用；找不到返回 null） */
+  addrOfLine(file, line){
+    const key = cleanPath(file).toLowerCase();
+    let map = this._lineCache.get(key);
+    if (!map){
+      map = new Map();
+      const want = key;
+      for (let i = 0; i < this.starts.length; i++){
+        const fi = this.files[i];
+        if (fi < 0) continue;
+        const p = cleanPath(this.paths[fi]).toLowerCase();
+        if (p !== want && !p.endsWith('/' + want)) continue;
+        const ln = this.lines[i];
+        const cur = map.get(ln);
+        // 同一行取**最小地址**；isStmt 的那条优先
+        if (cur === undefined) map.set(ln, i);
+        else if ((this.flags[i] & 1) && !(this.flags[cur] & 1)) map.set(ln, i);
+        else if (this.starts[i] < this.starts[cur] && (this.flags[i] & 1) === !!(this.flags[cur] & 1)) map.set(ln, i);
+      }
+      this._lineCache.set(key, map);
+    }
+    const i = map.get(line);
+    return i === undefined ? null : this.starts[i];
+  }
+
+  /** 指定地址区间里的全部行记录（源码视图画上下文用；已按地址升序） */
+  rowsInRange(from, to, max = 4000){
+    const out = [];
+    for (let i = 0; i < this.starts.length; i++){
+      const s = this.starts[i];
+      if (s < from) continue;
+      if (s >= to || out.length >= max) break;
+      const fi = this.files[i];
+      out.push({ addr: s, end: this.ends[i], line: this.lines[i], file: fi >= 0 ? this.paths[fi] : '', isStmt: !!(this.flags[i] & 1) });
+    }
+    return out;
+  }
+
+  summary(){
+    if (!this.size) return this.note || '没有行号信息';
+    const v = [...new Set(this.versions)].join('/');
+    return `行号表：${this.units} 段 · ${this.size} 条记录 · ${this.fileCount} 个源文件（DWARF ${v || '?'}）`
+      + (this.note ? `　⚠ ${this.note}` : '');
+  }
+}
+
+// ---------------------------------------------------------------- 内部
+
+/** 把一个程序的行记录摊平成"地址区间"（写进 recs） */
+function flattenProgram(prog, pathMap, recs, inCode = () => true){
+  const rows = prog.rows;
+  /**
+   * 先合并"同一地址的多条记录"：只有最后一条能形成区间（前面的区间长度是 0）。
+   * 但 `is_stmt`/`prologue_end` 这些标记可能只挂在前面的那条上 —— 直接丢掉的话
+   * "这一行是语句开头"就没了，源码视图会把函数序言当成断点行。所以往后面的记录上并。
+   */
+  for (let i = 0; i < rows.length - 1; i++){
+    const a = rows[i], b = rows[i + 1];
+    if (a.endSeq || b.endSeq) continue;
+    if (a.addr === b.addr){
+      b.isStmt = b.isStmt || a.isStmt;
+      b.prologueEnd = b.prologueEnd || a.prologueEnd;
+      a.skip = true;
+    }
+  }
+  for (let i = 0; i < rows.length; i++){
+    const r = rows[i];
+    if (r.endSeq || r.skip || r.noAddr) continue;
+    /**
+     * 地址 0 与"不在任何代码段里"的记录一并丢掉（双保险：真实代码不会落在地址 0 ——
+     * Cortex-M 的 flash 在 0x08000000，HPM 在 0x80000000）。
+     */
+    if (!r.addr || !inCode(r.addr)) continue;
+    const next = rows[i + 1];
+    const end = next ? next.addr : (r.addr + 1);
+    if (end <= r.addr) continue;                   // 兜底：空区间不要
+    recs.push({
+      s: r.addr >>> 0, e: end >>> 0, line: r.line | 0,
+      path: pathMap[r.file] ?? -1,
+      flags: (r.isStmt ? 1 : 0) | (r.prologueEnd ? 2 : 0),
+    });
+  }
+}
+
+export { parseProgram as _parseLineProgram, samePath };
