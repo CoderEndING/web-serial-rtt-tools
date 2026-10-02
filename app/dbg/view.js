@@ -57,7 +57,7 @@ export class DbgView {
     this.cancelFlag = false;               // Ctrl+C
     this.queue = [];                       // 多行粘贴 → 排队执行
     this.runningQueue = false;
-    this.folds = store.get('dbg.fold', {}) || {};
+    this.dockTab = 'regs';                 // 右侧面板当前 tab（regs / mem / var / rtt）
   }
 
   // ================================================================ 初始化
@@ -127,8 +127,8 @@ export class DbgView {
       });
     }
 
-    // ---- 折叠按钮（把高度让给命令行）----
-    this._initFolds();
+    // ---- 工作区版式（右侧 tab 面板 + 可拖分隔条）----
+    this._initWorkbench();
 
     // ---- 主区按钮 ----
     on('d-halt', 'click', () => this._act('暂停', async () => { await s.halt(); this.renderRegs(); this.renderMem(); await this.afterStop(); }));
@@ -188,25 +188,85 @@ export class DbgView {
     if (this.session.connected) this.refreshAll().catch(() => {});
   }
 
-  // ================================================================ 折叠
+  // ================================================================ 工作区版式（右侧 tab + 可拖分隔条）
 
-  _initFolds(){
-    for (const b of document.querySelectorAll('#tab-dbg [data-fold]')){
-      const id = b.dataset.fold;
-      b.addEventListener('click', () => {
-        const box = $(id);
-        if (!box) return;
-        const nowCollapsed = !box.classList.contains('collapsed');
-        box.classList.toggle('collapsed', nowCollapsed);
-        b.textContent = nowCollapsed ? '⌃' : '⌄';
-        this.folds[id] = nowCollapsed;
-        store.set('dbg.fold', this.folds);
-      });
-      if (this.folds[id]){
-        $(id)?.classList.add('collapsed');
-        b.textContent = '⌃';
-      }
+  /**
+   * 右边那条面板是**局部 tab**（寄存器 / 内存 / 变量 / RTT），一次只显示一个、顶到满高 ——
+   * 这是照 Ozone 的意思排的：左边源码与命令行各占一块够大的地方，细节面板做成切换。
+   * 分隔条：竖的调右侧宽度、横的调命令行高度，尺寸存 localStorage，刷新不丢。
+   */
+  _initWorkbench(){
+    // ---- tab ----
+    const tabs = $('d-dock-tabs');
+    if (tabs){
+      const btns = [...tabs.querySelectorAll('button[data-dock]')];
+      for (const b of btns) b.addEventListener('click', () => this._dockSelect(b.dataset.dock));
+      const saved = store.get('dbg.dock', 'regs');
+      this._dockSelect(btns.some(b => b.dataset.dock === saved) ? saved : 'regs', { save: false });
     }
+    // ---- 尺寸（存的是 px；没存就用 CSS 里的默认比例）----
+    const term = $('d-box-term'), dock = $('d-box-dock');
+    const termH = Number(store.get('dbg.termH', 0)) || 0;
+    const dockW = Number(store.get('dbg.dockW', 0)) || 0;
+    if (term && termH > 0) term.style.flexBasis = Math.round(termH) + 'px';
+    if (dock && dockW > 0) dock.style.flexBasis = Math.round(dockW) + 'px';
+    this._bindGrip($('d-grip-term'), {
+      axis: 'y',
+      get: () => term?.getBoundingClientRect().height || 0,
+      apply: (v) => { if (term) term.style.flexBasis = Math.round(v) + 'px'; },
+      min: () => 110,
+      max: () => Math.max(160, (term?.parentElement?.clientHeight || 600) * 0.82),
+      save: (v) => store.set('dbg.termH', Math.round(v)),
+    });
+    this._bindGrip($('d-grip-dock'), {
+      axis: 'x',
+      get: () => dock?.getBoundingClientRect().width || 0,
+      apply: (v) => { if (dock) dock.style.flexBasis = Math.round(v) + 'px'; },
+      min: () => 250,
+      max: () => Math.max(300, (dock?.parentElement?.clientWidth || 1200) - 320),
+      save: (v) => store.set('dbg.dockW', Math.round(v)),
+    });
+  }
+
+  /** 切右侧面板的 tab（名字：regs / mem / var / rtt） */
+  _dockSelect(name, { save = true } = {}){
+    const tabs = $('d-dock-tabs');
+    if (tabs) for (const b of tabs.querySelectorAll('button[data-dock]')) b.classList.toggle('on', b.dataset.dock === name);
+    const box = $('d-box-dock');
+    if (box) for (const p of box.querySelectorAll('.dockpage')) p.classList.toggle('on', p.dataset.dock === name);
+    this.dockTab = name;
+    if (save) store.set('dbg.dock', name);
+    // 内存页刚露出来时按当前宽度决定一行几个字节（面板是隐藏的时候量不到宽度）
+    if (name === 'mem' && this.mem.length) this.renderMem();
+  }
+
+  /** 通用分隔条拖拽（不用 setPointerCapture：合成的 CDP 事件也能驱动它） */
+  _bindGrip(el, { axis, get, apply, min, max, save }){
+    if (!el) return;
+    el.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      const startPos = axis === 'x' ? e.clientX : e.clientY;
+      const startVal = get();
+      if (!startVal) return;
+      const box = $('tab-dbg');
+      box?.classList.add('gripping');
+      const move = (ev) => {
+        const delta = (axis === 'x' ? ev.clientX : ev.clientY) - startPos;
+        // 往左/往上拖 = 变大（分隔条在目标的下/右侧）
+        const next = Math.max(min(), Math.min(max(), startVal - delta));
+        apply(next);
+      };
+      const up = () => {
+        window.removeEventListener('pointermove', move);
+        window.removeEventListener('pointerup', up);
+        window.removeEventListener('pointercancel', up);
+        box?.classList.remove('gripping');
+        save(get());
+      };
+      window.addEventListener('pointermove', move);
+      window.addEventListener('pointerup', up);
+      window.addEventListener('pointercancel', up);
+    });
   }
 
   _syncBackend(){
@@ -216,7 +276,7 @@ export class DbgView {
     const hint = $('d-elf-info');
     if (hint && !this.sym) hint.textContent = mock
       ? '模拟目标也有自己的内存/寄存器，可以配合载入 .elf 练手（断点、单步、p 变量都能跑）。'
-      : '载入 .elf 后可用符号名下断点、`p 变量` 看数值、PC 显示函数名与源码行。';
+      : '载入 .elf 后可用符号名下断点、`p 变量` 看数值、PC 显示函数名与源码行。符号列表在右边「变量」标签里。';
   }
 
   _syncButtons(connected, halted){
@@ -470,7 +530,13 @@ export class DbgView {
       return;
     }
     const writable = !!$('d-mem-write-on')?.checked;
-    const width = 16;
+    /**
+     * 一行几个字节按面板宽度算：右侧面板只有 ~380px 时，16 字节的 hexdump 会横向溢出
+     * （地址 9 字符 + 16×19px 格子 + ASCII 列 ≈ 640px）。宽度不够就一行 8 个。
+     * 量不到宽度（面板还藏着）时按 16 走 —— 切到「内存」tab 时 `_dockSelect()` 会重画一次。
+     */
+    const avail = box.clientWidth || 0;
+    const width = avail && avail < 560 ? 8 : 16;
     for (let i = 0; i < this.mem.length; i += width){
       const row = document.createElement('div');
       row.className = 'hxrow';

@@ -710,11 +710,7 @@
           <button id="d-elf-pick">载入 ELF…</button>
           <input type="file" id="d-elf-file" accept=".elf,.axf,.out,.bin" hidden>
         </div>
-        <div class="row">
-          <input id="d-sym-q" class="mono" placeholder="搜符号（变量优先，留空看全部）" autocomplete="off" spellcheck="false">
-        </div>
-        <div id="d-sym-list" class="symlist"><div class="hint">（载入 .elf 后这里列出全局变量/函数；点名字填进命令行，点 ＋ 加监视）</div></div>
-        <p class="hint" id="d-elf-info">载入 .elf 后可以按符号名下断点（<code>b main</code>）、<code>p 变量</code> 看数值、PC 显示函数名。</p>
+        <p class="hint" id="d-elf-info">载入 .elf 后可以按符号名下断点（<code>b main</code>）、<code>p 变量</code> 看数值、PC 显示函数名与源码行。符号列表在右边「变量」标签里。</p>
       </fieldset>
 
       <fieldset>
@@ -727,36 +723,10 @@
       </fieldset>
 
       <fieldset>
-        <legend>监视 <span class="hint">停止时刷新</span></legend>
-        <div class="row">
-          <input id="d-watch-in" class="mono" placeholder="变量名 / main+4 / 0x20000000" autocomplete="off" spellcheck="false">
-          <button id="d-watch-add">加</button>
-        </div>
-        <div id="d-watch-list" class="watchlist"><div class="hint">（还没有监视项：在符号列表点 ＋，或命令行 <code>w 变量</code>）</div></div>
-        <div class="row btnrow">
-          <button id="d-watch-refresh">刷新值</button>
-          <button id="d-watch-clear">清空</button>
-        </div>
-        <label class="chk"><input type="checkbox" id="d-watch-live"> 运行中也刷新（约 4 次/秒，目标照跑）</label>
-      </fieldset>
-
-      <fieldset>
         <legend>断点（硬件 FPB）</legend>
         <div id="d-bp-list" class="bplist"></div>
         <div class="row btnrow"><button id="d-bp-clear">清空断点</button></div>
         <p class="hint" id="d-bp-cap">—</p>
-      </fieldset>
-
-      <fieldset>
-        <legend>RTT 输出（同屏）</legend>
-        <div class="row btnrow">
-          <button id="d-rtt-locate">定位并开始</button>
-          <button id="d-rtt-stop">停止</button>
-        </div>
-        <div class="row"><span>地址</span><input id="d-rtt-addr" class="mono" placeholder="留空 = 用 _SEGGER_RTT 符号"></div>
-        <p class="hint mono" id="d-rtt-sym">（载入 .elf 后这里显示 <code>_SEGGER_RTT</code> 的地址）</p>
-        <label class="chk"><input type="checkbox" id="d-rtt-on"> 连接后自动开始</label>
-        <p class="hint" id="d-rtt-info">读的是同一个 RTT 环，目标在跑的时候也能看到 printf。</p>
       </fieldset>
     </aside>
 
@@ -772,51 +742,96 @@
         <label class="chk"><input type="checkbox" id="d-follow-pc" checked> 内存跟随 PC</label>
       </div>
 
-      <div class="dbggrid">
-        <fieldset class="dbgbox" id="d-box-regs">
-          <legend>寄存器 <button id="d-reg-refresh" class="foldbtn">刷新</button><button class="foldbtn" data-fold="d-box-regs" title="折叠/展开这块，把高度让给下面的命令行">⌄</button></legend>
-          <div id="d-regs" class="reglist"></div>
-        </fieldset>
-        <fieldset class="dbgbox" id="d-box-mem">
-          <legend>内存 <button class="foldbtn" data-fold="d-box-mem" title="折叠/展开这块，把高度让给下面的命令行">⌄</button></legend>
-          <div class="toolrow nw">
-            <span>地址</span><input id="d-mem-addr" class="mono" value="0x20000000">
-            <span>长度</span><input id="d-mem-len" class="num" value="128" inputmode="numeric">
-            <button id="d-mem-read">读</button>
-            <label class="chk"><input type="checkbox" id="d-mem-write-on"> 可写</label>
-          </div>
-          <div id="d-mem" class="hexdump mono"></div>
-          <div class="toolrow nw memedit">
-            <span>改</span><input id="d-mem-ea" class="mono" placeholder="地址">
-            <input id="d-mem-ev" class="mono" placeholder="字节（如 01 或 0x01）">
-            <button id="d-mem-write">写入</button>
-          </div>
-        </fieldset>
-      </div>
+      <!-- 版式（照着 Ozone 的意思排）：左边「源码 + 命令行」上下分（两块都够大），
+           右边一条**局部 tab** 的面板放寄存器 / 内存 / 变量 / RTT —— 不再平铺成四个小格子。
+           两条分隔条可以拖：左右调面板宽度、上下调命令行高度（尺寸记在 localStorage）。 -->
+      <div class="dbgwork">
+        <div class="dbgleft">
+          <fieldset class="dbgbox dbgsrc" id="d-box-src">
+            <legend>源码
+              <button id="d-src-pick" class="foldbtn" title="用浏览器的目录选择器授权一次工程目录（Chromium；只需选一次，之后按需读文件）">选择源码目录…</button>
+              <input type="file" id="d-src-dir" webkitdirectory directory multiple hidden>
+              <span class="hint mono" id="d-src-file">—</span>
+            </legend>
+            <div id="d-src" class="srclist mono"><div class="hint">（停下来时这里显示 PC 所在的源码行；点行号可下/删硬件断点）</div></div>
+          </fieldset>
 
-      <fieldset class="dbgbox dbgsrc" id="d-box-src">
-        <legend>源码
-          <button class="foldbtn" data-fold="d-box-src" title="折叠/展开这块，把高度让给下面的命令行">⌄</button>
-          <button id="d-src-pick" class="foldbtn" title="用浏览器的目录选择器授权一次工程目录（Chromium；只需选一次，之后按需读文件）">选择源码目录…</button>
-          <input type="file" id="d-src-dir" webkitdirectory directory multiple hidden>
-          <span class="hint mono" id="d-src-file">—</span>
-        </legend>
-        <div id="d-src" class="srclist mono"><div class="hint">（停下来时这里显示 PC 所在的源码行；点行号可下/删硬件断点）</div></div>
-      </fieldset>
+          <div class="grip grip-h" id="d-grip-term" title="拖动：调整命令行高度"></div>
 
-      <div class="dbgfoot">
-        <fieldset class="dbgbox dbgterm">
-          <legend>命令行 <span class="hint">h = 帮助 · Tab = 补全 · ↑↓ = 历史 · Ctrl+C = 中断 · Ctrl+L = 清屏</span></legend>
-          <div id="d-out" class="log mono"></div>
-          <div class="sendbar terminal">
-            <span class="prompt mono" aria-hidden="true">&gt;</span>
-            <input id="d-cmd" class="mono" placeholder="h / r / md 0x20000000 / b main / p g_var / w g_var / c / s" autocomplete="off" spellcheck="false">
-            <button id="d-run" class="primary mini">执行</button>
+          <fieldset class="dbgbox dbgterm" id="d-box-term">
+            <legend>命令行 <span class="hint">h = 帮助 · Tab = 补全 · ↑↓ = 历史 · Ctrl+C = 中断 · Ctrl+L = 清屏</span></legend>
+            <div id="d-out" class="log mono"></div>
+            <div class="sendbar terminal">
+              <span class="prompt mono" aria-hidden="true">&gt;</span>
+              <input id="d-cmd" class="mono" placeholder="h / r / md 0x20000000 / b main / p g_var / w g_var / c / s" autocomplete="off" spellcheck="false">
+              <button id="d-run" class="primary mini">执行</button>
+            </div>
+          </fieldset>
+        </div>
+
+        <div class="grip grip-v" id="d-grip-dock" title="拖动：调整右侧面板宽度"></div>
+
+        <fieldset class="dbgbox dbgdock" id="d-box-dock">
+          <legend>
+            <span class="seg docktabs" id="d-dock-tabs">
+              <button data-dock="regs" class="on">寄存器</button>
+              <button data-dock="mem">内存</button>
+              <button data-dock="var">变量</button>
+              <button data-dock="rtt">RTT</button>
+            </span>
+          </legend>
+
+          <div class="dockpage on" data-dock="regs">
+            <div class="toolrow nw">
+              <button id="d-reg-refresh" class="mini">刷新</button>
+              <span class="hint">回车即写入（只读位会黄字提醒）</span>
+            </div>
+            <div id="d-regs" class="reglist"></div>
           </div>
-        </fieldset>
-        <fieldset class="dbgbox">
-          <legend>RTT 输出</legend>
-          <pre id="d-rtt" class="rx mono"></pre>
+
+          <div class="dockpage" data-dock="mem">
+            <div class="toolrow nw">
+              <span>地址</span><input id="d-mem-addr" class="mono" value="0x20000000">
+              <span>长度</span><input id="d-mem-len" class="num" value="128" inputmode="numeric">
+              <button id="d-mem-read">读</button>
+              <label class="chk"><input type="checkbox" id="d-mem-write-on"> 可写</label>
+            </div>
+            <div id="d-mem" class="hexdump mono"></div>
+            <div class="toolrow nw memedit">
+              <span>改</span><input id="d-mem-ea" class="mono" placeholder="地址">
+              <input id="d-mem-ev" class="mono" placeholder="字节（如 01 或 0x01）">
+              <button id="d-mem-write">写入</button>
+            </div>
+          </div>
+
+          <div class="dockpage" data-dock="var">
+            <div class="toolrow nw">
+              <input id="d-sym-q" class="mono" placeholder="搜符号（变量优先，留空看全部）" autocomplete="off" spellcheck="false">
+            </div>
+            <div id="d-sym-list" class="symlist"><div class="hint">（载入 .elf 后这里列出全局变量/函数；点名字填进命令行，点 ＋ 加监视）</div></div>
+            <div class="toolrow nw">
+              <input id="d-watch-in" class="mono" placeholder="监视：变量名 / main+4 / 0x20000000" autocomplete="off" spellcheck="false">
+              <button id="d-watch-add">加</button>
+            </div>
+            <div id="d-watch-list" class="watchlist"><div class="hint">（还没有监视项：在符号列表点 ＋，或命令行 <code>w 变量</code>；停止时自动刷新）</div></div>
+            <div class="toolrow nw">
+              <button id="d-watch-refresh" class="mini">刷新值</button>
+              <button id="d-watch-clear" class="mini">清空</button>
+              <label class="chk"><input type="checkbox" id="d-watch-live"> 运行中也刷新</label>
+            </div>
+          </div>
+
+          <div class="dockpage" data-dock="rtt">
+            <div class="toolrow nw">
+              <button id="d-rtt-locate">定位并开始</button>
+              <button id="d-rtt-stop">停止</button>
+              <label class="chk"><input type="checkbox" id="d-rtt-on"> 连接后自动开始</label>
+            </div>
+            <div class="toolrow nw"><span>地址</span><input id="d-rtt-addr" class="mono" placeholder="留空 = 用 _SEGGER_RTT 符号"></div>
+            <p class="hint mono" id="d-rtt-sym">（载入 .elf 后这里显示 <code>_SEGGER_RTT</code> 的地址）</p>
+            <pre id="d-rtt" class="rx mono"></pre>
+            <p class="hint" id="d-rtt-info">读的是同一个 RTT 环，目标在跑的时候也能看到 printf。</p>
+          </div>
         </fieldset>
       </div>
     </section>

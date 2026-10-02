@@ -594,36 +594,108 @@ console.log('== 14. 命令行交互（Tab 补全 / Ctrl+C / Ctrl+L / 点输出�
 }
 
 // ==================================================================== 15
-console.log('== 15. 版式：命令行是主窗口，上面三块能折叠让高度 ==');
+console.log('== 15. 版式：源码 + 命令行各占一块大的，右侧是「局部 tab」面板 ==');
 {
-  const r = await ev(`
-    const h = id => document.getElementById(id)?.getBoundingClientRect().height || 0;
-    const foot = h('d-out') + h('d-cmd') + 20;
-    const grid = h('d-box-regs') || h('d-box-mem');
-    const src = h('d-box-src');
-    return { grid, src, out: h('d-out'), foot, box: document.querySelector('.dbgfoot').getBoundingClientRect().height,
-             gridBox: document.querySelector('.dbggrid').getBoundingClientRect().height };`);
-  ok(r.out > 120, `命令行输出区高度 ${Math.round(r.out)}px（主窗口）`, JSON.stringify(r));
-  ok(r.gridBox <= 320 && r.gridBox >= 100, `上面的寄存器/内存被压矮（${Math.round(r.gridBox)}px，最高 27vh）`, JSON.stringify(r.gridBox));
-  ok(r.box > r.gridBox, `命令行区比上面那块高（${Math.round(r.box)} vs ${Math.round(r.gridBox)}）`);
+  // 🚨 前置：本 profile 是共用的，版式尺寸/选中的 tab 会被上一次（手工或上一个套件）带偏 ——
+  //    先清成默认值再量，否则断言的是"上一次留下的布局"（本仓踩过：命令行只剩 205px 直接判失败）
+  await ev(`
+    const st = JSON.parse(localStorage.getItem('serial-rtt-tools:v1') || '{}');
+    delete st['dbg.termH']; delete st['dbg.dockW']; st['dbg.dock'] = 'regs';
+    localStorage.setItem('serial-rtt-tools:v1', JSON.stringify(st));
+    document.getElementById('d-box-term').style.flexBasis = '';
+    document.getElementById('d-box-dock').style.flexBasis = '';
+    window.__tools.dbg._dockSelect('regs', { save: false });
+    await new Promise(r => setTimeout(r, 250));
+    return 1;`);
 
-  const fold = await ev(`
-    const before = document.querySelector('.dbgfoot').getBoundingClientRect().height;
-    document.querySelector('[data-fold="d-box-regs"]').click();
-    document.querySelector('[data-fold="d-box-mem"]').click();
-    document.querySelector('[data-fold="d-box-src"]').click();
-    await new Promise(r => setTimeout(r, 200));
-    const after = document.querySelector('.dbgfoot').getBoundingClientRect().height;
-    const st = { before, after, collapsed: document.getElementById('d-box-regs').classList.contains('collapsed') };
-    document.querySelector('[data-fold="d-box-regs"]').click();
-    document.querySelector('[data-fold="d-box-mem"]').click();
-    document.querySelector('[data-fold="d-box-src"]').click();
-    await new Promise(r => setTimeout(r, 200));
-    st.restored = document.querySelector('.dbgfoot').getBoundingClientRect().height;
-    return st;`);
-  ok(fold.collapsed === true && fold.after > fold.before + 40,
-    `折叠寄存器/内存/源码后命令行明显变高（+${Math.round(fold.after - fold.before)}px）`, JSON.stringify(fold));
-  ok(Math.abs(fold.restored - fold.before) < 30, '再点一次恢复原高度', JSON.stringify(fold));
+  const r = await ev(`
+    const rect = sel => document.querySelector(sel)?.getBoundingClientRect() || { width: 0, height: 0 };
+    const src = rect('#d-box-src'), term = rect('#d-box-term'), dock = rect('#d-box-dock'), work = rect('.dbgwork');
+    return { src: src.height, term: term.height, dockW: dock.width, dockH: dock.height, workW: work.width,
+             leftW: rect('.dbgleft').width, out: rect('#d-out').height,
+             rowLayout: Math.abs(src.left - dock.left) > 40 ? 'row' : 'stack',
+             srcLeft: src.left, dockLeft: dock.left };`);
+  ok(r.rowLayout === 'row' && r.dockH > r.src * 0.9, `右侧面板与源码并排、且和左列一样高（dock ${Math.round(r.dockH)} / src ${Math.round(r.src)}）`, JSON.stringify(r));
+  /**
+   * 🚨 这两个下限是**回归护栏**：源码那块是 `flex:1 1 0`，一旦被改回 `flex-basis:auto`，
+   *    它会拿"整份源码的行数"当基准且不肯让 —— 实测命令行被压到 128px（拖都拖不动）。
+   */
+  ok(r.src >= 200, `源码区有足够高度：${Math.round(r.src)}px（≥200）`, JSON.stringify(r));
+  ok(r.term >= 200 && r.out >= 150, `命令行有足够高度：${Math.round(r.term)}px（输出区 ${Math.round(r.out)}px）`, JSON.stringify(r));
+  ok(r.dockW >= 250 && r.dockW <= 760, `右侧面板宽度合理：${Math.round(r.dockW)}px`, JSON.stringify(r));
+  ok(r.src + r.term > 300, '源码 + 命令行合起来占满左列（一块都没被挤扁）', JSON.stringify(r));
+
+  // 局部 tab：一次只显示一个面板，点哪个显示哪个，选择记进 localStorage
+  const tab = await ev(`
+    const d = window.__tools.dbg;
+    const pages = [...document.querySelectorAll('#d-box-dock .dockpage')];
+    const visible = () => pages.filter(p => getComputedStyle(p).display !== 'none').map(p => p.dataset.dock);
+    const seq = [visible()];
+    for (const name of ['mem', 'var', 'rtt', 'regs']){
+      document.querySelector('#d-dock-tabs button[data-dock="' + name + '"]').click();
+      await new Promise(r => setTimeout(r, 120));
+      seq.push(visible());
+    }
+    return { seq, saved: JSON.parse(localStorage.getItem('serial-rtt-tools:v1') || '{}')['dbg.dock'], tabs: pages.length,
+             on: [...document.querySelectorAll('#d-dock-tabs button')].filter(b => b.classList.contains('on')).map(b => b.dataset.dock) };`);
+  ok(tab.tabs === 4, '右侧面板有 4 个 tab（寄存器/内存/变量/RTT）', String(tab.tabs));
+  ok(tab.seq.every(v => v.length === 1), '任何时刻只显示一个面板（不再平铺成小格子）', JSON.stringify(tab.seq));
+  ok(JSON.stringify(tab.seq.map(v => v[0])) === JSON.stringify(['regs', 'mem', 'var', 'rtt', 'regs']), '点 tab 真的切换面板', JSON.stringify(tab.seq));
+  ok(tab.saved === 'regs' && tab.on.length === 1, 'tab 选择落进 localStorage，且只有一个是选中态', JSON.stringify(tab));
+
+  // 内存 tab 窄面板：一行字节数要按宽度自适应（否则横向溢出）
+  const mem = await ev(`
+    const d = window.__tools.dbg;
+    document.querySelector('#d-dock-tabs button[data-dock="mem"]').click();
+    document.getElementById('d-mem-addr').value = '0x20000000';
+    document.getElementById('d-mem-len').value = '32';
+    await d.readMem({ silent: true });
+    await new Promise(r => setTimeout(r, 150));
+    const rows = [...document.querySelectorAll('#d-mem .hxrow')];
+    const box = document.getElementById('d-mem');
+    return { cells: rows[0] ? rows[0].querySelectorAll('.by').length : 0, rows: rows.length,
+             overflow: box.scrollWidth - box.clientWidth, width: Math.round(box.getBoundingClientRect().width) };`);
+  ok(mem.cells === 8 || mem.cells === 16, `一格 ${mem.cells} 字节（按面板宽度 ${mem.width}px 自适应）`, JSON.stringify(mem));
+  ok(mem.overflow <= 2, 'hexdump 不会横向溢出面板', JSON.stringify(mem));
+
+  // 分隔条：拖动改尺寸并记住
+  const grip = await ev(`
+    const grip = document.getElementById('d-grip-term');
+    const term = document.getElementById('d-box-term');
+    const before = term.getBoundingClientRect().height;
+    const y = grip.getBoundingClientRect().top + 3;
+    const x = grip.getBoundingClientRect().left + 60;
+    grip.dispatchEvent(new PointerEvent('pointerdown', { clientX: x, clientY: y, bubbles: true, cancelable: true }));
+    window.dispatchEvent(new PointerEvent('pointermove', { clientX: x, clientY: y - 90, bubbles: true }));
+    window.dispatchEvent(new PointerEvent('pointerup', { clientX: x, clientY: y - 90, bubbles: true }));
+    await new Promise(r => setTimeout(r, 150));
+    const after = term.getBoundingClientRect().height;
+    const g2 = document.getElementById('d-grip-dock');
+    const dock = document.getElementById('d-box-dock');
+    const w0 = dock.getBoundingClientRect().width;
+    const gx = g2.getBoundingClientRect().left + 4, gy = g2.getBoundingClientRect().top + 40;
+    g2.dispatchEvent(new PointerEvent('pointerdown', { clientX: gx, clientY: gy, bubbles: true, cancelable: true }));
+    window.dispatchEvent(new PointerEvent('pointermove', { clientX: gx - 70, clientY: gy, bubbles: true }));
+    window.dispatchEvent(new PointerEvent('pointerup', { clientX: gx - 70, clientY: gy, bubbles: true }));
+    await new Promise(r => setTimeout(r, 150));
+    const w1 = dock.getBoundingClientRect().width;
+    const st = JSON.parse(localStorage.getItem('serial-rtt-tools:v1') || '{}');
+    return { before, after, w0, w1, savedTerm: st['dbg.termH'], savedDock: st['dbg.dockW'] };`);
+  ok(grip.after > grip.before + 60, `拖横分隔条把命令行拉高（${Math.round(grip.before)} → ${Math.round(grip.after)}px）`, JSON.stringify(grip));
+  ok(grip.w1 > grip.w0 + 40, `拖竖分隔条把右侧面板拉宽（${Math.round(grip.w0)} → ${Math.round(grip.w1)}px）`, JSON.stringify(grip));
+  ok(grip.savedTerm > 0 && grip.savedDock > 0, '两处尺寸都记进了 localStorage', JSON.stringify(grip));
+
+  // 复原（共用 profile，别给下一个套件留坑）
+  const reset = await ev(`
+    const st = JSON.parse(localStorage.getItem('serial-rtt-tools:v1') || '{}');
+    delete st['dbg.termH']; delete st['dbg.dockW']; st['dbg.dock'] = 'regs';
+    localStorage.setItem('serial-rtt-tools:v1', JSON.stringify(st));
+    document.getElementById('d-box-term').style.flexBasis = '';
+    document.getElementById('d-box-dock').style.flexBasis = '';
+    window.__tools.dbg._dockSelect('regs');
+    await new Promise(r => setTimeout(r, 120));
+    return true;`);
+  ok(reset === true, '复原版式设置（不给下一个套件留坑）');
 }
 
 // ==================================================================== 16
