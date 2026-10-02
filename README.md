@@ -1,9 +1,89 @@
 # 串口 / RTT 工具箱（网页版）
 
-零安装的调试小工具，纯静态页面，直接托管在 GitHub Pages：
+[![在线打开](https://img.shields.io/badge/%E5%9C%A8%E7%BA%BF%E6%89%93%E5%BC%80-GitHub%20Pages-2f6feb)](https://minichao9901.github.io/web-serial-rtt-tools/)
+[![License](https://img.shields.io/badge/license-Apache--2.0-green)](LICENSE)
+[![Probe](https://img.shields.io/badge/%E6%8E%A2%E9%92%88-akaLinkPro%20%C2%A569-important)](https://github.com/minichao9901/5301evk_akaLinkPro)
 
-**👉 [在浏览器里直接打开](https://minichao9901.github.io/web-serial-rtt-tools/)**
-（桌面版 Chrome / Edge；无需安装任何东西，串口/探针在页面里授权一次即可）
+> ## 一根 USB 线 + 一个网页 = 整套调试工作台
+>
+> **不装驱动、不装 IDE、不装 OpenOCD、不装 gdb、不装 J-Link 软件包。**
+> 桌面版 Chrome / Edge 打开下面这个网址，插上我们自研的 **akaLinkPro** 探针
+> （整机 = 一块 **¥69** 的 HPM5301 开发板 + 一根线），
+> 调试、烧录、串口、RTT、变量示波、点屏、摸总线 —— 全在浏览器里干完。
+
+**👉 [马上打开](https://minichao9901.github.io/web-serial-rtt-tools/)** ·
+探针硬件与固件：[**akaLinkPro**](https://github.com/minichao9901/5301evk_akaLinkPro) ·
+许可 Apache-2.0（两个仓库都是）
+
+**30 秒上手**：① 探针插上电脑（或把固件烧进你手边的 HPM5301EVKLite）→ ② 打开上面那个网址 →
+③ 在页面里点一次「连接探针」授权 → **没有第 4 步**。
+探针怎么接线看[下面的 40pin 图](#40pin-引脚定义hpm5301evklite--j3)，
+浏览器权限怎么配见[这一节](#浏览器权限怎么配edge--chrome串口--hid--webusb)。
+
+## 卖点一览（每一格都是**上板实测**，不是标称值）
+
+| # | 卖点 | 实测数字 |
+|---|---|---|
+| ① | **1% 的价格，同量级的性能** | 整机 **¥69** 对标 J-Link PRO（¥7000 档）：纯传输**写 3384 / 读 2928 KB/s**（60 MHz 档，OpenOCD 口径） |
+| ② | **RTT 轮询下沉进探针**（J-Link 式，主机只读一个串口） | 探针侧 RTT→CDC **2954 KB/s 零丢包** = 主机轮询上限（1140 KB/s）的 **2.6 倍**；本仓库网页端实测 **2.90 MB/s** |
+| ③ | **变量示波比 J-Link 快 3.3 倍** | 探针侧 HSS 直读目标 RAM：单变量 u32 **330 kHz**、8 通道 82 kHz（J-Link PRO 的 J-Scope 同口径 100 kHz）；**目标固件一行都不用改** |
+| ④ | **RISC-V 目标也照样调**（不是只会 ARM） | JTAG + DMI/SBA 引擎：HPM6800EVK SRAM 读 **1504** / 写 **1512 KB/s** = OpenOCD 主机驱动的 **9 倍**；RTT 1385 KB/s 字节级零丢 |
+| ⑤ | **真·零安装**（浏览器直连，不是"免驱"话术） | WebUSB / WebHID / Web Serial 直连探针：**11 个标签页**，授权一次；没有本地程序、没有后台服务、没有插件 |
+| ⑥ | **一块板当七种仪器** | CMSIS-DAP 调试器 · 串口 · RTT→CDC 桥 · J-Scope 变量示波 · flash 烧录器 · USB→SPI/QSPI 桥（点屏 / 外接 NOR）· USB→I2C 桥 |
+| ⑦ | **全开源、可复现** | 网页纯静态、**零依赖零构建**（`index.html` + `app/*.js`）；每个数字都有验收脚本，`make hw-campaign` 一条命令跑完并**当场判决**（当前 20/20） |
+
+> ①②③④ 的口径、靶子型号与测量脚本在 akaLinkPro 仓库的 `script_test/`（上板实测，可复现）；
+> ⑤⑥⑦ 就是**本仓库** —— 逐页功能见下面的「[功能一览](#功能一览11-个标签页)」，
+> 每条实测与自测入口见「[实测状态](#实测状态)」。
+
+## 两半合起来，才是完整的故事
+
+### 硬件那半边：**akaLinkPro**（自研探针，Apache-2.0）
+
+一颗 **HPM5301（RISC-V）** 被做成一整套调试基础设施 —— USB-HS 复合设备
+（**CMSIS-DAP + CDC + 自定义 HID + WebUSB + DFU**），一根线同时是调试器、串口和七种仪器：
+
+- **两条目标侧通路，同一份固件按需切**：
+  **ARM** —— SWD 为主、也支持 JTAG，bit-bang 引擎**按速度预编译**（20/30/36/45/60 MHz 档 + Slow C 版）；
+  **RISC-V** —— JTAG-only，探针侧 Debug Module（DMI + SBA）+ 专用扫描汇编。
+- **七种仪器的控制面全塞在自定义 HID 里**（协议真源见本仓库 `app/hid/probe.js`、
+  `app/spi/protocol.js`、`app/i2c/protocol.js`、`app/scope/protocol.js`）：
+  `0x31` RTT→CDC 桥 · `0x32` HSS 采样 + bulk `0x83` · `0x33` RISC-V 引擎 ·
+  `0x34` 采样期让路 · `0x35` SPI/QSPI 桥 + bulk `0x8B/0x0B` · `0x36` I2C 桥。
+- **硬件级的外设相位**：SPI/QSPI 桥自带 cmd / addr / dummy / token 相位与**单 / 双 / 四线**，
+  一次 CS 窗口跑完（回环自检 20/40/60/75 MHz 全过）；I2C 桥 100 k / 400 k / 1 M 三档，
+  带总线扫描、引脚自检与总线恢复。
+- **升级不需要烧录器**：长按 USER 键进 DFU，把 `.bin` 拖进虚拟 U 盘 `AKALINKPRO` 就完事
+  （APP 带签名 + 长度 + CRC32 校验，校验不过就停在 DFU）；配置存板载 QSPI NOR，插拔不丢。
+- **两块硬件一套源码**：akaLinkPro 原板与 HPM5301EVKLite 移植板，靠 `board.h` 特性宏切换。
+
+### 软件这半边：**本仓库 —— 零安装的网页工作台**
+
+上面那些能力，在浏览器里长成 **11 个标签页**：调试器（源码级断点 + gdb 风格命令行）·
+烧录器（页内跑 flashloader）· 串口助手 · 终端 · RTT Viewer（SWD/ARM 与 RISC-V/JTAG 都能看）·
+RTT 转发 · J-Scope 波形 · SPI/QSPI 桥 · SPI/QSPI 屏（含**局部刷新**）· USB→I2C · 工程生成。
+纯静态页面，**没有任何构建步骤**：GitHub Pages 直接托管，也可以下载下来双击打开。
+
+> 为什么"零安装"这件事不容易：J-Link 与 OpenOCD 都是**本机程序**，浏览器无权启动进程、
+> 也无权开 TCP。所以这里的零安装通路是 **WebUSB 直连 CMSIS-DAP 探针**（RTT / J-Scope / 烧录 /
+> 调试全走它），想用 J-Link 或 OpenOCD 时再启动那个**可选**的本仓库 `bridge/`。
+
+## 功能一览（11 个标签页）
+
+| 标签页 | 干什么 | 需要什么 |
+|---|---|---|
+| **串口助手** | SSCOM 那套核心功能：端口/波特率、ASCII/HEX 收发、**ANSI 彩色接收**（像 MobaXterm）、时间戳、定时发送、5 条快捷发送、保存接收数据、**记录到文件**（高速采集不丢数）、**高速自动关显示**（>50KB/s 停渲染、数据照收） | 桌面版 Chrome / Edge（Web Serial） |
+| **终端** | Xshell 式串口终端：xterm.js 渲染 ANSI、本地回显、回车/退格映射、粘贴发送；侧栏还能开 **akaLinkPro 的 RTT→CDC 转发**（探针自己读 RTT 塞进 CDC，主机只读一个 COM 口） | 同上（与串口助手共用同一个串口会话）；转发功能需要 akaLinkPro 探针 |
+| **RTT Viewer** | SEGGER RTT 多通道查看 + 下行输入 + 复位目标，四种后端；**目标类型可选 SWD/ARM 或 RISC-V/JTAG**（HPM 等，零安装走 JTAG+DMI+SBA）；同样支持记录到文件与高速自动关显示 | **零安装**：WebUSB + CMSIS-DAP 探针<br>**可选**：本地桥 + OpenOCD / J-Link |
+| **RTT 转发** | akaLinkPro 的**探针侧** RTT→CDC：探针自己通过 SWD 轮询目标控制块、把数据塞进它的 CDC 串口；本页开那个 COM 口收数据。**纯输出，没有发送**：ASCII/ANSI/HEX、时间戳、暂停、保存数据、记录到文件、高速自动关显示 | akaLinkPro 探针（配置走它的自定义 HID；接收走它的 CDC 口） |
+| **J-Scope 波形** | 类 SEGGER J-Scope 的**变量示波器**：探针自己按固定周期读目标 RAM（HSS，目标固件不用改），数据走 WebUSB 的独立批量端点，网页画多通道波形、带**触发**、导出 CSV、原始包可回放 | **网页侧已可用**：勾「用假探针」或打开 `.jsp` 回放即可体验；真机需要探针固件支持 `HID 0x32`（见 [`docs/scope-page.md`](docs/scope-page.md)） |
+| **烧录器** | .elf/.hex/.bin 写进目标：**零安装 WebUSB**（页面跑 flashloader，擦/写/校验/复位一条龙）或**本地桥 OpenOCD** | 零安装：同上探针；桥：OpenOCD |
+| **调试器** | 网页里的极简调试器，**不装 OpenOCD、不装 gdb**：暂停 / 继续 / **单步** / 复位、寄存器表（回车即改）、内存 hexdump（点字节即改）、**FPB 硬件断点**、按符号名的 gdb 风格命令行、旁边顺手看 RTT。**载入 .elf 后按源码行下断点**，停下来时源码区跟着 PC 走（DWARF 行号表） | 零安装：同上探针（WebUSB）；无硬件可切「后端 → 模拟目标」；设计与五条硬约束见 [`docs/dbg-page.md`](docs/dbg-page.md) |
+| **SPI/QSPI 桥** | 探针当 USB→SPI/QSPI 主站。右列分四个 tab：**命令表**（一行一条 `XFER`）· **脚本**（贴 C 表 / 手写帧 DSL）· **Flash 测试**（外接 NOR：读 ID/SFDP/状态、读测速、擦写校验）· **回环自检**（MOSI↔MISO 跳线）。tab 栏常驻**运行胶囊**与共享「中止」；SCLK、模式、CS 策略、辅助脚与有效电平在左栏配 | akaLinkPro 探针（HID `0x35` 控制面 + bulk 帧流）；接线照上面的 40pin 图；方案见 [`docs/spi-bridge-page.md`](docs/spi-bridge-page.md) |
+| **SPI/QSPI 屏** | 把屏点亮那一页。右列分三个 tab：**刷屏**（内置图案 / 拖入图片 → 预览 → 开窗对齐、492 B 切片刷；**局部刷新**——只发与上一帧不同的包围盒，同内容重刷整帧跳过；**动画/视频** MP4/WebM/GIF 逐帧发，发送当节拍器）· **面板初始化**（贴 C 数组 → 解析成步骤表 → 重放；每个字节可直接改、点开看/改它的 8 个 bit）· **读回**（读寄存器 / 读 GRAM 还原成一帧图 + 存 BMP）。tab 栏常驻**运行胶囊**与共享「中止」，日志常驻底部（高度可拖） | 与「SPI/QSPI 桥」页**共用同一次连接** |
+| **USB→I2C** | 探针当 **USB 转 I2C 主机**。右列分四个 tab：**扫描总线**（0x08..0x77）· **命令表**（读/写/探测/延时，一行一次事务）· **脚本**（贴 C 表或写脚本，`loop 100ms … end` 就是 while(1) 定时读/写）· **实时值**（`as` 解码把字节变成有名字的量：g / ℃ / V + 迷你曲线）。**长读自动分片**（`rd 0x50 0x00 256` 直接写，内部拆成 5 笔、日志只出一行）；tab 栏常驻**运行胶囊**与「停止」，切到哪个 tab 都知道任务还在跑。内置 **AT24C02 / MPU6050 / ADS1115 / Si5351** 四个模块示例，后两个是传感器，示例里直接做成 while(1) 连续采样 | akaLinkPro 探针（HID `0x36`，**只走 HID** 一条通路）；**仅 HPM5301EVKLite** 固件；方案见 [`docs/i2c-page.md`](docs/i2c-page.md) |
+| **工程生成** | 拖进 Keil `.uvprojx` 就能生成调试/下载配套文件：`Makefile.jlink`、`jlink_gdb.script`、`Makefile.pyocd`、`Makefile.openocd`（连带 `rtt_logger.py`）、`test_sram.bin`；参数可填可勾，产物**实时预览** | 不需要任何硬件/后端（纯前端生成） |
+
 
 ## 40pin 引脚定义（HPM5301EVKLite / J3）
 
@@ -40,25 +120,6 @@
 | **全站布局 review + 修复**：11 个标签页 × 3 档窗口的机器判据体检，修掉 5 处（SPI 桥页 dock 窄窗横向被裁 / 矮窗纵向被裁、屏页推荐值密排文字、监视名字列太窄、生成页长路径框） | `docs/review-2026-10-02.md`（含每条的真因、改法、复测口径与对照图） | 复测 `squash` / `clipped` 全空；`spi-bus-page` 133 · `spi-panel-page` 179 · `gen-page` 57 · `dbg-page` 113 · `ui.page` 19 全绿 |
 | 顺手修 3 个既有小 bug | 档 2 动画开窗漏传 profile（与静图不一致）· 两处短等待用 `setTimeout`（页面不可见时被钳到 ≥1 s）· `dbg-page` 测试写死下标（假故障） | — |
 
-
-## 功能一览（11 个标签页）
-
-| 标签页 | 干什么 | 需要什么 |
-|---|---|---|
-| **串口助手** | SSCOM 那套核心功能：端口/波特率、ASCII/HEX 收发、**ANSI 彩色接收**（像 MobaXterm）、时间戳、定时发送、5 条快捷发送、保存接收数据、**记录到文件**（高速采集不丢数）、**高速自动关显示**（>50KB/s 停渲染、数据照收） | 桌面版 Chrome / Edge（Web Serial） |
-| **终端** | Xshell 式串口终端：xterm.js 渲染 ANSI、本地回显、回车/退格映射、粘贴发送；侧栏还能开 **akaLinkPro 的 RTT→CDC 转发**（探针自己读 RTT 塞进 CDC，主机只读一个 COM 口） | 同上（与串口助手共用同一个串口会话）；转发功能需要 akaLinkPro 探针 |
-| **RTT Viewer** | SEGGER RTT 多通道查看 + 下行输入 + 复位目标，四种后端；**目标类型可选 SWD/ARM 或 RISC-V/JTAG**（HPM 等，零安装走 JTAG+DMI+SBA）；同样支持记录到文件与高速自动关显示 | **零安装**：WebUSB + CMSIS-DAP 探针<br>**可选**：本地桥 + OpenOCD / J-Link |
-| **RTT 转发** | akaLinkPro 的**探针侧** RTT→CDC：探针自己通过 SWD 轮询目标控制块、把数据塞进它的 CDC 串口；本页开那个 COM 口收数据。**纯输出，没有发送**：ASCII/ANSI/HEX、时间戳、暂停、保存数据、记录到文件、高速自动关显示 | akaLinkPro 探针（配置走它的自定义 HID；接收走它的 CDC 口） |
-| **J-Scope 波形** | 类 SEGGER J-Scope 的**变量示波器**：探针自己按固定周期读目标 RAM（HSS，目标固件不用改），数据走 WebUSB 的独立批量端点，网页画多通道波形、带**触发**、导出 CSV、原始包可回放 | **网页侧已可用**：勾「用假探针」或打开 `.jsp` 回放即可体验；真机需要探针固件支持 `HID 0x32`（见 [`docs/scope-page.md`](docs/scope-page.md)） |
-| **烧录器** | .elf/.hex/.bin 写进目标：**零安装 WebUSB**（页面跑 flashloader，擦/写/校验/复位一条龙）或**本地桥 OpenOCD** | 零安装：同上探针；桥：OpenOCD |
-| **调试器** | 网页里的极简调试器，**不装 OpenOCD、不装 gdb**：暂停 / 继续 / **单步** / 复位、寄存器表（回车即改）、内存 hexdump（点字节即改）、**FPB 硬件断点**、按符号名的 gdb 风格命令行、旁边顺手看 RTT。**载入 .elf 后按源码行下断点**，停下来时源码区跟着 PC 走（DWARF 行号表） | 零安装：同上探针（WebUSB）；无硬件可切「后端 → 模拟目标」；设计与五条硬约束见 [`docs/dbg-page.md`](docs/dbg-page.md) |
-| **SPI/QSPI 桥** | 探针当 USB→SPI/QSPI 主站。右列分四个 tab：**命令表**（一行一条 `XFER`）· **脚本**（贴 C 表 / 手写帧 DSL）· **Flash 测试**（外接 NOR：读 ID/SFDP/状态、读测速、擦写校验）· **回环自检**（MOSI↔MISO 跳线）。tab 栏常驻**运行胶囊**与共享「中止」；SCLK、模式、CS 策略、辅助脚与有效电平在左栏配 | akaLinkPro 探针（HID `0x35` 控制面 + bulk 帧流）；接线照上面的 40pin 图；方案见 [`docs/spi-bridge-page.md`](docs/spi-bridge-page.md) |
-| **SPI/QSPI 屏** | 把屏点亮那一页。右列分三个 tab：**刷屏**（内置图案 / 拖入图片 → 预览 → 开窗对齐、492 B 切片刷；**局部刷新**——只发与上一帧不同的包围盒，同内容重刷整帧跳过；**动画/视频** MP4/WebM/GIF 逐帧发，发送当节拍器）· **面板初始化**（贴 C 数组 → 解析成步骤表 → 重放；每个字节可直接改、点开看/改它的 8 个 bit）· **读回**（读寄存器 / 读 GRAM 还原成一帧图 + 存 BMP）。tab 栏常驻**运行胶囊**与共享「中止」，日志常驻底部（高度可拖） | 与「SPI/QSPI 桥」页**共用同一次连接** |
-| **USB→I2C** | 探针当 **USB 转 I2C 主机**。右列分四个 tab：**扫描总线**（0x08..0x77）· **命令表**（读/写/探测/延时，一行一次事务）· **脚本**（贴 C 表或写脚本，`loop 100ms … end` 就是 while(1) 定时读/写）· **实时值**（`as` 解码把字节变成有名字的量：g / ℃ / V + 迷你曲线）。**长读自动分片**（`rd 0x50 0x00 256` 直接写，内部拆成 5 笔、日志只出一行）；tab 栏常驻**运行胶囊**与「停止」，切到哪个 tab 都知道任务还在跑。内置 **AT24C02 / MPU6050 / ADS1115 / Si5351** 四个模块示例，后两个是传感器，示例里直接做成 while(1) 连续采样 | akaLinkPro 探针（HID `0x36`，**只走 HID** 一条通路）；**仅 HPM5301EVKLite** 固件；方案见 [`docs/i2c-page.md`](docs/i2c-page.md) |
-| **工程生成** | 拖进 Keil `.uvprojx` 就能生成调试/下载配套文件：`Makefile.jlink`、`jlink_gdb.script`、`Makefile.pyocd`、`Makefile.openocd`（连带 `rtt_logger.py`）、`test_sram.bin`；参数可填可勾，产物**实时预览** | 不需要任何硬件/后端（纯前端生成） |
-
-> 为什么 RTT 要分三种后端：J-Link 与 OpenOCD 都是**本机程序**，网页无权启动进程、也无权开 TCP。
-> 所以零安装模式下 RTT 走 **WebUSB 直连 CMSIS-DAP 探针**；想用 J-Link/OpenOCD 就启动仓库里的桥（`bridge/`）。
 
 ## 界面
 
