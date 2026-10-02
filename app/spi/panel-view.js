@@ -88,10 +88,19 @@ export class SpiPanelView {
     /** 解析表里的"字节 → 位"开关板（点字节弹出，改位即改那个字节） */
     this.bitpop = new BitPopover({ onEdit: (row, i, k, v) => this.onByteEdit(row, i, k, v) });
     this._sum = null;          // 摘要的原始文案（改过字节后要在后面补一句"已改 N 行"）
+    /**
+     * 右列 dock（刷屏 / 面板初始化 / 读回）与"当前在跑什么"。
+     * `_act` = 正在进行的长操作：{ kind, done, total, note, abortable } —— 运行胶囊与「中止」
+     * 都读它，所以**切到哪个 tab 都看得见**（用户 2026-10："右边部分做成分 tab"）。
+     */
+    this.dockTab = 'img';
+    this._act = null;
+    this.imgAbort = false;     // 「刷这一张」也能中止：半张图留在屏上无害（不像 flash 擦写）
   }
 
   init(){
     const s = this.session;
+    this._booting = true;      // 初始化期间别让 revealCanvas() 把 dock 顶回刷屏 tab（见该函数注释）
 
     for (const [v, label] of Object.entries(P.PROFILE_SHORT || P.PROFILE_NAME)) $('pn-profile').appendChild(new Option(label, v));
     for (const [k, p] of Object.entries(PANEL_PRESETS)) $('pn-preset').appendChild(new Option(p.short || p.label, k));
@@ -192,7 +201,12 @@ export class SpiPanelView {
     for (const ev of ['dragenter', 'dragover']) $('pn-drop').addEventListener(ev, e => { e.preventDefault(); $('pn-drop').classList.add('hot'); });
     for (const ev of ['dragleave', 'drop']) $('pn-drop').addEventListener(ev, e => { e.preventDefault(); $('pn-drop').classList.remove('hot'); });
     $('pn-drop').addEventListener('drop', e => this.pickImage(e.dataTransfer.files[0]));
-    for (const id of ['pn-fit', 'pn-x', 'pn-y', 'pn-swap', 'pn-byteorder', 'pn-level']) $(id).addEventListener('change', () => this.renderPreview());
+    for (const id of ['pn-fit', 'pn-x', 'pn-y', 'pn-level']) $(id).addEventListener('change', () => this.renderPreview());
+    /* 两个"显示开关"（字节序 / R-B 交换）在**读回 tab 里也有一份**（#pn-read-byteorder / #pn-read-swap）：
+     * 读回的画面单独占一张画布，翻颜色不该逼用户切回刷屏 tab。两边是同一组语义、双向同步。 */
+    for (const id of ['pn-swap', 'pn-byteorder']) $(id).addEventListener('change', () => {
+      this.syncViewSwitches('img'); this.renderPreview(); this.drawReadBack();
+    });
     /* 屏幕几何：选命名款 → 把宽高填进自定义框（方便在此基础上微调）并换底座；
      * 选「自定义…」→ 用框里的宽高。两种都要重算画布 / 读回窗口 / 假探针 GRAM ⇒ applyGeometry()。 */
     $('pn-geom').addEventListener('change', () => {
@@ -255,6 +269,11 @@ export class SpiPanelView {
     $('pn-read-stop').addEventListener('click', () => { this.readAbort = true; });
     $('pn-read-bmp').addEventListener('click', () => this.saveReadBmp());
     $('pn-read-full').addEventListener('click', () => this.fillReadWindow());
+    // 读回 tab 里的显示开关副本（与刷屏 tab 双向同步，见 syncViewSwitches）
+    for (const id of ['pn-read-byteorder', 'pn-read-swap']) $(id)?.addEventListener('change', () => {
+      this.syncViewSwitches('read'); this.renderPreview(); this.drawReadBack();
+    });
+    this.syncViewSwitches('img');
 
     // 面板电源 / 显示：4 个独立命令（上电 11h / 开显示 29h / 关显示 28h / 下电 10h）+ RST 脉冲
     $('pn-rst-send').addEventListener('click', () => this.sendResetPulse());
@@ -270,16 +289,9 @@ export class SpiPanelView {
 
     $('pn-log-clear').addEventListener('click', () => { $('pn-log').innerHTML = ''; });
 
-    // 两块大卡片可以折叠（初始化区默认展开占满主区，图片区默认折叠）；
-    // 按钮文字按**初始状态**同步一次 —— HTML 里写死"展开/收起"容易和 class 对不上
-    for (const b of document.querySelectorAll('#tab-panel .foldbtn')){
-      const card = $(b.dataset.fold);
-      b.textContent = card.classList.contains('folded') ? '展开' : '收起';
-      b.addEventListener('click', () => {
-        card.classList.toggle('folded');
-        b.textContent = card.classList.contains('folded') ? '展开' : '收起';
-      });
-    }
+    // ============================================================ 右列 dock + 日志高度 + 运行胶囊
+    this._bindDock();
+    this._bindGrips();
 
     this.unsub = s.subscribe(this);
     this.fillPresetNote();
@@ -288,6 +300,132 @@ export class SpiPanelView {
     this.applyGeometry();
     this.renderState(s.stateInfo());
     this.renderCounters(s.counters);
+    this.syncRunPill();
+    this._booting = false;
+  }
+
+  // ==================================================================== 右列 dock
+
+  /**
+   * tab 段 + 「中止」按钮（照 #dbg / #spi / #i2c 那套）。
+   * 折叠按钮（.foldbtn）在这一页**全部删除**：tab 本身就是"显示 / 隐藏"，
+   * 日志改成常驻之后也没有可折的东西了。
+   */
+  _bindDock(){
+    const tabs = $('pn-dock-tabs');
+    if (tabs){
+      for (const b of tabs.querySelectorAll('button[data-dock]')){
+        b.addEventListener('click', () => this._dockSelect(b.dataset.dock));
+      }
+    }
+    const ab = $('pn-run-abort');
+    if (ab) ab.addEventListener('click', () => this.abortAll());
+    const saved = store.get('panel.dock', '');
+    if (saved && tabs?.querySelector(`button[data-dock="${saved}"]`)) this._dockSelect(saved, { save: false });
+    else this._dockSelect('img', { save: false });
+  }
+
+  /** 切右列 tab（只显示一个；选择记进 localStorage）*/
+  _dockSelect(name, { save = true } = {}){
+    const tabs = $('pn-dock-tabs'), box = $('pn-box-dock');
+    if (tabs) for (const b of tabs.querySelectorAll('button[data-dock]')) b.classList.toggle('on', b.dataset.dock === name);
+    if (box) for (const p of box.querySelectorAll('.dockpage')) p.classList.toggle('on', p.dataset.dock === name);
+    this.dockTab = name;
+    if (save) store.set('panel.dock', name);
+    // 刚显示出来的内容补一次刷新：整个页面被切走时浏览器会把 rAF 挂起，
+    // 隐藏期间攒下的渲染可能还没落地（`display:none` 本身不影响 rAF）。
+    // 画布尤其明显：CSS 尺寸随 tab 出现才算得出来（object-fit 要按行高重新铺一次）。
+    if (name === 'read') this.drawReadBack();
+    else if (name === 'img') this.renderPreview();
+  }
+
+  /** 日志高度 + 源码文本框高度两条分隔条（复用 #spi 那套，拖完落 store）*/
+  _bindGrips(){
+    const box = $('pn-logbox');
+    const h = Number(store.get('panel.logH', 0)) || 0;
+    if (box && h > 0) box.style.height = Math.round(h) + 'px';
+    this._bindGrip($('pn-grip-log'), {
+      get: () => box?.getBoundingClientRect().height || 0,
+      apply: v => { if (box) box.style.height = Math.round(v) + 'px'; },
+      min: () => 72,
+      max: () => Math.max(120, (document.querySelector('#tab-panel .main')?.clientHeight || 700) - 260),
+      save: v => store.set('panel.logH', Math.round(v)),
+    });
+
+    const ta = $('pn-code-text');
+    const th = Number(store.get('panel.codeH', 0)) || 0;
+    if (ta && th > 0) ta.style.height = Math.round(th) + 'px';
+    this._bindGrip($('pn-grip-code'), {
+      get: () => ta?.getBoundingClientRect().height || 0,
+      apply: v => { if (ta) ta.style.height = Math.round(v) + 'px'; },
+      min: () => 70,
+      max: () => Math.max(120, (document.querySelector('#tab-panel .main')?.clientHeight || 700) - 320),
+      save: v => store.set('panel.codeH', Math.round(v)),
+    });
+  }
+
+  /** 通用分隔条拖拽（不用 setPointerCapture：合成的 CDP 事件也能驱动它 —— 抄的 #dbg / #spi）*/
+  _bindGrip(el, { get, apply, min, max, save }){
+    if (!el) return;
+    el.addEventListener('pointerdown', e => {
+      e.preventDefault();
+      const startY = e.clientY;
+      const startVal = get();
+      if (!startVal) return;
+      const move = ev => apply(Math.max(min(), Math.min(max(), startVal - (ev.clientY - startY))));
+      const up = () => {
+        window.removeEventListener('pointermove', move);
+        window.removeEventListener('pointerup', up);
+        window.removeEventListener('pointercancel', up);
+        save(get());
+      };
+      window.addEventListener('pointermove', move);
+      window.addEventListener('pointerup', up);
+      window.addEventListener('pointercancel', up);
+    });
+  }
+
+  // ==================================================================== 运行胶囊 / 中止
+
+  /**
+   * 记下"正在跑什么"。长操作进来时 set、finally 里清 —— 胶囊与「中止」按钮都读它。
+   * `abortable` 为 false 的操作（暂时没有）不该给中止按钮。
+   */
+  setActivity(kind, { done = 0, total = 0, note = '', abortable = true } = {}){
+    this._act = kind ? { kind, done, total, note, abortable } : null;
+    this.syncRunPill();
+  }
+
+  /** 运行胶囊：切到哪个 tab 都看得见（空闲 / 未连接数据端点 / 桥忙 / 具体在跑什么）*/
+  syncRunPill(){
+    const el = $('pn-run-pill');
+    if (!el) return;
+    const s = this.session, a = this._act;
+    let text = '空闲', cls = '';
+    if (a){
+      text = a.kind + (a.total ? ` ${a.done}/${a.total}` : '') + (a.note ? ` · ${a.note}` : '');
+      cls = 'on';
+    } else if (s.busy){ text = '桥忙（不可中止的那桩）'; cls = 'warn'; }
+    else if (!s.dataReady){ text = s.mock ? '假探针 · 未连数据端点' : '未连接数据端点'; }
+    else if (!s.enabled){ text = '桥未使能'; cls = 'warn'; }
+    el.textContent = text;
+    el.className = 'hint dockrun' + (cls ? ' ' + cls : '');
+    const ab = $('pn-run-abort');
+    if (ab) ab.disabled = !a?.abortable;
+  }
+
+  /** 中止当前这一桩（刷图 / 重放 / 读回 / 播放都归它管；切到别的 tab 也按得到）*/
+  abortAll(){
+    const s = this.session, a = this._act;
+    if (!a || !a.abortable){
+      s.log('i', s.busy ? '当前这桩操作不能中止' : '当前没有在跑的操作', this.tag);
+      return;
+    }
+    this.playAbort = true;
+    this.readAbort = true;
+    this.imgAbort = true;
+    this.anim.stop();
+    s.log('w', `已请求中止：${a.kind}（当前这一片发完就停）`, this.tag);
   }
 
   onSession(type, payload){
@@ -372,6 +510,7 @@ export class SpiPanelView {
     $('pn-anim-stop').disabled = !anim?.running;
     $('pn-anim-file').disabled = !!anim?.running;
     for (const b of $('pn-code-body').querySelectorAll('button[data-act]')) b.disabled = !canSend;
+    this.syncRunPill();          // 胶囊也要跟着状态走（未连接 / 未使能 / 忙）
   }
 
   // ==================================================================== 面板初始化
@@ -550,18 +689,24 @@ export class SpiPanelView {
     const items = C.rowsToItems(rows, { start: a, end: b });
     const totalBytes = rows.slice(a, b + 1).reduce((n, r) => n + r.data.length, 0);
 
+    // 🚨 `setBusy(true)` 之后到 `try` 之间**不许再有能抛的语句**：中间抛出去就永远走不到
+    //    finally 里的 `setBusy(false)`，会话会卡在"忙"上，后面所有操作都被 `if (s.busy) return`
+    //    静默吃掉（2026-10 踩过：少了一行 `const label`，整节重放全空、还查了半天）。
     this.playAbort = false;
-    s.setBusy(true);
-    this.refreshButtons();
     const t0 = performance.now();
     const label = a === b ? `单发第 ${a} 条` : `重放 ${a}..${b}`;
-    $('pn-code-prog').textContent = `${label} 进行中…`;
-    s.log('i', `${label}：${items.length} 条 / ${totalBytes} 参数字节`, this.tag);
+    s.setBusy(true);
     try {
+      this.setActivity(label, { total: rows.slice(a, b + 1).length });
+      this.refreshButtons();
+      $('pn-code-prog').textContent = `${label} 进行中…`;
+      s.log('i', `${label}：${items.length} 条 / ${totalBytes} 参数字节`, this.tag);
       const r = await s.sendFrames(items, {
         tag: this.tag, quiet: true, timeoutMs: 4000, batchBytes: this.batchBytes(),
         onProgress: (sent, total) => {
           $('pn-code-prog').textContent = `${label}：${sent}/${total} 包`;
+          this._act = { kind: label, done: sent, total, abortable: true };
+          this.syncRunPill();
           if (this.playAbort) throw new Error('用户中止');
         },
         shouldStop: () => this.playAbort,
@@ -575,6 +720,7 @@ export class SpiPanelView {
       s.log('e', `${label} 失败：` + (e?.message || e), this.tag);
       $('pn-code-prog').textContent = `${label} 失败`;
     } finally {
+      this.setActivity(null);
       s.setBusy(false);
       this.refreshButtons();
       await s.pollStatus(true);
@@ -607,15 +753,14 @@ export class SpiPanelView {
     this.session.log('i', `图案 ${kind}（${p.w}×${p.h}）`, this.tag);
   }
 
-  /** 点图案/选图之后把预览滚进视野。
-   *  ⚠️ 不能用 `canvas.scrollIntoView()`：它会把**所有祖先滚动容器**一起滚，
-   *     包括左边那栏（用户会看到侧栏莫名其妙跳走）。这里只动图片卡片自己的 scrollTop。 */
+  /** 点图案/选图之后把预览滚进视野 —— tab 化之后**不需要滚了**：画布就占满当前这块
+   *  （`#pn-canvas` 走 object-fit:contain 填满所在行）。这里只兜"图案按钮被别处触发、
+   *  而人停在读回 tab"的情况：切回刷屏 tab。
+   *  🚨 初始化那一次 `setPattern('BAR')` 必须放行 —— dock 刚按 store 恢复好，
+   *     在这儿切回 img 会把用户上次停留的 tab 顶掉。 */
   revealCanvas(){
-    const card = $('pn-img-card'), canvas = $('pn-canvas');
-    if (!card || !canvas) return;
-    const cr = card.getBoundingClientRect(), vr = canvas.getBoundingClientRect();
-    if (vr.top < cr.top) card.scrollTop += vr.top - cr.top - 8;
-    else if (vr.bottom > cr.bottom) card.scrollTop += vr.bottom - cr.bottom + 8;
+    if (this._booting) return;
+    if (this.dockTab !== 'img') this._dockSelect('img');
   }
 
   async pickImage(file){
@@ -718,9 +863,12 @@ export class SpiPanelView {
     const g = this.geometry();
     $('pn-canvas').width = g.w;
     $('pn-canvas').height = g.h;
+    const rc = $('pn-read-canvas');
+    if (rc){ rc.width = g.w; rc.height = g.h; }              // 读回那张也换几何（它有自己的画布）
     this.fillReadWindow();                                  // 读回窗口跟着屏走
     this.session.mockProbe?.setPanelGeometry?.(g.w, g.h);   // 假探针的 GRAM 也换成这块屏
     this.renderPreview();
+    if (this.readBack) this.drawReadBack();
   }
 
   /** 预览 = **将要发出去的样子**（compose → 565 → 回读，含 R/B 交换与电平）*/
@@ -790,18 +938,23 @@ export class SpiPanelView {
       level: Math.max(0, Math.min(255, +$('pn-level').value || 255)),
     });
 
-    s.setBusy(true);
-    this.refreshButtons();
+    this.imgAbort = false;
     const t0 = performance.now();
-    s.log('i', `刷图开始：${g.w}×${g.h} · ${out.slices} 片 / ${out.px} 字节 · 档 ${s.profile?.profile ?? '?'}`, this.tag);
+    s.setBusy(true);
     try {
+      this.setActivity('刷图中');
+      this.refreshButtons();
+      s.log('i', `刷图开始：${g.w}×${g.h} · ${out.slices} 片 / ${out.px} 字节 · 档 ${s.profile?.profile ?? '?'}`, this.tag);
       const r = await s.sendFrames(out.items, {
         tag: this.tag, quiet: true, timeoutMs: 5000, batchBytes: this.batchBytes(),
+        shouldStop: () => this.imgAbort,
         onProgress: this.progressThrottle((sent, total) => {
           const pct = (sent / total * 100).toFixed(0);
           const dt = (performance.now() - t0) / 1000;
           $('pn-img-sum').textContent = `发送中 ${pct}%（${sent}/${total} 包）· ${dt.toFixed(1)} s · ` +
             `${(out.px / 1024 / Math.max(0.001, dt)).toFixed(0)} KB/s`;
+          this._act = { kind: '刷图中', done: sent, total, abortable: true };
+          this.syncRunPill();
         }),
       });
       const ms = performance.now() - t0;
@@ -812,11 +965,13 @@ export class SpiPanelView {
       s.log(bad.length ? 'e' : 'g',
         `刷图完成：${out.slices} 片 · ${r.batches ?? out.slices} 次提交 · ${fmtBytes(out.px)} · ${ms.toFixed(0)} ms · ` +
         `${kbPerSec.toFixed(0)} KB/s` +
+        (this.imgAbort ? ' · 用户中止（屏上是半张图）' : '') +
         (bad.length ? ` · ${bad.length} 个非 OK 应答（${P.ST_TEXT[bad[0].status] || bad[0].status}）` : ''), this.tag);
       this.renderPreview();
     } catch (e){
       s.log('e', '刷图失败：' + (e?.message || e), this.tag);
     } finally {
+      this.setActivity(null);
       s.setBusy(false);
       this.refreshButtons();
       await s.pollStatus(true);
@@ -886,6 +1041,9 @@ export class SpiPanelView {
           `实测 ${st.fps.toFixed(1)} fps · ${st.kbs.toFixed(0)} KB/s` + calls + (st.dropped ? ` · 丢帧 ${st.dropped}` : '');
       }
     }
+    // 运行胶囊（在 tab 栏上，切到别的 tab 也看得见）：动画这桩的进度只有这里能跨 tab 看到
+    if (st.running) this._act = { kind: '播放中', done: st.frames, note: `${st.fps.toFixed(1)} fps`, abortable: true };
+    else if (this._act?.kind === '播放中') this._act = null;
     this.refreshButtons();
   }
 
@@ -973,20 +1131,23 @@ export class SpiPanelView {
     if (bad) return s.log('e', '读回：' + bad, this.tag);
 
     this.readAbort = false;
-    s.setBusy(true);
-    this.refreshButtons();
     const t0 = performance.now();
     const buf = new Uint8Array(plan.total);
     let off = 0, done = 0, missed = 0;
-    s.log('i', `读回开始：${plan.w}×${plan.h} → ${plan.total} B / ${plan.chunks.length} 片` +
-      `（${s.profile?.profile === 2 ? 'QSPI：读命令 + 地址递增' : 'DCS：2E 读 + 3E 续读'}）`, this.tag);
     // 🚨 这里原本是**每片写一次 DOM**：519 片 × 约 2 ms ≈ 1.2 s，正好等于整个读回耗时
     //    （实测 1235 ms / 205 KB/s）—— 限流后再写，收尾那片一定放行。
     const updProg = this.progressThrottle((done, total, off2, dt, miss) => {
       $('pn-read-prog').textContent = `读片 ${done}/${total} · ${(off2 / 1024).toFixed(1)} KB · ` +
         `${dt.toFixed(1)} s · ${(off2 / 1024 / Math.max(0.001, dt)).toFixed(0)} KB/s` + (miss ? ` · 丢 ${miss} 片` : '');
+      this._act = { kind: '读回中', done, total, abortable: true };
+      this.syncRunPill();
     });
+    s.setBusy(true);                 // 与重放 / 刷图同一条纪律：到 try 之间不许再有能抛的语句
     try {
+      this.setActivity('读回中');
+      this.refreshButtons();
+      s.log('i', `读回开始：${plan.w}×${plan.h} → ${plan.total} B / ${plan.chunks.length} 片` +
+        `（${s.profile?.profile === 2 ? 'QSPI：读命令 + 地址递增' : 'DCS：2E 读 + 3E 续读'}）`, this.tag);
       for (const c of plan.chunks){
         if (this.readAbort) break;
         const r = await s.sendFrames(c.items, {
@@ -1001,6 +1162,7 @@ export class SpiPanelView {
       }
     } finally {
       const ms = performance.now() - t0;
+      this.setActivity(null);
       s.setBusy(false);
       this.refreshButtons();
       const littleEndian = $('pn-byteorder').value === 'le';
@@ -1020,12 +1182,38 @@ export class SpiPanelView {
     }
   }
 
-  /** 把读回来的一帧画进预览框（窗口不是整屏时按 x0/y0 摆放，其余保持黑）*/
+  /**
+   * 两个"显示开关"（字节序 / R-B 交换）在刷屏 tab 与读回 tab 各有一份：
+   * `from` 是"用户刚动过的那一边"，把另一边的控件值补齐。改哪边都作用于同一帧。
+   */
+  syncViewSwitches(from){
+    const bo = $('pn-byteorder'), sw = $('pn-swap');
+    const rbo = $('pn-read-byteorder'), rsw = $('pn-read-swap');
+    if (!bo || !sw) return;
+    if (from === 'read'){
+      if (rbo) bo.value = rbo.value;
+      if (rsw) sw.checked = rsw.checked;
+    } else {
+      if (rbo) rbo.value = bo.value;
+      if (rsw) rsw.checked = sw.checked;
+    }
+  }
+
+  /** 把读回来的一帧画进**读回 tab 自己的**预览框（窗口不是整屏时按 x0/y0 摆放，其余保持黑）。
+   *  🚨 画布必须是 `#pn-read-canvas` 而不是 `#pn-canvas`：后者在「刷屏」tab 里，
+   *     tab 不是活动页时它是 display:none —— 结果会画进一个看不见的地方。 */
   drawReadBack(){
     const rb = this.readBack;
-    if (!rb) return;
+    const canvas = $('pn-read-canvas');
+    if (!rb || !canvas) return;
     const g = this.geometry();
-    const canvas = $('pn-canvas');
+    // 显示开关随时可翻（用户："颜色不对时先只翻一个"）→ 与上次解码用的口径不一致就重解一次
+    const littleEndian = $('pn-byteorder').value === 'le';
+    const swap = $('pn-swap').checked;
+    if (rb.littleEndian !== littleEndian || rb.swap !== swap || !rb.rgba){
+      rb.rgba = RD.decodeGram(rb.bytes, { littleEndian, swap });
+      rb.littleEndian = littleEndian; rb.swap = swap;
+    }
     if (canvas.width !== g.w || canvas.height !== g.h){ canvas.width = g.w; canvas.height = g.h; }
     const ctx = canvas.getContext('2d');
     ctx.fillStyle = '#000';
@@ -1035,9 +1223,10 @@ export class SpiPanelView {
     tmp.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(rb.rgba), rb.w, rb.h), 0, 0);
     ctx.imageSmoothingEnabled = false;
     ctx.drawImage(tmp, rb.x0, rb.y0);
-    const sum = $('pn-img-sum');
-    if (sum) sum.textContent = `读回：${rb.w}×${rb.h} @(${rb.x0},${rb.y0}) · ${fmtBytes(rb.bytes.length)} · ${rb.ms.toFixed(0)} ms` +
-      `　（${rb.littleEndian ? '低字节在前' : '高字节在前'}${rb.swap ? ' · R/B 交换' : ''}）`;
+    const sum = $('pn-read-sum');
+    if (sum) sum.textContent = `读回 ${rb.w}×${rb.h} @(${rb.x0},${rb.y0}) · ${fmtBytes(rb.bytes.length)} · ${rb.ms.toFixed(0)} ms` +
+      `　（${rb.littleEndian ? '低字节在前' : '高字节在前'}${rb.swap ? ' · R/B 交换' : ''}）` +
+      (rb.missed ? ` · ⚠ ${rb.missed} 片没拿到数据` : '');
   }
 
   /** 读回来的那一帧 → 24 位 BMP（浏览器不会导出 BMP，自己拼头）*/

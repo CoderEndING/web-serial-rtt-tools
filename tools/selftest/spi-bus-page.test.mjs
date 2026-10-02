@@ -492,7 +492,7 @@ console.log('== 10. NOR flash 卡（假探针里挂着一颗 W25Q128 模型）==
     return {
       read: b('#sp-fl-read'), bench: b('#sp-fl-bench'), erase: b('#sp-fl-erase'),
       rowW: Math.round(document.querySelector('#sp-flash-card .row.btnrow').getBoundingClientRect().width),
-      out: h('#sp-fl-out'), data: h('#sp-flash-card .datarow'),
+      out: h('#sp-fl-out'), data: h('#sp-flash-card .datarow'), cardH: h('#sp-flash-card'),
       paramRows: document.querySelectorAll('#sp-flash-card .framegrid .row').length,
       paramGridRows: new Set([...document.querySelectorAll('#sp-flash-card .framegrid .row')].map(r => Math.round(r.getBoundingClientRect().top))).size,
     };`);
@@ -500,7 +500,10 @@ console.log('== 10. NOR flash 卡（假探针里挂着一颗 W25Q128 模型）==
   ok(lay.erase < 140, `擦除按钮同理（${lay.erase}px）`);
   ok(lay.paramRows === 4 && lay.paramGridRows === 1, `四个参数排**一行**而不是 2×2（实测 ${lay.paramGridRows} 行）`);
   ok(lay.out === lay.data, `🚨「读数据 / 写数据」两窗**精确等高**（${lay.out} vs ${lay.data}px）`);
-  ok(lay.out >= 120, `两窗都够大（${lay.out}px，之前写数据只有 90px）`);
+  // 够不够大**跟窗口走**（900 高时 176px、820 高 136px、730 高 90px）——
+  // 自测跑在用户那个窗口上，写死一个绝对值会随窗口大小假红；这里断的是"占比 + 地板"。
+  ok(lay.out >= 80 && lay.out >= lay.cardH * 0.18,
+     `两窗都够大（${lay.out}px / 卡片 ${lay.cardH}px；900 高的窗口下是 176px —— 原来写数据 90 而读数据 183）`);
 
   // 10.1 引脚下拉与固件拒绝规则对齐
   const pads = await ev(`

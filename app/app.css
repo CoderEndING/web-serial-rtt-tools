@@ -399,24 +399,69 @@ fieldset[disabled]{opacity:.62}
 fieldset[disabled] legend::after{content:' · 未实现';color:var(--warn)}
 
 /* ---- 屏页（#panel）----
-   主区**单列 + 整列纵向滚动**（用户 2026-09-30 定稿）：图片/图案刷屏置顶（最常用、不可收起）→
-   面板初始化 → 日志。解析表固定 360px 之后三块加起来必然高过视口，所以右列自己出滚动条，
-   每块按**自然高度**排、不再互相挤压 —— 老的"三块弹性 3:2:1"只会把上面两块压扁。
+   右列 = **一个带 tab 的面板**（刷屏 / 面板初始化 / 读回）+ 常驻日志 + 状态条
+   （用户 2026-10："右边部分参考调试器界面做成分 tab，现在有点繁琐"）。
+   改之前是"四张卡纵堆 + 整列滚动"：1600×900 下内容 1597px / 可视 836px，每次要滚 761px，
+   而且三处高度写死（解析表 360 / 日志 190 / 预览画布 170），矮窗口里三块互相挤。
+   现在每块**吃满整块高度**，日志与运行状态常驻 —— tab 化不该把过程视图藏起来。
    侧栏卡片按 DOM 顺序排（探针 → 屏型号 → 面板档 → 当前生效 → 面板电源/显示）。 */
-#tab-panel .main{gap:8px;overflow-y:auto;overflow-x:hidden;padding-right:3px}
+#tab-panel .main{gap:8px;overflow:hidden;padding-right:3px}
 /* 🚨 flex 子项的 min-width 默认是 auto：卡片里只要有不肯收缩的东西（.toolrow.nw 不换行、表格的
    最小内容宽），fieldset 就会被撑到 ~713px —— 920px 视口下整页冒横向滚动条（实测定位）。
    桥页的 .busstack>fieldset 早已加了同款纪律，这里对齐它。 */
-#tab-panel .main>fieldset{min-width:0;flex:0 0 auto}
-/* 置顶的刷图卡片：常驻展开（legend 里没有收起按钮），也不再限高 —— 它自己就是"一屏里最该看全"的那块 */
-#tab-panel #pn-img-card{max-height:none;overflow:visible}
-/* 解析表固定 360px = 原来 120px 下限的 3 倍（用户口径："现在高度的 3 倍"）。
-   表自己滚（.scroll），不把卡片撑爆。 */
-#tab-panel #pn-code-wrap{height:360px;min-height:360px}
-/* 文本框允许压到 70px（它本来就滚）；给个 118px 的顺手高度，别和 360px 的表抢地方 */
-#tab-panel #pn-code-text{height:118px;min-height:70px}
-/* 日志卡片默认折叠；展开时给个确定高度（父级已不再是 flex:1 的弹性分配） */
-#tab-panel #pn-log-card .logbox{height:190px;min-height:92px}
+#tab-panel .main>fieldset{min-width:0}
+/* dock 本体的规则与 #tab-spi .spdock / #tab-i2c .i2cdock 逐条对应（各页各写一份，别互相关联）。
+   🚨 下面**没有任何 max-height 限高**：高度由 `.dockpage{flex:1}` 分配。 */
+#tab-panel .paneldock{display:flex;flex-direction:column;min-width:0;min-height:0;overflow:hidden;flex:1 1 auto}
+#tab-panel .paneldock>legend{white-space:nowrap;overflow:hidden;display:flex;align-items:center;gap:6px;width:100%;box-sizing:border-box}
+#tab-panel .paneldock>legend .hint{margin:0;display:inline}
+#tab-panel .docktabs{margin-left:2px;vertical-align:middle}
+#tab-panel .docktabs button{font-size:11.5px;padding:2px 10px}
+/* `overflow-y:auto` 是**兜底**：正常情况下当前 tab 刚好装下（自测里断言不出现滚动）；
+   矮到装不下时宁可让当前这块自己滚，也不要把它裁掉。 */
+#tab-panel .dockpage{display:none;flex:1 1 auto;min-height:0;flex-direction:column;gap:6px;overflow-y:auto;overflow-x:hidden}
+#tab-panel .dockpage.on{display:flex}
+#tab-panel .dockpage .toolrow{margin:0}
+#tab-panel .dockpage>p.hint{flex:none;margin:0}
+#tab-panel .dockpage>.row{flex:none}
+/* 运行胶囊：切到哪个 tab 都看得到"屏页在跑什么"（刷图 / 重放 / 读回 / 播放） */
+#tab-panel .dockrun{color:var(--fg2);font-size:11.5px;font-family:var(--mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#tab-panel .dockrun.on{color:var(--ok)}
+#tab-panel .dockrun.warn{color:var(--warn)}
+#tab-panel .dockrun.err{color:var(--err)}
+#tab-panel .grip{flex:none;background:transparent;border-radius:4px;position:relative}
+#tab-panel .grip::after{content:"";position:absolute;background:var(--line);border-radius:2px;opacity:.7}
+#tab-panel .grip:hover::after{background:var(--acc);opacity:1}
+#tab-panel .grip-h{height:9px;margin:0;cursor:row-resize}
+#tab-panel .grip-h::after{left:35%;right:35%;top:3px;height:3px}
+/* 解析表：**不再写死 360px** —— tab 化之后它吃满剩余高度（文本框那截用 #pn-grip-code 拖）。
+   矮窗口下也不再被别的卡挤扁（用户："初始化部分被压缩得太厉害了"）。 */
+#tab-panel #pn-code-wrap{flex:1 1 auto;min-height:120px;height:auto;max-height:none}
+/* 文本框：默认 110px、可拖 70~400（它本来就自己滚），省下的高度全给表格 */
+#tab-panel #pn-code-text{height:110px;min-height:70px;flex:none}
+/* 日志常驻：高度落在 #pn-logbox 上（`.log` 自己按 30% 算会因为父高为 0 而塌掉），可拖 + 记 store */
+#tab-panel #pn-logbox{flex:0 0 auto;height:150px;min-height:72px;display:flex;flex-direction:column}
+#tab-panel #pn-logbox .log{height:100%;min-height:0;flex:1 1 auto}
+/* 预览画布：**填满所在行**（object-fit:contain 保比例、绝不拉变形；image-rendering:pixelated
+   保证放大后仍是硬边）。原来是 max-height:170px 写死 —— 360×360 的屏缩到 138×170 根本看不清。
+   🚨 画布必须**绝对定位**：`height:100%` 在"高度由内容决定"的父级里会退化成 auto，
+   而 canvas 是带固有比例的可替换元素 —— 宽度一撑开，高度按 240:296 反算回去（实测 730×904），
+   把整页顶爆。绝对定位之后它不参与布局，盒子多高它就多高。 */
+#tab-panel .canvasrow,#tab-panel .readrow{flex:1 1 auto;min-height:170px;align-items:stretch;margin-top:6px}
+#tab-panel .canvasrow>.canvasbox,#tab-panel .readrow>.canvasbox{
+  position:relative;flex:0 0 auto;width:clamp(200px,34%,440px);min-height:0;
+}
+/* 🚨 右侧那列控制在矮窗口里比整行还高（9 行控件 ≈ 249px）：flex 行**单行**布局下，
+   行的交叉尺寸 = 最高那个 item 的内容高 —— 于是画布会被"撑"到 249，比行本身（235）还高、
+   压到下面的提示上。`max-height:100%` 把它的假设交叉尺寸夹回行高（行的行高是确定的），
+   多余的部分让它自己滚：1600×900 及以上不会出现滚动条，只有很矮的窗口才有。 */
+#tab-panel .canvasrow>.imginfo,#tab-panel .readrow>.imginfo{max-height:100%;overflow-y:auto;overflow-x:hidden;min-height:0}
+#tab-panel #pn-canvas,#tab-panel #pn-read-canvas{
+  position:absolute;inset:0;width:100%;height:100%;object-fit:contain;
+  background:#000;border:1px solid var(--line);border-radius:6px;image-rendering:pixelated;
+}
+/* 动画块保持自然高度（它的高度让给上面那张画布） */
+#tab-panel .animbox{flex:none}
 /* 拖放区压扁一点：它只是"选图入口"，别占掉命令区的高度（图案按钮就在上面一行） */
 #tab-panel .drop{padding:5px 9px;margin:4px 0;font-size:12px}
 #tab-panel .toolrow{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:0 0 7px}
@@ -424,7 +469,6 @@ fieldset[disabled] legend::after{content:' · 未实现';color:var(--warn)}
    压紧后省下来的高度全给文本框和表格（用户："初始化部分被压缩得太厉害了"）。 */
 #tab-panel #pn-code-card .toolrow{margin:0 0 4px}
 #tab-panel #pn-code-card .row{margin:3px 0}
-#tab-panel #pn-code-card legend{padding:0 4px}
 #tab-panel #pn-code-card>.row.btnrow button{padding:3px 9px}
 /* 摘要 + 导出按钮挤一行（折行会白吃 28px 高度，那点高度留给文本框和表格） */
 #tab-panel .toolrow.nw{flex-wrap:nowrap;overflow:hidden}
@@ -437,11 +481,11 @@ fieldset[disabled] legend::after{content:' · 未实现';color:var(--warn)}
   resize:none;white-space:pre;overflow:auto;
 }
 #tab-panel .scroll{max-height:none;margin-top:0}
-/* 预览限高：不然 360×360 的画布会把"图片"卡片撑得比初始化面板还高 */
-#tab-panel #pn-canvas{max-height:170px;width:auto}
+/* 预览画布的高度规则在上面 dock 段里（填满所在行 + object-fit:contain）——
+   原来这里是 `#tab-panel #pn-canvas{max-height:170px}`（写死），已删除。 */
 #tab-panel .imginfo .row{margin:3px 0}
 #tab-panel .imgrow{gap:10px}
-/* 日志：折叠卡片里的一块滚动区 + 右上角浮动"清空"（不占额外高度） */
+/* 日志：常驻的一块滚动区 + 右上角浮动"清空"（不占额外高度） */
 #tab-panel .logbox,#tab-spi .logbox{position:relative}
 #tab-panel .logbox .log{height:100%}
 /* 桥页的日志直接放在 .main 里：高度落在 logbox 上（.log 自己按 30% 算会因为父高为 0 而塌掉）。

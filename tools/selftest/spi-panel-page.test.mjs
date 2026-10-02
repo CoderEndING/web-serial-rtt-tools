@@ -63,6 +63,16 @@ async function ev(expr){
   return r.result.value;
 }
 
+/**
+ * 切右列 tab（刷屏 / 面板初始化 / 读回）。
+ * 每一节开始前显式切一次 —— **真实用户只能点看得见的那块**，测试也照这个来：
+ * 页签不对时 getBoundingClientRect() 全是 0，断言会莫名其妙地失败。
+ */
+async function selectDock(name){
+  await ev(`document.querySelector('#pn-dock-tabs button[data-dock="${name}"]').click(); return true;`);
+  await sleep(220);
+}
+
 await send('Page.enable');
 await send('Runtime.enable');
 try { await send('Network.enable'); await send('Network.setCacheDisabled', { cacheDisabled: true }); } catch {}
@@ -76,6 +86,21 @@ try { await send('Network.enable'); await send('Network.setCacheDisabled', { cac
 await send('Page.bringToFront').catch(() => {});
 await send('Page.navigate', { url: URL_ });
 console.log('目标: ' + URL_);
+
+/**
+ * **预置清理**（跑之前先擦干净，跟 spi-bus-page 一个道理）：
+ * `panel.dock`（上次停在哪张 tab）、`panel.logH` / `panel.codeH`（两条分隔条的记忆）
+ * 都会跨次污染 —— 上一次把 dock 停在「读回」，这一节的"默认停在刷屏"就直接错。
+ */
+await sleep(800);
+await ev(`(() => {
+  const k = 'serial-rtt-tools:v1';
+  const d = JSON.parse(localStorage.getItem(k) || '{}');
+  for (const key of ['panel.dock', 'panel.logH', 'panel.codeH']) delete d[key];
+  localStorage.setItem(k, JSON.stringify(d));
+  return 1;
+})()`);
+await send('Page.reload', { ignoreCache: true });
 
 let ready = false;
 for (let i = 0; i < 60; i++){
@@ -98,35 +123,151 @@ console.log('== 1. 切到屏页 ==');
 }
 
 // ==================================================================== 1b
-console.log('== 1b. 布局（用户 2026-09-30 定的口径）：刷图置顶不可收起 / 解析表 360px / 右列滚动 ==');
+console.log('== 1b. 布局（用户 2026-10 定稿）：右列 tab 化（刷屏 / 面板初始化 / 读回）+ 常驻日志 ==');
 {
   const L = await ev(`
     const main = document.querySelector('#tab-panel .main');
-    const cards = [...main.querySelectorAll(':scope > fieldset')].map(f => f.id);
-    const img = document.getElementById('pn-img-card'), code = document.getElementById('pn-code-card');
-    const wrap = document.getElementById('pn-code-wrap');
-    const cs = getComputedStyle(main);
-    return { cards, hasImgFold: !!img.querySelector('.foldbtn'), hasCodeFold: !!code.querySelector('.foldbtn'),
-             imgH: Math.round(img.getBoundingClientRect().height),
-             tableH: Math.round(wrap.getBoundingClientRect().height),
-             tableRows: document.querySelectorAll('#pn-code-body tr').length,
-             over: cs.overflowY, canScroll: main.scrollHeight > main.clientHeight + 4,
-             scrollH: main.scrollHeight, clientH: main.clientHeight,
-             docOverflow: document.documentElement.scrollWidth > document.documentElement.clientWidth + 1 };`);
-  ok(L.cards[0] === 'pn-img-card' && L.cards[1] === 'pn-log-card' && L.cards[2] === 'pn-code-card' && L.cards[3] === 'pn-read-card',
-     `主区顺序 = 刷图 → 日志 → 面板初始化 → 读回（实测 ${L.cards.join(' → ')}；2026-10 用户要求：日志挪到初始化前、读回放在初始化后）`);
-  ok(L.hasImgFold === false && L.hasCodeFold === true, '刷图那块**没有**收起按钮，初始化那块保留');
-  ok(Math.abs(L.tableH - 360) <= 2, `解析表高度 = 360px（原来 120px 下限的 3 倍，实测 ${L.tableH}）`);
-  ok(L.over === 'auto' && L.canScroll, `主区自己出纵向滚动条（overflow-y=${L.over}，${L.clientH} → ${L.scrollH}）`);
-  ok(L.docOverflow === false, '整页没有横向滚动条');
-  const log = await ev(`
-    const card = document.getElementById('pn-log-card');
-    return { folded: card.classList.contains('folded'), btn: card.querySelector('.foldbtn').textContent,
-             h: Math.round(card.getBoundingClientRect().height), logH: Math.round(document.getElementById('pn-log').getBoundingClientRect().height) };`);
-  ok(log.folded === false && log.logH > 100 && log.btn === '收起',
-     `日志**默认展开**（用户 2026-09-30）：卡片 ${log.h}px / 日志区 ${log.logH}px，按钮写着「${log.btn}」`);
+    const dock = document.getElementById('pn-box-dock');
+    const box = document.getElementById('pn-logbox');
+    return {
+      tabs: [...document.querySelectorAll('#pn-dock-tabs button[data-dock]')].map(b => b.dataset.dock),
+      pages: [...dock.querySelectorAll('.dockpage')].map(p => p.dataset.dock),
+      onPages: [...dock.querySelectorAll('.dockpage.on')].map(p => p.dataset.dock),
+      mainOver: getComputedStyle(main).overflowY,
+      mainScroll: main.scrollHeight - main.clientHeight,
+      pill: document.getElementById('pn-run-pill').textContent,
+      abort: !!document.getElementById('pn-run-abort'),
+      abortDisabled: document.getElementById('pn-run-abort').disabled,
+      logInsideDock: !!dock.querySelector('#pn-logbox'),
+      logH: Math.round(box.getBoundingClientRect().height),
+      logGrip: !!document.getElementById('pn-grip-log'),
+      fold: document.querySelectorAll('#tab-panel .foldbtn').length,
+      docOverflow: document.documentElement.scrollWidth > document.documentElement.clientWidth + 1 };`);
+  ok(L.tabs.join(',') === 'img,code,read', `tab 段 = 刷屏 / 面板初始化 / 读回（实测 ${L.tabs.join(' / ')}）`);
+  ok(L.pages.join(',') === 'img,code,read' && L.onPages.join(',') === 'img',
+     `三个 tab 页按序排、默认停在「刷屏」（本页最高频的动作；实测 ${L.pages.join(' → ')} / 亮着 ${L.onPages}）`);
+  ok(L.mainOver === 'hidden' && L.mainScroll <= 1,
+     `右列**自己不再滚动**（overflow-y=${L.mainOver}，差 ${L.mainScroll}px）—— 高度交给当前 tab（原来要滚 761px）`);
+  ok(L.logInsideDock === false && L.logH >= 60 && L.logGrip,
+     `日志常驻在 dock 之外（${L.logH}px + 分隔条）—— 不占 tab、切到哪一页都在（用户 2026-09-30/2026-10 两条要求同时满足）`);
+  ok(L.abort && L.abortDisabled === true && /空闲|未连接/.test(L.pill),
+     `tab 栏上有运行胶囊「${L.pill}」+ 中止按钮（空闲时禁用）`);
 
-  // 表头吸顶（用户 2026-09-30："往下拉表头就上去了，看不到 byte 索引了"）
+  /**
+   * 胶囊 / 中止的联动（直接驱动，不跟毫秒级的假探针抢时序 —— 跑起来再读会 flaky）：
+   * 有操作在跑 → 胶囊变绿、中止可点；中止 → 三个 abort 旗一起竖起来；跑完 → 退回空闲。
+   */
+  const act = await ev(`
+    const pill = document.getElementById('pn-run-pill'), ab = document.getElementById('pn-run-abort');
+    const panel = window.__tools.panel;
+    panel.setActivity('重放 0..191', { done: 12, total: 194 });
+    const on = { text: pill.textContent, cls: pill.className, disabled: ab.disabled };
+    ab.click();
+    const flags = { play: panel.playAbort, read: panel.readAbort, img: panel.imgAbort };
+    panel.playAbort = false; panel.readAbort = false; panel.imgAbort = false;   // 放开，别影响后面几节
+    panel.setActivity(null);
+    const off = { text: pill.textContent, disabled: ab.disabled };
+    return { on, flags, off };`);
+  ok(/重放 0\.\.191 12\/194/.test(act.on.text) && /dockrun on/.test(act.on.cls) && act.on.disabled === false,
+     `有操作在跑 → 胶囊「${act.on.text}」高亮、中止可点`);
+  ok(act.flags.play === true && act.flags.read === true && act.flags.img === true,
+     '点中止 → 重放 / 读回 / 刷图三个旗一起竖起来（切到哪个 tab 都按得到同一个按钮）');
+  ok(/空闲|未连接/.test(act.off.text) && act.off.disabled === true,
+     `跑完退回「${act.off.text}」（第 1b 节还没连探针，所以是"未连接"而不是"空闲"）、中止重新禁用`);
+  ok(L.fold === 0, '折叠按钮**全部删除**（tab 本身就是显示 / 隐藏）');
+  ok(L.docOverflow === false, '整页没有横向滚动条');
+
+  // 每个 tab 页**吃满整块高度**、且不出现纵向滚动（矮窗口才允许内部兜底滚动）
+  for (const t of ['img', 'code', 'read']){
+    await selectDock(t);
+    const m = await ev(`
+      const pg = document.querySelector('#pn-box-dock .dockpage.on');
+      const dock = document.getElementById('pn-box-dock').getBoundingClientRect();
+      return { tab: pg.dataset.dock, h: Math.round(pg.getBoundingClientRect().height),
+               dockH: Math.round(dock.height), legendH: Math.round(document.querySelector('#pn-box-dock>legend').getBoundingClientRect().height),
+               over: pg.scrollHeight - pg.clientHeight };`);
+    // 断言用**相对量**：窗口多大都不该假红（自测跑在用户那个窗口上，尺寸不由我们定）
+    ok(m.tab === t && m.h >= m.dockH - m.legendH - 24 && m.over <= 1,
+       `「${t}」tab 吃满整块高度（${m.h}px ≈ dock ${m.dockH} − tab栏 ${m.legendH}）、内容不溢出（差 ${m.over}px）`);
+  }
+
+  // 刷屏 tab：预览画布填满所在行（原来 max-height:170px 写死，360×360 的屏缩到 138×170 根本看不清）
+  await selectDock('img');
+  const cv = await ev(`
+    const c = document.getElementById('pn-canvas'), r = c.getBoundingClientRect();
+    const cs = getComputedStyle(c);
+    const row = c.closest('.canvasrow').getBoundingClientRect();
+    return { w: Math.round(r.width), h: Math.round(r.height), rowH: Math.round(row.height),
+             of: cs.objectFit, pos: cs.position, attr: c.width + 'x' + c.height };`);
+  ok(cv.pos === 'absolute' && cv.of === 'contain' && cv.h > 150 && Math.abs(cv.h - cv.rowH) <= 1,
+     `刷屏预览画布 ${cv.w}×${cv.h} 正好填满所在行（行高 ${cv.rowH}）· object-fit=${cv.of} 保比例不拉变形 · 绝对定位（不然它会把整页顶爆）`);
+  ok(cv.attr === '240x296', `画布的位图尺寸仍是屏几何（${cv.attr}）`);
+
+  // 面板初始化 tab：解析表**不再写死 360px**，改为吃剩余高度 + 一条可拖的分隔条
+  await selectDock('code');
+  const tb = await ev(`
+    const wrap = document.getElementById('pn-code-wrap'), ta = document.getElementById('pn-code-text');
+    const pg = document.querySelector('#pn-box-dock .dockpage.on').getBoundingClientRect();
+    return { tableH: Math.round(wrap.getBoundingClientRect().height), rows: document.querySelectorAll('#pn-code-body tr').length,
+             taH: Math.round(ta.getBoundingClientRect().height), grow: getComputedStyle(wrap).flexGrow,
+             pageH: Math.round(pg.height), grip: !!document.getElementById('pn-grip-code') };`);
+  ok(tb.grow === '1' && tb.tableH >= 120,
+     `解析表是**弹性**的那一块（flex-grow=1：${tb.tableH}px / ${tb.pageH}px 页高 / ${tb.rows} 行）—— 不再是写死的 360px`);
+  ok(tb.taH >= 70 && tb.grip, `源码文本框 ${tb.taH}px + 中间有可拖分隔条（70~400px）`);
+
+  // 拖分隔条：文本框长高 → **表格同步变矮**（这条才是"吃剩余高度"的功能性证据，与窗口尺寸无关）
+  const drag = await ev(`
+    const wrap = document.getElementById('pn-code-wrap');
+    const grip = document.getElementById('pn-grip-code'), ta = document.getElementById('pn-code-text');
+    const before = Math.round(ta.getBoundingClientRect().height);
+    const tableBefore = Math.round(wrap.getBoundingClientRect().height);
+    const r = grip.getBoundingClientRect();
+    const drag = dy => {
+      grip.dispatchEvent(new PointerEvent('pointerdown', { clientY: r.top + 4, bubbles: true }));
+      window.dispatchEvent(new PointerEvent('pointermove', { clientY: r.top + 4 + dy, bubbles: true }));
+      window.dispatchEvent(new PointerEvent('pointerup', { clientY: r.top + 4 + dy, bubbles: true }));
+    };
+    drag(-30);
+    await new Promise(r2 => setTimeout(r2, 150));
+    const after = Math.round(ta.getBoundingClientRect().height);
+    const tableAfter = Math.round(wrap.getBoundingClientRect().height);
+    const saved = JSON.parse(localStorage.getItem('serial-rtt-tools:v1') || '{}')['panel.codeH'];
+    drag(30);
+    await new Promise(r2 => setTimeout(r2, 150));
+    return { before, after, tableBefore, tableAfter, back: Math.round(ta.getBoundingClientRect().height), saved };`);
+  ok(drag.after > drag.before && Math.abs(drag.saved - drag.after) <= 2,
+     `拖分隔条：文本框 ${drag.before} → ${drag.after}px，并记进 store（panel.codeH=${drag.saved}）`);
+  ok(drag.tableBefore - drag.tableAfter >= 20,
+     `文本框长高的那 30px 是从表格里让出来的（表格 ${drag.tableBefore} → ${drag.tableAfter}px）—— 弹性而非写死`);
+  ok(Math.abs(drag.back - drag.before) <= 2, `拖回去复原（${drag.back}px）`);
+
+  // 读回 tab：**它自己的**画布（#pn-canvas 在刷屏 tab 里，非活动 tab 是 display:none）
+  await selectDock('read');
+  const rd = await ev(`
+    const c = document.getElementById('pn-read-canvas'), r = c.getBoundingClientRect();
+    const row = c.closest('.readrow').getBoundingClientRect();
+    return { w: Math.round(r.width), h: Math.round(r.height), rowH: Math.round(row.height),
+             of: getComputedStyle(c).objectFit,
+             same: c === document.getElementById('pn-canvas'),
+             sum: document.getElementById('pn-read-sum').textContent,
+             bo: !!document.getElementById('pn-read-byteorder'), sw: !!document.getElementById('pn-read-swap') };`);
+  ok(rd.same === false && rd.h > 120 && Math.abs(rd.h - rd.rowH) <= 1,
+     `读回有**自己的**画布 ${rd.w}×${rd.h}（填满所在行 ${rd.rowH}）—— 不能再和静图/动画共用 #pn-canvas（否则结果画进隐藏页，用户什么也看不到）`);
+  ok(rd.of === 'contain', `读回画布也按比例铺满（object-fit=${rd.of}）`);
+  ok(rd.bo && rd.sw, '读回 tab 里带一份「字节序 / R-B 交换」（翻颜色不用切回刷屏 tab）');
+
+  // 两个显示开关双向同步（改哪边都一样）
+  const sw = await ev(`
+    const a = document.getElementById('pn-byteorder'), b = document.getElementById('pn-read-byteorder');
+    b.value = 'le'; b.dispatchEvent(new Event('change'));
+    const r1 = { a: a.value, b: b.value };
+    a.value = 'be'; a.dispatchEvent(new Event('change'));
+    const r2 = { a: a.value, b: b.value };
+    return { r1, r2 };`);
+  ok(sw.r1.a === 'le' && sw.r2.b === 'be', `读回 tab 的「字节序」与刷屏 tab 双向同步（读回改 → 刷屏 ${sw.r1.a}；刷屏改 → 读回 ${sw.r2.b}）`);
+
+  // 表头吸顶（用户 2026-09-30："往下拉表头就上去了，看不到 byte 索引了"）—— 在初始化 tab 里量
+  await selectDock('code');
   const sticky = await ev(`
     const wrap = document.getElementById('pn-code-wrap');
     const th = document.querySelector('#pn-code-tab thead th');
@@ -145,6 +286,7 @@ console.log('== 1b. 布局（用户 2026-09-30 定的口径）：刷图置顶不
   ok(sticky.pos === 'sticky' && Math.abs(sticky.off0) <= 1 && Math.abs(sticky.off1) <= 1 && sticky.rulerVisible,
      `表头（含字节标尺）吸顶：滚到底仍在容器顶部（偏移 ${sticky.off0} → ${sticky.off1}px，尺子可见=${sticky.rulerVisible}）`);
   ok(sticky.bg !== 'rgba(0, 0, 0, 0)', `吸顶表头有不透明背景（${sticky.bg}）—— 不然行会从底下透出来`);
+  await selectDock('img');             // 后面的用例从"刷屏"这条常识路径接着跑
 }
 
 // ==================================================================== 2
@@ -271,6 +413,7 @@ console.log('== 4b. 自定义分辨率（内置两款之外的屏，如 240×240
 // ==================================================================== 5
 console.log('== 5. 面板初始化：内置示例 + 解析 + 表格 ==');
 {
+  await selectDock('code');            // 这一节的控件都在「面板初始化」tab 里
   const onLoad = await ev(`
     return { text: document.getElementById('pn-code-text').value.length,
              sum: document.getElementById('pn-code-sum').textContent,
@@ -324,6 +467,7 @@ console.log('== 5. 面板初始化：内置示例 + 解析 + 表格 ==');
 // ==================================================================== 5b
 console.log('== 5b. 字节编辑（照 bmp_sender.html）：每格一个字节可直接敲 + 点开位开关板 ==');
 {
+  await selectDock('code');            // 位开关板按格子的位置弹（元素必须在可见 tab 里才有真实坐标）
   const opened = await ev(`
     // 用内置 AXS15352 示例。去掉自动补前缀后首行 = 厂家表第一条 0xCE ← 5A A5，
     // 这里点**第 2 个参数字节**（0xA5）—— 位开关板要能对着任意一个参数字节打开。
@@ -459,6 +603,7 @@ console.log('== 5b. 字节编辑（照 bmp_sender.html）：每格一个字节�
 // ==================================================================== 6
 console.log('== 6. 重放：整表下发 + 单发（假探针逐帧对账）==');
 {
+  await selectDock('code');
   const replay = await ev(`
     // 先把"屏"定死：ST77916 = 档 2 + 360×360 + 40 MHz（否则下面每条的展开形态都不确定）
     document.getElementById('pn-preset').value = 'st77916';
@@ -551,6 +696,7 @@ console.log('== 6. 重放：整表下发 + 单发（假探针逐帧对账）==')
 // ==================================================================== 7
 console.log('== 7. 图片 / 图案刷屏 ==');
 {
+  await selectDock('img');
   const pat = await ev(`
     const btns = [...document.querySelectorAll('#pn-patterns button')];
     btns.find(b => b.textContent === '色条 8').click();
@@ -721,6 +867,7 @@ console.log('== 9. 两页联动：屏页失能 → 桥页立刻看到 ==');
 // ==================================================================== 9b
 console.log('== 9b. 动画 / 视频：录一段 WebM 当源 → 逐帧整屏刷（假探针对账）==');
 {
+  await selectDock('img');             // 动画在「刷屏」tab 里（与静图共用同一张预览画布）
   // ① 源：页面里现录一段（canvas.captureStream + MediaRecorder），不依赖任何外部素材
   //    🚨 用 `captureStream(0)` + `track.requestFrame()` 手动推帧：自动帧率那条路在
   //    "画布不在 DOM 里 / 窗口被遮住"时会一帧都录不到（实测只录出 110 字节的裸头）。
@@ -845,6 +992,7 @@ console.log('== 9b. 动画 / 视频：录一段 WebM 当源 → 逐帧整屏刷�
 // ==================================================================== 9c
 console.log('== 9c. 仓库自带素材（samples/anim）：帧数认得出来 · 不勾循环播完就停 ==');
 {
+  await selectDock('img');
   // 🚨 这一条钉的是两个真出现过的坑（2026-10 实测 Chrome 153）：
   //    ① `await decoder.completed` 之后 `tracks.selectedTrack` 还是 null → frameCount 记成 0，
   //       状态行写成"0 帧"，用户以为素材坏了；
@@ -885,6 +1033,7 @@ console.log('== 9c. 仓库自带素材（samples/anim）：帧数认得出来 ·
 // ==================================================================== 9d
 console.log('== 9d. 攒批：USB 调用次数降一个数量级，设备侧收到的帧一个不少 ==');
 {
+  await selectDock('img');
   // 背景（2026-10，用户现场 "3 MB/s 瓶颈在哪"）：一帧 240×296 = 142 KB 被"一帧不跨包"切成
   // 289 片像素 + 3 条命令 = 292 个帧。固件每次只 arm 一个 512 B 槽，但 **USB 层面一次 bulk 传输
   // 可以带任意多个 512 B 包** —— 所以"每片一次 transferOut"是主机侧自找的开销（每次 ~150 µs ⇒ 44 ms/帧）。
@@ -928,10 +1077,16 @@ console.log('== 9e. 回读：读寄存器 + 读 GRAM（假探针 GRAM → 预览
   // 用户 2026-10 的需求："spi/qspi 屏的回读功能（读一般都是 1 线读）：读寄存器；读 gram 值
   // （发 2A+2B 开窗，2E 读数据，3E 是续读），把读出的数据还原成一帧图片并显示在预览窗口，
   // 并提供保存为 bmp 的功能。"
-  // 位置也按用户要求钉住：日志在「面板初始化」**前**面，读回在初始化**后**面。
-  const order = await ev(`return [...document.querySelectorAll('#tab-panel .main > fieldset')].map(f => f.id);`);
-  ok(order.join(',') === 'pn-img-card,pn-log-card,pn-code-card,pn-read-card',
-     `屏页卡片顺序：图片 → 日志 → 面板初始化 → 读回（${order.join(' → ')}）`);
+  // tab 化之后（用户 2026-10"右边部分做成分 tab"）：读回是**独立一页**，画面有**自己的画布**。
+  await selectDock('read');
+  const order = await ev(`
+    const dock = document.getElementById('pn-box-dock');
+    return { pages: [...dock.querySelectorAll('.dockpage')].map(p => p.dataset.dock),
+             ids: [...dock.querySelectorAll('.dockpage')].map(p => p.id),
+             logOutside: !dock.contains(document.getElementById('pn-logbox')) };`);
+  ok(order.pages.join(',') === 'img,code,read' && order.ids.join(',') === 'pn-img-card,pn-code-card,pn-read-card',
+     `屏页三块 = 刷屏 → 面板初始化 → 读回（${order.ids.join(' → ')}）`);
+  ok(order.logOutside === true, '日志在 dock 之外（常驻）—— 读回 / 重放完第一眼就能看到它有没有报错');
 
   const reg = await ev(`
     const s = window.__tools.spiSession;
@@ -960,7 +1115,8 @@ console.log('== 9e. 回读：读寄存器 + 读 GRAM（假探针 GRAM → 预览
     p.resetState();
     await window.__tools.panel.readGram();
     const r = window.__tools.panel.summary().readBack;
-    const canvas = document.getElementById('pn-canvas');
+    // 🚨 量的是**读回 tab 自己那张**画布：它和刷屏的 #pn-canvas 是两张独立元素。
+    const canvas = document.getElementById('pn-read-canvas');
     const px = [...canvas.getContext('2d').getImageData(8, 4, 1, 1).data];
     const bmp = RD.encodeBMP(window.__tools.panel.readBack.rgba, r.w, r.h);
     const dv = new DataView(bmp.buffer);
@@ -972,7 +1128,7 @@ console.log('== 9e. 回读：读寄存器 + 读 GRAM（假探针 GRAM → 预览
      `读回 40×20：${rb.r?.bytes} B / ${rb.r?.chunks} 片 / 丢 ${rb.r?.missed} 片（${rb.progress}）`);
   ok(rb.r?.sample?.[0]?.join(',') === '8,4,98',
      `解码后的第一个像素 = 假探针图案的 (8,4) → (${rb.r?.sample?.[0]?.join(',')})`);
-  ok(rb.px?.join(',') === '8,4,98,255', `预览框里画的就是它（canvas(8,4) = ${rb.px?.join(',')}）`);
+  ok(rb.px?.join(',') === '8,4,98,255', `读回 tab 自己的画布里画的就是它（#pn-read-canvas(8,4) = ${rb.px?.join(',')}）`);
   ok(rb.bmp.magic === 'BM' && rb.bmp.w === 40 && rb.bmp.h === 20 && rb.bmp.bpp === 24 && rb.bmp.len === 54 + 40 * 3 * 20,
      `BMP：${rb.bmp.w}×${rb.bmp.h} 24bpp · ${rb.bmp.len} B（54 + 40×3×20）`);
 

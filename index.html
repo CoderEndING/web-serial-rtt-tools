@@ -1162,14 +1162,29 @@
     </aside>
 
     <section class="main">
-      <!-- 图片/图案刷屏放在**最上面**：刷屏是这一页最高频的动作（用户 2026-09-30 指定），
-           而且它**不提供收起** —— 常驻展开，一到这一页就能直接刷。 -->
-      <fieldset id="pn-img-card">
-        <legend>图片 / 图案刷屏</legend>
+      <!-- 右列 = 一个带 tab 的面板（照「调试器」/「桥」两页的 .docktabs / .dockpage 那套）+ 常驻日志。
+           为什么改成 tab：原来四张卡纵堆在一个滚动区里，1600×900 下内容 1597px / 可视 836px ——
+           每次都要滚 761px，而且三处高度写死（解析表 360 / 日志 190 / 预览画布 170），矮窗口下
+           三块互相挤。tab 化之后**每块吃满整块高度**；日志与运行状态仍然常驻 ——
+           tab 化不该把"刷完一屏第一眼要看的东西"藏起来。
+           🚨 刷屏 tab 常驻第一（用户 2026-09-30：这是本页最高频的动作）。 -->
+      <fieldset class="paneldock" id="pn-box-dock">
+        <legend>
+          <span class="seg docktabs" id="pn-dock-tabs">
+            <button data-dock="img" class="on">刷屏</button>
+            <button data-dock="code">面板初始化</button>
+            <button data-dock="read">读回</button>
+          </span>
+          <span class="hint dockrun" id="pn-run-pill" title="屏页当前在跑什么（切到哪个 tab 都看得见）：刷图 / 重放 / 读回 / 播放动画">空闲</span>
+          <span class="spacer"></span>
+          <button id="pn-run-abort" class="mini" disabled title="中止当前这一桩（刷图 / 重放 / 读回 / 播放）：当前这一片发完就停。切到别的 tab 也按得到">中止</button>
+        </legend>
+
+      <div class="dockpage on" data-dock="img" id="pn-img-card">
         <div class="row"><span>内置图案</span><div class="chips" id="pn-patterns"></div></div>
         <div id="pn-drop" class="drop">把 <b>BMP / PNG / JPEG</b> 拖到这里，或点击选择</div>
         <input type="file" id="pn-img-file" accept="image/*,.bmp" hidden>
-        <div class="imgrow">
+        <div class="imgrow canvasrow">
           <div class="canvasbox"><canvas id="pn-canvas" width="240" height="296"></canvas></div>
           <div class="imginfo">
             <p class="hint" id="pn-img-info" style="margin-top:0">（还没选图 / 图案）</p>
@@ -1214,22 +1229,10 @@
             <p class="hint" id="pn-anim-info" style="margin:0">逐帧整屏刷：发送多快就播多快，解码更快时丢帧（不堆延迟）。
               选 MP4 / WebM 或 GIF —— 帧率上限由链路决定（AXS15352 实测 ~20 fps、ST77916 ~13 fps）。</p>
           </div>
-        </div>
-      </fieldset>
+        </div><!-- /animbox -->
+      </div><!-- /dockpage 刷屏 -->
 
-      <!-- 日志：**默认展开**（用户 2026-09-30）—— 刷屏 / 重放完第一眼就想看它有没有报错，
-           折叠着等于每次都要多点一下。想省地方还能自己收。
-           2026-10 用户要求：日志挪到「面板初始化」**前面** —— 先看有没有报错，再看/改命令表。 -->
-      <fieldset id="pn-log-card">
-        <legend>日志<button class="mini foldbtn" data-fold="pn-log-card">收起</button></legend>
-        <div class="logbox">
-          <button id="pn-log-clear" class="mini logclear" title="只清屏上的日志（记录仍保留在会话里，展开/切页回来会重放）">清空</button>
-          <div id="pn-log" class="log"></div>
-        </div>
-      </fieldset>
-
-      <fieldset id="pn-code-card">
-          <legend>面板初始化（把 C 数组贴进来 / 载入内置示例）<button class="mini foldbtn" data-fold="pn-code-card">收起</button></legend>
+      <div class="dockpage" data-dock="code" id="pn-code-card">
           <div class="toolrow">
             <span>内置示例</span>
             <select id="pn-code-preset"></select>
@@ -1240,6 +1243,7 @@
             <button id="pn-code-parse" class="primary mini">解析并预览</button>
           </div>
           <textarea id="pn-code-text" class="code" spellcheck="false" placeholder="把面板初始化代码贴到这里（C 数组为主，也认纯文本行与 JSON）：&#10;&#10;{0xCE, (uint8_t[]){0x5A, 0xA5}, 2, 0},&#10;{0xA1, (uint8_t[]){0x00, 0xDD}, 2, 0},&#10;{0x11, NULL, 0, 100},&#10;{0x29, NULL, 0, 0},"></textarea>
+          <div class="grip grip-h" id="pn-grip-code" title="拖动：调整上面「源码文本框」的高度 —— 表格吃掉剩下的全部高度（文本框本来就自己滚）"></div>
           <div class="toolrow nw">
             <span class="hint" id="pn-code-sum" style="margin:0">把代码贴进来 → 点「解析并预览」</span>
             <span class="spacer"></span>
@@ -1268,15 +1272,16 @@
             <button id="pn-code-stop">中止</button>
             <span class="hint" id="pn-code-prog" style="margin:0"></span>
           </div>
-        </fieldset>
+      </div><!-- /dockpage 面板初始化 -->
 
       <!-- ============================ 读回：寄存器 / GRAM ============================
            用户 2026-10："spi/qspi 屏的回读功能（读一般都是 1 线读）：读寄存器；读 gram 值
            （发 2A+2B 开窗，2E 读数据，3E 是续读），把读出的数据还原成一帧图片并显示在预览窗口，
-           并提供保存为 bmp 的功能。" —— 位置按用户要求：放在「面板初始化」之后。 -->
-      <fieldset id="pn-read-card">
-        <legend>读回（寄存器 / GRAM）<button class="mini foldbtn" data-fold="pn-read-card">收起</button></legend>
-
+           并提供保存为 bmp 的功能。"
+           🚨 读回**有自己的画布**（#pn-read-canvas）：原来它和静图 / 动画共用 `#pn-canvas`，
+           而 tab 化之后那张画布在「刷屏」tab 里 —— 读回的结果会画进一个 display:none 的页，
+           用户什么也看不到。 -->
+      <div class="dockpage" data-dock="read" id="pn-read-card">
         <div class="toolrow">
           <span>寄存器</span>
           <select id="pn-read-reg" title="MIPI DCS 的标准读命令；表外的直接改右边两个格子"></select>
@@ -1313,16 +1318,37 @@
           <label class="chk" title="档 1 的续读命令（每片一条）">续读 <input id="pn-read-cont" class="num" value="3E" style="width:44px"></label>
         </div>
 
-        <p class="hint" style="margin:4px 0 0">
-          <b>档 1（SPI + DC）</b>走 MIPI DCS 读流程：<code>2Ah/2Bh</code> 开窗 → <code>2Eh</code>（RAMRD，<b>CS 保持</b>）→ 读数据（<b>首字节是 dummy</b>）→ 之后每片用 <code>3Eh</code> 续读。
-          <b>档 2（QSPI）</b>跟 SPI Flash 一样：一条事务里「读命令 + 24 bit 地址 + dummy + 数据」，地址按片递增。
-          一帧 240×296 = 142,080 B，要读 <b>285 片</b>（每片 ≤503 B：504 的应答正好 512 B 满包，主机会等不到短包）。读回来的画面显示在「图片 / 图案刷屏」的预览框里；
-          颜色不对时先只翻「字节序」（桥页/图片区的开关），再试 R/B 交换。
-        </p>
+        <div class="imgrow readrow">
+          <div class="canvasbox"><canvas id="pn-read-canvas" width="240" height="296"></canvas></div>
+          <div class="imginfo">
+            <p class="hint" id="pn-read-sum" style="margin-top:0">还没读回一帧 —— 点上面的「读一帧」</p>
+            <label class="row"><span>字节序</span>
+              <select id="pn-read-byteorder" title="与「刷屏」tab 里那个是同一组开关（改哪边都一样）。默认「高字节在前」与 MADCTL=0x00(RGB) 是正确组合；颜色不对时**只翻一个**开关（先试 R/B 交换，再试低字节在前）">
+                <option value="be">高字节在前（默认）</option>
+                <option value="le">低字节在前</option>
+              </select></label>
+            <label class="chk"><input type="checkbox" id="pn-read-swap"> R/B 交换（等价 MADCTL 的 BGR 位）</label>
+            <p class="hint" style="margin:8px 0 0">
+              <b>档 1（SPI + DC）</b>走 MIPI DCS 读流程：<code>2Ah/2Bh</code> 开窗 → <code>2Eh</code>（RAMRD，<b>CS 保持</b>）→ 读数据（<b>首字节是 dummy</b>）→ 之后每片用 <code>3Eh</code> 续读。<br>
+              <b>档 2（QSPI）</b>跟 SPI Flash 一样：一条事务里「读命令 + 24 bit 地址 + dummy + 数据」，地址按片递增。<br>
+              一帧 240×296 = 142,080 B，要读 <b>285 片</b>（每片 ≤503 B：504 的应答正好 512 B 满包，主机会等不到短包）。
+            </p>
+          </div>
+        </div>
         <div class="row btnrow">
           <span class="hint" id="pn-read-prog" style="margin:0">待读</span>
         </div>
+      </div><!-- /dockpage 读回 -->
       </fieldset>
+
+      <div class="grip grip-h" id="pn-grip-log" title="拖动：调整日志高度"></div>
+
+      <!-- 日志**常驻**（不占 tab、钉在底部、高度可拖）：刷屏 / 重放 / 读回完第一眼就看它有没有报错。
+           用户 2026-09-30 定过"默认展开"、2026-10 又要求排在初始化之前 —— 常驻是这两条的同时满足。 -->
+      <div class="logbox" id="pn-logbox">
+        <button id="pn-log-clear" class="mini logclear" title="只清屏上的日志（记录仍保留在会话里，切页回来会重放）">清空</button>
+        <div id="pn-log" class="log"></div>
+      </div>
 
       <div class="stats">
         <span>帧 ok <b id="pn-c-ok">0</b> · err <b id="pn-c-err">0</b> · tx <b id="pn-c-tx">0 B</b> · rx <b id="pn-c-rx">0 B</b></span>
