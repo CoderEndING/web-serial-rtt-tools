@@ -1455,6 +1455,7 @@
           <span class="seg docktabs" id="i2-dock-tabs">
             <button data-dock="scan" class="on">扫描总线</button>
             <button data-dock="cmd">命令表</button>
+            <button data-dock="reg">寄存器</button>
             <button data-dock="dsl">脚本</button>
             <button data-dock="live">实时值</button>
           </span>
@@ -1499,6 +1500,38 @@
             <b>写</b> = 子地址 + 数据（数据留空 = 只把地址指针推过去；<b>写不自动分片</b>，一次 ≤51 B）；
             <b>探测</b> = 只问 ACK；<b>延时</b> = 在「数据」格里填时长（如 <code>10ms</code>）。
             周期格写 <code>100ms</code> 或 <code>100ms×50</code>（×50 = 跑 50 轮自己停；不写 = 一直跑）。</p>
+        </div>
+
+        <!-- 寄存器面板：读一段（默认 128 B = 16×8）→ 表里逐位改 → 只写改动 / 整块写回。
+             交互照 #panel 页的字节开关板（同一个 .bitpop 皮肤，但 DOM 是这一页自己的一份）。 -->
+        <div class="dockpage" data-dock="reg">
+          <div class="toolrow">
+            <label class="row" style="margin:0"><span style="width:auto">器件</span><input id="i2-reg-dev" value="0x50" size="6" title="7 位地址（0x08..0x77）。在「扫描总线」里点「选用」也会带到这里"></label>
+            <label class="row" style="margin:0"><span style="width:auto">起始</span><input id="i2-reg-start" value="0x00" size="8" title="起始寄存器地址（大端）。0x0100 配「地址宽度 2 B」= 发 01 00"></label>
+            <label class="row" style="margin:0"><span style="width:auto">长度</span><input id="i2-reg-len" value="128" size="5" inputmode="numeric" title="一次读多少字节，1..4096，默认 128（16 列 × 8 行）。超过 54 B 自动分片读"></label>
+            <label class="row" style="margin:0"><span style="width:auto">地址宽度</span><select id="i2-reg-alen" title="子地址字节数：多数传感器/寄存器器件是 1 B；EEPROM（AT24C32 起）多是 2 B；0 B = 不带子地址的纯读">
+              <option value="1">1 B</option><option value="2">2 B</option><option value="0">0 B（纯读）</option></select></label>
+            <label class="row" style="margin:0"><span style="width:auto">读法</span><select id="i2-reg-chunk" title="reset = 每片重发子地址（最稳，默认）；ptr = 先推一次地址指针再续读（FIFO 型器件必须用这个）">
+              <option value="reset">每片重发地址</option><option value="ptr">地址指针自增</option></select></label>
+            <label class="row" style="margin:0"><span style="width:auto">写分片</span><select id="i2-reg-wrchunk" title="写回时每片最多多少字节。51 = 协议上限（寄存器/传感器用这个）；EEPROM 有页写回卷（AT24C02 页 8 B / AT24C32 页 32 B），必须按页给"></select></label>
+            <label class="row" style="margin:0"><span style="width:auto">片间等待</span><input id="i2-reg-gap" value="0" size="4" inputmode="numeric" title="每片之间等多少毫秒。EEPROM 每写完一页要等 tWR（约 5 ms），按页写时填 6；寄存器型器件填 0"></label>
+            <span class="spacer"></span>
+            <button id="i2-reg-read" class="primary mini" title="读一段回来（超过 54 B 自动分片）。读到的值成为「器件现值」，之后黄框标的都是与它的差异">读取</button>
+            <button id="i2-reg-write" class="mini" title="只把改过的字节写回器件（相邻的合并成一片，中间断开的会分开写）">只写改动</button>
+            <button id="i2-reg-write-all" class="mini" title="把整段都写回去（不管有没有改）—— 慎用：会重写没改的寄存器">整块写回</button>
+            <button id="i2-reg-discard" class="mini" title="丢弃表里的改动，回到读回来的那份">丢弃改动</button>
+          </div>
+          <div class="scroll fill" id="i2-reg-wrap">
+            <table class="sp regtab">
+              <thead><tr id="i2-reg-head"></tr></thead>
+              <tbody id="i2-reg-body"></tbody>
+            </table>
+          </div>
+          <p class="hint" id="i2-reg-sum">还没读</p>
+          <p class="hint">点表里任意一个字节 → 弹出 8 个 bit（<b>点一下就翻转</b>，和原值不同的位套黄框；也能直接敲十六进制）。
+            <b>读到的是"器件现值"</b>，只有点「只写改动 / 整块写回」才真的发 I2C。<br>
+            EEPROM 注意两条：写分片要按<b>页</b>给（AT24C02 页 8 B、AT24C32 页 32 B，给大了器件内部会回卷覆盖）；
+            每写完一页要等 <b>tWR</b>（约 5 ms）才认下一笔 —— 填在「片间等待」里（例如 6 ms）。</p>
         </div>
 
         <div class="dockpage" data-dock="dsl">
@@ -1560,6 +1593,27 @@
         <span>协议：<code>HID 0x36</code>（控制面 + 数据面同一条报文，事务在主循环执行，主机轮询 RESULT 取结果）· 长读自动分片</span>
       </div>
     </section>
+  </div>
+
+  <!-- 寄存器面板的位开关板（.bitpop 皮肤与 #panel 页共用；DOM 是这一页自己的一份，
+       id 前缀 i2-regpop —— 两页各自的弹窗互不干扰） -->
+  <div class="bitpop" id="i2-regpop" hidden>
+    <div class="bp-head">
+      <span class="btitle" id="i2-regpop-title">—</span>
+      <span class="bval" id="i2-regpop-val"></span>
+      <span class="spacer"></span>
+      <label class="row" style="margin:0"><span style="width:auto">十六进制</span>
+        <input id="i2-regpop-hex" class="bx" size="3" maxlength="4" spellcheck="false" title="直接敲十六进制（1~2 位），与点 bit 同步"></label>
+    </div>
+    <div class="bits" id="i2-regpop-bits"></div>
+    <div class="bp-acts">
+      <button class="mini" data-bit="zero" title="这一字节清零">00</button>
+      <button class="mini" data-bit="ones" title="这一字节全置 1">FF</button>
+      <button class="mini" data-bit="inv" title="逐位取反">取反</button>
+      <button class="mini" data-bit="orig" title="恢复到读回来的原值">恢复原值</button>
+      <button class="mini" data-bit="close">完成</button>
+    </div>
+    <p class="hint" id="i2-regpop-hint"></p>
   </div>
 </section>
 

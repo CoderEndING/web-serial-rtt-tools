@@ -81,7 +81,7 @@ RTT 转发 · J-Scope 波形 · SPI/QSPI 桥 · SPI/QSPI 屏（含**局部刷新
 | **调试器** | 网页里的极简调试器，**不装 OpenOCD、不装 gdb**：暂停 / 继续 / **单步** / 复位、寄存器表（回车即改）、内存 hexdump（点字节即改）、**FPB 硬件断点**、按符号名的 gdb 风格命令行、旁边顺手看 RTT。**载入 .elf 后按源码行下断点**，停下来时源码区跟着 PC 走（DWARF 行号表） | 零安装：同上探针（WebUSB）；无硬件可切「后端 → 模拟目标」；设计与五条硬约束见 [`docs/dbg-page.md`](docs/dbg-page.md) |
 | **SPI/QSPI 桥** | 探针当 USB→SPI/QSPI 主站。右列分四个 tab：**命令表**（一行一条 `XFER`）· **脚本**（贴 C 表 / 手写帧 DSL）· **Flash 测试**（外接 NOR：读 ID/SFDP/状态、读测速、擦写校验）· **回环自检**（MOSI↔MISO 跳线）。tab 栏常驻**运行胶囊**与共享「中止」；SCLK、模式、CS 策略、辅助脚与有效电平在左栏配 | akaLinkPro 探针（HID `0x35` 控制面 + bulk 帧流）；接线照上面的 40pin 图；方案见 [`docs/spi-bridge-page.md`](docs/spi-bridge-page.md) |
 | **SPI/QSPI 屏** | 把屏点亮那一页。右列分三个 tab：**刷屏**（内置图案 / 拖入图片 → 预览 → 开窗对齐、492 B 切片刷；**局部刷新**——只发与上一帧不同的包围盒，同内容重刷整帧跳过；**动画/视频** MP4/WebM/GIF 逐帧发，发送当节拍器）· **面板初始化**（贴 C 数组 → 解析成步骤表 → 重放；每个字节可直接改、点开看/改它的 8 个 bit）· **读回**（读寄存器 / 读 GRAM 还原成一帧图 + 存 BMP）。tab 栏常驻**运行胶囊**与共享「中止」，日志常驻底部（高度可拖） | 与「SPI/QSPI 桥」页**共用同一次连接** |
-| **USB→I2C** | 探针当 **USB 转 I2C 主机**。右列分四个 tab：**扫描总线**（0x08..0x77）· **命令表**（读/写/探测/延时，一行一次事务）· **脚本**（贴 C 表或写脚本，`loop 100ms … end` 就是 while(1) 定时读/写）· **实时值**（`as` 解码把字节变成有名字的量：g / ℃ / V + 迷你曲线）。**长读自动分片**（`rd 0x50 0x00 256` 直接写，内部拆成 5 笔、日志只出一行）；tab 栏常驻**运行胶囊**与「停止」，切到哪个 tab 都知道任务还在跑。内置 **AT24C02 / MPU6050 / ADS1115 / Si5351** 四个模块示例，后两个是传感器，示例里直接做成 while(1) 连续采样 | akaLinkPro 探针（HID `0x36`，**只走 HID** 一条通路）；**仅 HPM5301EVKLite** 固件；方案见 [`docs/i2c-page.md`](docs/i2c-page.md) |
+| **USB→I2C** | 探针当 **USB 转 I2C 主机**。右列分五个 tab：**扫描总线**（0x08..0x77）· **命令表**（读/写/探测/延时，一行一次事务）· **寄存器**（读一段，默认 **128 B = 16×8 表**；每个字节点开就是 8 个 bit 的开关板，改完按「只写改动 / 整块写回」发下去 —— 调器件寄存器不用自己把 `0x55` 拆成 8 位再拼回去）· **脚本**（贴 C 表或写脚本，`loop 100ms … end` 就是 while(1) 定时读/写）· **实时值**（`as` 解码把字节变成有名字的量：g / ℃ / V + 迷你曲线）。**长读自动分片**（`rd 0x50 0x00 256` 直接写，内部拆成 5 笔、日志只出一行），长写也分片（EEPROM 页写可给「写分片 / 片间等待」按页写、等 tWR）；tab 栏常驻**运行胶囊**与「停止」，切到哪个 tab 都知道任务还在跑。内置 **AT24C02 / MPU6050 / ADS1115 / Si5351** 四个模块示例，后两个是传感器，示例里直接做成 while(1) 连续采样 | akaLinkPro 探针（HID `0x36`，**只走 HID** 一条通路）；**仅 HPM5301EVKLite** 固件；方案见 [`docs/i2c-page.md`](docs/i2c-page.md) |
 | **工程生成** | 拖进 Keil `.uvprojx` 就能生成调试/下载配套文件：`Makefile.jlink`、`jlink_gdb.script`、`Makefile.pyocd`、`Makefile.openocd`（连带 `rtt_logger.py`）、`test_sram.bin`；参数可填可勾，产物**实时预览** | 不需要任何硬件/后端（纯前端生成） |
 
 
@@ -147,7 +147,7 @@ RTT 转发 · J-Scope 波形 · SPI/QSPI 桥 · SPI/QSPI 屏（含**局部刷新
 |---|
 | ![调试器](docs/shots/14-dbg.png) |
 
-| USB→I2C（假探针 · 右列四个 tab：扫描 / **命令表** / 脚本 / 实时值 · 命令表在跑 while(1)：MPU6050 每 50 ms 读 14 B 解出 ax/ay/az，ADS1115 每 200 ms 读电压，还有一条 `rd 0x50 0x00 256` 的长读 —— 日志里只出一行「256 B · 分 5 笔」） |
+| USB→I2C（假探针 · 右列五个 tab：扫描 / **命令表** / **寄存器** / 脚本 / 实时值 · 命令表在跑 while(1)：MPU6050 每 50 ms 读 14 B 解出 ax/ay/az，ADS1115 每 200 ms 读电压，还有一条 `rd 0x50 0x00 256` 的长读 —— 日志里只出一行「256 B · 分 5 笔」；寄存器 tab 一次读 128 B 成 16×8 表，点字节能逐位改后只写改动） |
 |---|
 | ![USB→I2C](docs/shots/15-i2c.png) |
 
@@ -173,7 +173,7 @@ RTT 转发 · J-Scope 波形 · SPI/QSPI 桥 · SPI/QSPI 屏（含**局部刷新
 | `make test-dbg-page` 调试器真页面（CDP + 假目标） | **113/113** |
 | `make test-spi` / `test-read` / `test-dsl` / `test-flash` SPI 桥与屏的逻辑层 | **90 / 54 / 124 / 66** |
 | `make test-spi-page` SPI/QSPI 桥 + 屏 两页真页面（CDP + 假探针） | **133 + 179** |
-| `make test-i2c` / `test-i2c-dsl` USB→I2C 逻辑层 | **170 / 251** |
+| `make test-i2c` / `test-i2c-dsl` / `test-i2c-reg` USB→I2C 逻辑层（协议+假器件 / 命令表与脚本 / 寄存器面板与长写分片） | **170 / 251 / 76** |
 | `make test-scope` / `test-dwarf` J-Scope 协议 / DWARF 解析 | **127 / 78** |
 | `make test-rtt` / `test-hid` RTT 协议 / akaLinkPro HID 协议 | **45 / 55** |
 | `make test-gen` / `test-gen-page` 工程生成对账（与 Python 工具逐字节）+ 真页面 | **34 / 57** |
@@ -831,7 +831,7 @@ app/
                         image(图案·BMP·RGB565·切片·**局部刷新的差异包围盒**) / anim(动画/视频逐帧发) /
                         panel-code + bit-editor(面板初始化表解析与字节编辑) / panel-read(读回) /
                         flash(外接 NOR) / frames-dsl(手写多帧) / bus-view + panel-view(两页界面)
-  i2c/                  USB→I2C：protocol / transport / mock / session / dsl(命令表·脚本) / expr(实时值表达式) / runner / view
+  i2c/                  USB→I2C：protocol / transport / mock / session / dsl(命令表·脚本) / expr(实时值表达式) / runner / registers+reg-view(寄存器面板) / view
   scope/                J-Scope 波形：protocol(读计划/包) / transport(WinUSB) / mock / render(画布) / store / view
   gen/                  工程生成：templates(模板移植自 uvprojx2cmake.py) / fixes(固定 4 项修正) / model(参数+器件表+uvprojx 解析) / zip(零依赖打包) / view
   hid/                  akaLinkPro 自定义 HID：probe(协议 + WebHID 客户端) / mock(假探针) / view(桥的面板) / stream(RTT 转发页，纯输出接收)

@@ -87,6 +87,7 @@ test:
 	$(NODE) tools/selftest/dbg-core.test.mjs
 	$(NODE) tools/selftest/i2c-proto.test.mjs
 	$(NODE) tools/selftest/i2c-dsl.test.mjs
+	$(NODE) tools/selftest/i2c-registers.test.mjs
 	$(NODE) tools/selftest/scenery-samples.test.mjs
 
 # USB→I2C 页的协议层 + 假探针 + 假器件（AT24C02/MPU6050/ADS1115/Si5351）—— 不需要硬件
@@ -96,6 +97,10 @@ test-i2c:
 # USB→I2C 页的命令协议（DSL + C 表 + as 解码 + 表格互转）+ 四个模块示例必须零错误
 test-i2c-dsl:
 	$(NODE) tools/selftest/i2c-dsl.test.mjs
+
+# USB→I2C 页的「寄存器」面板：长写分片 planWrite + 输入解析/diff/bit + 假探针端到端 + EEPROM 页写回归
+test-i2c-reg:
+	$(NODE) tools/selftest/i2c-registers.test.mjs
 
 # USB→I2C 页的真页面验收（假探针，不需要硬件；需要 8899 服务 + 9333 CDP 浏览器）
 test-i2c-page: page-prep

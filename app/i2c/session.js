@@ -294,6 +294,53 @@ export class I2cSession {
     return { err: P.E.OK, data, ms, chunks: plan.cmds.length, mode: plan.mode };
   }
 
+  /**
+   * **一次逻辑写**（长写自动分片），与 `readLong` 对称。写不像读那样能靠器件指针自增，
+   * 所以**每一片都自带子地址**（见 `protocol.planWrite`）。中间几笔同样不写日志，只出一行。
+   *
+   * @param {object} o
+   *   · `dev`       7 位地址
+   *   · `addr`      起始子地址（原序字节数组）
+   *   · `data`      完整数据（`offsets` 是它里面的下标）
+   *   · `offsets`   只写这些下标（缺省整块）—— 「寄存器」面板的「只写改动」用它
+   *   · `chunkMax`  单片上限（缺省 51；**EEPROM 页写要按页给**，AT24C02 是 8）
+   *   · `gapMs`     **片间等待**（缺省 0）。EEPROM 每写完一页要等 tWR（约 5 ms）才认下一笔，
+   *                 所以按页写 EEPROM 时给 6 ms 左右；寄存器型器件不需要。
+   * @returns {Promise<{err:number, ms:number, bytes:number, chunks:number, failNote?:string}>}
+   */
+  async writeLong({ dev, addr = [], data, offsets = null, chunkMax = P.WR_MAX, gapMs = 0 },
+    { label = '', quiet = false, resultTimeout = 2000 } = {}){
+    const bytes = data instanceof Uint8Array ? data : Uint8Array.from(data || []);
+    const plan = P.planWrite(addr, bytes, { chunkMax, offsets });
+    const head = label || `写 ${P.addr7(dev)}${addr.length ? '[' + P.hexBytes(addr) + ']' : ''} × ${plan.bytes} B`;
+    if (!plan.chunks){
+      if (!quiet) this.log('w', `${head} —— 没有要写的字节`);
+      return { err: P.E.OK, ms: 0, bytes: 0, chunks: 0 };
+    }
+    const t0 = performance.now();
+    let done = 0;
+    for (let i = 0; i < plan.cmds.length; i++){
+      const c = plan.cmds[i];
+      const r = await this.transaction({ dev, addr: c.addr, wr: c.wr, rd: 0 }, { quiet: true, resultTimeout });
+      if (r.err !== P.E.OK){
+        const ms = performance.now() - t0;
+        const note = `第 ${i + 1}/${plan.cmds.length} 片（${c.note}）失败`;
+        if (!quiet) this.log('e', `${head} → ${note}：${P.errText(r.err)}（已写入 ${done} B，后面几片没发）`);
+        this.lastOp = { label: head, err: r.err, ms, n: done };
+        this._emit('op', this.lastOp);
+        return { err: r.err, ms, bytes: done, chunks: i + 1, failNote: note };
+      }
+      done += c.wr.length;
+      // 片间让路：EEPROM 的 tWR 期间器件不 ACK（不给就第 2 片起全失败）
+      if (gapMs > 0 && i < plan.cmds.length - 1) await waitMs(gapMs);
+    }
+    const ms = performance.now() - t0;
+    this.lastOp = { label: head, err: P.E.OK, ms, n: done };
+    this._emit('op', this.lastOp);
+    if (!quiet) this.log('ok', `${head} → 分 ${plan.cmds.length} 笔 · ${ms.toFixed(1)} ms`);
+    return { err: P.E.OK, ms, bytes: done, chunks: plan.cmds.length };
+  }
+
   async loadCfg({ quiet = false } = {}){
     const r = await this._cmd(P.actGetCfg());
     const cfg = P.parseCfg(P.dataOf(r).subarray(0, P.CFG_SIZE));

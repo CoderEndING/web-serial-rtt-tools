@@ -181,6 +181,32 @@ console.log('== 3. 配置：读取 → 改写 → 回读对账 ==');
   ok(pinSec.bl === '13', `BL 默认 PA31（${pinSec.bl}）`);
   ok(pinSec.opts.includes('14') && pinSec.opts.includes('17'), 'pad 下拉里有 PA26~PA29（14~17，2026-09-30 释放的那批）');
 
+  /* 2026-10-03：I2C 桥的 SCL/SDA 在固件里是**写死的**（PA29/PA28 = J3[19]/J3[21]），
+     用户要求在「引脚分配图」上**固定显示**这两根（与配置、与 I2C 是否使能都无关）——
+     接线的人必须一眼看到它们已经名花有主。 */
+  const pinmap = await ev(`
+    document.getElementById('sp-pinmap-btn').click();
+    await new Promise(r => setTimeout(r, 350));
+    const rows = [...document.querySelectorAll('#sp-pinmap-body tr')].map(tr => tr.textContent.replace(/\\s+/g, ' ').trim());
+    return {
+      hidden: document.getElementById('sp-pinmap').hidden,
+      r19: rows.find(t => t.startsWith('19')) || '',
+      r21: rows.find(t => t.startsWith('21')) || '',
+      fixed: document.querySelectorAll('#sp-pinmap-body .p-fixed').length,
+      i2c: document.querySelectorAll('#sp-pinmap-body .is-i2c').length,
+      legend: document.getElementById('sp-pinmap-legend').textContent,
+      foot: document.getElementById('sp-pinmap-foot').textContent,
+    };`);
+  ok(pinmap.hidden === false, '「引脚分配图」能打开');
+  ok(/PA29/.test(pinmap.r19) && /SCL/.test(pinmap.r19) && /I2C/.test(pinmap.r19),
+     `J3[19] 固定标成 I2C SCL（${pinmap.r19}）`);
+  ok(/PA28/.test(pinmap.r21) && /SDA/.test(pinmap.r21) && /I2C/.test(pinmap.r21),
+     `J3[21] 固定标成 I2C SDA（${pinmap.r21}）`);
+  ok(pinmap.fixed === 2 && pinmap.i2c === 2, `这两根带「固定」徽标与 I2C 配色（徽标 ${pinmap.fixed} / 配色 ${pinmap.i2c}）`);
+  ok(/◆/.test(pinmap.legend) && /I2C/.test(pinmap.legend), '图例里有「◆ I2C 桥固定脚」');
+  ok(/J3\[19\]/.test(pinmap.foot) && /J3\[21\]/.test(pinmap.foot), '脚注给了 I2C 的接线位置（J3[19]/J3[21]）');
+  await ev(`document.getElementById('sp-pinmap-btn').click(); return true;`);   // 关掉，别挡住后面的小节
+
   /* 探针里三根线全空（刚烧完固件/重枚举的默认态）时，面板**预填推荐脚位**而不是显示"不用" ——
    * 用户 2026-10 现场就是卡在这儿。假探针的默认配置里 DC/RST/BL 是推荐值，所以这里换成
    * "把探针写成全 0 → 再读回" 来复现现场。 */

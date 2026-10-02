@@ -411,6 +411,9 @@ export class SpiBusView {
     notes.push('PB10~PB13 是 SPI2 的 CS/SCLK/MISO/MOSI（已灰）');
     notes.push('PA30 是 USB0_PWR 网络，被板上 Q1 常态短到地，拉不动（已灰）');
     notes.push('PY00/PY01 在 v1 不支持（已灰）');
+    /* PA28/PA29 是 I2C 桥写死的 SDA/SCL（见 akaLinkPro 的 i2c_bridge.c）：
+       **不灰掉**（I2C 没使能时它们确实能用），但要让接线的人知道这两根已经名花有主。 */
+    notes.push('PA28/PA29 是 I2C 桥的固定 SDA/SCL（J3[21]/J3[19]）—— I2C 一使能，固件就拒这两根当辅助脚');
     $('sp-pad-note').textContent = 'TE 撕裂信号暂不暴露（TBD）。' + notes.join('；') + '。';
   }
 
@@ -464,7 +467,7 @@ export class SpiBusView {
       const dft = now ? '' : LINES.filter(([, v, d]) => !v && d === pad).map(([n]) => n).join('/');
       return { now, dft };
     };
-    const M = { spi: '★', vcom: '●', aux: '○', no: '⛔', pwr: '·', gnd: '·', nc: '·' };
+    const M = { spi: '★', vcom: '●', aux: '○', no: '⛔', pwr: '·', gnd: '·', nc: '·', i2c: '◆' };
     /* [J3 脚, pad 名/标签, 角色, 备注, 协议 pad 索引（0 = 不在辅助脚表里）] */
     const T = [
       [1, '3V3', 'pwr', '', 0], [2, '5V0', 'pwr', '', 0],
@@ -476,8 +479,8 @@ export class SpiBusView {
       [13, 'PB11', 'spi', 'SCLK', 1], [14, 'GND', 'gnd', '', 0],
       [15, 'NC', 'nc', '', 0], [16, 'NC', 'nc', '', 0],
       [17, '3V3', 'pwr', '', 0], [18, 'NC', 'nc', '', 0],
-      [19, 'PA29', 'aux', '原 SPI1 MOSI', 17], [20, 'GND', 'gnd', '', 0],
-      [21, 'PA28', 'aux', '原 SPI1 MISO', 16], [22, 'NC', 'nc', '', 0],
+      [19, 'PA29', 'i2c', 'I2C 桥 SCL', 17], [20, 'GND', 'gnd', '', 0],
+      [21, 'PA28', 'i2c', 'I2C 桥 SDA', 16], [22, 'NC', 'nc', '', 0],
       [23, 'PA27', 'aux', '原 SPI1 SCLK', 15], [24, 'PA26', 'aux', '原 SPI1 CS0', 14],
       [25, 'GND', 'gnd', '', 0], [26, 'PB10', 'spi', 'CS', 4],
       [27, 'PB12', 'spi', 'D1 / MISO', 2], [28, 'PB13', 'spi', 'D0 / MOSI', 3],
@@ -490,14 +493,16 @@ export class SpiBusView {
     ];
     const cell = ([pin, name, role, note, pad]) => {
       const { now, dft } = sel(pad);
-      const cls = { spi: 'is-spi', vcom: 'is-vcom', aux: 'is-aux', no: 'is-no' }[role] || 'is-plain';
+      const cls = { spi: 'is-spi', vcom: 'is-vcom', aux: 'is-aux', no: 'is-no', i2c: 'is-i2c' }[role] || 'is-plain';
       /* 配置把辅助线挂在"当不了辅助脚"的脚上（SPI2 固定脚 / CDC 串口 / 保留脚 / 实测不可用）
        * ＝ 陈旧或错误的配置：标红 + ⚠，别让人以为接对了 */
       const stale = !!now && role !== 'aux';
-      const why = { spi: 'SPI2 的固定信号脚', vcom: 'CDC 虚拟串口脚', no: '实测当不了辅助脚' }[role] || '不可用';
+      const why = { spi: 'SPI2 的固定信号脚', vcom: 'CDC 虚拟串口脚', no: '实测当不了辅助脚',
+                    i2c: 'I2C 桥的固定脚（I2C 一使能就被它占用）' }[role] || '不可用';
       return `<td class="p-pin">${pin}</td>` +
              `<td class="p-name ${cls}"><span class="p-mark">${M[role] || '·'}</span>${name}` +
              (note ? `<span class="p-note">${note}</span>` : '') +
+             (role === 'i2c' ? '<span class="p-fixed">固定</span>' : '') +
              (now ? `<span class="p-sel${stale ? ' is-bad' : ''}">&lt;&lt; ${now}${stale ? ` ⚠ 这根是${why}，接上去也不动` : ''}</span>` : '') +
              (dft ? `<span class="p-sel is-dflt">&lt;&lt; ${dft}（默认）</span>` : '') +
              '</td>';
@@ -508,7 +513,7 @@ export class SpiBusView {
     }
     $('sp-pinmap-body').innerHTML = rows.join('');
     $('sp-pinmap-legend').textContent =
-      '★ 桥的信号（SPI2）　● CDC 虚拟串口（UART2）　○ 可当辅助脚　⛔ 不可用　· 电源/地/空脚　' +
+      '★ 桥的信号（SPI2）　● CDC 虚拟串口（UART2）　○ 可当辅助脚　◆ I2C 桥固定脚　⛔ 不可用　· 电源/地/空脚　' +
       '<< 实心＝当前配置　<< 虚线（默认）＝还没配，按默认脚位先标给你接线';
     const show = (v, d) => v ? (P.PAD_NAME[v] || ('pad' + v))
                              : d ? (P.PAD_NAME[d] || ('pad' + d)) + '（默认）' : '不用';
@@ -519,7 +524,8 @@ export class SpiBusView {
       '　BL=' + show(c.padBl, P.AUX_DEFAULT.BL) +
       '　TE=' + show(c.padTe, P.AUX_DEFAULT.TE) +
       '　｜　接线：CS←J3[26] SCLK←J3[13] D0←J3[28] D1←J3[27] D2←J3[10] D3←J3[8]，' +
-      'VCOM ← J3[5](TX,PB08) / J3[3](RX,PB09)';
+      'VCOM ← J3[5](TX,PB08) / J3[3](RX,PB09)，' +
+      'I2C ← J3[19](SCL,PA29) / J3[21](SDA,PA28)（固定脚，见「USB→I2C」页）';
     $('sp-pinmap-sub').textContent =
       '（<< 实心 = 当前配置；<< 虚线（默认）= 还没配，按默认脚位标出来给你接线）';
 

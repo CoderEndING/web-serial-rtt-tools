@@ -20,6 +20,7 @@
 import { $, appendLogLine, setStatus } from '../ui/dom.js';
 import { store } from '../core/store.js';
 import { I2cSession } from './session.js';
+import { RegView } from './reg-view.js';
 import { ScriptRunner, buildTasks } from './runner.js';
 import { PRESETS, presetById, DEFAULT_PRESET } from './presets.js';
 import {
@@ -29,7 +30,7 @@ import { AS_HELP } from './expr.js';
 import { RD_MAX, RD_TOTAL_MAX, hex2, hexBytes, addr7, guessDevice, errText, ticksToUs, addr7 as a7 } from './protocol.js';
 
 const MAX_ROWS = 24;
-const DOCKS = ['scan', 'cmd', 'dsl', 'live'];
+const DOCKS = ['scan', 'cmd', 'reg', 'dsl', 'live'];
 const OP_NAME = { rd: '读', wr: '写', ping: '探测', delay: '延时' };
 /** 每种操作哪些格子可编辑（其余灰掉）—— 一格一格灰比塞四个下拉更省地方，也更不容易填错 */
 const OP_CELLS = {
@@ -134,6 +135,7 @@ export class I2cView {
   constructor(){
     this.session = new I2cSession();
     this.runner = new ScriptRunner(this.session, { onEvent: e => this._onRunEvent(e) });
+    this.reg = new RegView({ session: this.session });   // 「寄存器」tab（读一段 → 改位 → 写回）
     this.rows = [blankRow('rd'), blankRow('rd'), blankRow('rd')];
     this.rowEls = [];
     this.results = new Map();          // 行号 → {text, cls}
@@ -152,6 +154,7 @@ export class I2cView {
   init(){
     const s = this.session;
     s.subscribe(this);
+    this.reg.init();
     this._bindConn();
     this._bindDock();
     this._bindCfg();
@@ -312,6 +315,8 @@ export class I2cView {
     $('i2-info').textContent = on
       ? `${st.hidLabel || 'akaLinkPro'}${st.mock ? '（假探针）' : ''} · ${st.enabled ? '桥已使能' : '桥未使能'}`
       : '未连接';
+    // 「寄存器」面板的按钮也跟着连接状态走（它自己还要管"有没有改动"）
+    this.reg?.setEnabled(on);
   }
 
   // ==================================================================== 连接
@@ -421,7 +426,7 @@ export class I2cView {
         btn.disabled = false; btn.textContent = '扫描总线 0x08..0x77';
       }
     });
-    $('i2-dev').addEventListener('change', () => this._syncScanPick());
+    $('i2-dev').addEventListener('change', () => { this._syncScanPick(); this.reg.setDevice($('i2-dev').value); });
   }
 
   _renderScan(ms){
@@ -438,7 +443,11 @@ export class I2cView {
       const td = document.createElement('td');
       const b1 = document.createElement('button');
       b1.className = 'mini'; b1.textContent = '选用';
-      b1.addEventListener('click', () => { $('i2-dev').value = addr7(a); this._syncScanPick(); });
+      b1.addEventListener('click', () => {
+        $('i2-dev').value = addr7(a);
+        this._syncScanPick();
+        this.reg.setDevice(addr7(a));      // 「寄存器」面板也切到这个器件（省得两头填）
+      });
       const b2 = document.createElement('button');
       b2.className = 'mini'; b2.textContent = '读 1 字节';
       b2.title = '往命令表插一行：读这个器件 0x00 起 1 字节';

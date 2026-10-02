@@ -124,7 +124,7 @@ console.log('== 1b. 右列分 tab（照 #dbg 那套：一次只显示一个）==
     const ids = [...document.querySelectorAll('#i2-dock-tabs button[data-dock]')].map(b => b.dataset.dock);
     const pages = [...document.querySelectorAll('#i2-box-dock .dockpage')].map(p => p.dataset.dock);
     return { ids, pages, shown: [...document.querySelectorAll('#i2-box-dock .dockpage.on')].map(p => p.dataset.dock) };`);
-  ok(t.ids.join(',') === 'scan,cmd,dsl,live', `四个 tab：扫描/命令表/脚本/实时值（${t.ids.join(',')}）`, t.ids.join(','));
+  ok(t.ids.join(',') === 'scan,cmd,reg,dsl,live', `五个 tab：扫描/命令表/寄存器/脚本/实时值（${t.ids.join(',')}）`, t.ids.join(','));
   ok(t.pages.join(',') === t.ids.join(','), '每个 tab 都有对应的内容块（顺序一致）');
   ok(t.shown.length === 1 && t.shown[0] === 'scan', '🚨 同时**只有一个**内容块可见', JSON.stringify(t.shown));
 
@@ -373,6 +373,151 @@ console.log('== 5b. 长读自动分片：填 256，外部看不见那 5 笔 ==')
   ok(/✗/.test(wrBig) && /不自动分片/.test(wrBig), '写超 51 B 报"写不自动分片"（EEPROM 跨页会绕回页首）', wrBig);
 }
 
+// ==================================================================== 5c
+console.log('== 5c. 寄存器面板：读 128 B → 点字节改 bit → 只写改动 ==');
+{
+  // 假 Si5351（0x60）是纯寄存器器件（无页写回卷）—— 铺一段有规律的图案当"器件现值"
+  const setup = await ev(`
+    const t = window.__tools.i2c;
+    const dev = t.session.hid.devices.get(0x60);
+    for (let i = 0; i < 128; i++) dev.regs[i] = (i * 5 + 1) & 0xff;
+    document.querySelector('#i2-dock-tabs button[data-dock="reg"]').click();
+    const set = (id, v) => { const el = document.getElementById(id); el.value = v; el.dispatchEvent(new Event('change')); };
+    set('i2-reg-dev', '0x60'); set('i2-reg-start', '0x00'); set('i2-reg-len', '128');
+    document.getElementById('i2-reg-alen').value = '1';
+    const btn = document.getElementById('i2-reg-read');
+    const wasDisabled = btn.disabled;
+    btn.click();
+    await new Promise(r => setTimeout(r, 1200));
+    const cells = [...document.querySelectorAll('#i2-reg-body button.rb')];
+    return {
+      wasDisabled,
+      dock: t.dockTab,
+      on: [...document.querySelectorAll('#i2-box-dock .dockpage.on')].map(p => p.dataset.dock),
+      rows: document.querySelectorAll('#i2-reg-body tr').length,
+      cells: cells.length,
+      first: cells[0]?.textContent, last: cells[cells.length - 1]?.textContent,
+      head: [...document.querySelectorAll('#i2-reg-head th')].map(th => th.textContent).join('|'),
+      addr0: document.querySelector('#i2-reg-body td.ra')?.textContent,
+      ascii0: document.querySelector('#i2-reg-body td.rascii')?.textContent,
+      sum: document.getElementById('i2-reg-sum').textContent,
+      len: t.reg.base.length,
+    };`);
+  ok(setup.wasDisabled === false, '连上假探针后「读取」是可点的');
+  ok(setup.dock === 'reg' && setup.on.join(',') === 'reg', '切到「寄存器」tab 且只显示这一块');
+  ok(setup.rows === 8 && setup.cells === 128, `128 B 画成 16×8（实际 ${setup.rows} 行 / ${setup.cells} 格）`);
+  ok(setup.first === '01' && setup.last === '7C', `首末字节与假器件图案对账（${setup.first} … ${setup.last}）`);
+  ok(setup.head === '地址|0|1|2|3|4|5|6|7|8|9|A|B|C|D|E|F|ASCII', '表头 = 地址 + 列号 0..F + ASCII', setup.head);
+  ok(setup.addr0 === '0x00', '第一行的地址标注按地址宽度写（0x00）', setup.addr0);
+  ok(setup.len === 128 && /128 B/.test(setup.sum), '摘要报出读回长度', setup.sum);
+
+  // 点字节点开开关板 → 翻一位
+  const edited = await ev(`
+    const t = window.__tools.i2c;
+    document.querySelector('#i2-reg-body button.rb[data-off="0"]').click();
+    await new Promise(r => setTimeout(r, 60));
+    const pop = document.getElementById('i2-regpop');
+    const open = !pop.hidden;
+    const bits = pop.querySelectorAll('#i2-regpop-bits button.bit').length;
+    pop.querySelector('#i2-regpop-bits button.bit[data-k="0"]').click();     // 0x01 → 0x00
+    await new Promise(r => setTimeout(r, 60));
+    const cell = document.querySelector('#i2-reg-body button.rb[data-off="0"]');
+    return { open, bits, cell: cell.textContent, chg: cell.classList.contains('chg'),
+             chgBits: pop.querySelectorAll('#i2-regpop-bits button.bit.chg').length,
+             hexBox: document.getElementById('i2-regpop-hex').value,
+             sum: document.getElementById('i2-reg-sum').textContent,
+             cur: t.reg.cur[0], base: t.reg.base[0],
+             writeDisabled: document.getElementById('i2-reg-write').disabled };`);
+  ok(edited.open && edited.bits === 8, '点表里的字节 → 弹出 8 个 bit 的开关板');
+  ok(edited.cur === 0x00 && edited.base === 0x01, '点 bit0 把 0x01 翻成 0x00（只改缓冲，器件现值没动）');
+  ok(edited.cell === '00' && edited.chg, '格子立刻变 00 并套上黄框');
+  ok(edited.chgBits === 1, '开关板上"与原件不同的位"标了 1 个');
+  ok(edited.hexBox === '00', '开关板的十六进制框与点 bit 同步');
+  ok(/改了 1 个字节/.test(edited.sum), '摘要报出改动个数', edited.sum);
+  ok(edited.writeDisabled === false, '有改动时「只写改动」自动变可点');
+
+  // 写回：器件里真的变了、没改的字节没动、黄框清掉
+  const wrote = await ev(`
+    const t = window.__tools.i2c;
+    document.getElementById('i2-reg-write').click();
+    await new Promise(r => setTimeout(r, 900));
+    const dev = t.session.hid.devices.get(0x60);
+    const cell = document.querySelector('#i2-reg-body button.rb[data-off="0"]');
+    return { dev0: dev.regs[0], dev1: dev.regs[1], base0: t.reg.base[0],
+             chg: cell.classList.contains('chg'),
+             sum: document.getElementById('i2-reg-sum').textContent,
+             writeDisabled: document.getElementById('i2-reg-write').disabled,
+             errs: window.__tools.summary().errors.length };`);
+  ok(wrote.dev0 === 0x00, '「只写改动」真的写进了假器件（0x60 regs[0] = 0x00）');
+  ok(wrote.dev1 === 6, '相邻没改的字节一个都没动（regs[1] 仍是 0x06）', String(wrote.dev1));
+  ok(wrote.base0 === 0x00 && wrote.chg === false, '写回成功后"器件现值"跟着更新、黄框清掉');
+  ok(wrote.writeDisabled === true, '没有改动了 → 「只写改动」自动灰掉');
+  ok(wrote.errs === 0, '这一轮没有未捕获错误');
+
+  // 丢弃改动：改一格再丢弃，回到器件现值
+  const discard = await ev(`
+    const t = window.__tools.i2c;
+    document.querySelector('#i2-reg-body button.rb[data-off="3"]').click();
+    await new Promise(r => setTimeout(r, 40));
+    document.getElementById('i2-regpop-bits').querySelector('button.bit[data-k="7"]').click();
+    await new Promise(r => setTimeout(r, 40));
+    const changed = t.reg.cur[3] !== t.reg.base[3];
+    document.getElementById('i2-reg-discard').click();
+    await new Promise(r => setTimeout(r, 60));
+    const cell = document.querySelector('#i2-reg-body button.rb[data-off="3"]');
+    return { changed, same: t.reg.cur[3] === t.reg.base[3],
+             cell: cell.textContent, chg: cell.classList.contains('chg'),
+             dev: t.session.hid.devices.get(0x60).regs[3] };`);
+  ok(discard.changed && discard.same, '「丢弃改动」把缓冲还原成器件现值');
+  ok(discard.chg === false && discard.cell === discard.dev.toString(16).toUpperCase().padStart(2, '0'),
+     '格子上的黄框也一起清掉（内容回到器件现值）');
+
+  // 非法输入：地址超出范围要**报错并保持原表**（不是静默清空）
+  const bad = await ev(`
+    const t = window.__tools.i2c;
+    const proto = Object.getPrototypeOf(t.session);
+    t.session.log = proto.log.bind(t.session);      // 本节要数日志，先接回真的
+    t.session.ring.length = 0;
+    const dev = document.getElementById('i2-reg-dev');
+    dev.value = '0x80'; dev.dispatchEvent(new Event('change'));
+    document.getElementById('i2-reg-read').click();
+    await new Promise(r => setTimeout(r, 300));
+    const out = { logs: t.session.ring.map(e => e.text).join(' | '),
+                  cells: document.querySelectorAll('#i2-reg-body button.rb').length };
+    // 还原成安静模式 + 合法器件地址
+    t.session.log = () => {};
+    dev.value = '0x60'; dev.dispatchEvent(new Event('change'));
+    return out;`);
+  ok(bad.cells === 128, '器件地址非法时表**不被动过**（还是那 128 格）', String(bad.cells));
+  ok(/0x08\.\.0x77|超出 7 位/.test(bad.logs), '……并在日志里说清哪里不合法', bad.logs.slice(0, 120));
+
+  // 🚨 读完之后改过器件/起始地址 → **必须拒绝写回**（否则会把旧地址的数据糊到新地址上）
+  const guard = await ev(`
+    const t = window.__tools.i2c;
+    const proto = Object.getPrototypeOf(t.session);
+    t.session.log = proto.log.bind(t.session);
+    t.session.ring.length = 0;
+    // 先改一格（有"改动"才谈得上写回），再把器件地址改掉
+    t.reg.cur = t.reg.cur.slice(); t.reg.cur[1] = (t.reg.cur[1] ^ 0xff) & 0xff;
+    t.reg._render(); t.reg._renderSummary();
+    const dev = document.getElementById('i2-reg-dev');
+    dev.value = '0x68'; dev.dispatchEvent(new Event('change'));
+    const before = t.session.hid.devices.get(0x68).regs[1];
+    document.getElementById('i2-reg-write').click();
+    await new Promise(r => setTimeout(r, 400));
+    const out = { logs: t.session.ring.map(e => e.text).join(' | '),
+                  dev68: t.session.hid.devices.get(0x68).regs[1], before,
+                  dev60: t.session.hid.devices.get(0x60).regs[1],
+                  base: t.reg.base[1] };
+    // 复原：器件回到 0x60、重新读一次（后面没有小节了，但保持页面干净）
+    dev.value = '0x60'; dev.dispatchEvent(new Event('change'));
+    t.session.log = () => {};
+    return out;`);
+  ok(/读取.*之后被改过|先重新「读取」/.test(guard.logs), '读取后改过器件地址 → 写回被拦下并说明原因', guard.logs.slice(0, 140));
+  ok(guard.dev68 === guard.before, '……假器件 0x68 一个字节都没被写（没有"糊到新地址"）');
+  ok(guard.dev60 === guard.base, '……0x60 里那份也没动（改动只留在页面上）');
+}
+
 // ==================================================================== 6
 console.log('== 6. 表格 ⇄ 脚本（同一套解析）==');
 {
@@ -533,7 +678,7 @@ console.log('== 9. 收尾：放掉探针 ==');
     return { s: t.summary(), state: document.getElementById('i2-state').textContent };`);
   ok(done.s.connected === false, 'disconnect 后已放掉 HID');
   ok(done.s.running === false, '定时已停');
-  ok(['scan', 'cmd', 'dsl', 'live'].includes(done.s.dock), 'summary 里能报出当前 tab', done.s.dock);
+  ok(['scan', 'cmd', 'reg', 'dsl', 'live'].includes(done.s.dock), 'summary 里能报出当前 tab', done.s.dock);
   // 把 tab 还原成默认，别给下一次测试留个"停在实时值"的状态
   await ev(`document.querySelector('#i2-dock-tabs button[data-dock="scan"]').click();
             localStorage.setItem('serial-rtt-tools:v1', JSON.stringify(
