@@ -140,8 +140,10 @@ export class Ads1115 extends RegDevice {
     super(addr, 'ADS1115', 4);
     this.now = now;
     this.cfg = 0x8583;            // 上电默认：MUX=AIN0-AIN1, ±2.048V, 单次, 128SPS
-    this.conv = 0;
-    this.readyAt = 0;
+    this.conv = 0;                // 转换结果：上电后保持 0000h 直到第一次转换完成
+    this.readyAt = 0;             // 单次转换"出结果"的时刻
+    this.pending = false;         // 有一次单次转换在跑（跑完之前转换寄存器还是旧值）
+    this.nextCont = 0;            // 连续模式下一次刷新的时刻
     this._writeCfg(this.cfg);
   }
   _writeCfg(word){
@@ -155,6 +157,21 @@ export class Ads1115 extends RegDevice {
   _sps(){
     const dr = (this.cfg >> 5) & 7;
     return [8, 16, 32, 64, 128, 250, 475, 860][dr];
+  }
+  /**
+   * 真器件是"**到点才更新**转换寄存器"：单次要等 1/DR，连续模式也受数据率节流。
+   * 所以读得比数据率还快时，读回来的是同一个值 —— 假器件也照这个来，
+   * 否则"忘了 delay 就现算一个新值"的脚本在假探针上永远测不出问题。
+   */
+  _advance(){
+    const now = this.now();
+    const single = ((this.cfg >> 8) & 1) === 1;                 // MODE：1 = 单次
+    if (single){
+      if (this.pending && now >= this.readyAt){ this._sample(); this.pending = false; }
+    } else if (now >= this.nextCont){
+      this._sample();
+      this.nextCont = now + 1000 / this._sps();
+    }
   }
   _sample(){
     // 单端 AIN0（MUX=100）：1.0 V ± 0.6 V 慢正弦；差分时给个小的
@@ -174,12 +191,13 @@ export class Ads1115 extends RegDevice {
         const word = (wr[0] << 8) | wr[1];
         this._writeCfg(word);
         // OS 位是 bit15：1 = 启动一次单次转换（配置字里就是它）
-        const isSingle = ((word >> 15) & 1) === 1;
-        if (isSingle){
-          this.readyAt = this.now() + Math.ceil(1000 / this._sps()) + 1;   // 转换要时间
+        if (((word >> 15) & 1) === 1){
+          this.pending = true;                   // 转换要 1/DR 才出结果
+          this.readyAt = this.now() + Math.ceil(1000 / this._sps()) + 1;
         } else {
-          this._sample();                        // 连续模式：随时都是新数据
+          this.pending = false;                  // 连续模式：一直转，读到的就是最近一次
           this.readyAt = 0;
+          this.nextCont = 0;
         }
       }
       this.ptr = (reg + wr.length) % 4;
@@ -188,12 +206,15 @@ export class Ads1115 extends RegDevice {
     if (rd){
       const reg = ptr & 3;
       if (reg === 0){
-        this._sample();                          // 转换寄存器：读就是取最近一次结果
+        this._advance();                         // 没到点就还是上一次的结果（真器件如此）
         this.regs[0] = (this.conv >> 8) & 0xff;
         this.regs[1] = this.conv & 0xff;
       } else if (reg === 1){
-        const osDone = this.now() >= this.readyAt ? 0x8000 : 0x0000;
-        const word = (this.cfg & 0x7fff) | osDone;
+        this._advance();
+        // OS 读回：0 = 还在转换中，1 = 当前没在转换（连续模式一直在转 → 恒读 0）
+        const single = ((this.cfg >> 8) & 1) === 1;
+        const busy = single ? this.pending : true;
+        const word = (this.cfg & 0x7fff) | (busy ? 0x0000 : 0x8000);
         this.regs[1] = (word >> 8) & 0xff;
         this.regs[2] = word & 0xff;
       }
@@ -206,12 +227,25 @@ export class Ads1115 extends RegDevice {
   }
 }
 
-/** Si5351：寄存器文件（0x00 器件状态 / 0x03 CLK0 控制 / 0x1A.. PLLA / 0x2A.. MS0…）*/
+/**
+ * Si5351：寄存器文件。**寄存器地址按数据手册 / AN619**（别把 0x03 当 CLK0 控制）：
+ *   · 0x03 = 输出使能（bit7..0 = CLK7..CLK0 的 _OEB，**写 1 = 关掉那一路**），复位值 0 = 全开；
+ *   · 0x10..0x17 = CLK0..CLK7 控制（PDN / 整数模式 / PLL 选择 / 反相 / MSx 来源 / 驱动电流）；
+ *   · 0x1A PLLA、0x22 PLLB、0x2A MS0 … 参数块；0xB1 = PLL 软复位（**自清位**）。
+ * 注意寄存器号最大到 0xBB，所以文件开 192 B（原来 128 B 会把 0xB1 绕回 0x31）。
+ */
 export class Si5351 extends RegDevice {
   constructor(addr = 0x60){
-    super(addr, 'Si5351', 128);
-    this.regs[0x00] = 0x00;      // 器件状态：SYS_INIT=0（已初始化）、无 LOL/LOS
-    this.regs[0x03] = 0x0f;      // CLK0 控制：上电默认输出关（PDN=0 但 IDRV 弱驱动）
+    super(addr, 'Si5351', 192);
+    this.regs[0x00] = 0x00;      // 器件状态：SYS_INIT=0（已初始化）、无 LOL/LOS，bit3:0 = 版本号
+    this.regs[0x03] = 0x00;      // 输出使能：复位值 0x00 = 四路都开着（写 1 才是关）
+    this.regs[0x10] = 0x00;      // CLK0 控制：AN619 复位值就是 0x00（真片子读到的可能是出厂 NVM 的配置）
+  }
+  transact(addr, wr, rd){
+    const out = super.transact(addr, wr, rd);
+    // 0xB1(PLL 软复位) 是自清位：写进去 0xAC，回读就已经是 0 了（真器件如此）
+    if (wr.length && addr.length && addr[0] === 0xb1) this.regs[0xb1] = 0x00;
+    return out;
   }
 }
 

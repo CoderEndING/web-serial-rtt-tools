@@ -417,6 +417,18 @@ console.log('== 10. 示例脚本必须零错误（示例写错比功能写错更
   ok(w.name.includes('⚠'), '写 EEPROM 的示例标题里带警告标记', w.name);
   ok(w.text.includes('AT24C02 · 读'), '……并提示先跑只读那份留底');
 
+  // 🚨 示例里的十六进制注释也是**给人抄的** —— 2026-10 手册对账抓出的两处错钉在这里，别再漂回去
+  const adsText = PRESETS.find(p => p.id === 'ads1115').text;
+  ok(adsText.includes('0xC583'), 'ADS1115 给出了"单端 ±2.048V"的正确配置字 0xC583');
+  ok(!adsText.includes('0x8383 = 同上'), '……不再把 0x8383 说成"同上但 PGA=010(±2.048V)"');
+  ok(adsText.includes('**AIN0-AIN1 差分** · ±4.096V'), '……0x8383 的真实含义写对了（MUX=000 差分 · ±4.096V）');
+  const siText = PRESETS.find(p => p.id === 'si5351').text;
+  ok(siText.includes('0x03 输出使能'), 'Si5351 写明 0x03 是输出使能（低有效，写 1 = 关掉那一路）');
+  ok(siText.includes('0x10 CLK0 控制'), '……CLK0 控制在 0x10');
+  ok(!siText.includes('0x03 CLK0 控制'), '……不再把 CLK0 控制写成 0x03');
+  ok(siText.includes('0xB1') && siText.includes('0xAC'), '……带上必须的 PLL 软复位 0xB1 = 0xAC');
+  ok(!siText.includes('00 01 0A 00'), '……参数块 8 B 不再漏掉 P1[17:16] 那一位');
+
   // Si5351 不许塞"看着像对"的魔法序列
   const si = PRESETS.find(p => p.id === 'si5351');
   ok(si.text.includes('没在硬件上验过'), 'Si5351 示例明确标注频率合成部分未经硬件验证');
