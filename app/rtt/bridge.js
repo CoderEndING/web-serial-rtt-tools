@@ -9,6 +9,7 @@
  *   · stream —— 纯字节流（J-Link 的 RTT telnet 19021，只有 ch0，全双工）
  */
 import { toB64, fromB64 } from '../core/b64.js';
+import { waitMs } from '../core/pace.js';
 
 export class BridgeClient {
   constructor(url){
@@ -110,7 +111,9 @@ export class BridgeClient {
         if (!b.length) throw new Error(`读内存失败：0x${addr.toString(16)} 要 ${len} 字节，只回来 ${b.length} 字节（OpenOCD 忙不过来？把轮询间隔调大一点）`);
         const o = new Uint8Array(len); o.set(b); return o;
       }
-      await new Promise(r2 => setTimeout(r2, 30));
+      /* 短等待一律走 pace.waitMs：页面不可见时 setTimeout 会被钳到 ≥1 s（本仓实测过
+         把 3.3 KB 固件从 1.4 s 拖成 47 s）。这里是"短读后重试一次"的 settle，正是那一类。 */
+      await waitMs(30);
     }
   }
 

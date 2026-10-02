@@ -15,6 +15,7 @@ import { bytes as fBytes } from '../core/format.js';
 import { findSymbol } from '../rtt/elf.js';
 import { AkaLinkHid, startRcText, START_PENDING } from './probe.js';
 import { MockAkaLinkHid } from './mock.js';
+import { waitMs } from '../core/pace.js';
 
 const CLOCK_OPTIONS = [
   { v: '', label: '不改（用探针当前档位）' },
@@ -342,7 +343,10 @@ export class RttCdcView {
       if (st.running && st.cbAddr) break;
       if (st.startRc !== 0 && st.startRc !== START_PENDING && st.startRc !== prevRc) break;
       if (Date.now() - t0 > timeout) break;
-      await new Promise(res => setTimeout(res, 150));
+      /* 轮询间隔走 pace.waitMs（≤128 ms 是"让路自旋"，时长真实且**不受后台定时器节流**）。
+         这里等的是"探针把桥拉起来"（几百毫秒量级），用 setTimeout 的话窗口一被遮住
+         每次轮询就变 ≥1 s，白等好几倍。取 120 ms 是为了留在自旋档内。 */
+      await waitMs(120);
     }
     const st = this.last;
     if (st?.running && st.cbAddr){
