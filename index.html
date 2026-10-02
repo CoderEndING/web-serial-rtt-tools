@@ -33,6 +33,7 @@
     <button class="tab" data-tab="dbg">调试器</button>
     <button class="tab" data-tab="spi">SPI/QSPI 桥</button>
     <button class="tab" data-tab="panel">SPI/QSPI 屏</button>
+    <button class="tab" data-tab="i2c">USB→I2C</button>
     <button class="tab" data-tab="gen">工程生成</button>
   </nav>
   <div class="topright">
@@ -1337,6 +1338,185 @@
       <button class="mini primary" data-bit="close">完成</button>
     </div>
     <p class="hint" id="pn-bitpop-hint"></p>
+  </div>
+</section>
+
+<!-- ============================ USB → I2C 转发桥（HID 0x36） ============================ -->
+<section class="panel" id="tab-i2c">
+  <div class="ws">
+    <aside class="side">
+      <fieldset>
+        <legend>探针 · I2C 桥</legend>
+        <div class="row btnrow">
+          <button id="i2-connect" class="primary" title="授权 HID（探针的自定义 HID，usage page 0xFF00）。⚠️ 第一次点会弹出**浏览器的设备选择框**——那个框就是「授权」，在里面选 akaLinkPro 即可">连接探针（授权）</button>
+          <button id="i2-reconnect" title="用浏览器记住的探针直接连（不用再点弹框）">重连</button>
+        </div>
+        <p class="hint" id="i2-info">未连接</p>
+        <label class="chk" title="不需要硬件：内置 AT24C02@0x50 / MPU6050@0x68 / ADS1115@0x48 / Si5351@0x60 四个假器件，传感器数据是活的（会动的正弦），示例脚本能直接看出效果"><input type="checkbox" id="i2-mock"> 用假探针（无需硬件）</label>
+        <p class="hint" id="i2-state">未连接</p>
+        <p class="hint">一个探针同时只能被一个页签占着 —— 本页连接前会请别的页签让出（RTT 转发 / J-Scope / SPI 桥 / 调试器）。</p>
+      </fieldset>
+
+      <fieldset>
+        <legend>桥配置（HID 0x36 · SET_CFG / GET_CFG）</legend>
+        <label class="row"><span>SCL 档</span><select id="i2-scl" title="HPM 的 I2C 只有 100k / 400k / 1M 三个标准档，固件挑「不超过请求值」的最高档，实际值回在下面">
+          <option value="100000">100 kHz（标准，最稳）</option>
+          <option value="400000">400 kHz（快速）</option>
+          <option value="1000000">1 MHz（快速+，只有短线 + 带上拉的模块才稳）</option>
+        </select></label>
+        <label class="chk" title="PA28(SDA) 板上**没有**上拉（PA29/SCL 有 R6 10k）。常见 I2C 模块自带 4.7k~10k，接上就够；裸芯片要么外接电阻，要么开这个应急（电流弱，只适合低速短线）"><input type="checkbox" id="i2-pullup"> 打开内部上拉（应急用）</label>
+        <label class="row"><span>NACK 重试</span><input id="i2-retries" class="num" value="0" inputmode="numeric" title="固件侧整笔重试次数 0..8（NACK / 超时后重发整笔）"></label>
+        <div class="row btnrow">
+          <button id="i2-cfg-get">读取配置</button>
+          <button id="i2-cfg-set" class="primary">写入配置</button>
+        </div>
+        <p class="hint" id="i2-scl-actual">实际生效：—</p>
+      </fieldset>
+
+      <fieldset>
+        <legend>使能与状态</legend>
+        <div class="row btnrow">
+          <button id="i2-enable" class="primary" title="配置 PA28=SDA / PA29=SCL 并初始化 I2C3。⚠️ 使能期间 SPI 桥的辅助脚 pad16/17（就是这两根）会被拒">使能</button>
+          <button id="i2-disable" title="把两根脚放成高阻输入（不还原成 SPI 复用）">失能</button>
+          <button id="i2-reset" title="总线被拉死（SDA/SCL 常低）时的解药：9 个 SCL 脉冲 + STOP + 控制器复位。会清计数器、保配置">总线恢复</button>
+        </div>
+        <p class="hint">状态字 <b id="i2-word">—</b> <span id="i2-word-text"></span></p>
+        <p class="hint">ok <b id="i2-c-ok">0</b> · err <b id="i2-c-err">0</b> · tx <b id="i2-c-tx">0 B</b> · rx <b id="i2-c-rx">0 B</b> · nack地址 <b id="i2-c-na">0</b> · nack数据 <b id="i2-c-nd">0</b><br>
+          超时 <b id="i2-c-to">0</b> · 总线恢复 <b id="i2-c-rec">0</b> · 单笔耗时 <b id="i2-last-us">—</b> µs</p>
+      </fieldset>
+
+      <fieldset>
+        <legend>接线与排障</legend>
+        <p class="hint"><b>SDA = PA28 = J3[21]</b>（板丝印 SPI_MISO，板上**没有**上拉）<br>
+          <b>SCL = PA29 = J3[19]</b>（板丝印 SPI_MOSI，有 R6 10k；与 USB0_OC 网络共用）<br>
+          GND = J3[6]/[9]/[14]/[20]/[25]/[30]/[34]/[39] · 3.3V = J3[1]/[17]</p>
+        <div class="row btnrow">
+          <button id="i2-pintest" class="primary" title="接线出问题第一个跑它（只在总线空闲时可用：它会发一次真实探测事务，用 7 位地址里保留的 0x7E，不会写坏任何东西）">接线自检(PINTEST)</button>
+          <button id="i2-dbg" title="12 个寄存器的现场快照：I2C CTRL/STATUS/ADDR/CMD/SETUP/INTEN、PA28/PA29 的复用与焊盘、配置、状态字">现场快照(DBG)</button>
+        </div>
+        <p class="hint">判读口诀：<b>事务中曾拉低 SCL=1 且问题位图=0 ⇒ 桥这一侧没问题</b>，没 ACK 就往器件侧查（接线 / 供电 / 地址 / 上拉）。</p>
+        <p class="hint">⚠️ 探针复位或重烧固件后，桥回到**未使能**、配置回默认（100 kHz、上拉关）—— 每次连接后先「读取配置」核一眼。</p>
+      </fieldset>
+    </aside>
+
+    <section class="main">
+      <div class="busstack">
+        <fieldset id="i2-scan-card">
+          <legend>扫描总线（HID 0x36 · SCAN · 0x08..0x77）<button class="mini foldbtn" data-fold="i2-scan-card">收起</button></legend>
+          <div class="toolrow">
+            <button id="i2-scan" class="primary mini" title="固件一次性扫完 0x08..0x77（112 个地址，100 kHz 下约 15 ms）并回 14 B 位图。扫描期间 DAP/CDC 会顿一下">扫描总线</button>
+            <span class="hint" id="i2-scan-sum" style="margin:0">还没扫过</span>
+            <span class="spacer"></span>
+            <label class="row" style="margin:0"><span style="width:auto">选中器件</span><input id="i2-dev" value="0x50" size="6" title="点下面表格里的一行即可选中；也可以手打一个 7 位地址"></label>
+          </div>
+          <div class="scroll" id="i2-scan-wrap">
+            <table class="sp"><thead><tr><th style="width:70px">地址</th><th>可能的器件（只是提示，按手册核）</th><th style="width:170px">操作</th></tr></thead>
+            <tbody id="i2-scan-body"></tbody></table>
+          </div>
+        </fieldset>
+
+        <fieldset id="i2-cmd-card">
+          <legend>通用命令（多行命令编辑区 · 最多 24 行）<button class="mini foldbtn" data-fold="i2-cmd-card">收起</button></legend>
+          <div class="toolrow">
+            <button id="i2-cmd-add" class="mini">+ 加一行</button>
+            <button id="i2-cmd-del" class="mini">删末行</button>
+            <button id="i2-cmd-clearall" class="mini">清空表</button>
+            <span class="spacer"></span>
+            <button id="i2-cmd-clear" class="mini">清空结果</button>
+            <button id="i2-cmd-send" class="primary mini" title="按顺序跑一遍（带周期的行不会跑 —— 那些用「开始定时」）">发送全部</button>
+            <button id="i2-cmd-run" class="primary mini" title="一次性行先跑一遍，然后带周期的行按各自周期一直跑（这就是 while(1)）">开始定时</button>
+            <button id="i2-cmd-stop" class="mini">停止</button>
+          </div>
+          <div class="scroll cmdscroll">
+            <table class="sp cmdtab">
+              <thead><tr>
+                <th>#</th><th>操作</th><th>器件</th><th>子地址</th><th>数据</th><th>读长</th><th>解码 as</th><th>周期</th><th>结果</th>
+              </tr></thead>
+              <tbody id="i2-cmd-body"></tbody>
+            </table>
+          </div>
+          <p class="hint">每行一次事务（START…STOP）。<b>器件格留空 = 跳过该行。</b>
+            操作：<b>读</b> = 子地址 + 读长；<b>写</b> = 子地址 + 数据（数据留空 = 只把地址指针推过去，EEPROM 分片读就靠它）；
+            <b>探测</b> = 只问 ACK；<b>延时</b> = 在「数据」格里填时长（如 <code>10ms</code>）。
+            周期格写 <code>100ms</code> 或 <code>100ms×50</code>（×50 = 跑 50 轮自己停；不写 = 一直跑）。</p>
+        </fieldset>
+
+        <fieldset id="i2-dsl-card">
+          <legend>脚本区（贴 C 表 / 脚本 · 载入与导出）<button class="mini foldbtn" data-fold="i2-dsl-card">收起</button></legend>
+          <div class="toolrow">
+            <span>示例</span>
+            <select id="i2-preset"></select>
+            <button id="i2-dsl-load" class="mini">载入</button>
+            <button id="i2-dsl-file" class="mini" title="读 .c / .h / .txt / .json：C 表行能直接解析，JSON 若是本站导出的形状会自动转回可读文本">读文件…</button>
+            <input type="file" id="i2-dsl-file-input" accept=".c,.h,.txt,.json" hidden>
+            <button id="i2-dsl-fromtable" class="mini" title="把上面的命令表（24 行）写成脚本 —— 表格与脚本走的是同一套解析，行为完全一致">命令表 → 脚本</button>
+            <span class="spacer"></span>
+            <button id="i2-dsl-parse" class="mini" title="只解析、不发：先把语法、字段范围、as 表达式核一遍">只看解析</button>
+            <button id="i2-dsl-send" class="primary mini" title="解析整段后一次发出去（只跑一次性部分）">解析并发送</button>
+            <button id="i2-dsl-run" class="primary mini" title="一次性部分先跑，然后 loop/every 的定时段一直跑（while(1)）」">开始定时</button>
+            <button id="i2-dsl-stop" class="mini">停止</button>
+          </div>
+          <textarea id="i2-dsl-text" class="code" spellcheck="false" placeholder="一行一条命令，'#' 注释。例：&#10;&#10;scan                                    扫总线&#10;ping 0x50                               地址探测&#10;rd 0x50 0x00 8                          读 0x50 的 0x00 起 8 B&#10;{0x50, 1, 0x0000, 4, 0, (uint8_t[]){0xA5,0x5A,0xDE,0xAD}},   C 表行&#10;delay 10ms                              延时&#10;loop 50ms                               while(1)：整段按 50 ms 循环&#10;  rd 0x68 0x3B 14 as ax=i16be(0)/16384, az=i16be(4)/16384&#10;end"></textarea>
+          <div class="toolrow nw">
+            <span class="hint" id="i2-dsl-sum" style="margin:0">一行一条命令 · 空行与 # 注释忽略</span>
+            <span class="spacer"></span>
+            <button id="i2-dsl-to-table" class="mini" title="把脚本里的 XFER 行装进上面的命令表（24 行上限）">载入到命令表</button>
+            <button id="i2-dsl-out-c" class="mini" title="导出成 C 表：列序 = 线上 XFER 字段（dev, addr_len, addr, wr_len, rd_len, data），能直接贴回固件源码，也能贴回本页">导出 C 表</button>
+            <button id="i2-dsl-out-json" class="mini">导出 JSON</button>
+            <button id="i2-dsl-out-text" class="mini">导出文本</button>
+            <button id="i2-dsl-clear" class="mini">清空</button>
+          </div>
+          <div class="scroll" id="i2-dsl-errwrap" style="display:none">
+            <table class="sp"><thead><tr><th style="width:44px">行</th><th>内容</th><th>问题</th></tr></thead><tbody id="i2-dsl-err"></tbody></table>
+          </div>
+          <details class="dslhelp">
+            <summary>语法速查 + as 解码表达式</summary>
+            <div class="hint" id="i2-dsl-help"></div>
+          </details>
+        </fieldset>
+
+        <fieldset id="i2-frag-card">
+          <legend>读分片助手（单次读上限 54 B）<button class="mini foldbtn" data-fold="i2-frag-card">收起</button></legend>
+          <div class="toolrow">
+            <label class="row" style="margin:0"><span style="width:auto">器件</span><input id="i2-frag-dev" value="0x50" size="6"></label>
+            <label class="row" style="margin:0"><span style="width:auto">起始子地址</span><input id="i2-frag-addr" value="0x00" size="6"></label>
+            <label class="row" style="margin:0"><span style="width:auto">总长</span><input id="i2-frag-len" class="num" value="256" inputmode="numeric"><span>B</span></label>
+            <select id="i2-frag-mode" title="地址指针自增：先一次零长度写把指针推到起始地址，之后每片都不带子地址（快一倍，只适合地址自增的器件）。每片重发子地址：FIFO 型器件只能这样">
+              <option value="ptr">地址指针自增（EEPROM / 寄存器型，推荐）</option>
+              <option value="reset">每片重发子地址（FIFO 型器件用）</option>
+            </select>
+            <button id="i2-frag-run" class="mini">生成分片读</button>
+          </div>
+          <p class="hint">读超过 54 B 必须分片。**别拿 FIFO 型器件（读一次弹一个数）用「地址指针自增」** —— 那样丢数据。</p>
+        </fieldset>
+
+        <fieldset id="i2-live-card">
+          <legend>实时值 · while(1) 读的效果<button class="mini foldbtn" data-fold="i2-live-card">收起</button></legend>
+          <div class="toolrow">
+            <span class="hint" id="i2-live-sum" style="margin:0">还没有数据</span>
+            <span class="spacer"></span>
+            <label class="chk" style="margin:0"><input type="checkbox" id="i2-live-spark" checked> 画曲线</label>
+            <button id="i2-live-reset" class="mini">清空</button>
+          </div>
+          <div class="scroll" id="i2-live-wrap">
+            <table class="sp"><thead><tr><th>变量</th><th>最新</th><th>最小</th><th>最大</th><th>次数</th><th>频率</th><th style="width:236px">曲线（最近 120 点）</th></tr></thead>
+            <tbody id="i2-live-body"></tbody></table>
+          </div>
+          <p class="hint">变量来自命令里的 <code>as 名字=表达式</code>。例：<code>rd 0x68 0x3B 14 as ax=i16be(0)/16384, az=i16be(4)/16384</code> —— 加速度直接出 g。</p>
+        </fieldset>
+      </div>
+
+      <div class="logbox" id="i2-logbox">
+        <button id="i2-log-clear" class="mini logclear" title="只清屏上的日志（记录仍在会话里，切页回来会重放）">清空</button>
+        <div id="i2-log" class="log"></div>
+      </div>
+
+      <div class="stats">
+        <span>协议：<code>HID 0x36</code>（控制面 + 数据面同一条报文，事务在主循环执行，主机轮询 RESULT 取结果）</span>
+        <span class="spacer"></span>
+        <span class="hint" style="margin:0">接线与协议细节见 <code>docs/i2c-page.md</code> · 固件侧真源 <code>akaLinkPro/src/i2c_bridge/i2c_bridge_proto.h</code></span>
+      </div>
+    </section>
   </div>
 </section>
 

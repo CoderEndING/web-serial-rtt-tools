@@ -1,0 +1,396 @@
+/**
+ * USB→I2C 桥的**会话层** —— 连接、配置、事务、计数器、日志环。**不碰 DOM**（只读 `document.hidden`）。
+ *
+ * 一句话说清它与 SPI 桥会话的差别：I2C **只有一条 HID 通路**（0x36），没有 bulk 端点、
+ * 没有帧流、没有第二套缓冲。所以这一层比 spi/session.js 简单得多 —— 但要守住三件事：
+ *
+ *   1. **一次只允许一笔在飞**：固件对并发 XFER 回 `E_BUSY`，主机侧也别把请求排队堆起来
+ *      （那是把"忙"当成正常状态用）。这里用一条串行链把事务排队，顺便让定时任务与手动
+ *      点击不会打架。
+ *   2. **必须走"登记 + 轮询 RESULT"**：一次事务最长 ~5 ms（54 B @100 kHz），
+ *      一条 HID 往返拿不到数据。轮询间隔用 `waitMs`（`app/core/pace.js`）——
+ *      页面不可见时 `setTimeout` 的短延时会**被钳到 ≥1 s**，那样一笔 5 ms 的事务要等 1 s。
+ *   3. **探针失联要如实说**：连续几次 HID 超时就置 `lost`，并停掉自动轮询 ——
+ *      否则串口/波形页会被超时错误刷屏（web-handoff §10 明确点了这一条）。
+ */
+import { AkaLinkHid } from '../hid/probe.js';
+import { MockI2cProbe } from './mock.js';
+import { waitMs } from '../core/pace.js';
+import * as P from './protocol.js';
+
+const RING_MAX = 600;          // 日志环（切页时全量重放用）
+const POLL_MS = 1500;          // STATUS 轮询间隔（观察量，1.5 s 够）
+const LOST_AFTER = 3;          // 连续几次超时就判"探针失联"
+const NOT_CONNECTED = '未连接 —— 点「连接探针（授权）」授权 HID（一个探针同时只能被一个页签占着）';
+
+export class I2cSession {
+  constructor(){
+    this.hid = null;                 // 真：AkaLinkHid；假：MockI2cProbe
+    this.usingMock = false;
+    this.cfg = null;                 // {sclHz, pullup, retries, flags, actualSclHz}
+    this.counters = null;
+    this.status = null;              // 最近一次状态字（解析后）
+    this.ring = [];
+    this.subs = new Set();
+    this.busy = false;
+    this.lost = false;
+    this.failStreak = 0;
+    this._chain = Promise.resolve();
+    this._pollTimer = null;
+    this.stateText = NOT_CONNECTED;
+    this.stateKind = '';
+    this.lastOp = null;              // {label, err, ms, n}
+  }
+
+  // ==================================================================== 订阅 / 广播
+
+  subscribe(view){
+    this.subs.add(view);
+    return () => this.subs.delete(view);
+  }
+  _emit(type, payload){
+    for (const v of this.subs){
+      try { v.onSession?.(type, payload); } catch (e){ console.warn('[i2c] 视图回调出错', e); }
+    }
+  }
+  log(kind, text, tag = 'bus'){
+    const e = { kind, text, tag, t: Date.now() };
+    this.ring.push(e);
+    if (this.ring.length > RING_MAX) this.ring.shift();
+    this._emit('log', e);
+  }
+  _setState(text, kind = ''){
+    this.stateText = text; this.stateKind = kind;
+    this._emit('state', this.stateInfo());
+  }
+  stateInfo(){
+    return {
+      connected: this.connected, mock: this.usingMock, lost: this.lost,
+      hidLabel: this.hid?.label || '', text: this.stateText, kind: this.stateKind,
+      busy: this.busy, enabled: this.enabled, cfg: this.cfg, counters: this.counters,
+      status: this.status, lastOp: this.lastOp,
+    };
+  }
+
+  get connected(){ return !!(this.hid && (this.usingMock || this.hid.connected)); }
+  get enabled(){ return !!this.status?.enabled; }
+  get actualSclHz(){ return this.cfg?.actualSclHz || this.counters?.actualSclHz || 0; }
+
+  // ==================================================================== 连接
+
+  /** 连探针（HID）。`interactive=true` 会弹浏览器的授权框（第一次必须）*/
+  async connect(interactive = false, { mock = false } = {}){
+    try {
+      if (mock){
+        if (!this.usingMock || !(this.hid instanceof MockI2cProbe)){
+          await this._dropHid();
+          this.hid = new MockI2cProbe();
+          this.usingMock = true;
+        }
+        this.log('g', '假探针已就位（内置 AT24C02@0x50 / MPU6050@0x68 / ADS1115@0x48 / Si5351@0x60）');
+      } else {
+        if (this.usingMock || !this.hid){
+          await this._dropHid();
+          this.hid = new AkaLinkHid();
+          this.usingMock = false;
+        }
+        if (interactive) await this.hid.request(); else await this.hid.reconnect();
+        this.log('g', `HID 已连接：${this.hid.label || 'akaLinkPro'}`);
+      }
+      this.lost = false; this.failStreak = 0;
+      this.hid.onDisconnect = () => {
+        this.lost = true;
+        this._setState('探针掉线了（拔插一次 USB，或点「重连」）', 'err');
+        this.stopPoll();
+      };
+      // 连接后第一件事：GET_CFG 确认桥的现状（探针复位/重烧后配置会回默认）
+      await this.loadCfg({ quiet: true });
+      await this.readStatus({ quiet: true });
+      this.startPoll();
+      this._setState(this.enabled ? '已连接（桥已使能）' : '已连接（桥还没使能 —— 点「使能」）');
+      return true;
+    } catch (e){
+      this.log('e', '连接失败：' + (e?.message || e));
+      this._setState('连接失败：' + (e?.message || e), 'err');
+      this._emit('state', this.stateInfo());
+      return false;
+    }
+  }
+
+  async _dropHid(){
+    const h = this.hid;
+    this.hid = null;
+    try { await h?.close?.(); } catch { /* 关不掉也继续 */ }
+  }
+
+  async disconnect(){
+    this.stopPoll();
+    try { await this._dropHid(); } catch { /* 同上 */ }
+    this.usingMock = false;
+    this.cfg = null; this.counters = null; this.status = null;
+    this._setState(NOT_CONNECTED);
+  }
+
+  /** 探针重新枚举过（复位/拔插/重烧）→ 重新取设备对象。对"设备侧端点没打开"无效，只有拔插能救 */
+  async reacquire(){
+    if (this.usingMock || !this.hid) return this.connect(false);
+    await this.hid._reacquire();
+    this.lost = false; this.failStreak = 0;
+    this.log('g', '已重新取到探针句柄');
+    await this.loadCfg({ quiet: true });
+    await this.readStatus({ quiet: true });
+    this.startPoll();
+    return true;
+  }
+
+  // ==================================================================== 底层：一条命令
+
+  /**
+   * 把活儿排进**串行链**。
+   * 🚨 这不是可选的：`AkaLinkHid.xfer()` 里同一时刻只允许一条在飞（`if (this._pending) throw
+   *    '上一条请求还没回来'`）。而事务内部要连续发 XFER + 好几条 RESULT，中间还夹着
+   *    1.5 s 一次的 STATUS 轮询 —— 不排队就会互相踩，表现是"偶尔报『上一条请求还没回来』"。
+   */
+  _enqueue(fn){
+    const p = this._chain.then(fn, fn);
+    this._chain = p.catch(() => {});
+    return p;
+  }
+
+  /** **直接**发一条 HID 0x36 命令（调用者负责已经在链里了）。带失联计数。*/
+  async _rawCmd(data, timeout = 3000){
+    if (!this.connected) throw new Error('探针没连上');
+    try {
+      const res = await this.hid.xfer(P.HID_CMD, data, timeout);
+      this.failStreak = 0;
+      return res;
+    } catch (e){
+      this.failStreak++;
+      if (this.failStreak >= LOST_AFTER && !this.lost){
+        this.lost = true;
+        this.stopPoll();
+        this.log('e', `连续 ${this.failStreak} 次没响应 —— 探针可能已失联：先点「重连」，还不行就**拔插一次 USB**（已知现象，见 web-handoff §10）`);
+        this._setState('探针失联：重连 / 拔插 USB', 'err');
+      }
+      throw e;
+    }
+  }
+
+  /** 排队发一条命令（页面上的按钮 / 轮询走这条）*/
+  _cmd(data, timeout = 3000){ return this._enqueue(() => this._rawCmd(data, timeout)); }
+
+  /**
+   * 一次事务（**登记 + 轮询 RESULT**），串行排队。
+   * @returns {Promise<{err:number, data:Uint8Array, cmdRc:number, ms:number, tries:number}>}
+   */
+  transaction(x, { label = '', quiet = false, resultTimeout = 2000 } = {}){
+    return this._enqueue(async () => {
+      if (this.lost) throw new Error('探针失联中：先重连或拔插 USB');
+      const t0 = performance.now();
+      let tries = 0, r1;
+      // 1) 登记（忙就重发 —— 固件明说"等一下重发"，别把它当失败）
+      for (;;){
+        tries++;
+        r1 = await this._rawCmd(P.actXfer(x));
+        const rc = P.parseStatus(r1).cmdRc;
+        if (rc === P.E.OK) break;
+        if (rc === P.E.BUSY && tries < 20){ await waitMs(1); continue; }
+        const ms = performance.now() - t0;
+        this.lastOp = { label, err: rc, ms, n: 0 };
+        this._emit('op', this.lastOp);
+        if (!quiet) this.log('e', `${label || P.describeXfer(x)} —— 被拒：${P.errText(rc)}`);
+        return { err: rc, data: new Uint8Array(0), cmdRc: rc, ms, tries };
+      }
+      // 2) 轮询 RESULT 到 PENDING 清零
+      //
+      // 🚨 **跳出条件只能是 PENDING 清零**，别拿"完成计数（DONE_CNT）变了"当条件：
+      //    DONE_CNT 数的是**成功**事务，失败的那一笔它不动 —— 于是每笔失败都要白等满
+      //    `resultTimeout`（默认 2 s）。实测就是这么被咬的：向不存在的地址发一笔，
+      //    2 s 才回来；扫描里几十个空地址就是好几分钟。
+      //    （协议文档建议"想更严谨就比对 DONE_CNT"—— 那是在 PENDING 之外**额外**记一笔账，
+      //      不是拿它当唯一判据。）
+      const deadline = performance.now() + resultTimeout;
+      let r = null;
+      for (;;){
+        r = await this._rawCmd(P.actResult());
+        const st = P.parseStatus(r);
+        this.status = st;
+        if (!st.pending) break;
+        if (performance.now() > deadline){
+          const ms = performance.now() - t0;
+          this.lastOp = { label, err: P.E_HOST_TIMEOUT, ms, n: 0 };
+          this._emit('op', this.lastOp);
+          if (!quiet) this.log('e', `${label || P.describeXfer(x)} —— 等 RESULT 超时（探针侧 ${resultTimeout} ms 没做完这一笔）`);
+          return { err: P.E_HOST_TIMEOUT, data: new Uint8Array(0), cmdRc: 0, ms, tries };
+        }
+        await waitMs(1);
+      }
+      const { err, data } = P.parseResult(r);
+      const ms = performance.now() - t0;
+      this.lastOp = { label, err, ms, n: data.length };
+      this._emit('op', this.lastOp);
+      if (!quiet){
+        const head = label || P.describeXfer(x);
+        if (err === P.E.OK) this.log('ok', `${head} → ${P.hexBytes(data) || '（无数据）'}  · ${ms.toFixed(1)} ms`);
+        else this.log('e', `${head} → ${P.errText(err)}`);
+      }
+      return { err, data, cmdRc: 0, ms, tries };
+    });
+  }
+
+  // ==================================================================== 上层动作
+
+  async loadCfg({ quiet = false } = {}){
+    const r = await this._cmd(P.actGetCfg());
+    const cfg = P.parseCfg(P.dataOf(r).subarray(0, P.CFG_SIZE));
+    this.cfg = cfg;
+    this._emit('cfg', cfg);
+    if (!quiet) this.log('g', `配置：SCL 档 ${cfg.actualSclHz / 1000} kHz（请求 ${cfg.sclHz}）· 内部上拉 ${cfg.pullup ? '开' : '关'} · 重试 ${cfg.retries}`);
+    return cfg;
+  }
+
+  async applyCfg(cfg){
+    const r = await this._cmd(P.actSetCfg(cfg));
+    const rc = P.parseStatus(r).cmdRc;
+    if (rc !== P.E.OK){ this.log('e', `写配置被拒：${P.errText(rc)}`); return null; }
+    this.log('g', `已下发配置：请求 SCL ${cfg.sclHz} · 上拉 ${cfg.pullup ? '开' : '关'} · 重试 ${cfg.retries}`);
+    return await this.loadCfg({ quiet: true });
+  }
+
+  async setEnabled(on){
+    const r = await this._cmd(P.actEnable(on));
+    const st = P.parseStatus(r);
+    this.status = st;
+    this._emit('status', st);
+    this.log(on ? 'g' : 'w', on
+      ? `桥已使能（PA28=SDA / PA29=SCL 已被 I2C 占用；⚠️ 使能期间 SPI 桥的辅助脚 pad16/17 会被拒）`
+      : '桥已失能（两根脚放成高阻输入）');
+    // 状态栏文案也要跟着变 —— 不然自动使能之后还挂着"桥还没使能"（实测就这么误导过一次）
+    this._setState(this.enabled ? '已连接（桥已使能）' : '已连接（桥还没使能 —— 点「使能」）');
+    this.startPoll();
+    return st.enabled;
+  }
+
+  async busReset(){
+    const r = await this._cmd(P.actReset());
+    const rc = P.parseStatus(r).cmdRc;
+    if (rc !== P.E.OK){ this.log('e', `总线恢复被拒：${P.errText(rc)}`); return false; }
+    const { err } = await this._waitResult(2000);
+    this.log(err === P.E.OK ? 'g' : 'e', `总线恢复：9 个 SCL 脉冲 + STOP + 控制器复位 → ${P.errText(err)}（计数器已清零）`);
+    await this.readStatus({ quiet: true });
+    return err === P.E.OK;
+  }
+
+  /** 只轮询 RESULT（给 RESET/SCAN 这种"登记后没有返回值"的动作用）*/
+  async _waitResult(timeout = 2000){
+    const deadline = performance.now() + timeout;
+    for (;;){
+      const r = await this._cmd(P.actResult());
+      const st = P.parseStatus(r);
+      this.status = st;
+      this._emit('status', st);
+      if (!st.pending){ const { err, data } = P.parseResult(r); return { err, data }; }
+      if (performance.now() > deadline) return { err: P.E_HOST_TIMEOUT, data: new Uint8Array(0) };
+      await waitMs(1);
+    }
+  }
+
+  async readStatus({ quiet = false } = {}){
+    const r = await this._cmd(P.actStatus());
+    const st = P.parseStatus(r);
+    const c = P.parseCounters(P.dataOf(r).subarray(0, P.STAT_WORDS * 4));
+    this.status = st; this.counters = c;
+    this._emit('status', st);
+    this._emit('counters', c);
+    if (!quiet){
+      this.log('dim', `状态 0x${st.raw.toString(16).padStart(8, '0')} ` +
+        `[${st.enabled ? 'EN' : '--'}${st.pending ? ' PEND' : ''}${st.busOk ? ' BUSOK' : ''}` +
+        `${st.sda ? ' SDA=1' : ' SDA=0'}${st.scl ? ' SCL=1' : ' SCL=0'}] ` +
+        `ok=${c.framesOk} err=${c.framesErr} tx=${c.bytesTx}B rx=${c.bytesRx}B ` +
+        `nackA=${c.nackAddr} nackD=${c.nackData} to=${c.timeouts} recover=${c.busRecover}`);
+    }
+    return { status: st, counters: c };
+  }
+
+  /** 扫描 0x08..0x77 → 地址数组 */
+  async scan(){
+    const r = await this._cmd(P.actScan());
+    const rc = P.parseStatus(r).cmdRc;
+    if (rc !== P.E.OK){
+      const msg = `扫描被拒：${P.errText(rc)}`;
+      this.log('e', msg);
+      throw new Error(msg);
+    }
+    const t0 = performance.now();
+    const { err, data } = await this._waitResult(6000);
+    const ms = performance.now() - t0;
+    if (err !== P.E.OK){
+      const msg = `扫描失败：${P.errText(err)}`;
+      this.log('e', msg);
+      throw new Error(msg);
+    }
+    const addrs = P.scanBitmapToAddrs(data);
+    this.log(addrs.length ? 'ok' : 'warn', addrs.length
+      ? `扫描完成（${ms.toFixed(0)} ms）：` + addrs.map(a => `${P.addr7(a)}${P.guessDevice(a) ? '(' + P.guessDevice(a) + ')' : ''}`).join(' · ')
+      : `扫描完成（${ms.toFixed(0)} ms）：总线上**没有任何器件应答** —— 先跑「接线自检(PINTEST)」，再查供电/上拉/地址`);
+    await this.readStatus({ quiet: true });
+    return { addrs, ms };
+  }
+
+  async pinTest(){
+    const r = await this._cmd(P.actPinTest());
+    const st = P.parseStatus(r);
+    if (st.cmdRc !== P.E.OK){
+      // PINTEST 会发一次真实探测事务，总线忙时会被拒 —— 这是正常的，等一下再来
+      this.log('e', `接线自检被拒：${P.errText(st.cmdRc)}`);
+      return null;
+    }
+    const v = P.parsePinTest(P.dataOf(r).subarray(0, 4));
+    this.log(v.bridgeOk ? 'g' : 'e',
+      `接线自检：空闲 SDA=${v.idleSda} SCL=${v.idleScl} · 开内部上拉后 SDA=${v.pullupSda} SCL=${v.pullupScl} · ` +
+      `事务中曾拉低 SCL=${v.droveScl} SDA=${v.droveSda}` +
+      (v.problems.length ? ` · 问题：${v.problems.join('；')}` : ''));
+    if (v.bridgeOk) this.log('dim', 'bit16=1 且问题位图=0 ⇒ **桥这一侧没问题**，没 ACK 就往器件侧查（接线/供电/地址/上拉）');
+    this._emit('pintest', v);
+    return v;
+  }
+
+  async dbg(){
+    const r = await this._cmd(P.actDbg());
+    const rows = P.parseDbg(P.dataOf(r));
+    this.log('dim', '现场快照：' + rows.map(x => `${x.name}=0x${x.value.toString(16).padStart(8, '0')}`).join(' '));
+    this._emit('dbg', rows);
+    return rows;
+  }
+
+  // ==================================================================== 自动轮询
+
+  startPoll(){
+    if (this._pollTimer || !this.connected) return;
+    this.stopPoll();
+    this._pollTimer = setInterval(() => {
+      // 页面看不见时别刷（省 USB 带宽，也免得和别的页签抢探针）
+      if (typeof document !== 'undefined' && document.hidden) return;
+      if (this.lost) return;
+      // ⚠️ 这里**不看** `busy`：定时循环跑着的时候计数器正是最该看的。冲突由串行链解决。
+      this.readStatus({ quiet: true }).catch(() => { /* 失联由 _rawCmd 记账 */ });
+    }, POLL_MS);
+  }
+  stopPoll(){
+    if (this._pollTimer){ clearInterval(this._pollTimer); this._pollTimer = null; }
+  }
+
+  /** 忙碌标记（执行器跑一整段时置上，避免自动轮询插进来抢 HID）*/
+  setBusy(on){
+    this.busy = !!on;
+    this._emit('state', this.stateInfo());
+  }
+
+  summary(){
+    return {
+      connected: this.connected, mock: this.usingMock, lost: this.lost,
+      enabled: this.enabled, cfg: this.cfg, counters: this.counters,
+      ringLines: this.ring.length, lastOp: this.lastOp,
+    };
+  }
+}

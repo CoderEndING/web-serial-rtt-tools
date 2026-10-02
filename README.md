@@ -15,6 +15,7 @@
 | **烧录器** | .elf/.hex/.bin 写进目标：**零安装 WebUSB**（页面跑 flashloader，擦/写/校验/复位一条龙）或**本地桥 OpenOCD** | 零安装：同上探针；桥：OpenOCD |
 | **SPI/QSPI 桥** | 探针当 USB→SPI/QSPI 主站：通用命令表 / 手写帧 DSL / 回环自检 / 外接 NOR Flash 测试；SCLK、模式、CS 策略、辅助脚与有效电平都在这里配 | akaLinkPro 探针（HID `0x35` 控制面 + bulk 帧流）；方案见 [`docs/spi-bridge-page.md`](docs/spi-bridge-page.md) |
 | **SPI/QSPI 屏** | 把屏点亮那一页：**面板初始化**（贴 C 数组 → 解析成步骤表 → 重放；每个字节可直接改、点开看/改它的 8 个 bit）+ **图片/图案刷屏**（开窗对齐、492 B 切片、两档面板档）+ **动画/视频**（MP4/WebM/GIF 逐帧整屏刷，发送当节拍器） | 与「SPI/QSPI 桥」页**共用同一次连接** |
+| **USB→I2C** | 探针当 **USB 转 I2C 主机**：**扫描总线**（0x08..0x77）、**多行命令表**（读/写/探测/延时，一行一次事务）、**脚本区**（贴 C 表或写脚本，`loop 100ms … end` 就是 while(1) 定时读/写）、读分片助手、`as` 解码表达式把字节变成有名字的量（g / ℃ / V）+ **实时值面板画曲线**。内置 **AT24C02 / MPU6050 / ADS1115 / Si5351** 四个模块示例，后两个是传感器，示例里直接做成 while(1) 连续采样 | akaLinkPro 探针（HID `0x36`，**只走 HID** 一条通路）；**仅 HPM5301EVKLite** 固件；方案见 [`docs/i2c-page.md`](docs/i2c-page.md) |
 | **工程生成** | 拖进 Keil `.uvprojx` 就能生成调试/下载配套文件：`Makefile.jlink`、`jlink_gdb.script`、`Makefile.pyocd`、`Makefile.openocd`（连带 `rtt_logger.py`）、`test_sram.bin`；参数可填可勾，产物**实时预览** | 不需要任何硬件/后端（纯前端生成） |
 
 > 为什么 RTT 要分三种后端：J-Link 与 OpenOCD 都是**本机程序**，网页无权启动进程、也无权开 TCP。
@@ -45,6 +46,10 @@
 | 调试器（零安装 · 暂停/继续/单步/复位 · 寄存器可直接改 · 内存 hexdump · 硬件断点 · gdb 风格命令行 · RTT 同屏） |
 |---|
 | ![调试器](docs/shots/14-dbg.png) |
+
+| USB→I2C（假探针 · 扫描到 4 个器件 · 命令表在跑 while(1)：MPU6050 每 50 ms 读 14 B 解出 ax/ay/az，ADS1115 每 200 ms 读电压 · 脚本区载着 MPU6050 示例） |
+|---|
+| ![USB→I2C](docs/shots/15-i2c.png) |
 
 （截图里第一个标签用的是**内置演示串口**，所以显示的是假设备；`?demo=serial` 就能自己试。）
 

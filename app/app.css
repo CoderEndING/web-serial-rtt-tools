@@ -505,6 +505,71 @@ fieldset.folded > legend::after{content:' · 已折叠';color:var(--fg2);font-si
 #sp-pinmap-miss{color:#ffd479}
 #sp-pinmap-miss:empty{display:none}
 
+/* ============================ USB→I2C 桥（#tab-i2c） ============================
+   布局与 #tab-spi 同构（左栏连接/配置/状态，右栏 扫描 → 命令表 → 脚本 → 实时值 + 日志），
+   所以下面大半是照抄那份的度量，改一边记得看另一边。 */
+#tab-i2c .side .row>span:first-child,#tab-i2c .row>span:first-child{width:74px}
+#tab-i2c .busstack{display:flex;flex-direction:column;gap:9px;overflow:auto;flex:1 1 auto;min-height:0;padding-right:2px}
+#tab-i2c .busstack>fieldset{min-width:0}
+#tab-i2c .toolrow{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:0 0 6px}
+#tab-i2c .toolrow.nw{flex-wrap:nowrap;overflow:hidden}
+#tab-i2c .toolrow>span:first-child{color:var(--fg2);font-size:12px;flex:none}
+#tab-i2c .toolrow select{max-width:330px}
+#tab-i2c .toolrow.nw #i2-dsl-sum{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#tab-i2c .toolrow.nw button{flex:none}
+/* 命令表：行高压紧 + 自己限高滚动（矮窗口下这一块最容易把中列占满，同 #spi 的处置） */
+#tab-i2c .scroll.cmdscroll{max-height:172px;overflow:auto;margin-top:2px}
+#tab-i2c table.cmdtab{font-size:11.5px}
+#tab-i2c table.cmdtab th{padding:1px 4px;white-space:nowrap;position:sticky;top:0;background:var(--bg2);z-index:1}
+#tab-i2c table.cmdtab td{padding:0 3px}
+#tab-i2c table.cmdtab td.idx{color:var(--fg2);width:18px;text-align:right;padding-right:5px}
+#tab-i2c table.cmdtab td.res{font-size:11px;white-space:nowrap;max-width:260px;overflow:hidden;text-overflow:ellipsis}
+#tab-i2c table.cmdtab td.res.ok{color:var(--ok)}
+#tab-i2c table.cmdtab td.res.bad{color:var(--err)}
+#tab-i2c table.cmdtab td.res.warn{color:var(--warn)}
+#tab-i2c table.cmdtab td.res.dim{color:var(--fg2)}
+#tab-i2c input.cell,#tab-i2c select.cell{
+  width:100%;padding:0 4px;height:20px;font-family:var(--mono);font-size:11.5px;background:var(--bg3);
+  border:1px solid var(--line);border-radius:5px;color:var(--fg);
+}
+#tab-i2c select.cell{padding:0}
+#tab-i2c input.cell:focus{outline:1px solid var(--acc);border-color:var(--acc)}
+#tab-i2c input.cell:disabled,#tab-i2c select.cell:disabled{opacity:.35;background:transparent;border-color:transparent}
+/* 列宽：操作/器件/子地址/数据/读长/解码/周期/结果。
+   数据列跟着窗口伸缩、结果列固定 —— 只固定一边的话宽窗口下另一边会失控（同 #spi 的教训） */
+#tab-i2c table.cmdtab th:nth-child(2){width:60px}
+#tab-i2c table.cmdtab th:nth-child(3){width:62px}
+#tab-i2c table.cmdtab th:nth-child(4){width:78px}
+#tab-i2c table.cmdtab th:nth-child(5){width:auto}
+#tab-i2c table.cmdtab th:nth-child(6){width:52px}
+#tab-i2c table.cmdtab th:nth-child(7){width:auto}
+#tab-i2c table.cmdtab th:nth-child(8){width:82px}
+#tab-i2c table.cmdtab th:nth-child(9){width:240px}
+#i2-dsl-text{
+  width:100%;min-height:118px;max-height:300px;font-family:var(--mono);font-size:12px;line-height:1.45;
+  resize:vertical;white-space:pre-wrap;overflow-wrap:anywhere;overflow-x:hidden;overflow-y:auto;
+}
+#tab-i2c .dslhelp{margin-top:5px}
+#tab-i2c .dslhelp summary{color:var(--fg2);font-size:12px;cursor:pointer}
+#tab-i2c .dslhelp .hint{white-space:pre-wrap;font-family:var(--mono);font-size:11.5px;line-height:1.5;margin:5px 0 0}
+#tab-i2c .scroll{overflow:auto;max-height:200px;border:1px solid var(--line);border-radius:8px;margin-top:6px}
+#tab-i2c #i2-scan-wrap{max-height:132px}
+#tab-i2c #i2-live-wrap{max-height:158px}
+#tab-i2c #i2-logbox{flex:0 0 auto;height:22%;min-height:96px;display:flex;flex-direction:column}
+#tab-i2c #i2-logbox .log{height:100%;min-height:0;flex:1 1 auto}
+#tab-i2c .logbox{position:relative}
+#tab-i2c .logclear{position:absolute;top:4px;right:10px;z-index:3;opacity:.9}
+/* 扫到的那一行被"选用"时高亮（一眼看出当前选的是哪个器件） */
+#tab-i2c #i2-scan-body tr.on{background:rgba(74,163,255,.13)}
+#tab-i2c #i2-scan-body tr.on td:first-child{color:var(--acc)}
+#tab-i2c #i2-scan-body button{margin-right:4px}
+#tab-i2c #i2-live-body canvas.spark{display:block;width:220px;height:20px}
+#tab-i2c #i2-live-body td{padding:1px 6px}
+#tab-i2c #i2-dsl-sum.ok{color:var(--ok)}
+#tab-i2c #i2-dsl-sum.warn{color:var(--warn)}
+#tab-i2c #i2-dsl-sum.err{color:var(--err)}
+#tab-i2c #i2-frag-card .row>span:first-child{width:auto}
+
 /* ============================ 调试器（#tab-dbg） ============================ */
 /**
  * 版式（2026-10-02 按用户要求照 Ozone 重排）：

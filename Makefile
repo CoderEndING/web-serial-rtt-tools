@@ -31,7 +31,7 @@ LA       = tools/la/kingst_la.py
 .DEFAULT_GOAL := help
 .PHONY: help serve serve-dev serve-stop browser open page-prep test test-ui test-gen test-gen-page gen-embed samples-anim test-hid test-dwarf test-scope test-scope-page test-scope-render test-spi test-read test-spi-page test-hw test-record test-bridge test-bridge-gate test-hpm test-image test-all test-dbg test-dbg-page test-dbg-hw test-idcode test-dsl test-flash flash-timing hw-campaign hw-campaign-hpm campaign-summary \
         bridge bridge-stop fw-build fw-flash fw-restore fw-h7-build fw-h7-slow fw-h7-flash \
-        algo-check flash-plan la-info la-capture git-status git-log check clean spi-hw spi-flow
+        algo-check flash-plan la-info la-capture git-status git-log check clean spi-hw spi-flow i2c-hw
 
 help:
 	pwsh -NoProfile -ExecutionPolicy Bypass -File tools/dev/help.ps1
@@ -85,6 +85,20 @@ test:
 	$(NODE) tools/selftest/spi-flash.test.mjs
 	$(NODE) tools/selftest/stm32-devid.test.mjs
 	$(NODE) tools/selftest/dbg-core.test.mjs
+	$(NODE) tools/selftest/i2c-proto.test.mjs
+	$(NODE) tools/selftest/i2c-dsl.test.mjs
+
+# USB→I2C 页的协议层 + 假探针 + 假器件（AT24C02/MPU6050/ADS1115/Si5351）—— 不需要硬件
+test-i2c:
+	$(NODE) tools/selftest/i2c-proto.test.mjs
+
+# USB→I2C 页的命令协议（DSL + C 表 + as 解码 + 表格互转）+ 四个模块示例必须零错误
+test-i2c-dsl:
+	$(NODE) tools/selftest/i2c-dsl.test.mjs
+
+# USB→I2C 页的真页面验收（假探针，不需要硬件；需要 8899 服务 + 9333 CDP 浏览器）
+test-i2c-page: page-prep
+	$(NODE) tools/selftest/i2c-page.test.mjs
 
 # 调试器页的逻辑层（纯 Node）：寄存器位域 / FPB 断点编码 / 命令解析 / 符号表 +
 # 拿内置假目标真跑一遍「连接 → 读寄存器 → 写内存 → 下断点 → 继续 → 命中断点 → 单步 → 复位」
@@ -203,6 +217,12 @@ spi-hw: page-prep
 #   打开 web -> 连接探针 -> 初始化屏 -> 发图 x3 -> 再次初始化屏 -> 发图 x3
 spi-flow: page-prep
 	$(NODE) tools/selftest/spi-hw-flow.mjs $(ARGS)
+
+# USB→I2C 页的真机冒烟（真探针 + 真 I2C 器件）：扫描 → PINTEST → 读写 → 定时读
+#   make i2c-hw                       # 默认 AT24C02@0x50，只读 + 一次页写回读（会还原）
+#   make i2c-hw ARGS="--dev=0x68"     # 换器件地址（探测 + 只读，不做写）
+i2c-hw: page-prep
+	$(NODE) tools/selftest/i2c-hw.mjs $(ARGS)
 
 # ---------------------------------------------------------------- 页面类脚本的共同前置
 # 8899 静态服务 + 9333 CDP 浏览器（哪个不在就起哪个）。
@@ -354,6 +374,14 @@ check:
 	$(NODE) --check app/dbg/session.js
 	$(NODE) --check app/dbg/mock.js
 	$(NODE) --check app/dbg/view.js
+	$(NODE) --check app/i2c/protocol.js
+	$(NODE) --check app/i2c/mock.js
+	$(NODE) --check app/i2c/expr.js
+	$(NODE) --check app/i2c/dsl.js
+	$(NODE) --check app/i2c/session.js
+	$(NODE) --check app/i2c/runner.js
+	$(NODE) --check app/i2c/presets.js
+	$(NODE) --check app/i2c/view.js
 	$(NODE) --check app/main.js
 	$(NODE) --check bridge/rtt-bridge.mjs
 	pwsh -NoProfile -Command "Write-Host '语法检查通过'"

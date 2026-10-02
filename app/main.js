@@ -17,6 +17,7 @@ import { DbgView } from './dbg/view.js';
 import { SpiSession } from './spi/session.js';
 import { SpiBusView } from './spi/bus-view.js';
 import { SpiPanelView } from './spi/panel-view.js';
+import { I2cView } from './i2c/view.js';
 import { ProbeBus, closeProbeUsbDevices } from './core/probe-bus.js';
 import { toast } from './ui/toast.js';
 import { BUILD } from './core/build.js';
@@ -41,6 +42,8 @@ const dbg = new DbgView();
 const spiSession = new SpiSession();
 const spi = new SpiBusView(spiSession);
 const panel = new SpiPanelView(spiSession);
+// USB→I2C 转发桥（#i2c）：HID 0x36，只走 HID 一条通路（没有 bulk 端点）
+const i2c = new I2cView();
 
 assistant.init();
 terminal.init();
@@ -53,6 +56,7 @@ scope.init();
 spi.init();
 panel.init();
 dbg.init();
+i2c.init();
 
 initTabs(name => {
   if (name === 'terminal') requestAnimationFrame(() => terminal.onShow());
@@ -62,6 +66,7 @@ initTabs(name => {
   if (name === 'spi') requestAnimationFrame(() => spi.onShow());
   if (name === 'panel') requestAnimationFrame(() => panel.onShow());
   if (name === 'dbg') requestAnimationFrame(() => dbg.onShow());
+  if (name === 'i2c') requestAnimationFrame(() => i2c.onShow());
   if (name === 'gen') requestAnimationFrame(() => gen.onShow());
 });
 
@@ -94,6 +99,11 @@ probeBus.onRelease = async why => {
     // 调试器：占着探针（可能还在单步/轮询），让位时一并断开
     if (dbg.session?.connected){ await dbg.disconnect(); done.push('调试会话'); }
   } catch { /* 同上 */ }
+  try {
+    // USB→I2C 桥：占着 HID（而且可能正在跑 while(1) 定时读），让位时连会话一起停
+    if (i2c.runner?.running) i2c.runner.stop();
+    if (i2c.session?.connected){ await i2c.session.disconnect(); done.push('I2C 桥会话'); }
+  } catch { /* 同上 */ }
   // 🚨 最后一步**必须**把本页签的探针 USB 句柄都关掉：视图那边可能早就"断开"了、
   //    只是引用丢了没 close()，而浏览器仍然认为接口被这个页签占着 —— 不关的话
   //    请求方那边怎么重试都认领不上（见 core/probe-bus.js 的 closeProbeUsbDevices）。
@@ -123,6 +133,7 @@ function summary(){
     spi: spi?.summary?.() || null,
     panel: panel?.summary?.() || null,
     dbg: dbg?.summary?.() || null,
+    i2c: i2c?.summary?.() || null,
     vendor: 'serial-rtt-tools',
   };
 }
@@ -135,8 +146,10 @@ document.body.appendChild(box);
 flash.bus = probeBus;
 // 调试器同理：连之前先请别的页签放掉探针（跨页签协调是必需的，不是锦上添花）
 dbg.bus = probeBus;
+// USB→I2C 桥同理：连接前先请别的页签让位（HID 一个探针只能被一个页签占着）
+i2c.bus = probeBus;
 
-window.__tools = { session, assistant, terminal, rtt, flash, gen, hid, stream, scope, spi, panel, dbg, spiSession, probeBus, summary, errors };
+window.__tools = { session, assistant, terminal, rtt, flash, gen, hid, stream, scope, spi, panel, dbg, i2c, spiSession, probeBus, summary, errors };
 
 /**
  * 拆掉加载遮罩 —— 放在这里（所有 view 都 init 完、__tools 挂好之后）。
