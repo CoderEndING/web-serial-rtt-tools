@@ -88,6 +88,14 @@ export const errName = code => ERR_NAME[code] || `E_${code}`;
 // ============================================================================
 export const WR_MAX = 51;          // 单次写数据字节
 export const RD_MAX = 54;          // 单次读数据字节
+/**
+ * 一次**逻辑读**的自动分片上限。
+ * 单次 54 B 是 HID 报文的限制（响应侧只有 56 B 装数据），属于实现细节 —— 填命令的人
+ * 不该每次都自己拆。所以 `rd 0x50 0x00 256` 会被 `session.readLong()` 自动拆成 5 笔、
+ * 拼回一整块再交出去（日志只出一行）。写**不**自动分片：EEPROM 页写跨页会绕回页首，
+ * 自动拆是危险的（见 docs/i2c-page.md）。
+ */
+export const RD_TOTAL_MAX = 4096;
 export const ADDR_MAX = 4;         // 子地址字节数
 export const XFER_HDR = 9;         // flags/dev/addr_len/wr_len/rd_len/addr(4)
 export const SCAN_FIRST = 0x08;
@@ -315,35 +323,44 @@ export function describeXfer({ dev, addr = [], wr = [], rd = 0 }){
 }
 
 /**
- * 大块读的**分片计划**（纯函数，Node 自测直接打）。
+ * 大块读的**分片计划**（纯函数，Node 自测直接打；`session.readLong()` 就是按它执行的）。
  *
  * 读跨越 54 B 就必须分片。两种办法：
- *   · `'ptr'`（推荐，EEPROM / 多数传感器支持地址自增）：先发一次"把地址指针推到 start"的
- *     **零长度写**（addr=[start], wr=0, rd=0 → 线上就是 `START dev+W + 子地址 + STOP`，
+ *   · `'reset'`（**默认**，每片都重新写子地址）：对 EEPROM、寄存器型器件（MPU6050/ADS1115/
+ *     Si5351）全都成立 —— 每片是"START dev+W + 子地址 + rSTART dev+R + 读 + STOP"，
+ *     语义上等价于把一次长读拆开，**最稳**，慢一倍。
+ *   · `'ptr'`（地址指针自增）：先发一次"把地址指针推到 start"的**零长度写**
+ *     （addr=[start], wr=0, rd=0 → 线上就是 `START dev+W + 子地址 + STOP`，
  *     正好是设置地址指针，一个数据字节都不写），再分片 `rd 54、54、…`（每片 addr_len=0），
- *     器件的内部地址指针会在片间自增。
- *   · `'reset'`（FIFO 型器件只能这样，每片都重新写子地址）：每片都带 addr，最稳但慢一倍。
+ *     器件的内部地址指针会在片间自增。**FIFO 型器件只能用这个**（读一次弹一个数，
+ *     每片重发子地址会把数据丢光）；反过来，读一次弹一个数的器件也不能用 'reset'。
  *
- * ⚠️ 读一次就弹一个数的 FIFO 器件**不能**用 `'ptr'`。
+ * ⚠️ 子地址为空（addr_len=0）时 `'reset'` 退化成"连着发 N 笔纯读" —— 没有子地址可递增，
+ *    这是唯一能做的；能不能接上完全看器件自己（多数寄存器型器件会接着上次的指针走）。
  *
- * @returns {{cmds:Array<{addr:number[],wr:number[],rd:number,note:string}>, total:number}}
+ * @returns {{cmds:Array<{addr:number[],wr:number[],rd:number,note:string}>, total:number, mode:string}}
  */
-export function planRead(start, len, { mode = 'ptr', dev = 0, addrLen = 1 } = {}){
+export function planRead(start, len, { mode = 'reset', addrLen } = {}){
   const cmds = [];
   const total = Math.max(0, len | 0);
-  if (!total) return { cmds, total: 0 };
-  const base = Array.from(start || []).slice(0, addrLen);
-  if (mode === 'reset'){
+  const m = mode === 'ptr' ? 'ptr' : 'reset';
+  if (!total) return { cmds, total: 0, mode: m };
+  const src = Array.from(start || []);
+  // 🚨 默认按**实际的子地址字节数**截取，不能固定 1：`planRead([0x00,0x10], 256)` 曾被
+  //    截成 [0x00]，第二个地址字节直接丢了（读 AT24C32 那种 2 字节地址的片子会全错）。
+  const n = addrLen == null ? src.length : Math.max(0, Math.min(ADDR_MAX, addrLen | 0));
+  const base = src.slice(0, n);
+  if (m === 'reset'){
     for (let off = 0; off < total; off += RD_MAX){
       cmds.push({ addr: bump(base, off), wr: [], rd: Math.min(RD_MAX, total - off), note: `片@+${off}` });
     }
-    return { cmds, total };
+    return { cmds, total, mode: m };
   }
-  cmds.push({ addr: base, wr: [], rd: 0, note: '设地址指针' });
+  if (base.length) cmds.push({ addr: base, wr: [], rd: 0, note: '设地址指针' });
   for (let off = 0; off < total; off += RD_MAX){
     cmds.push({ addr: [], wr: [], rd: Math.min(RD_MAX, total - off), note: `续读@+${off}` });
   }
-  return { cmds, total };
+  return { cmds, total, mode: m };
 }
 
 /** 子地址按"原序字节"做加法（EEPROM 是 8 位地址就只加最低字节） */

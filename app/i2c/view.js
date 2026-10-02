@@ -1,21 +1,24 @@
 /**
  * 「USB→I2C」页（`#i2c`）—— 只管 DOM。协议/会话/执行器都在各自的模块里。
  *
- * 页面的三块主区，对应三种干活方式：
- *   ① **扫描**：一条 SCAN 拿回 0x08..0x77 的位图，点一行就选中器件；
- *   ② **多行命令编辑区**（表格）：一行一次事务，能一条条看着结果改参数；
- *   ③ **脚本区**（贴 C 表 / 脚本）：整段贴下去跑，支持 `loop … end` 定时段
- *      —— 这就是"while(1)"，MPU6050 / ADS1115 的示例就是靠它一直在读。
- * 再加一块 **实时值**：`as` 解码出来的命名变量（加速度 / 电压 / 温度）实时显示 + 小曲线，
- * 让「定时读传感器」这个效果看得见，而不是一屏跳动的十六进制。
+ * 右列是一个**带 tab 的面板**（照「调试器」页 `#tab-dbg` 的 `.docktabs` / `.dockpage` 那套）：
+ *   [扫描总线] [命令表] [脚本] [实时值]        + 运行胶囊 / 停止
+ * 下面常驻**日志**（可拖高）与统计条。
+ * 为什么是 tab：原来五张卡片纵向堆在一个滚动区里、每张被迫限高（命令表只能看见 7 行、
+ * 脚本框一屏就满），而且"正在跑的结果"和"实时值"永远没法同屏。tab 化之后每块吃满高度；
+ * 日志与运行状态**仍然常驻** —— 那是 tab 化之后唯一的过程视图，不能一起藏起来。
  *
- * 🚨 两条本项目的硬纪律（别改回去）：
+ * 🚨 三条本项目的硬纪律（别改回去）：
  *   1. **DOM 只写在冷路径上**：表格结果列与实时值面板都用 rAF 合并（一帧最多刷一次），
  *      日志用 `appendLogLine`（滚动也是 rAF 合并的）。理由见 2026-10-01 的性能定标 ——
  *      在热路径里同步写可见元素一次就 ~5 ms，读 `scrollHeight` 一次 ~17 ms。
  *   2. **短等待用 pace.js**：页面里的轮询间隔走 `waitMs`，见 session.js。
+ *   3. **隐藏 tab 里的画布量不到尺寸**：切到「实时值」时必须重画一次（`display:none` 时
+ *      canvas 的 clientWidth 是 0，曲线会画成空白）；同理切回「命令表」要补一次结果 flush
+ *      （浏览器会把隐藏页面的 rAF 降频甚至挂起）。
  */
 import { $, appendLogLine, setStatus } from '../ui/dom.js';
+import { store } from '../core/store.js';
 import { I2cSession } from './session.js';
 import { ScriptRunner, buildTasks } from './runner.js';
 import { PRESETS, presetById, DEFAULT_PRESET } from './presets.js';
@@ -23,9 +26,10 @@ import {
   parseScript, toCTable, toText, toJson, fromJson, describeItem, SYNTAX_HELP, KIND,
 } from './dsl.js';
 import { AS_HELP } from './expr.js';
-import { hex2, hexBytes, addr7, guessDevice, errText, ticksToUs, addr7 as a7 } from './protocol.js';
+import { RD_MAX, RD_TOTAL_MAX, hex2, hexBytes, addr7, guessDevice, errText, ticksToUs, addr7 as a7 } from './protocol.js';
 
 const MAX_ROWS = 24;
+const DOCKS = ['scan', 'cmd', 'dsl', 'live'];
 const OP_NAME = { rd: '读', wr: '写', ping: '探测', delay: '延时' };
 /** 每种操作哪些格子可编辑（其余灰掉）—— 一格一格灰比塞四个下拉更省地方，也更不容易填错 */
 const OP_CELLS = {
@@ -35,13 +39,21 @@ const OP_CELLS = {
   delay: { dev: 0, addr: 0, data: 1, rd: 0, as: 0, period: 1 },
 };
 const CELL_HINT = {
-  rd:    { addr: '子地址（留空 = 不带子地址的纯读；`-` 同）', data: '', rd: '读几个字节（≤54）', as: 'as 解码', period: '周期，如 100ms / 100ms×50' },
-  wr:    { addr: '子地址（留空 = 不带子地址）', data: '要写的十六进制字节，如 11 22 33（≤51 B；留空 = 只把地址指针推过去）', rd: '', as: '', period: '周期，如 500ms×20' },
+  rd:    { addr: '子地址（留空 = 不带子地址的纯读；`-` 同）', data: '', rd: `读几个字节（≤${RD_TOTAL_MAX}；**超过 ${RD_MAX} 自动分片**，想连续读加 ptr）`, as: 'as 解码', period: '周期，如 100ms / 100ms×50' },
+  wr:    { addr: '子地址（留空 = 不带子地址）', data: '要写的十六进制字节，如 11 22 33（≤51 B，**写不自动分片**；留空 = 只把地址指针推过去）', rd: '', as: '', period: '周期，如 500ms×20' },
   ping:  { addr: '', data: '', rd: '', as: '', period: '' },
   delay: { addr: '', data: '时长，如 10ms / 500us', rd: '', as: '', period: '' },
 };
 
 const blankRow = (op = 'rd', dev = '0x50') => ({ op, dev, addr: '', data: '', rd: '', as: '', period: '' });
+
+/** 读长格的内容 → `{ n, chunk }`（吃 `256`、`256 ptr`、`256ptr` 三种写法）*/
+export function parseRdCell(v){
+  const s = String(v ?? '').trim();
+  const m = /^([0-9]+)\s*(ptr|chain)?$/i.exec(s);
+  if (!m) return null;
+  return { n: parseInt(m[1], 10), chunk: m[2] ? 'ptr' : 'reset' };
+}
 
 // ============================================================================
 // 表格 ⇄ 脚本（纯函数，Node 自测直接打）
@@ -73,7 +85,11 @@ export function rowToLine(r){
   if (op === 'ping') return `ping ${dev}${suffix}`;
   const addr = trimOr(r.addr, '-');
   if (op === 'wr') return `wr ${dev} ${addr}${trimOr(r.data) ? ' ' + trimOr(r.data) : ''}${suffix}`;
-  return `rd ${dev} ${addr} ${trimOr(r.rd, '1')}${suffix}`;
+  // 读长格里可以带 ptr（`256 ptr` / `256ptr`）= 长读走"地址指针自增"连续读
+  const cell = parseRdCell(r.rd);
+  const n = cell ? cell.n : trimOr(r.rd, '1');
+  const extra = cell?.chunk === 'ptr' ? ' ptr' : '';
+  return `rd ${dev} ${addr} ${n}${suffix}${extra}`;
 }
 
 /** 整张表 → 脚本（这样才能保证表格与脚本区**走同一套解析与校验**，不会两处口径不一致）*/
@@ -102,7 +118,11 @@ export function rowsFromItems(items){
     } else if (it.wr.length || (it.addr.length && !it.rd)){
       rows.push({ op: 'wr', dev: hex2(it.dev), addr: addrTxt, data: it.wr.map(hex2).join(' '), rd: '', as: '', period: pts });
     } else {
-      rows.push({ op: 'rd', dev: hex2(it.dev), addr: addrTxt, data: '', rd: String(it.rd), as: it.asText || '', period: pts });
+      rows.push({
+        op: 'rd', dev: hex2(it.dev), addr: addrTxt, data: '',
+        rd: String(it.rd) + (it.rd > RD_MAX && it.chunk === 'ptr' ? ' ptr' : ''),
+        as: it.asText || '', period: pts,
+      });
     }
   }
   return rows.slice(0, MAX_ROWS);
@@ -121,6 +141,7 @@ export class I2cView {
     this.live = new Map();
     this.scanAddrs = [];
     this.bus = null;                   // ProbeBus（main.js 注入）
+    this.dockTab = 'scan';             // 右列当前 tab（scan / cmd / dsl / live）
     this._liveDirty = false;
     this._tableDirty = false;
     this._t0 = performance.now();
@@ -132,6 +153,7 @@ export class I2cView {
     const s = this.session;
     s.subscribe(this);
     this._bindConn();
+    this._bindDock();
     this._bindCfg();
     this._bindStatus();
     this._bindScan();
@@ -157,7 +179,100 @@ export class I2cView {
     //    是直接 `_setState` 的（不走事件）—— 不补这一下，页面刚打开时"扫描/发送"全是可点的，
     //    点了才发现没连探针（实测自测里就红在这条）。
     this._syncButtons({ connected: false, enabled: false });
+    this._runPill('idle');
     this._dslSummary('未解析', '');
+  }
+
+  // ==================================================================== 局部 tab（右列）
+
+  _bindDock(){
+    const tabs = $('i2-dock-tabs');
+    const btns = tabs ? [...tabs.querySelectorAll('button[data-dock]')] : [];
+    for (const b of btns) b.addEventListener('click', () => this._dockSelect(b.dataset.dock));
+    const saved = store.get('i2c.dock', 'scan');
+    this._dockSelect(DOCKS.includes(saved) ? saved : 'scan', { save: false });
+
+    // 运行胶囊 + 共享的「停止」（切到哪个 tab 都看得见、都能停）
+    $('i2-run-stop').addEventListener('click', () => this._stopRun());
+
+    // 日志高度可拖（存 localStorage；刷新后还在）
+    const box = $('i2-logbox');
+    const h = Number(store.get('i2c.logH', 0)) || 0;
+    if (box && h > 0) box.style.height = Math.round(h) + 'px';
+    this._bindGrip($('i2-grip-log'), {
+      get: () => box?.getBoundingClientRect().height || 0,
+      apply: v => { if (box) box.style.height = Math.round(v) + 'px'; },
+      min: () => 72,
+      max: () => Math.max(120, (document.querySelector('#tab-i2c .main')?.clientHeight || 700) - 220),
+      save: v => store.set('i2c.logH', Math.round(v)),
+    });
+  }
+
+  /** 切右列的 tab（照 #dbg 的 `_dockSelect`：只显示一个，选择记进 localStorage）*/
+  _dockSelect(name, { save = true } = {}){
+    const tabs = $('i2-dock-tabs');
+    if (tabs) for (const b of tabs.querySelectorAll('button[data-dock]')) b.classList.toggle('on', b.dataset.dock === name);
+    const box = $('i2-box-dock');
+    if (box) for (const p of box.querySelectorAll('.dockpage')) p.classList.toggle('on', p.dataset.dock === name);
+    this.dockTab = name;
+    if (save) store.set('i2c.dock', name);
+    // 刚显示出来的内容补一次刷新：隐藏的那段时间里如果**整个页面**也被切走了，
+    // 浏览器会把 rAF 挂起 → 结果列/曲线可能停在旧值上（`display:none` 本身不影响 rAF，
+    // 但"切页签回来"这种情况会）。补一次最省心。
+    if (name === 'live'){ this._liveDirty = false; this._renderLive(); }
+    if (name === 'cmd' && this._tableDirty){ this._tableDirty = false; this._flushTable(); }
+  }
+
+  /** 通用分隔条拖拽（不用 setPointerCapture：合成的 CDP 事件也能驱动它 —— 抄的 #dbg）*/
+  _bindGrip(el, { get, apply, min, max, save }){
+    if (!el) return;
+    el.addEventListener('pointerdown', e => {
+      e.preventDefault();
+      const startY = e.clientY;
+      const startVal = get();
+      if (!startVal) return;
+      const move = ev => apply(Math.max(min(), Math.min(max(), startVal - (ev.clientY - startY))));
+      const up = () => {
+        window.removeEventListener('pointermove', move);
+        window.removeEventListener('pointerup', up);
+        window.removeEventListener('pointercancel', up);
+        save(get());
+      };
+      window.addEventListener('pointermove', move);
+      window.addEventListener('pointerup', up);
+      window.addEventListener('pointercancel', up);
+    });
+  }
+
+  /**
+   * tab 栏右边的**运行胶囊**：不管当前在哪个 tab，都看得见"定时任务还在跑 / 多少拍 / 失败几笔"。
+   * 这是 tab 化之后唯一能跨 tab 传达运行状态的地方 —— 少了它，切到「脚本」改一行就忘了
+   * 命令表还在 while(1)。
+   */
+  _runPill(kind, extra = ''){
+    const el = $('i2-run-pill');
+    const stop = $('i2-run-stop');
+    if (!el) return;
+    const st = this.runner.stats;
+    if (kind === 'run'){
+      const ticks = st?.ticks || 0;
+      const errs = st?.errors || 0;
+      el.className = 'hint dockrun ' + (errs ? 'err' : 'on');
+      el.textContent = `▶ 运行中 · ${ticks} 拍 · 采样 ${st?.samples || 0} · 失败 ${errs}` + (extra ? ' · ' + extra : '');
+      if (stop) stop.disabled = false;
+    } else if (kind === 'stopping'){
+      el.className = 'hint dockrun warn';
+      el.textContent = '⏹ 正在停止…（等在飞的那一笔收尾）';
+      if (stop) stop.disabled = true;
+    } else if (kind === 'done'){
+      el.className = 'hint dockrun';
+      el.textContent = `已结束 · ${st?.ticks || 0} 拍 · 采样 ${st?.samples || 0} · 失败 ${st?.errors || 0}`;
+      if (stop) stop.disabled = true;
+    } else {
+      el.className = 'hint dockrun';
+      el.textContent = '未运行';
+      if (stop) stop.disabled = true;
+    }
   }
 
   onShow(){
@@ -165,6 +280,9 @@ export class I2cView {
     const box = $('i2-log');
     box.innerHTML = '';
     for (const e of this.session.ring.slice(-200)) appendLogLine(box, e.text, e.kind, 500);
+    // 页面整块被藏过一阵，隐藏期间的 rAF 可能没跑 → 补一次
+    if (this._tableDirty){ this._tableDirty = false; this._flushTable(); }
+    this._renderLive();
   }
 
   onSession(type, payload){
@@ -354,22 +472,19 @@ export class I2cView {
     $('i2-cmd-clear').addEventListener('click', () => { this.results.clear(); this._renderTable(); });
     $('i2-cmd-send').addEventListener('click', () => this._runTable(false));
     $('i2-cmd-run').addEventListener('click', () => this._runTable(true));
-    $('i2-cmd-stop').addEventListener('click', () => this._stopRun());
-    for (const b of document.querySelectorAll('#tab-i2c .foldbtn')){
-      b.addEventListener('click', () => {
-        const card = $(b.dataset.fold);
-        card.classList.toggle('folded');
-        b.textContent = card.classList.contains('folded') ? '展开' : '收起';
-      });
-    }
   }
 
   _addRow(row){
     if (this.rows.length >= MAX_ROWS){
-      this.session.log('warn', `命令表最多 ${MAX_ROWS} 行 —— 更长的序列请用下面的「脚本区」`);
+      this.session.log('warn', `命令表最多 ${MAX_ROWS} 行 —— 更长的序列请用「脚本」tab`);
       return;
     }
-    this.rows.push(row || blankRow());
+    // 新行的器件地址跟上一行走（顺着往下填一串寄存器时最省事），没有上一行才用扫描选中那个
+    if (!row){
+      const last = this.rows[this.rows.length - 1];
+      row = blankRow('rd', trimOr(last?.dev) || trimOr($('i2-dev').value) || '0x50');
+    }
+    this.rows.push(row);
     this._renderTable();
   }
 
@@ -543,7 +658,6 @@ export class I2cView {
     $('i2-dsl-parse').addEventListener('click', () => this._parseDsl({ quiet: false }));
     $('i2-dsl-send').addEventListener('click', () => this._runScript(false));
     $('i2-dsl-run').addEventListener('click', () => this._runScript(true));
-    $('i2-dsl-stop').addEventListener('click', () => this._stopRun());
     $('i2-dsl-to-table').addEventListener('click', () => {
       const { items, errors } = parseScript(ta.value);
       if (errors.length){ this._showDslErrors(errors); this._dslSummary(`有 ${errors.length} 处语法错，先改掉`, 'err'); return; }
@@ -564,31 +678,6 @@ export class I2cView {
     });
     $('i2-dsl-clear').addEventListener('click', () => { ta.value = ''; this._dslSummary('已清空', ''); this._showDslErrors([]); });
     $('i2-log-clear').addEventListener('click', () => { $('i2-log').innerHTML = ''; });
-
-    // 分片读助手：把"读 N 字节"展开成合法分片序列，直接塞进脚本区
-    $('i2-frag-run').addEventListener('click', () => {
-      const dev = trimOr($('i2-frag-dev').value, '0x50');
-      const addr = trimOr($('i2-frag-addr').value, '0x00');
-      const len = Math.max(1, parseInt($('i2-frag-len').value, 10) || 256);
-      const mode = $('i2-frag-mode').value;
-      const L = [`# 分片读：${dev} 从 ${addr} 读 ${len} B（单次上限 54 B）`];
-      if (mode === 'ptr'){
-        L.push(`# 先把地址指针推到 ${addr}（零长度写），之后每片都不带子地址 —— 器件内部指针自增`);
-        L.push(`wr ${dev} ${addr}`);
-        for (let off = 0; off < len; off += 54) L.push(`rd ${dev} - ${Math.min(54, len - off)}`);
-        L.push('# ⚠️ 只适用于**地址自增**的器件（EEPROM / 大多数寄存器型传感器）。');
-        L.push('#    FIFO 型器件（读一次弹一个数）请改用「每片重发子地址」那一档。');
-      } else {
-        L.push('# 每片都重发子地址（FIFO 型器件只能这样，慢一倍但最稳）');
-        for (let off = 0; off < len; off += 54){
-          const at = (parseInt(addr, 16) || 0) + off;
-          L.push(`rd ${dev} 0x${at.toString(16).toUpperCase().padStart(2, '0')} ${Math.min(54, len - off)}`);
-        }
-      }
-      ta.value = (ta.value.trim() ? ta.value.replace(/\s*$/, '\n\n') : '') + L.join('\n') + '\n';
-      this._dslSummary(`已把 ${len} B 的分片读追加到脚本区（${mode === 'ptr' ? '地址指针自增' : '每片重发子地址'}）`, 'ok');
-      this._parseDsl({ quiet: true });
-    });
   }
 
   _parseDsl({ quiet = false } = {}){
@@ -662,15 +751,19 @@ export class I2cView {
     const btnRun = [$('i2-cmd-run'), $('i2-dsl-run'), $('i2-cmd-send'), $('i2-dsl-send')];
     this.live.clear();
     this._renderLive();
+    this._runPill('run');
     try {
       this.session.log('g', `▶ 开始：${label} —— ${items.length} 条命令` +
         (items.some(x => x.period) ? '（带周期的会一直跑，记得点「停止」）' : ''));
       const r = await this.runner.run(items, { label });
       const s = r?.stats || {};
+      this._runPill(r?.why === 'stopping' || r?.why === 'stopped' ? 'stopping' : 'done');
       this.session.log(r?.why === 'done' ? 'g' : 'warn',
         `■ 结束（${r?.why}）：一次性 ${s.once || 0} 条 · 循环 ${s.ticks || 0} 拍 · 采样 ${s.samples || 0} 个值 · 失败 ${s.errors || 0} 笔 · 用时 ${((r?.ms || 0) / 1000).toFixed(1)} s`);
+      this._runPill('done');
     } catch (e){
       this.session.log('e', '执行出错：' + (e?.message || e));
+      this._runPill('idle');
     } finally {
       for (const b of btnRun) b.disabled = false;
     }
@@ -680,11 +773,12 @@ export class I2cView {
     else this.session.log('dim', '当前没有在跑的任务');
   }
 
-  /** 执行器事件 → 表格结果列 / 实时值 / 日志 */
+  /** 执行器事件 → 表格结果列 / 实时值 / 运行胶囊 / 日志 */
   _onRunEvent(e){
     switch (e.type){
       case 'start':
-        if (e.tasks) this.session.log('dim', `定时任务 ${e.tasks} 个 —— 它们会各自按周期一直跑，直到点「停止」`);
+        if (e.tasks) this.session.log('dim', `定时任务 ${e.tasks} 个 —— 它们会各自按周期一直跑，直到点 tab 栏右边的「停止」`);
+        this._runPill('run');
         break;
       case 'item': {
         const row = e.item.line != null ? e.item.line - 1 : -1;
@@ -707,10 +801,14 @@ export class I2cView {
         }
         const parts = [];
         if (ok){
-          const valTxt = e.values?.length ? ' → ' + e.values.map(v => `${v.name}=${v.text}`).join(' ') : '';
-          parts.push((e.hex || '（无数据）') + valTxt);
+          // 🚨 **解码值排在前面**：列宽有限，省略号会吃掉尾巴。传感器读数的重点就是
+          //    ax/az/v 这些数（原始十六进制日志里有全文、hover 也有 title），所以先给值。
+          const valTxt = e.values?.length ? e.values.map(v => `${v.name}=${v.text}`).join(' ') : '';
+          const chunkTxt = e.chunks > 1 ? `（共 ${e.data?.length ?? 0} B · 分 ${e.chunks} 笔）` : '';
+          const hexTxt = abbreviateHex(e.hex, e.chunks > 1 ? 12 : 0);
+          parts.push([valTxt, hexTxt, chunkTxt].filter(Boolean).join('  '));
           parts.push(`${(e.ms || 0).toFixed(1)} ms`);
-        } else parts.push('✗ ' + errText(e.err));
+        } else parts.push('✗ ' + errText(e.err) + (e.failNote ? `（${e.failNote}）` : ''));
         this._setResult(row, parts.join(' · '), ok ? 'ok' : 'bad');
         if (ok && e.values?.length) for (const v of e.values) this._pushLive(v);
         break;
@@ -721,10 +819,15 @@ export class I2cView {
         const late = e.actualMs > per * 1.25;
         this._setTick(row, `第 ${e.n} 拍 · 实测 ${e.actualMs.toFixed(0)} ms` +
           (e.task?.count ? `/ ${e.task.count}` : '') + (late ? ` ⚠ 比设定 ${per}ms 慢` : ''), late ? 'warn' : 'dim');
+        this._runPill('run');
         break;
       }
+      case 'stopping':
+        this._runPill('stopping');
+        break;
       case 'end':
         for (const el of this.rowEls) el.tr.classList.remove('running');
+        this._runPill('done');
         break;
       default: break;
     }
@@ -774,36 +877,51 @@ export class I2cView {
 
   _pushLive(v){
     if (!Number.isFinite(v.value)) return;
+    const now = performance.now();
     let e = this.live.get(v.name);
-    if (!e){ e = { name: v.name, last: v.value, min: Infinity, max: -Infinity, n: 0, t0: performance.now(), buf: [] }; this.live.set(v.name, e); }
+    if (!e){ e = { name: v.name, last: v.value, min: Infinity, max: -Infinity, n: 0, t0: now, tLast: now, buf: [] }; this.live.set(v.name, e); }
     e.last = v.value;
     if (v.value < e.min) e.min = v.value;
     if (v.value > e.max) e.max = v.value;
     e.n++;
+    e.tLast = now;
     e.buf.push(v.value);
     if (e.buf.length > 120) e.buf.shift();
     this._liveDirty = true;
     this._flushSoon();
   }
 
+  /**
+   * 实测频率：按**首末两次采样之间**算，不是"到现在为止"。
+   * 🚨 用 `performance.now() - t0` 当区间的话，跑停之后这个数会一直往下掉
+   *    （实测跑完 5 秒还显示 15.5 Hz，而那一段本来是 20 Hz）—— 那是渲染时刻在变，
+   *    不是采样变慢了。同理摘要里报"最快的那个"，不要拿第一个变量去代表全部。
+   */
+  _rateOf(e){
+    if (!e || e.n < 2) return 0;
+    const span = (e.tLast - e.t0) / 1000;
+    return span > 0 ? (e.n - 1) / span : 0;
+  }
+
   _renderLive(){
     const body = $('i2-live-body');
     const list = [...this.live.values()];
+    const rates = list.map(e => this._rateOf(e));
     $('i2-live-sum').textContent = list.length
-      ? `${list.length} 个变量 · 共 ${list.reduce((a, b) => a + b.n, 0)} 次采样（${(list[0].n / Math.max(0.001, (performance.now() - list[0].t0) / 1000)).toFixed(1)} Hz 上下）`
+      ? `${list.length} 个变量 · 共 ${list.reduce((a, b) => a + b.n, 0)} 次采样 · 最快 ${Math.max(...rates).toFixed(1)} Hz`
       : '还没有数据 —— 跑一段带 `as` 解码的定时读（示例里的 MPU6050 / ADS1115）就有了';
     body.innerHTML = '';
     const spark = $('i2-live-spark').checked;
     for (const e of list){
       const tr = document.createElement('tr');
       const f = v => (Number.isFinite(v) ? v.toFixed(4).replace(/0+$/, '').replace(/\.$/, '') : '—');
-      const hz = e.n / Math.max(0.001, (performance.now() - e.t0) / 1000);
+      const hz = this._rateOf(e);
       tr.innerHTML = `<td><b>${escapeHtml(e.name)}</b></td><td>${f(e.last)}</td><td>${f(e.min)}</td>` +
-        `<td>${f(e.max)}</td><td>${e.n}</td><td>${hz.toFixed(1)} Hz</td>`;
+        `<td>${f(e.max)}</td><td>${e.n}</td><td>${hz > 0 ? hz.toFixed(1) + ' Hz' : '—'}</td>`;
       const td = document.createElement('td');
       if (spark){
         const cv = document.createElement('canvas');
-        cv.width = 220; cv.height = 20; cv.className = 'spark';
+        cv.width = 284; cv.height = 20; cv.className = 'spark';
         drawSpark(cv, e.buf);
         td.appendChild(cv);
       }
@@ -818,6 +936,7 @@ export class I2cView {
       connected: this.session.connected, mock: this.session.usingMock, enabled: this.session.enabled,
       rows: this.rows.length, rowErrors: t.errs.length,
       preset: $('i2-preset').value,
+      dock: this.dockTab,
       running: this.runner.running,
       liveVars: [...this.live.keys()],
       scan: this.scanAddrs.map(a => '0x' + a.toString(16)),
@@ -832,9 +951,21 @@ function escapeHtml(s){
   return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
+/** 长读的十六进制太长，只留前 `keep` 个字节 + `…+N B`（keep=0 表示原样）*/
+function abbreviateHex(hex, keep){
+  if (!keep || !hex) return hex || '（无数据）';
+  const parts = String(hex).split(' ');
+  if (parts.length <= keep) return hex;
+  return parts.slice(0, keep).join(' ') + ` …+${parts.length - keep}B`;
+}
+
 /** 迷你曲线：一条折线 + 自动量程（不用第三方库，20 px 高够看趋势）*/
 function drawSpark(cv, buf){
   const ctx = cv.getContext('2d');
+  // 背板宽度跟着 CSS 实际宽度走（否则固定 220 被 CSS 拉到 284 会糊）——
+  // 量不到（元素还藏着）就退回上次的值/默认值，别把背板设成 0。
+  const cssW = Math.round(cv.getBoundingClientRect().width);
+  if (cssW > 0 && cv.width !== cssW) cv.width = cssW;
   const W = cv.width, H = cv.height;
   ctx.clearRect(0, 0, W, H);
   ctx.strokeStyle = getComputedStyle(document.body).getPropertyValue('--acc') || '#4aa3ff';

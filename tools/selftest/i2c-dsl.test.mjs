@@ -282,14 +282,15 @@ console.log('== 6. as 解码表达式 ==');
 // ==================================================================== 7
 console.log('== 7. 错误必须带行号拦住 ==');
 {
-  const e1 = errOf('scan\nrd 0x50 0x00 99\n');
-  ok(e1 && e1.line === 2, '读长超上限：报在第 2 行', JSON.stringify(e1));
-  ok(e1.msg.includes('54'), '……并说清上限是多少', e1.msg);
+  const e1 = errOf('scan\nrd 0x50 0x00 99999\n');
+  ok(e1 && e1.line === 2, '一次逻辑读超上限：报在第 2 行', JSON.stringify(e1));
+  ok(e1.msg.includes('4096'), '……并说清上限是多少（4096）', e1.msg);
   ok(errOf('rd 0x80 0x00 1').msg.includes('7 位'), '器件地址超 7 位被拒');
   ok(errOf('rd 0x50 0x00').msg.includes('缺长度'), '读命令缺长度被拒');
   ok(errOf('rd 0x50 0x00 0').msg.includes('必须 > 0'), '读长 0 被拒（要探测就写 ping）');
   eq(parse1('wr 0x50 0x00 11 22 33 44 55').wr.length, 5, '写 5 B 是合法的（上限 51）');
   ok(errOf(`wr 0x50 0x00 ${new Array(52).fill('11').join(' ')}`).msg.includes('51'), '写 52 B 被拒');
+  ok(errOf(`wr 0x50 0x00 ${new Array(52).fill('11').join(' ')}`).msg.includes('不自动分片'), '……并说清"写不自动分片"（EEPROM 跨页会绕回页首）');
   ok(errOf('rd 0x50 0x00 1 2 3').msg.includes('多了一个参数'), '读命令多余参数被拒');
   ok(errOf('qqq 1 2').msg.includes('看不懂'), '未知关键字被拒');
   ok(errOf('00 01 02').msg.includes('dev='), '裸字节缺 dev 被拒并给出正确写法');
@@ -422,6 +423,89 @@ console.log('== 10. 示例脚本必须零错误（示例写错比功能写错更
   const siParsed = D.parseScript(si.text);
   const siLoop = buildTasks(siParsed.items).tasks[0];
   eq(siLoop.count, 20, 'Si5351 的状态监视循环带次数（跑 20 轮自停）');
+}
+
+// ==================================================================== 11
+console.log('== 11. 长读自动分片（实现细节，不该让人自己拆）==');
+{
+  // 一条 `rd … 256` 就是**一条逻辑读**：解析成一项、rd=256、默认 chunk=reset
+  const big = parse1('rd 0x50 0x00 256');
+  eq(big.rd, 256, '读长 256 直接收下（不再要求 ≤54）');
+  eq(big.chunk, 'reset', '长读默认 chunk=reset（每片重发子地址 —— EEPROM/寄存器型全都对）');
+  ok(big.label.includes('自动分片'), '标签里写明了会自动分片', big.label);
+  eq(parse1('rd 0x50 0x00 8').chunk, 'reset', '短读也带 chunk 字段（恒 reset，下游不用特判）');
+
+  // ptr / chain / chunk= 三种写法
+  eq(parse1('rd 0x50 0x00 256 ptr').chunk, 'ptr', '行尾 ptr → 连续读');
+  eq(parse1('rd 0x50 0x00 256 chain').chunk, 'ptr', 'chain 是 ptr 的别名');
+  eq(parse1('rd 0x50 0x00 256 chunk=ptr').chunk, 'ptr', 'chunk=ptr 也认');
+  eq(parse1('rd 0x50 0x00 256 chunk=reset').chunk, 'reset', 'chunk=reset 显式写也认');
+  eq(parse1('xfer dev=0x50 addr=0x00 rd=256 chunk=ptr').chunk, 'ptr', 'xfer 字段名写法也支持 chunk=');
+  ok(errOf('rd 0x50 0x00 256 chunk=qqq') !== null, 'chunk 只认 ptr / reset');
+  eq(parse1('rd 0x50 0x00 256 ptr').rd, 256, '……ptr 不吃掉读长');
+  eq(parse1('rd 0x50 0x00 256 ptr').addr.length, 1, '……也不吃掉子地址');
+  eq(parse1('rd 0x50 0x00 256 ptr as v=u8(0)').as.fields[0].name, 'v', '……和 as 共存');
+
+  // 上限与边界
+  ok(errOf('rd 0x50 0x00 99999') !== null, `一次逻辑读超过 ${4096} B 被拒`);
+  eq(parse1('rd 0x50 0x00 4096').rd, 4096, '恰好 4096 可以');
+  eq(parse1('rd 0x50 0x00 55').rd, 55, '刚过 54 也走自动分片（两笔）');
+  ok(parse1('rd 0x50 0x00 55').label.includes('自动分片'), '……标签直接说"2 笔"', parse1('rd 0x50 0x00 55').label);
+
+  // 写**不**自动分片（EEPROM 跨页会绕回页首，自动拆是危险的）
+  const wrErr = errOf(`wr 0x50 0x00 ${new Array(52).fill('11').join(' ')}`);
+  ok(wrErr.msg.includes('不自动分片'), '写超过 51 B 明确拒绝并说明原因', wrErr.msg);
+
+  // 导出的 C 表必须**展开成线上真实发出的每一笔** —— rd_len 是线上字段（一个字节，最大 54）
+  const script = [
+    'rd 0x50 0x00 256',
+    'rd 0x68 0x00 120 ptr',
+  ].join('\n');
+  const r = D.parseScript(script);
+  const c = D.toCTable(r.items);
+  const rows = c.split('\n').filter(l => l.startsWith('{'));
+  eq(rows.length, 5 + 4, 'reset 模式 256 B → 5 行；ptr 模式 120 B → 1 笔设指针 + 3 片 = 4 行，合计 9');
+  ok(rows.every(l => /, ([0-9]+), (NULL|\(uint8_t)/.test(l)), '……每一行的 rd_len 都在线上范围内', rows.join(' | '));
+  ok(c.includes('rd_len 是线上字段'), '……并留了注释说明为什么被展开');
+  ok(c.includes('导出 JSON'), '……并指向无损的 JSON 导出');
+  eq(D.parseScript(c).errors.length, 0, '展开后的 C 表能原样解析回来（零错误）');
+
+  // 展开后的**字节流**必须与 planRead 算出来的一致
+  const plan = P.planRead([0x00], 256, { mode: 'reset' });
+  const parsedRows = D.parseScript(c).items;
+  eq(parsedRows.length, plan.cmds.length + 4, '展开后的条数 = 分片数 + ptr 那条的设指针笔 + …');
+  eq(parsedRows[0].rd, plan.cmds[0].rd, '第一片的读长一致');
+  eq(hex(parsedRows[0].addr), hex(plan.cmds[0].addr), '第一片的子地址一致');
+  eq(parsedRows[4].rd, plan.cmds[4].rd, '末片读长一致（40 B）');
+  eq(hex(parsedRows[4].addr), hex(plan.cmds[4].addr), '末片子地址一致（0x00+216=0xD8）');
+
+  // JSON 是无损的：chunk 与 as 都保住
+  const json = D.toJson(r.items);
+  const back = D.fromJson(json);
+  eq(back[0].chunk, 'reset', 'JSON 往返：chunk 保住');
+  eq(back[1].chunk, 'ptr', 'JSON 往返：ptr 保住');
+  eq(back[0].rd, 256, 'JSON 往返：读长保住');
+
+  // 命令表：「读长」格写 `256` 或 `256 ptr` 都能走通（这样才能无损往返）
+  eq(V.parseRdCell('256').n, 256, '读长格：256');
+  eq(V.parseRdCell('256').chunk, 'reset', '读长格：默认每片重发子地址');
+  eq(V.parseRdCell('256 ptr').chunk, 'ptr', '读长格：256 ptr');
+  eq(V.parseRdCell('256ptr').chunk, 'ptr', '读长格：256ptr 连写也认');
+  eq(V.parseRdCell(''), null, '读长格：空 → null（交给上层给默认值）');
+  eq(V.parseRdCell('abc'), null, '读长格：非数字 → null');
+
+  const rowsIn = [{ op: 'rd', dev: '0x50', addr: '0x00', data: '', rd: '256', as: '', period: '' }];
+  const line = V.rowToLine(rowsIn[0]);
+  eq(line, 'rd 0x50 0x00 256', '表格 → 脚本：长读原样写成一条', line);
+  const rowsPtr = [{ op: 'rd', dev: '0x50', addr: '0x00', data: '', rd: '256 ptr', as: '', period: '' }];
+  eq(V.rowToLine(rowsPtr[0]), 'rd 0x50 0x00 256 ptr', '表格 → 脚本：ptr 也带出去');
+
+  // 脚本 → 表格：长读装回一格
+  const rowsBack = V.rowsFromItems(D.parseScript('rd 0x50 0x00 256\nrd 0x68 0x00 120 ptr').items);
+  eq(rowsBack[0].rd, '256', '脚本 → 表格：长读回到「读长」格');
+  eq(rowsBack[1].rd, '120 ptr', '脚本 → 表格：ptr 长读带上标记');
+  const rowsBack2 = V.rowsFromItems(D.parseScript('rd 0x50 0x00 8').items);
+  eq(rowsBack2[0].rd, '8', '短读不带多余标记');
 }
 
 console.log(`\n== 结果：${pass} 项通过 / ${fail} 项失败 ==`);

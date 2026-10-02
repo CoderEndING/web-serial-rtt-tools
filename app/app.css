@@ -506,24 +506,48 @@ fieldset.folded > legend::after{content:' · 已折叠';color:var(--fg2);font-si
 #sp-pinmap-miss:empty{display:none}
 
 /* ============================ USB→I2C 桥（#tab-i2c） ============================
-   布局与 #tab-spi 同构（左栏连接/配置/状态，右栏 扫描 → 命令表 → 脚本 → 实时值 + 日志），
-   所以下面大半是照抄那份的度量，改一边记得看另一边。 */
+   右列 = 一个带 tab 的面板 + **常驻**日志（照「调试器」页的 .docktabs / .dockpage 那套）。
+   为什么改成 tab：原来五张卡片纵向堆在一个滚动区里、每张都被迫限高（命令表只能看见 7 行、
+   脚本框一屏就满），而且"正在跑的结果"与"实时值"永远没法同屏。tab 化之后每块**吃满整块高度**；
+   日志与运行状态仍然常驻 —— tab 化不该把"过程视图"也一起藏起来。
+   🚨 下面**没有**任何 max-height 限高：高度由 `.dockpage{flex:1}` 分配，
+      给里面的 .scroll 加 max-height 会让 tab 化白做（第一版就是这么被限住的）。 */
 #tab-i2c .side .row>span:first-child,#tab-i2c .row>span:first-child{width:74px}
-#tab-i2c .busstack{display:flex;flex-direction:column;gap:9px;overflow:auto;flex:1 1 auto;min-height:0;padding-right:2px}
-#tab-i2c .busstack>fieldset{min-width:0}
-#tab-i2c .toolrow{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:0 0 6px}
-#tab-i2c .toolrow.nw{flex-wrap:nowrap;overflow:hidden}
-#tab-i2c .toolrow>span:first-child{color:var(--fg2);font-size:12px;flex:none}
-#tab-i2c .toolrow select{max-width:330px}
-#tab-i2c .toolrow.nw #i2-dsl-sum{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-#tab-i2c .toolrow.nw button{flex:none}
-/* 命令表：行高压紧 + 自己限高滚动（矮窗口下这一块最容易把中列占满，同 #spi 的处置） */
-#tab-i2c .scroll.cmdscroll{max-height:172px;overflow:auto;margin-top:2px}
-#tab-i2c table.cmdtab{font-size:11.5px}
+#tab-i2c .main{gap:6px}
+#tab-i2c .i2cdock{display:flex;flex-direction:column;min-width:0;min-height:0;overflow:hidden;flex:1 1 auto}
+#tab-i2c .i2cdock>legend{white-space:nowrap;overflow:hidden;display:flex;align-items:center;gap:6px;width:100%;box-sizing:border-box}
+#tab-i2c .i2cdock>legend .hint{margin:0;display:inline}
+#tab-i2c .docktabs{margin-left:2px;vertical-align:middle}
+#tab-i2c .docktabs button{font-size:11.5px;padding:2px 10px}
+#tab-i2c .dockpage{display:none;flex:1 1 auto;min-height:0;flex-direction:column;gap:6px}
+#tab-i2c .dockpage.on{display:flex}
+#tab-i2c .dockpage .toolrow{margin:0}
+/* tab 里的滚动区吃满剩余高度（`.scroll` 基础规则里的 max-height:200px 在这里必须让位） */
+#tab-i2c .scroll,#tab-i2c .scroll.fill{overflow:auto;max-height:none;border:1px solid var(--line);border-radius:8px;margin-top:0}
+#tab-i2c .scroll.fill{flex:1 1 auto;min-height:0}
+/* 运行胶囊：切到哪个 tab 都能看到"定时任务还在跑 / 跑了多少拍 / 失败几笔" */
+#tab-i2c .dockrun{color:var(--fg2);font-size:11.5px;font-family:var(--mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#tab-i2c .dockrun.on{color:var(--ok)}
+#tab-i2c .dockrun.warn{color:var(--warn)}
+#tab-i2c .dockrun.err{color:var(--err)}
+#tab-i2c .grip{flex:none;background:transparent;border-radius:4px;position:relative}
+#tab-i2c .grip::after{content:"";position:absolute;background:var(--line);border-radius:2px;opacity:.7}
+#tab-i2c .grip:hover::after{background:var(--acc);opacity:1}
+#tab-i2c .grip-h{height:9px;margin:0;cursor:row-resize}
+#tab-i2c .grip-h::after{left:35%;right:35%;top:3px;height:3px}
+#tab-i2c #i2-logbox{flex:0 0 auto;height:22%;min-height:96px;display:flex;flex-direction:column}
+#tab-i2c .logbox{position:relative}
+#tab-i2c #i2-logbox .log{height:100%;min-height:0;flex:1 1 auto}
+#tab-i2c .logclear{position:absolute;top:4px;right:10px;z-index:3;opacity:.9}
+/* 命令表：行高压紧（现在能吃满高度，别再限高）
+   🚨 `table-layout:fixed` 是必需的：auto 布局下 `td{max-width}` **不生效**，结果列里那段长
+   十六进制会把列宽整个撑开、把表格顶出横向滚动条（实测）。fixed 之后 th 上写的宽度才算数，
+   `td.res` 的 ellipsis 也才真的截断（完整内容挂 title，hover 能看）。 */
+#tab-i2c table.cmdtab{table-layout:fixed;font-size:11.5px}
 #tab-i2c table.cmdtab th{padding:1px 4px;white-space:nowrap;position:sticky;top:0;background:var(--bg2);z-index:1}
-#tab-i2c table.cmdtab td{padding:0 3px}
+#tab-i2c table.cmdtab td{padding:0 3px;overflow:hidden}
 #tab-i2c table.cmdtab td.idx{color:var(--fg2);width:18px;text-align:right;padding-right:5px}
-#tab-i2c table.cmdtab td.res{font-size:11px;white-space:nowrap;max-width:260px;overflow:hidden;text-overflow:ellipsis}
+#tab-i2c table.cmdtab td.res{font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 #tab-i2c table.cmdtab td.res.ok{color:var(--ok)}
 #tab-i2c table.cmdtab td.res.bad{color:var(--err)}
 #tab-i2c table.cmdtab td.res.warn{color:var(--warn)}
@@ -535,40 +559,44 @@ fieldset.folded > legend::after{content:' · 已折叠';color:var(--fg2);font-si
 #tab-i2c select.cell{padding:0}
 #tab-i2c input.cell:focus{outline:1px solid var(--acc);border-color:var(--acc)}
 #tab-i2c input.cell:disabled,#tab-i2c select.cell:disabled{opacity:.35;background:transparent;border-color:transparent}
-/* 列宽：操作/器件/子地址/数据/读长/解码/周期/结果。
-   数据列跟着窗口伸缩、结果列固定 —— 只固定一边的话宽窗口下另一边会失控（同 #spi 的教训） */
+/* 列宽：序号/操作/器件/子地址/数据/读长/解码/周期/结果。
+   🚨 fixed 布局下**没写宽度的列会平分剩余空间** —— `#` 曾经因此拿到 233px（一个序号占了
+   六分之一屏）。所以序号必须显式给死；「数据」与「解码 as」故意留 auto，让它俩吃掉余量
+   （它们装的是长短不一的十六进制与表达式，跟着窗口伸缩最合适）。结果列给死 300px：
+   只固定一边的话宽窗口下另一边会失控（同 #spi 的教训）。 */
+#tab-i2c table.cmdtab th:nth-child(1){width:26px}
 #tab-i2c table.cmdtab th:nth-child(2){width:60px}
 #tab-i2c table.cmdtab th:nth-child(3){width:62px}
 #tab-i2c table.cmdtab th:nth-child(4){width:78px}
 #tab-i2c table.cmdtab th:nth-child(5){width:auto}
-#tab-i2c table.cmdtab th:nth-child(6){width:52px}
+#tab-i2c table.cmdtab th:nth-child(6){width:58px}
 #tab-i2c table.cmdtab th:nth-child(7){width:auto}
 #tab-i2c table.cmdtab th:nth-child(8){width:82px}
-#tab-i2c table.cmdtab th:nth-child(9){width:240px}
+#tab-i2c table.cmdtab th:nth-child(9){width:300px}
 #i2-dsl-text{
-  width:100%;min-height:118px;max-height:300px;font-family:var(--mono);font-size:12px;line-height:1.45;
-  resize:vertical;white-space:pre-wrap;overflow-wrap:anywhere;overflow-x:hidden;overflow-y:auto;
+  width:100%;flex:1 1 auto;min-height:110px;max-height:none;font-family:var(--mono);font-size:12px;
+  line-height:1.45;resize:vertical;white-space:pre-wrap;overflow-wrap:anywhere;overflow-x:hidden;overflow-y:auto;
 }
-#tab-i2c .dslhelp{margin-top:5px}
+#tab-i2c .dslhelp{margin-top:0;flex:none}
 #tab-i2c .dslhelp summary{color:var(--fg2);font-size:12px;cursor:pointer}
-#tab-i2c .dslhelp .hint{white-space:pre-wrap;font-family:var(--mono);font-size:11.5px;line-height:1.5;margin:5px 0 0}
-#tab-i2c .scroll{overflow:auto;max-height:200px;border:1px solid var(--line);border-radius:8px;margin-top:6px}
-#tab-i2c #i2-scan-wrap{max-height:132px}
-#tab-i2c #i2-live-wrap{max-height:158px}
-#tab-i2c #i2-logbox{flex:0 0 auto;height:22%;min-height:96px;display:flex;flex-direction:column}
-#tab-i2c #i2-logbox .log{height:100%;min-height:0;flex:1 1 auto}
-#tab-i2c .logbox{position:relative}
-#tab-i2c .logclear{position:absolute;top:4px;right:10px;z-index:3;opacity:.9}
+#tab-i2c .dslhelp .hint{white-space:pre-wrap;font-family:var(--mono);font-size:11.5px;line-height:1.5;margin:5px 0 0;max-height:240px;overflow:auto}
+#tab-i2c #i2-dsl-errwrap{flex:none;max-height:120px}
+#tab-i2c .toolrow{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:0 0 6px}
+#tab-i2c .toolrow.nw{flex-wrap:nowrap;overflow:hidden}
+#tab-i2c .toolrow>span:first-child{color:var(--fg2);font-size:12px;flex:none}
+#tab-i2c .toolrow select{max-width:330px}
+#tab-i2c .toolrow.nw #i2-dsl-sum{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#tab-i2c .toolrow.nw button{flex:none}
+#tab-i2c .dockpage>p.hint{flex:none;margin:0}
 /* 扫到的那一行被"选用"时高亮（一眼看出当前选的是哪个器件） */
 #tab-i2c #i2-scan-body tr.on{background:rgba(74,163,255,.13)}
 #tab-i2c #i2-scan-body tr.on td:first-child{color:var(--acc)}
 #tab-i2c #i2-scan-body button{margin-right:4px}
-#tab-i2c #i2-live-body canvas.spark{display:block;width:220px;height:20px}
+#tab-i2c #i2-live-body canvas.spark{display:block;width:284px;height:20px}
 #tab-i2c #i2-live-body td{padding:1px 6px}
 #tab-i2c #i2-dsl-sum.ok{color:var(--ok)}
 #tab-i2c #i2-dsl-sum.warn{color:var(--warn)}
 #tab-i2c #i2-dsl-sum.err{color:var(--err)}
-#tab-i2c #i2-frag-card .row>span:first-child{width:auto}
 
 /* ============================ 调试器（#tab-dbg） ============================ */
 /**

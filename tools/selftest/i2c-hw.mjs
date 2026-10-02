@@ -183,6 +183,25 @@ let BASE = {};
   ok(frag.err === 0 && frag.data.length === 16, `接着续读 16 B 成功：${hex(frag.data)}`);
   ok(frag.data.slice(0, 8).join(',') === baseline.join(','), '首 8 B 与带子地址读到的**逐字节一致**（分片法没读错位）');
 
+  // 🚨 长读自动分片：填 256，外部只看到一条命令、一行日志（分片是实现细节）
+  const longRead = await ev(`
+    const t = window.__tools.i2c;
+    const proto = Object.getPrototypeOf(t.session);
+    const realLog = proto.log.bind(t.session);      // 前面几节可能打桩静音过，这里要数日志
+    t.session.log = realLog;
+    t.session.ring.length = 0;
+    const r = await t.session.readLong({ dev:${DEV}, addr:[${ADDR}], rd:256 });
+    t.session.log = () => {};
+    return { err: r.err, n: r.data.length, chunks: r.chunks, mode: r.mode, ms: r.ms,
+             ok1: r.data[0], ok2: r.data[1],
+             logs: t.session.ring.filter(e => e.kind === 'ok').map(e => e.text) };`);
+  ok(longRead.err === 0, `256 B 长读成功（分 ${longRead.chunks} 笔，${longRead.ms?.toFixed?.(0)} ms）`);
+  ok(longRead.n === 256 && longRead.chunks === 5, '自动分成 5 笔、拼回 256 B');
+  ok(longRead.mode === 'reset', '默认走「每片重发子地址」（对 EEPROM / 寄存器型都成立）');
+  ok(longRead.ok1 === baseline[0] && longRead.ok2 === baseline[1], '长读首两字节与短读一致（拼接没串位）');
+  ok(longRead.logs.length === 1, `🚨 真机上日志也只出一行（实际 ${longRead.logs.length} 行）`, JSON.stringify(longRead.logs));
+  ok(/256 B/.test(longRead.logs[0] || '') && /分 5 笔/.test(longRead.logs[0] || ''), '……那一行说清总长与笔数', longRead.logs[0]);
+
   // 不存在的地址必须报 NACK（证明错误路径是活的，不是"什么都回成功"）
   const bad = await ev(`return (await window.__tools.i2c.session.transaction({ dev:0x21, addr:[0], wr:[], rd:1 }, { quiet:true })).err;`);
   ok(bad === 3, '探测不存在的 0x21 → E_NO_ADDR(3)（错误路径是活的）', String(bad));
@@ -244,19 +263,27 @@ console.log('== 6. 页面上跑一段 while(1) 定时读（真机）==');
     document.getElementById('i2-dsl-run').click();
     await new Promise(r => setTimeout(r, 2200));
     const running = t.runner.running;
+    const pill = document.getElementById('i2-run-pill').textContent;
     const e = t.live.get('b0');
     const ticks = t.runner.stats?.ticks || 0;
     const errors = t.runner.stats?.errors || 0;
-    document.getElementById('i2-dsl-stop').click();
+    // 切到「实时值」tab 再停 —— 顺便验证 tab 化之后"切走不打断、胶囊还在"
+    document.querySelector('#i2-dock-tabs button[data-dock="live"]').click();
+    await new Promise(r => setTimeout(r, 400));
+    const stillRunning = t.runner.running;
+    const pillAfterSwitch = document.getElementById('i2-run-pill').textContent;
+    document.getElementById('i2-run-stop').click();
     await new Promise(r => setTimeout(r, 500));
-    return { sum, errRows, running, n: e ? e.n : 0, last: e ? e.last : null, ticks, errors, afterStop: t.runner.running };`);
+    return { sum, errRows, running, pill, stillRunning, pillAfterSwitch, n: e ? e.n : 0,
+             last: e ? e.last : null, ticks, errors, afterStop: t.runner.running };`);
   ok(r.errRows === 0, '生成的脚本零语法错');
   ok(/1 个循环任务/.test(r.sum), '脚本解析出 1 个循环任务', r.sum);
   ok(r.running === true, '真机上 while(1) 跑起来了');
   ok(r.n >= 12, `2.2 s 内按 100 ms 采了 ${r.n} 次（应当 ≥12）`);
+  ok(r.stillRunning === true && /运行中/.test(r.pillAfterSwitch), '切到别的 tab 不打断、运行胶囊照样看得到', r.pillAfterSwitch);
   ok(r.errors === 0, `循环期间零失败（errors=${r.errors}）`);
   ok(r.last === (baseline ? baseline[0] : r.last), `解出来的 b0 = ${r.last}，与第 4 步读到的首字节一致`);
-  ok(r.afterStop === false, '点「停止」后真的停了');
+  ok(r.afterStop === false, '点 tab 栏的「停止」后真的停了');
 }
 
 // ==================================================================== 7
@@ -277,14 +304,16 @@ console.log('== 7. 收尾 ==');
   ok(dOk >= 10, `本次新增成功事务 ${dOk} 笔（扫描 + 读写 + 循环采样）`);
   const err = await ev('return window.__tools.summary().errors;');
   ok(err.length === 0, '整场跑完页面无未捕获错误', JSON.stringify(err));
-  // 把桥恢复成"没使能、100 kHz、上拉关"的默认样子（别给用户留个奇怪的现场）
+  // 把桥恢复成"没使能、100 kHz、上拉关"的默认样子（别给用户留个奇怪的现场），
+  // 右列 tab 也拨回「扫描总线」（它是持久化设置，留着会让下一个套件的前置变脏）
   await ev(`
     const t = window.__tools.i2c;
+    document.querySelector('#i2-dock-tabs button[data-dock="scan"]')?.click();
     await t.session.applyCfg({ sclHz: 100000, pullup: 0, retries: 0 });
     await t.session.setEnabled(false);
     await t.session.disconnect();
     return true;`);
-  console.log('    （已把桥恢复成未使能 + 100 kHz + 上拉关，并放掉 HID）');
+  console.log('    （已把桥恢复成未使能 + 100 kHz + 上拉关，右列拨回「扫描总线」，并放掉 HID）');
 }
 
 console.log(`\n${fail ? '❌' : '✅'} i2c-hw: ${pass} 通过 / ${fail} 失败`);

@@ -407,5 +407,77 @@ console.log('== 9. 执行器：稳态不刷日志（否则日志环十几秒就�
   await s.disconnect();
 }
 
+// ==================================================================== 10
+console.log('== 10. readLong：长读自动分片（对上层就是"读 N 个字节"）==');
+{
+  const s = new I2cSession();
+  await s.connect(false, { mock: true });
+  await s.setEnabled(true);
+
+  // 先往 EEPROM 写个已知图案（分 8 次页写，每页 5 B 避开页边界）
+  const ee = s.hid.devices.get(0x50);
+  for (let i = 0; i < 256; i++) ee.mem[i] = i & 0xff;   // 直接铺内存，省得等 tWR
+
+  // ① 短读走原路（不分片）
+  const one = await s.readLong({ dev: 0x50, addr: [0x00], rd: 8 });
+  eq(one.err, 0, '短读成功');
+  eq(one.chunks, 1, '短读只有 1 笔（不分片）');
+  eq(hex(one.data), '00 01 02 03 04 05 06 07', '短读内容对');
+
+  // ② 256 B 长读：默认 reset 模式，自动 5 笔拼回来
+  s.ring.length = 0;
+  const big = await s.readLong({ dev: 0x50, addr: [0x00], rd: 256 });
+  eq(big.err, 0, '256 B 长读成功');
+  eq(big.data.length, 256, '拼回来 256 B');
+  eq(big.chunks, 5, '自动分成 5 笔（54×4 + 40）');
+  eq(big.mode, 'reset', '默认 reset 模式');
+  ok([...big.data].every((v, i) => v === (i & 0xff)), '256 B 逐字节与写入的图案一致（分片拼接没串位）');
+  const okLogs = s.ring.filter(e => e.kind === 'ok').length;
+  eq(okLogs, 1, '🚨 中间 5 笔**不往日志里写**，只出一行结果（"让外部看不到"就靠这条）');
+  ok(s.ring[0].text.includes('256 B') && s.ring[0].text.includes('分 5 笔'), '……那一行说清了总长与笔数', s.ring[0].text);
+
+  // ③ ptr 模式：先一笔"设地址指针"，之后续片不带子地址
+  const calls = [];
+  const origXfer = s.hid.xfer.bind(s.hid);
+  s.hid.xfer = async (cmd, data) => { if (data[0] === P.ACT.XFER) calls.push({ addrLen: data[3], rd: data[5] }); return origXfer(cmd, data); };
+  s.ring.length = 0;
+  const ptr = await s.readLong({ dev: 0x50, addr: [0x00], rd: 120, chunk: 'ptr' });
+  s.hid.xfer = origXfer;
+  eq(ptr.err, 0, 'ptr 模式 120 B 长读成功');
+  eq(ptr.data.length, 120, '……读回 120 B');
+  eq(ptr.mode, 'ptr', '……mode 标成 ptr');
+  eq(calls.length, 4, 'ptr 模式：1 笔设指针 + 3 片 = 4 笔');
+  eq(calls[0].addrLen, 1, '第一笔带子地址（设地址指针）');
+  eq(calls[0].rd, 0, '……而且不读数据');
+  ok(calls.slice(1).every(c => c.addrLen === 0), '后续每一片都**不带**子地址（靠器件内部指针自增）');
+  eq(calls[1].rd, 54, '续片 54 B');
+  eq(calls[3].rd, 12, '末片 12 B');
+  ok([...ptr.data].every((v, i) => v === (i & 0xff)), 'ptr 模式拼回来的内容也对');
+
+  // ④ 中途失败：必须说清断在第几片，而且**不返回半截数据**
+  const shortDev = {
+    addr: 0x30, name: '测试器件',
+    n: 0,
+    transact(addr, wr, rd){
+      this.n++;
+      if (this.n > 2) return { err: P.E.NO_ADDR };
+      const out = new Uint8Array(rd);
+      for (let i = 0; i < rd; i++) out[i] = (addr[0] + i) & 0xff;
+      return out;
+    },
+  };
+  s.hid.devices.set(0x30, shortDev);
+  s.ring.length = 0;
+  const bad = await s.readLong({ dev: 0x30, addr: [0x00], rd: 200 });
+  eq(bad.err, P.E.NO_ADDR, '第 3 片失败 → 整个长读报那个错误码');
+  eq(bad.data.length, 0, '🚨 失败时**不返回半截数据**（读到一半的值没有意义）');
+  eq(bad.chunks, 3, '报告断在第 3 片');
+  ok(bad.failNote.includes('第 3/4 片'), '……并且说清"第几片/共几片"', bad.failNote);
+  eq(s.ring.filter(e => e.kind === 'e').length, 1, '失败也只出一行日志');
+  ok(s.ring[0].text.includes('已读回 108 B'), '……那一行说清了已经读回多少（方便判断器件是不是半路掉线）', s.ring[0].text);
+
+  await s.disconnect();
+}
+
 console.log(`\n== 结果：${pass} 项通过 / ${fail} 项失败 ==`);
 process.exit(fail ? 1 : 0);

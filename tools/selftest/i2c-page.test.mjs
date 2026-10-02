@@ -80,8 +80,18 @@ for (let i = 0; i < 60; i++){
   try { if (await ev('return !!window.__tools?.i2c;')) { ready = true; break; } } catch {}
 }
 if (!ready) throw new Error('页面没起来（__tools.i2c 不存在）');
-// 自带前置：别的页面测试会把 localStorage 里的"当前标签"留在自己那一页，
-// 不显式点一下的话本页可能根本没显示（各页测试都这么做，见 spi/scope/dbg 的 page 测试）
+// 🚨 自带前置：右列 tab 是**持久化的用户设置**，上一个套件（比如 i2c-hw 的"切到实时值再停"）
+//    会把它留在别的 tab 上。不先清掉的话，下面"默认 tab 是扫描总线"那条会莫名其妙地红
+//    （实测踩过：i2c-hw 跑完接着跑本套件，一次红两条）。
+await ev(`const k='serial-rtt-tools:v1'; const st=JSON.parse(localStorage.getItem(k)||'{}');
+          delete st['i2c.dock']; localStorage.setItem(k, JSON.stringify(st)); true`);
+await send('Page.reload', { ignoreCache: true });
+for (let i = 0; i < 40; i++){
+  await sleep(400);
+  try { if (await ev('return !!window.__tools?.i2c;')) break; } catch {}
+}
+// 同样自带前置：别的页面测试会把"当前标签"留在自己那一页，不显式点一下本页可能根本没显示
+// （各页测试都这么做，见 spi/scope/dbg 的 page 测试）
 await ev(`document.querySelector('#tabs .tab[data-tab="i2c"]').click(); return true;`);
 await sleep(200);
 
@@ -96,15 +106,62 @@ console.log('== 1. 标签页与初始状态 ==');
   ok(s.i2c && s.i2c.connected === false, '初始：未连接');
   ok(s.i2c.rows === 3, `命令表默认 3 行（实际 ${s.i2c?.rows}）`);
   ok(s.i2c.preset === 'quick', '默认选中「快速上手」示例');
+  ok(s.i2c.dock === 'scan', '右列默认 tab 是「扫描总线」');
   const ta = await ev(`return document.getElementById('i2-dsl-text').value.slice(0, 20);`);
   ok(/快速上手/.test(ta), '脚本区载入了默认示例', ta);
-  const disabled = await ev(`return document.getElementById('i2-scan').disabled;`);
-  ok(disabled === true, '未连接时「扫描总线」是灰的');
+  const dis = await ev(`return { scan: document.getElementById('i2-scan').disabled,
+                                stop: document.getElementById('i2-run-stop').disabled,
+                                pill: document.getElementById('i2-run-pill').textContent };`);
+  ok(dis.scan === true, '未连接时「扫描总线」是灰的');
+  ok(dis.stop === true, '没在跑时「停止」是灰的');
+  ok(/未运行/.test(dis.pill), '运行胶囊初始显示「未运行」', dis.pill);
+}
+
+// ==================================================================== 1b
+console.log('== 1b. 右列分 tab（照 #dbg 那套：一次只显示一个）==');
+{
+  const t = await ev(`
+    const ids = [...document.querySelectorAll('#i2-dock-tabs button[data-dock]')].map(b => b.dataset.dock);
+    const pages = [...document.querySelectorAll('#i2-box-dock .dockpage')].map(p => p.dataset.dock);
+    return { ids, pages, shown: [...document.querySelectorAll('#i2-box-dock .dockpage.on')].map(p => p.dataset.dock) };`);
+  ok(t.ids.join(',') === 'scan,cmd,dsl,live', `四个 tab：扫描/命令表/脚本/实时值（${t.ids.join(',')}）`, t.ids.join(','));
+  ok(t.pages.join(',') === t.ids.join(','), '每个 tab 都有对应的内容块（顺序一致）');
+  ok(t.shown.length === 1 && t.shown[0] === 'scan', '🚨 同时**只有一个**内容块可见', JSON.stringify(t.shown));
+
+  const sw = await ev(`
+    const click = d => document.querySelector('#i2-dock-tabs button[data-dock="' + d + '"]').click();
+    const out = [];
+    for (const d of ['cmd', 'dsl', 'live', 'scan']){
+      click(d);
+      out.push({
+        d,
+        on: [...document.querySelectorAll('#i2-box-dock .dockpage.on')].map(p => p.dataset.dock),
+        btnOn: [...document.querySelectorAll('#i2-dock-tabs button.on')].map(b => b.dataset.dock),
+        saved: (JSON.parse(localStorage.getItem('serial-rtt-tools:v1') || '{}') || {})['i2c.dock'],
+        bodyRows: document.querySelectorAll('#i2-cmd-body tr').length,
+      });
+    }
+    return out;`);
+  for (const r of sw){
+    ok(r.on.length === 1 && r.on[0] === r.d, `切到「${r.d}」：只有它显示`, JSON.stringify(r.on));
+    ok(r.btnOn.length === 1 && r.btnOn[0] === r.d, `……tab 按钮也只有一个高亮`, JSON.stringify(r.btnOn));
+    ok(r.saved === r.d, '……选择落进 localStorage（刷新/切页回来还在）', String(r.saved));
+  }
+  ok(sw.every(r => r.bodyRows === 3), '切 tab 不重建表格（3 行始终在）', JSON.stringify(sw.map(r => r.bodyRows)));
+
+  // tab 栏那一行（胶囊 + 停止）不在任何 dockpage 里 —— 切到哪个 tab 都看得见
+  const pillOutside = await ev(`
+    return { inPage: !!document.querySelector('#i2-box-dock .dockpage #i2-run-pill'),
+             inLegend: !!document.querySelector('#i2-box-dock > legend #i2-run-pill'),
+             stopInLegend: !!document.querySelector('#i2-box-dock > legend #i2-run-stop') };`);
+  ok(pillOutside.inLegend && !pillOutside.inPage, '运行胶囊挂在 legend 上（不属于任何 tab，切 tab 都在）');
+  ok(pillOutside.stopInLegend === true, '「停止」按钮同理');
 }
 
 // ==================================================================== 2
 console.log('== 2. 命令表的排版与格子联动（踩过的坑）==');
 {
+  await ev(`document.querySelector('#i2-dock-tabs button[data-dock="cmd"]').click(); return true;`);
   const lay = await ev(`
     const tr = document.querySelector('#i2-cmd-body tr');
     return {
@@ -228,26 +285,92 @@ console.log('== 5. 命令表：跑一次性 + while(1) 定时 ==');
     document.getElementById('i2-cmd-run').click();
     await new Promise(r => setTimeout(r, 1600));
     const running = t.runner.running;
-    const live = t.live.get('ax');
-    const snap = { running, vars: [...t.live.keys()], n: live ? live.n : 0, buf: live ? live.buf.length : 0, last: live ? live.last : null };
-    document.getElementById('i2-cmd-stop').click();
+    const pill = document.getElementById('i2-run-pill').textContent;
+    const stopDis = document.getElementById('i2-run-stop').disabled;
+    // 🚨 tab 化之后的关键一条：切到别的 tab，定时任务**不能**被打断、胶囊也要还在
+    document.querySelector('#i2-dock-tabs button[data-dock="live"]').click();
     await new Promise(r => setTimeout(r, 500));
-    return { ...snap, afterStop: t.runner.running, res1: document.querySelectorAll('#i2-cmd-body td.res')[1].textContent };`);
+    const stillRunning = t.runner.running;
+    const pillAfterSwitch = document.getElementById('i2-run-pill').textContent;
+    const live = t.live.get('ax');
+    const snap = { running, pill, stopDis, stillRunning, pillAfterSwitch, vars: [...t.live.keys()],
+                   n: live ? live.n : 0, buf: live ? live.buf.length : 0, last: live ? live.last : null };
+    // 从胶囊旁边的「停止」停（不是命令表里那个按钮 —— 已经没有了）
+    document.getElementById('i2-run-stop').click();
+    await new Promise(r => setTimeout(r, 500));
+    return { ...snap, afterStop: t.runner.running, pillAfterStop: document.getElementById('i2-run-pill').textContent,
+             res1: document.querySelectorAll('#i2-cmd-body td.res')[1].textContent };`);
   ok(timed.running === true, 'while(1) 跑起来了');
+  ok(/运行中/.test(timed.pill) && /拍/.test(timed.pill), '运行胶囊显示「运行中 · N 拍」', timed.pill);
+  ok(timed.stopDis === false, '……并且「停止」按钮变成可点');
+  ok(timed.stillRunning === true, '🚨 切到「实时值」tab 后定时任务仍在跑（tab 化不打断执行）');
+  ok(/运行中/.test(timed.pillAfterSwitch), '……胶囊在别的 tab 上照样看得到', timed.pillAfterSwitch);
   ok(timed.vars.includes('ax') && timed.vars.includes('az'), '实时值里有 ax / az 两个变量', timed.vars.join(','));
   ok(timed.n >= 20, `1.6 s 内按 50 ms 采了 ${timed.n} 次（应当 ≥20）`);
   ok(timed.buf === timed.n, '曲线缓冲跟采样次数同步长起来', String(timed.buf));
   ok(timed.last !== null && Number.isFinite(timed.last), 'ax 有实际数值', String(timed.last));
-  ok(timed.afterStop === false, '点「停止」后不再跑');
+  ok(timed.afterStop === false, '点 tab 栏的「停止」后不再跑');
+  ok(/已结束/.test(timed.pillAfterStop), '……胶囊转成「已结束」', timed.pillAfterStop);
   ok(/⟳/.test(timed.res1) && /实测/.test(timed.res1), '结果列显示了实测周期（定时行的拍数）', timed.res1);
 
   const liveDom = await ev(`
     return { rows: document.querySelectorAll('#i2-live-body tr').length,
              canvases: document.querySelectorAll('#i2-live-body canvas.spark').length,
+             canvasW: document.querySelector('#i2-live-body canvas.spark')?.width || 0,
              sum: document.getElementById('i2-live-sum').textContent };`);
   ok(liveDom.rows === 3, `实时值表 3 行（实际 ${liveDom.rows}）`);
   ok(liveDom.canvases === 3, '……每行一条迷你曲线');
+  ok(liveDom.canvasW > 100, `曲线背板宽度跟着实际宽度走（${liveDom.canvasW}px）`);
   ok(/个变量/.test(liveDom.sum), '实时值摘要写明了变量数与采样数', liveDom.sum);
+}
+
+// ==================================================================== 5b
+console.log('== 5b. 长读自动分片：填 256，外部看不见那 5 笔 ==');
+{
+  const big = await ev(`
+    const t = window.__tools.i2c;
+    // 往假 EEPROM 里铺 256 B 已知图案（直接铺内存，省得等 tWR）
+    const ee = t.session.hid.devices.get(0x50);
+    for (let i = 0; i < 256; i++) ee.mem[i] = i & 0xff;
+    t.rows = [
+      { op:'rd', dev:'0x50', addr:'0x00', data:'', rd:'256', as:'b0=u8(0), b255=u8(255)', period:'' },
+    ];
+    t.results.clear(); t._renderTable();
+    // 前面几节把 session.log 打桩静音了（省 DOM）；这里要数日志行数，先接回真的
+    const proto = Object.getPrototypeOf(t.session);
+    t.session.log = proto.log.bind(t.session);
+    t.session.ring.length = 0;
+    document.getElementById('i2-cmd-send').click();
+    await new Promise(r => setTimeout(r, 1500));
+    const out = {
+      res: document.querySelector('#i2-cmd-body td.res').textContent,
+      logs: t.session.ring.filter(e => e.kind === 'ok').map(e => e.text),
+      live: [...t.live.entries()].map(([k, v]) => k + '=' + v.last),
+    };
+    t.session.log = () => {};                 // 还原成静音，别让后面的断言被日志干扰
+    return out;`);
+  ok(/共 256 B/.test(big.res) && /分 5 笔/.test(big.res), '结果列写明「共 256 B · 分 5 笔」', big.res);
+  ok(big.logs.length === 1, `🚨 日志只出一行（不是 5 行）—— 分片对外不可见（实际 ${big.logs.length} 行）`, JSON.stringify(big.logs));
+  ok(/256 B/.test(big.logs[0]) && /分 5 笔/.test(big.logs[0]), '……那一行说清了总长与笔数', big.logs[0]);
+  ok(/b0=0/.test(big.live.find(x => x.startsWith('b0')) || '') || big.live.some(x => x === 'b0=0'),
+     'as 解码作用在**拼起来的整块**上（b0 = 0x00）', JSON.stringify(big.live));
+  ok(big.live.some(x => x === 'b255=255'), '……偏移 255 也能解到（b255 = 0xFF）', JSON.stringify(big.live));
+
+  // 读长超上限要当行报错
+  const tooBig = await ev(`
+    const t = window.__tools.i2c;
+    t.rows = [{ op:'rd', dev:'0x50', addr:'0x00', data:'', rd:'99999', as:'', period:'' }];
+    t._renderTable();
+    return document.querySelector('#i2-cmd-body td.res').textContent;`);
+  ok(/✗/.test(tooBig) && /4096/.test(tooBig), '读长超 4096 当行红字报出来', tooBig);
+
+  // 写超 51 B 要报"写不自动分片"
+  const wrBig = await ev(`
+    const t = window.__tools.i2c;
+    t.rows = [{ op:'wr', dev:'0x50', addr:'0x00', data: Array(52).fill('11').join(' '), rd:'', as:'', period:'' }];
+    t._renderTable();
+    return document.querySelector('#i2-cmd-body td.res').textContent;`);
+  ok(/✗/.test(wrBig) && /不自动分片/.test(wrBig), '写超 51 B 报"写不自动分片"（EEPROM 跨页会绕回页首）', wrBig);
 }
 
 // ==================================================================== 6
@@ -291,7 +414,7 @@ console.log('== 6. 表格 ⇄ 脚本（同一套解析）==');
 }
 
 // ==================================================================== 7
-console.log('== 7. 脚本区：预设 / 错误表 / 分片助手 ==');
+console.log('== 7. 脚本区：预设 / 错误表 / 长读 / 导出 ==');
 {
   const pres = await ev(`
     const sel = document.getElementById('i2-preset');
@@ -311,43 +434,53 @@ console.log('== 7. 脚本区：预设 / 错误表 / 分片助手 ==');
   ok(pres.errRows === 0, 'ADS1115 示例零语法错');
   ok(pres.help > 800, `语法速查有内容（${pres.help} 字符）`);
 
+  // AT24C02 只读示例：全片 256 B 现在是**一条**命令（自动分片），不再是 6 行手拆
+  const eep = await ev(`
+    document.getElementById('i2-preset').value = 'at24c02-read';
+    document.getElementById('i2-dsl-load').click();
+    await new Promise(r => setTimeout(r, 200));
+    document.getElementById('i2-dsl-parse').click();
+    await new Promise(r => setTimeout(r, 200));
+    return { sum: document.getElementById('i2-dsl-sum').textContent,
+             text: document.getElementById('i2-dsl-text').value };`);
+  ok(/一次性 3 /.test(eep.sum), 'AT24C02 只读示例：ping + 读 16 B + 读 256 B（一次性 3 条）', eep.sum);
+  ok(/^rd 0x50 0x00 256$/m.test(eep.text), '全片读写成一条 `rd 0x50 0x00 256`（不再手动拆 5 行）');
+  ok(!/^rd 0x50 - 54$/m.test(eep.text), '……旧的手拆分片行已经不在了');
+
   const bad = await ev(`
     const ta = document.getElementById('i2-dsl-text');
     const tooLong = Array(56).fill('11').join(' ');       // 56 B > 单次写上限 51
-    ta.value = 'scan\\nrd 0x50 0x00 99\\nwr 0x50 0x00 ' + tooLong;
+    ta.value = 'scan\\nrd 0x50 0x00 99999\\nwr 0x50 0x00 ' + tooLong;
     document.getElementById('i2-dsl-parse').click();
     await new Promise(r => setTimeout(r, 250));
     const rows = [...document.querySelectorAll('#i2-dsl-err tr')].map(tr => [...tr.children].map(td => td.textContent));
     return { n: rows.length, rows, sum: document.getElementById('i2-dsl-sum').textContent,
              visible: document.getElementById('i2-dsl-errwrap').style.display !== 'none' };`);
   ok(bad.n === 2, `两处语法错都列出来了（实际 ${bad.n}）`, JSON.stringify(bad.rows));
-  ok(bad.rows.some(r => r[0] === '2' && /54/.test(r[2])), '第 2 行：读长超上限并说清上限是 54', JSON.stringify(bad.rows[0]));
+  ok(bad.rows.some(r => r[0] === '2' && /4096/.test(r[2])), '第 2 行：一次逻辑读超上限并说清是 4096', JSON.stringify(bad.rows[0]));
   ok(bad.rows.some(r => r[0] === '3' && /51/.test(r[2])), '第 3 行：写数据超上限并说清上限是 51', JSON.stringify(bad.rows[1]));
   ok(bad.visible === true && /2 处语法错/.test(bad.sum), '错误表显示出来了，摘要点名了处数', bad.sum);
 
-  const frag = await ev(`
+  // 导出：长读在 C 表里被展开（rd_len 是线上字段），JSON 里保持一条
+  const exp = await ev(`
+    const t = window.__tools.i2c;
+    const D = t.__dsl;
+    return null;`).catch(() => null);
+  const exp2 = await ev(`
     const ta = document.getElementById('i2-dsl-text');
-    ta.value = '';
-    document.getElementById('i2-frag-dev').value = '0x50';
-    document.getElementById('i2-frag-addr').value = '0x00';
-    document.getElementById('i2-frag-len').value = '256';
-    document.getElementById('i2-frag-mode').value = 'ptr';
-    document.getElementById('i2-frag-run').click();
-    await new Promise(r => setTimeout(r, 250));
-    const ptr = ta.value;
-    document.getElementById('i2-frag-mode').value = 'reset';
-    document.getElementById('i2-frag-run').click();
-    await new Promise(r => setTimeout(r, 250));
-    const both = ta.value;
+    ta.value = 'rd 0x50 0x00 256';
     document.getElementById('i2-dsl-parse').click();
-    await new Promise(r => setTimeout(r, 250));
-    return { ptr, both, errRows: document.querySelectorAll('#i2-dsl-err tr').length };`);
-  ok(/^wr 0x50 0x00$/m.test(frag.ptr), '分片助手（地址指针自增）：先发一次零长度写把指针推过去', frag.ptr.split('\n').slice(1, 3).join(' | '));
-  ok(/^rd 0x50 - 54$/m.test(frag.ptr) && /^rd 0x50 - 40$/m.test(frag.ptr), '……然后 54/54/54/54/40 分片，续片不带子地址');
-  ok(/rd 0x50 0x36 54/.test(frag.both) && /rd 0x50 0x6C 54/.test(frag.both),
-     '「每片重发子地址」那档按起始地址递增（0x00 → 0x36 → 0x6C → 0xA2 → 0xD8）',
-     frag.both.split('\n').filter(l => /^rd/.test(l)).slice(-4).join(' | '));
-  ok(frag.errRows === 0, '分片助手生成的脚本零语法错');
+    await new Promise(r => setTimeout(r, 200));
+    // 不点下载（CDP 下会弹保存框），直接用模块函数算一遍看形状
+    const m = await import('./app/i2c/dsl.js');
+    const items = m.parseScript(ta.value).items;
+    return { c: m.toCTable(items), json: m.toJson(items), text: m.toText(items) };`);
+  const cRows = exp2.c.split('\n').filter(l => l.startsWith('{'));
+  ok(cRows.length === 5, `导出 C 表：256 B 被展开成 5 行（实际 ${cRows.length}）`, exp2.c.split('\n').slice(0, 8).join(' | '));
+  ok(cRows.every(l => /, ([0-9]+), (NULL|\(uint8_t)/.test(l)), '……每行的 rd_len 都在线上范围内');
+  ok(/rd_len 是线上字段/.test(exp2.c), '……并注释说明为什么被展开');
+  ok(/"chunk": "reset"/.test(exp2.json), '导出 JSON 保住 chunk（无损往返）');
+  ok(/自动分片 5 笔/.test(exp2.text), '导出文本写明「自动分片 5 笔」', exp2.text.trim());
 }
 
 // ==================================================================== 8
@@ -380,11 +513,12 @@ console.log('== 8. 错误路径与状态显示 ==');
   // 坏行必须在结果列里当行报错，而不是等到发送才炸
   const badRow = await ev(`
     const t = window.__tools.i2c;
-    t.rows = [{ op:'rd', dev:'0x50', addr:'0x00', data:'', rd:'99', as:'', period:'' }];
+    document.querySelector('#i2-dock-tabs button[data-dock="cmd"]').click();
+    t.rows = [{ op:'rd', dev:'0x50', addr:'0x00', data:'', rd:'99999', as:'', period:'' }];
     t._renderTable();
     return { text: document.querySelector('#i2-cmd-body td.res').textContent,
              cls: document.querySelector('#i2-cmd-body td.res').className };`);
-  ok(/✗/.test(badRow.text) && /54/.test(badRow.text), '填错的行在结果列里就报出来了', badRow.text);
+  ok(/✗/.test(badRow.text) && /4096/.test(badRow.text), '填错的行在结果列里就报出来了', badRow.text);
   ok(/bad/.test(badRow.cls), '……并且染成错误色', badRow.cls);
 }
 
@@ -399,6 +533,12 @@ console.log('== 9. 收尾：放掉探针 ==');
     return { s: t.summary(), state: document.getElementById('i2-state').textContent };`);
   ok(done.s.connected === false, 'disconnect 后已放掉 HID');
   ok(done.s.running === false, '定时已停');
+  ok(['scan', 'cmd', 'dsl', 'live'].includes(done.s.dock), 'summary 里能报出当前 tab', done.s.dock);
+  // 把 tab 还原成默认，别给下一次测试留个"停在实时值"的状态
+  await ev(`document.querySelector('#i2-dock-tabs button[data-dock="scan"]').click();
+            localStorage.setItem('serial-rtt-tools:v1', JSON.stringify(
+              Object.assign(JSON.parse(localStorage.getItem('serial-rtt-tools:v1') || '{}'), { 'i2c.dock': 'scan' })));
+            return true;`);
   const err = await ev('return window.__tools.summary().errors;');
   ok(err.length === 0, '整场跑完页面无未捕获错误', JSON.stringify(err));
 }

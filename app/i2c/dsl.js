@@ -14,7 +14,10 @@
  *
  *   rd  <dev> <子地址> <读长>             写子地址 + repeated START 读（读寄存器最常用）
  *   rd  0x50 - 8                         子地址写 `-` = 不带子地址的**纯读**
- *   wr  <dev> <子地址> <b0> <b1> …        写子地址 + 数据
+ *   rd  0x50 0x00 256                    读长随便写（≤4096）—— **超过 54 B 自动分片**，
+ *                                        日志只出一行（分片是实现细节，不该让人每次自己拆）
+ *   rd  0x50 0x00 256 ptr                长读改走「地址指针自增」连续读（FIFO 型器件必须用它）
+ *   wr  <dev> <子地址> <b0> <b1> …        写子地址 + 数据（单次 ≤51 B，**写不自动分片**）
  *   wr  <dev> <子地址>                    只发子地址、不带数据 = 把地址指针推到 N
  *   wr  0x50 - 11 22 33                  不带子地址的纯写（命令型器件）
  *   wrr 等价于 rd（写子地址再读），留着只为读起来顺
@@ -56,13 +59,20 @@
  *   报错带**行号 + 原行**。
  */
 
-import { WR_MAX, RD_MAX, ADDR_MAX, hexBytes, addr7, cBytes, hex2 } from './protocol.js';
+import { WR_MAX, RD_MAX, RD_TOTAL_MAX, ADDR_MAX, hexBytes, addr7, cBytes, hex2, planRead } from './protocol.js';
 import { parseAs } from './expr.js';
 
 export const KIND = { XFER: 'xfer', SCAN: 'scan', DELAY: 'delay' };
 
 /** 行尾修饰关键字（出现在这些词后面的都不再算位置参数）*/
-const MODIFIERS = new Set(['as', 'every', 'tag', 'note']);
+const MODIFIERS = new Set(['as', 'every', 'tag', 'note', 'ptr', 'chain', 'chunk']);
+/** `chunk=ptr` / `every=100ms` 这类 `key=value` 也要认出来是修饰字（取 `=` 前面那段）*/
+const modKey = t => {
+  const s = String(t ?? '').toLowerCase();
+  const eq = s.indexOf('=');
+  return eq < 0 ? s : s.slice(0, eq);
+};
+const isModifierToken = t => MODIFIERS.has(modKey(t));
 
 // ============================================================================
 // 小工具（与 SPI 侧同款写法；默认进制按 I2C 的习惯重定）
@@ -257,7 +267,7 @@ export function parseScript(text){
 
     // ---- 单行命令 ----
     let item = null, rest = [];
-    const isMod = t => MODIFIERS.has(String(t).toLowerCase().replace(/=$/, ''));
+    const isMod = isModifierToken;
     const cutAt = (from) => { const k = toks.findIndex((t, idx) => idx >= from && isMod(t)); return k < 0 ? toks.length : k; };
     if (head === 'scan'){
       item = { kind: KIND.SCAN, dev: null, addr: [], wr: [], rd: 0, label: '扫描 0x08..0x77' };
@@ -320,12 +330,26 @@ function finishLine(item, rest, lineNo, raw, st, err, warn){
   item.period = st.period;
   item.count = st.count;
   item.group = st.group;
+  if (item.kind === KIND.XFER && item.chunk == null) item.chunk = 'reset';
   const basePeriod = st.period;
 
   // 从 rest 里剥修饰：as 的值可能被空格拆成多个 token，拼回去
   const toks = rest.slice();
   for (let i = 0; i < toks.length; i++){
-    const k = toks[i].toLowerCase().replace(/=$/, '');
+    const raw = toks[i];
+    const k = modKey(raw);
+    // `ptr` / `chain` / `chunk=ptr`：长读改走"地址指针自增"（FIFO 型器件必须用它）
+    if (k === 'ptr' || k === 'chain'){
+      item.chunk = 'ptr';
+      continue;
+    }
+    if (k === 'chunk'){
+      const v = raw.includes('=') ? raw.split('=').slice(1).join('=') : toks[i + 1];
+      if (!/^(ptr|chain|reset)$/i.test(String(v || ''))){ err(lineNo, raw, `chunk 只能是 ptr 或 reset（收到 "${v}"）`); return; }
+      item.chunk = /^reset$/i.test(v) ? 'reset' : 'ptr';
+      if (!raw.includes('=')) i++;
+      continue;
+    }
     if (k === 'as'){
       const val = [];
       let j = i + 1;
@@ -401,13 +425,16 @@ function parseRdWr(head, toks, rest){
   const sa = parseSubAddr(toks[2]);
   if (!sa.ok) return { ok: false, why: `子地址：${sa.why}` };
   if (sa.bytes.length > ADDR_MAX) return { ok: false, why: `子地址 ${sa.bytes.length} B 超过 ${ADDR_MAX} B` };
-  const item = { kind: KIND.XFER, dev: dv.v, addr: sa.bytes, wr: [], rd: 0, label: '' };
+  const item = { kind: KIND.XFER, dev: dv.v, addr: sa.bytes, wr: [], rd: 0, chunk: 'reset', label: '' };
   if (isRead){
     if (toks[3] == null) return { ok: false, why: '读命令缺长度，例如 `rd 0x50 0x00 8`' };
     const n = parseNum(toks[3], false);
     if (!n.ok) return { ok: false, why: `读长：${n.why}` };
     if (n.v <= 0) return { ok: false, why: '读长必须 > 0（只想探测地址就写 `ping 0x50`）' };
-    if (n.v > RD_MAX) return { ok: false, why: `读长 ${n.v} 超过单次上限 ${RD_MAX} B（要更多就分片，见「读分片」按钮）` };
+    if (n.v > RD_TOTAL_MAX){
+      return { ok: false, why: `读长 ${n.v} 超过一次逻辑读的上限 ${RD_TOTAL_MAX} B` +
+        `（超过 ${RD_MAX} B 会**自动分片**，不用自己拆；但要更大的块请分几次读）` };
+    }
     item.rd = n.v;
     if (toks.length > 4){
       return { ok: false, why: `读命令多了一个参数 "${toks[4]}"（读命令只有 dev / 子地址 / 读长三个位置参数）。` +
@@ -421,14 +448,14 @@ function parseRdWr(head, toks, rest){
     try { item.wr = parseHexBytesLoose(toks.slice(3).join(',')); }
     catch (e){ return { ok: false, why: `写数据：${e.message}` }; }
     if (!item.wr.length) return { ok: false, why: '写数据是空的' };
-    if (item.wr.length > WR_MAX) return { ok: false, why: `写数据 ${item.wr.length} B 超过单次上限 ${WR_MAX} B（分片写）` };
+    if (item.wr.length > WR_MAX) return { ok: false, why: `写数据 ${item.wr.length} B 超过单次上限 ${WR_MAX} B（**写不自动分片**：EEPROM 页写跨页会绕回页首，自动拆是危险的 —— 请自己按页/按寄存器块拆）` };
   }
   return { ok: true, item, rest };
 }
 
 /** `xfer dev=0x50 addr=0x00,0x10 wr=11,22 rd=0`（`toks` 已切到修饰字之前）*/
 function parseXferKV(toks, rest){
-  const item = { kind: KIND.XFER, dev: 0, addr: [], wr: [], rd: 0, label: '' };
+  const item = { kind: KIND.XFER, dev: 0, addr: [], wr: [], rd: 0, chunk: 'reset', label: '' };
   let addrLenHint = null;
   for (let i = 1; i < toks.length; i++){
     const t = toks[i];
@@ -458,6 +485,10 @@ function parseXferKV(toks, rest){
         if (!n.ok) return { ok: false, why: `rd=${val}：${n.why}` };
         item.rd = n.v; break;
       }
+      case 'chunk': {
+        if (!/^(ptr|chain|reset)$/i.test(val)) return { ok: false, why: `chunk=${val} 只能是 ptr 或 reset` };
+        item.chunk = /^reset$/i.test(val) ? 'reset' : 'ptr'; break;
+      }
       case 'addrl': case 'addr_len': {
         const n = parseNum(val, false);
         if (!n.ok) return { ok: false, why: `addr_len=${val}：${n.why}` };
@@ -475,8 +506,8 @@ function parseXferKV(toks, rest){
     return { ok: false, why: `addr_len=${addrLenHint} 与 addr 的 ${item.addr.length} B 对不上` };
   }
   if (addrLenHint != null && !item.addr.length && addrLenHint > 0) item.addr = numToBytes(0, addrLenHint);
-  if (item.wr.length > WR_MAX) return { ok: false, why: `写数据 ${item.wr.length} B 超过 ${WR_MAX} B` };
-  if (item.rd > RD_MAX) return { ok: false, why: `读长 ${item.rd} 超过 ${RD_MAX} B` };
+  if (item.wr.length > WR_MAX) return { ok: false, why: `写数据 ${item.wr.length} B 超过 ${WR_MAX} B（**写不自动分片**：EEPROM 页写跨页会绕回页首，自动拆是危险的）` };
+  if (item.rd > RD_TOTAL_MAX) return { ok: false, why: `读长 ${item.rd} 超过一次逻辑读的上限 ${RD_TOTAL_MAX} B` };
   if (item.rd < 0) return { ok: false, why: '读长不能是负的' };
   return { ok: true, item, rest };
 }
@@ -569,11 +600,13 @@ export function describeItem(it){
   if (it.kind === KIND.SCAN) return '扫描 0x08..0x77';
   if (it.kind === KIND.DELAY) return `延时 ${it.ms} ms`;
   const a = it.addr.length ? `[${hexBytes(it.addr)}]` : '';
+  const big = it.rd > RD_MAX ? `（自动分片 ${Math.ceil(it.rd / RD_MAX)} 笔）` : '';
+  const mode = it.rd > RD_MAX && it.chunk === 'ptr' ? '·连续读' : '';
   if (!it.addr.length && !it.wr.length && !it.rd) return `探测 ${addr7(it.dev)}`;
   if (it.addr.length && !it.wr.length && !it.rd) return `设地址指针 ${addr7(it.dev)}${a}`;
   if (it.wr.length && !it.rd) return `写 ${addr7(it.dev)}${a} ← ${hexBytes(it.wr)}`;
-  if (!it.wr.length && it.rd) return `读 ${addr7(it.dev)}${a} × ${it.rd}`;
-  return `写 ${addr7(it.dev)}${a} ← ${hexBytes(it.wr)} → 读 × ${it.rd}`;
+  if (!it.wr.length && it.rd) return `读 ${addr7(it.dev)}${a} × ${it.rd}${big}${mode}`;
+  return `写 ${addr7(it.dev)}${a} ← ${hexBytes(it.wr)} → 读 × ${it.rd}${big}${mode}`;
 }
 
 // ============================================================================
@@ -583,23 +616,49 @@ export function describeItem(it){
 const periodText = it => (!it.period ? '' : it.count ? `every ${it.period}ms ${it.count}` : `every ${it.period}ms`);
 const asText = it => (it.as?.fields?.length ? `as ${it.asText}` : '');
 
-/** 导出成 **C 表**（列序 = 线上 XFER 字段）：能直接贴回固件源码，也能贴回本页 */
+/**
+ * 导出成 **C 表**（列序 = 线上 XFER 字段）：能直接贴回固件源码，也能贴回本页。
+ *
+ * ⚠️ **长读会被展开成多行**：C 表的 `rd_len` 是**线上字段**（一个字节，最大 54），
+ *    塞不下 `rd 0x50 0x00 256` 这种逻辑读 —— 所以按 `planRead()` 展开成 N 行，
+ *    展开后的字节流与页面上实际发出的**逐笔一致**。
+ *    代价：`as` 解码表达式没法逐行表达（它是作用在**拼起来之后**的整块上的），
+ *    所以被展开的那些行会丢掉 `as` —— 要无损往返请用「导出 JSON」（那个带 chunk 与 as）。
+ */
 export function toCTable(items, { header = true } = {}){
   const L = [];
   if (header){
     L.push('// USB→I2C 页导出：列序 = 线上 XFER 字段 (dev, addr_len, addr, wr_len, rd_len, data)');
     L.push('// addr 按大端铺成 addr_len 个字节（addr[0] 先发）；NULL = 没有数据');
   }
+  let expanded = 0;
   for (const it of items){
     if (it.kind === KIND.SCAN){ L.push('scan'); continue; }
     if (it.kind === KIND.DELAY){ L.push(`delay ${it.ms}ms`); continue; }
     const tail = [asText(it), periodText(it)].filter(Boolean).join(' ');
-    const addrTxt = it.addr.length
-      ? '0x' + (it.addr.reduce((a, b) => ((a << 8) | b) >>> 0, 0) >>> 0).toString(16).toUpperCase().padStart(it.addr.length * 2, '0')
-      : '0';
-    L.push(`{${hex2(it.dev)}, ${it.addr.length}, ${addrTxt}, ${it.wr.length}, ${it.rd}, ${cBytes(it.wr)}},${tail ? ' ' + tail : ''}`);
+    // 长读：展开成线上真实发出的每一笔
+    if (it.rd > RD_MAX){
+      const plan = planRead(it.addr, it.rd, { mode: it.chunk === 'ptr' ? 'ptr' : 'reset' });
+      L.push(`// ↓ 一条 \`${describeItem({ ...it, period: 0, count: 0 })}\` 展开成 ${plan.cmds.length} 笔（C 表的 rd_len 是线上字段，最大 ${RD_MAX}）`);
+      for (const c of plan.cmds) L.push(cRow(it.dev, c.addr, [], c.rd));
+      // 周期属于**整条逻辑读**，展开后挂到最后一笔上才等价
+      if (tail) L.push(`// 上面这组按 ${tail} 循环（周期属于整条读，不属于某一片）`);
+      expanded++;
+      continue;
+    }
+    L.push(cRow(it.dev, it.addr, it.wr, it.rd) + (tail ? ' ' + tail : ''));
   }
+  if (expanded) L.push(`// （共 ${expanded} 条长读被展开；要无损往返请用「导出 JSON」）`);
   return L.join('\n') + '\n';
+}
+
+/** 一行 C 表 */
+function cRow(dev, addr, wr, rd){
+  const a = Array.from(addr || []);
+  const addrTxt = a.length
+    ? '0x' + (a.reduce((x, y) => ((x << 8) | y) >>> 0, 0) >>> 0).toString(16).toUpperCase().padStart(a.length * 2, '0')
+    : '0';
+  return `{${hex2(dev)}, ${a.length}, ${addrTxt}, ${(wr || []).length}, ${rd | 0}, ${cBytes(wr)}},`;
 }
 
 /** 导出成**人读文本**（每行一条 + 结果注解）*/
@@ -620,6 +679,7 @@ export function toJson(items){
     items: items.map(it => ({
       kind: it.kind, dev: it.dev ?? null, addr: it.addr, wr: it.wr, rd: it.rd,
       ms: it.ms ?? null, periodMs: it.period || 0, count: it.count || 0, group: it.group || 0,
+      chunk: it.chunk || 'reset',
       as: it.asText || '', tag: it.tag || '',
     })),
   }, null, 2) + '\n';
@@ -635,6 +695,7 @@ export function fromJson(text){
       // dev / ms 保持 null（而不是 0）：scan 没有器件、XFER 没有时长 —— 别把"没有"写成"是 0"
       kind: r.kind || KIND.XFER, dev: r.dev ?? null, addr: r.addr || [], wr: r.wr || [], rd: r.rd || 0,
       ms: r.ms ?? null, period: r.periodMs || 0, count: r.count || 0, group: r.group || 0,
+      chunk: r.chunk === 'ptr' ? 'ptr' : 'reset',
       line: i + 1, text: '', tag: r.tag || '', asText: r.as || '', as: null, warn: null,
     };
     if (it.asText){
@@ -653,8 +714,10 @@ export const SYNTAX_HELP = `一行一条命令，'#' 或 '//' 注释到行尾，
   scan                     扫 0x08..0x77，列出应答的地址
   ping 0x50                地址探测（只问 ACK）
   rd  0x50 0x00 8          写子地址 0x00 后 repeated START 读 8 B
+  rd  0x50 0x00 256        读长随便写（≤4096）—— **超过 54 B 自动分片**，日志只出一行
+  rd  0x50 0x00 256 ptr    同上，但用「地址指针自增」连续读（读一次弹一个数的 FIFO 型器件必须用它）
   rd  0x50 - 8             子地址写 '-' = 不带子地址的纯读
-  wr  0x50 0x00 11 22 33   写子地址 + 数据（单次 ≤51 B）
+  wr  0x50 0x00 11 22 33   写子地址 + 数据（单次 ≤51 B，**写不自动分片**）
   wr  0x50 0x00            只发子地址、不带数据 = **把器件的地址指针推到 0x00**
                            （线上 = START + dev+W + 子地址 + STOP；EEPROM 分片读靠它）
   wr  0x50 - 11 22         不带子地址的纯写
@@ -682,4 +745,4 @@ C 表行（列序 = 线上 XFER 字段，从固件源码直接贴）：
   {0x68, 1, 0x3B, 0, 14, NULL}, as ax=i16be(0)/16384 every 50ms
 
 进制：设备地址与子地址**默认十六进制**（50 就是 0x50）；读长/延时/周期是十进制。
-上限：单次写 ≤51 B、单次读 ≤54 B、子地址 ≤4 B、器件地址 7 位。`;
+上限：单次写 ≤51 B（写**不**自动分片）、一次逻辑读 ≤4096 B（>54 B 自动分片）、子地址 ≤4 B、器件地址 7 位。`;

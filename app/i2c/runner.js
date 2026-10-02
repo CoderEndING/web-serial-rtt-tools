@@ -27,7 +27,7 @@
 
 import { KIND, describeItem } from './dsl.js';
 import { applyAs } from './expr.js';
-import { hexBytes, errText } from './protocol.js';
+import { hexBytes, errText, RD_MAX } from './protocol.js';
 
 /** 定时循环里"前几拍"照常写日志，之后转入静默 —— 见 runner 顶部的说明 */
 const LOUD_TICKS = 2;
@@ -206,10 +206,14 @@ export class ScriptRunner {
     // XFER：定时任务从第 LOUD_TICKS+1 拍起转静默（成功不再逐笔写日志）
     const loud = !task || iter <= LOUD_TICKS;
     this._emit({ type: 'item', item: it, task, phase: 'begin' });
-    const r = await this.session.transaction(
-      { dev: it.dev, addr: it.addr, wr: it.wr, rd: it.rd },
-      { label: it.label || describeItem(it), quiet: !loud },
-    );
+    // 读 >54 B 走 readLong()：分片、拼接、错误定位都在会话层做完，中间几笔不露出来
+    const r = it.rd > RD_MAX
+      ? await this.session.readLong(
+          { dev: it.dev, addr: it.addr, rd: it.rd, chunk: it.chunk },
+          { label: it.label || describeItem(it), quiet: !loud })
+      : await this.session.transaction(
+          { dev: it.dev, addr: it.addr, wr: it.wr, rd: it.rd },
+          { label: it.label || describeItem(it), quiet: !loud });
     let values = [];
     let warn = null;
     if (r.err === 0 && it.as?.fields?.length && r.data.length){
@@ -228,6 +232,7 @@ export class ScriptRunner {
     this._emit({
       type: 'item', item: it, task, phase: 'done',
       err: r.err, data: r.data, ms: r.ms, values, warn,
+      chunks: r.chunks || 1, failNote: r.failNote || '',
       hex: hexBytes(r.data),
     });
   }

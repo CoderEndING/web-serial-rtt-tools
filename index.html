@@ -1400,23 +1400,37 @@
     </aside>
 
     <section class="main">
-      <div class="busstack">
-        <fieldset id="i2-scan-card">
-          <legend>扫描总线（HID 0x36 · SCAN · 0x08..0x77）<button class="mini foldbtn" data-fold="i2-scan-card">收起</button></legend>
+      <!-- 右列 = 一个带 tab 的面板（照「调试器」页的 .docktabs / .dockpage 那套）+ 常驻日志。
+           为什么改成 tab：原来五张卡片纵向堆在同一个滚动区里、每张都被迫限高
+           （命令表只能看见 7 行、脚本框一屏就满），而且"正在跑的结果"和"实时值"永远没法同屏。
+           tab 化之后每块**吃满整块高度**，日志与运行状态仍然常驻（tab 化不该把过程视图也藏起来）。 -->
+      <fieldset class="i2cdock" id="i2-box-dock">
+        <legend>
+          <span class="seg docktabs" id="i2-dock-tabs">
+            <button data-dock="scan" class="on">扫描总线</button>
+            <button data-dock="cmd">命令表</button>
+            <button data-dock="dsl">脚本</button>
+            <button data-dock="live">实时值</button>
+          </span>
+          <span class="hint dockrun" id="i2-run-pill" title="定时任务的运行状态（切到哪个 tab 都看得见）">未运行</span>
+          <span class="spacer"></span>
+          <button id="i2-run-stop" class="mini" disabled title="停止正在跑的定时任务（一次性序列也会被打断）">停止</button>
+        </legend>
+
+        <div class="dockpage on" data-dock="scan">
           <div class="toolrow">
             <button id="i2-scan" class="primary mini" title="固件一次性扫完 0x08..0x77（112 个地址，100 kHz 下约 15 ms）并回 14 B 位图。扫描期间 DAP/CDC 会顿一下">扫描总线</button>
             <span class="hint" id="i2-scan-sum" style="margin:0">还没扫过</span>
             <span class="spacer"></span>
             <label class="row" style="margin:0"><span style="width:auto">选中器件</span><input id="i2-dev" value="0x50" size="6" title="点下面表格里的一行即可选中；也可以手打一个 7 位地址"></label>
           </div>
-          <div class="scroll" id="i2-scan-wrap">
+          <div class="scroll fill" id="i2-scan-wrap">
             <table class="sp"><thead><tr><th style="width:70px">地址</th><th>可能的器件（只是提示，按手册核）</th><th style="width:170px">操作</th></tr></thead>
             <tbody id="i2-scan-body"></tbody></table>
           </div>
-        </fieldset>
+        </div>
 
-        <fieldset id="i2-cmd-card">
-          <legend>通用命令（多行命令编辑区 · 最多 24 行）<button class="mini foldbtn" data-fold="i2-cmd-card">收起</button></legend>
+        <div class="dockpage" data-dock="cmd">
           <div class="toolrow">
             <button id="i2-cmd-add" class="mini">+ 加一行</button>
             <button id="i2-cmd-del" class="mini">删末行</button>
@@ -1425,9 +1439,8 @@
             <button id="i2-cmd-clear" class="mini">清空结果</button>
             <button id="i2-cmd-send" class="primary mini" title="按顺序跑一遍（带周期的行不会跑 —— 那些用「开始定时」）">发送全部</button>
             <button id="i2-cmd-run" class="primary mini" title="一次性行先跑一遍，然后带周期的行按各自周期一直跑（这就是 while(1)）">开始定时</button>
-            <button id="i2-cmd-stop" class="mini">停止</button>
           </div>
-          <div class="scroll cmdscroll">
+          <div class="scroll fill cmdscroll">
             <table class="sp cmdtab">
               <thead><tr>
                 <th>#</th><th>操作</th><th>器件</th><th>子地址</th><th>数据</th><th>读长</th><th>解码 as</th><th>周期</th><th>结果</th>
@@ -1436,33 +1449,32 @@
             </table>
           </div>
           <p class="hint">每行一次事务（START…STOP）。<b>器件格留空 = 跳过该行。</b>
-            操作：<b>读</b> = 子地址 + 读长；<b>写</b> = 子地址 + 数据（数据留空 = 只把地址指针推过去，EEPROM 分片读就靠它）；
+            操作：<b>读</b> = 子地址 + 读长（读长可以随便写，<b>超过 54 B 自动分片</b>，日志只出一行）；
+            <b>写</b> = 子地址 + 数据（数据留空 = 只把地址指针推过去；<b>写不自动分片</b>，一次 ≤51 B）；
             <b>探测</b> = 只问 ACK；<b>延时</b> = 在「数据」格里填时长（如 <code>10ms</code>）。
             周期格写 <code>100ms</code> 或 <code>100ms×50</code>（×50 = 跑 50 轮自己停；不写 = 一直跑）。</p>
-        </fieldset>
+        </div>
 
-        <fieldset id="i2-dsl-card">
-          <legend>脚本区（贴 C 表 / 脚本 · 载入与导出）<button class="mini foldbtn" data-fold="i2-dsl-card">收起</button></legend>
+        <div class="dockpage" data-dock="dsl">
           <div class="toolrow">
             <span>示例</span>
             <select id="i2-preset"></select>
             <button id="i2-dsl-load" class="mini">载入</button>
             <button id="i2-dsl-file" class="mini" title="读 .c / .h / .txt / .json：C 表行能直接解析，JSON 若是本站导出的形状会自动转回可读文本">读文件…</button>
             <input type="file" id="i2-dsl-file-input" accept=".c,.h,.txt,.json" hidden>
-            <button id="i2-dsl-fromtable" class="mini" title="把上面的命令表（24 行）写成脚本 —— 表格与脚本走的是同一套解析，行为完全一致">命令表 → 脚本</button>
+            <button id="i2-dsl-fromtable" class="mini" title="把「命令表」那个 tab 里的内容写成脚本 —— 表格与脚本走的是同一套解析，行为完全一致">命令表 → 脚本</button>
             <span class="spacer"></span>
-            <button id="i2-dsl-parse" class="mini" title="只解析、不发：先把语法、字段范围、as 表达式核一遍">只看解析</button>
+            <button id="i2-dsl-parse" class="mini" title="只解析、不发：先把语法、字段范围、as 表达式核一遍（不需要连探针）">只看解析</button>
             <button id="i2-dsl-send" class="primary mini" title="解析整段后一次发出去（只跑一次性部分）">解析并发送</button>
-            <button id="i2-dsl-run" class="primary mini" title="一次性部分先跑，然后 loop/every 的定时段一直跑（while(1)）」">开始定时</button>
-            <button id="i2-dsl-stop" class="mini">停止</button>
+            <button id="i2-dsl-run" class="primary mini" title="一次性部分先跑，然后 loop/every 的定时段一直跑（while(1)）">开始定时</button>
           </div>
-          <textarea id="i2-dsl-text" class="code" spellcheck="false" placeholder="一行一条命令，'#' 注释。例：&#10;&#10;scan                                    扫总线&#10;ping 0x50                               地址探测&#10;rd 0x50 0x00 8                          读 0x50 的 0x00 起 8 B&#10;{0x50, 1, 0x0000, 4, 0, (uint8_t[]){0xA5,0x5A,0xDE,0xAD}},   C 表行&#10;delay 10ms                              延时&#10;loop 50ms                               while(1)：整段按 50 ms 循环&#10;  rd 0x68 0x3B 14 as ax=i16be(0)/16384, az=i16be(4)/16384&#10;end"></textarea>
+          <textarea id="i2-dsl-text" class="code" spellcheck="false" placeholder="一行一条命令，'#' 注释。例：&#10;&#10;scan                                    扫总线&#10;ping 0x50                               地址探测&#10;rd 0x50 0x00 8                          读 0x50 的 0x00 起 8 B&#10;rd 0x50 0x00 256                        读 256 B —— 超过 54 B 自动分片&#10;{0x50, 1, 0x0000, 4, 0, (uint8_t[]){0xA5,0x5A,0xDE,0xAD}},   C 表行&#10;delay 10ms                              延时&#10;loop 50ms                               while(1)：整段按 50 ms 循环&#10;  rd 0x68 0x3B 14 as ax=i16be(0)/16384, az=i16be(4)/16384&#10;end"></textarea>
           <div class="toolrow nw">
             <span class="hint" id="i2-dsl-sum" style="margin:0">一行一条命令 · 空行与 # 注释忽略</span>
             <span class="spacer"></span>
-            <button id="i2-dsl-to-table" class="mini" title="把脚本里的 XFER 行装进上面的命令表（24 行上限）">载入到命令表</button>
-            <button id="i2-dsl-out-c" class="mini" title="导出成 C 表：列序 = 线上 XFER 字段（dev, addr_len, addr, wr_len, rd_len, data），能直接贴回固件源码，也能贴回本页">导出 C 表</button>
-            <button id="i2-dsl-out-json" class="mini">导出 JSON</button>
+            <button id="i2-dsl-to-table" class="mini" title="把脚本里的 XFER 行装进「命令表」（24 行上限）">载入到命令表</button>
+            <button id="i2-dsl-out-c" class="mini" title="导出成 C 表：列序 = 线上 XFER 字段（dev, addr_len, addr, wr_len, rd_len, data），能直接贴回固件源码，也能贴回本页。⚠️ 长读会被展开成多行（rd_len 是线上字段，最大 54）">导出 C 表</button>
+            <button id="i2-dsl-out-json" class="mini" title="无损导出：带 chunk 与 as，能原样读回来">导出 JSON</button>
             <button id="i2-dsl-out-text" class="mini">导出文本</button>
             <button id="i2-dsl-clear" class="mini">清空</button>
           </div>
@@ -1473,38 +1485,25 @@
             <summary>语法速查 + as 解码表达式</summary>
             <div class="hint" id="i2-dsl-help"></div>
           </details>
-        </fieldset>
+        </div>
 
-        <fieldset id="i2-frag-card">
-          <legend>读分片助手（单次读上限 54 B）<button class="mini foldbtn" data-fold="i2-frag-card">收起</button></legend>
-          <div class="toolrow">
-            <label class="row" style="margin:0"><span style="width:auto">器件</span><input id="i2-frag-dev" value="0x50" size="6"></label>
-            <label class="row" style="margin:0"><span style="width:auto">起始子地址</span><input id="i2-frag-addr" value="0x00" size="6"></label>
-            <label class="row" style="margin:0"><span style="width:auto">总长</span><input id="i2-frag-len" class="num" value="256" inputmode="numeric"><span>B</span></label>
-            <select id="i2-frag-mode" title="地址指针自增：先一次零长度写把指针推到起始地址，之后每片都不带子地址（快一倍，只适合地址自增的器件）。每片重发子地址：FIFO 型器件只能这样">
-              <option value="ptr">地址指针自增（EEPROM / 寄存器型，推荐）</option>
-              <option value="reset">每片重发子地址（FIFO 型器件用）</option>
-            </select>
-            <button id="i2-frag-run" class="mini">生成分片读</button>
-          </div>
-          <p class="hint">读超过 54 B 必须分片。**别拿 FIFO 型器件（读一次弹一个数）用「地址指针自增」** —— 那样丢数据。</p>
-        </fieldset>
-
-        <fieldset id="i2-live-card">
-          <legend>实时值 · while(1) 读的效果<button class="mini foldbtn" data-fold="i2-live-card">收起</button></legend>
+        <div class="dockpage" data-dock="live">
           <div class="toolrow">
             <span class="hint" id="i2-live-sum" style="margin:0">还没有数据</span>
             <span class="spacer"></span>
             <label class="chk" style="margin:0"><input type="checkbox" id="i2-live-spark" checked> 画曲线</label>
             <button id="i2-live-reset" class="mini">清空</button>
           </div>
-          <div class="scroll" id="i2-live-wrap">
-            <table class="sp"><thead><tr><th>变量</th><th>最新</th><th>最小</th><th>最大</th><th>次数</th><th>频率</th><th style="width:236px">曲线（最近 120 点）</th></tr></thead>
+          <div class="scroll fill" id="i2-live-wrap">
+            <table class="sp"><thead><tr><th>变量</th><th>最新</th><th>最小</th><th>最大</th><th>次数</th><th>频率</th><th style="width:300px">曲线（最近 120 点）</th></tr></thead>
             <tbody id="i2-live-body"></tbody></table>
           </div>
-          <p class="hint">变量来自命令里的 <code>as 名字=表达式</code>。例：<code>rd 0x68 0x3B 14 as ax=i16be(0)/16384, az=i16be(4)/16384</code> —— 加速度直接出 g。</p>
-        </fieldset>
-      </div>
+          <p class="hint">变量来自命令里的 <code>as 名字=表达式</code>。例：<code>rd 0x68 0x3B 14 as ax=i16be(0)/16384, az=i16be(4)/16384</code> —— 加速度直接出 g。
+            长读也照常解码（<code>rd 0x50 0x00 256 as b0=u8(0)</code> 里的偏移是在**拼起来之后**的整块上算的）。</p>
+        </div>
+      </fieldset>
+
+      <div class="grip grip-h" id="i2-grip-log" title="拖动：调整日志高度"></div>
 
       <div class="logbox" id="i2-logbox">
         <button id="i2-log-clear" class="mini logclear" title="只清屏上的日志（记录仍在会话里，切页回来会重放）">清空</button>
@@ -1512,7 +1511,7 @@
       </div>
 
       <div class="stats">
-        <span>协议：<code>HID 0x36</code>（控制面 + 数据面同一条报文，事务在主循环执行，主机轮询 RESULT 取结果）</span>
+        <span>协议：<code>HID 0x36</code>（控制面 + 数据面同一条报文，事务在主循环执行，主机轮询 RESULT 取结果）· 长读自动分片</span>
         <span class="spacer"></span>
         <span class="hint" style="margin:0">接线与协议细节见 <code>docs/i2c-page.md</code> · 固件侧真源 <code>akaLinkPro/src/i2c_bridge/i2c_bridge_proto.h</code></span>
       </div>

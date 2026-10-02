@@ -240,6 +240,60 @@ export class I2cSession {
 
   // ==================================================================== 上层动作
 
+  /**
+   * **一次逻辑读**（长读自动分片）。上层只管"要从 dev 的 addr 读 rd 个字节"，
+   * 54 B 的分片、拼接、错误定位都在这里做完 —— **中间那几笔不往日志里写**，
+   * 只出一行结果（`256 B · 分 5 笔 · 62 ms`）。理由：一次只能读 54 B 是 HID 报文的限制，
+   * 是实现细节，不该让填命令的人每次都自己拆。
+   *
+   * `chunk`：
+   *   · `'reset'`（默认）—— 每片重发子地址。EEPROM / 寄存器型器件（MPU6050/ADS1115/Si5351）
+   *     全都对，最稳，慢一倍。
+   *   · `'ptr'` —— 地址指针自增（先零长度写推指针，之后续片不带子地址）。
+   *     **读一次弹一个数的 FIFO 型器件必须用它**，否则每片重发子地址会把数据丢光。
+   *
+   * @returns {Promise<{err:number, data:Uint8Array, ms:number, chunks:number, mode:string, failNote?:string}>}
+   */
+  async readLong({ dev, addr = [], rd, chunk = 'reset' }, { label = '', quiet = false, resultTimeout = 2000 } = {}){
+    const total = Math.max(0, rd | 0);
+    if (total <= P.RD_MAX){
+      const r = await this.transaction({ dev, addr, wr: [], rd: total }, { label, quiet, resultTimeout });
+      return { ...r, chunks: 1, mode: 'single' };
+    }
+    const plan = P.planRead(addr, total, { mode: chunk });
+    const t0 = performance.now();
+    const head = label || `读 ${P.addr7(dev)}${addr.length ? '[' + P.hexBytes(addr) + ']' : ''} × ${total}`;
+    const parts = [];
+    let done = 0;
+    for (let i = 0; i < plan.cmds.length; i++){
+      const c = plan.cmds[i];
+      // 分片内部一律 quiet：不逐片刷日志（这就是"让外部看不到"的地方）
+      const r = await this.transaction({ dev, addr: c.addr, wr: [], rd: c.rd }, { quiet: true, resultTimeout });
+      if (r.err !== P.E.OK){
+        const ms = performance.now() - t0;
+        const note = `第 ${i + 1}/${plan.cmds.length} 片（${c.note}）失败`;
+        // 出错时**必须**说清断在哪一片、已经拿到多少 —— 这比"失败了"有用得多
+        if (!quiet) this.log('e', `${head} → ${note}：${P.errText(r.err)}（已读回 ${done} B，这部分丢弃）`);
+        this.lastOp = { label: head, err: r.err, ms, n: 0 };
+        this._emit('op', this.lastOp);
+        return { err: r.err, data: new Uint8Array(0), ms, chunks: i + 1, mode: plan.mode, failNote: note };
+      }
+      if (r.data.length) parts.push(r.data);
+      done += r.data.length;
+    }
+    const data = new Uint8Array(done);
+    let off = 0;
+    for (const p of parts){ data.set(p, off); off += p.length; }
+    const ms = performance.now() - t0;
+    this.lastOp = { label: head, err: P.E.OK, ms, n: data.length };
+    this._emit('op', this.lastOp);
+    if (!quiet){
+      this.log('ok', `${head} → ${data.length} B · 分 ${plan.cmds.length} 笔` +
+        `${plan.mode === 'ptr' ? '（地址指针自增）' : ''} · ${ms.toFixed(1)} ms  ${P.hexBytes(data.subarray(0, 16))}${data.length > 16 ? ' …' : ''}`);
+    }
+    return { err: P.E.OK, data, ms, chunks: plan.cmds.length, mode: plan.mode };
+  }
+
   async loadCfg({ quiet = false } = {}){
     const r = await this._cmd(P.actGetCfg());
     const cfg = P.parseCfg(P.dataOf(r).subarray(0, P.CFG_SIZE));
