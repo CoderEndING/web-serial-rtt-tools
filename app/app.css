@@ -321,13 +321,21 @@ dialog form{margin-top:16px;text-align:right}
 }
 /* flash 卡的按钮行：**别再被拉伸**。
    `.btnrow>button{flex:1}`（全局，第 92 行）在这里的后果是 `读一段`/`读测速` 各被拉到 591px 宽、
-   擦除那行四个控件各 328px（用户："布局是不是有点奇怪？高度有点太大？"—— 宽不是高，但一样怪）。
-   工具栏那些按钮是内容宽的，这里对齐它们；`测速量` 那个 label 自带 margin-left:auto 仍然靠右。 */
+   擦除那行四个控件各 328px（用户："布局是不是有点奇怪？"）。工具栏那些按钮是内容宽的，
+   这里对齐它们；`测速量` 那个 label 自带 margin-left:auto 仍然靠右。 */
 #sp-flash-card .row.btnrow>button,#sp-flash-card .row.btnrow>select{flex:0 0 auto}
 #sp-flash-card .row.btnrow>select{max-width:240px}
-/* 行距压紧：这一卡的控件行多，每行省 4px 攒起来全给下面两个数据窗口 */
-#sp-flash-card>.row,#sp-flash-card>.toolrow{margin:3px 0}
-#sp-flash-card>.hint{margin:4px 0 0}
+/* 🚨 行距/tab 间隙压紧**不是抠像素**：这一卡的控件行最多（工具行 / 参数行 / 提示 / 读行 /
+   擦写行 / 写数据行 / 填图案行 / 提示），每一处省几像素攒起来才是两个数据窗口的高度 ——
+   用户 2026-10 的原话是"写数据框高度还可以高出一行字来"。实测：把"我确认要擦写"并进擦除行
+   （省 24px）、行距 3→2（省 ~14px）、tab 间隙 6→4（省 ~20px）之后，820 高的窗口下
+   两个数据窗口从 110px 长到 ~139px —— 正好一行多。
+   ⚠️ 这里必须写 `#tab-spi #sp-flash-card`（两个 id）：`#tab-spi .dockpage` 的 (1,1,0)
+   会压过单 id 的 (1,0,0)，间隙就静默不生效了。 */
+#tab-spi #sp-flash-card{gap:4px}
+#sp-flash-card>.row,#sp-flash-card>.toolrow{margin:2px 0}
+#sp-flash-card>.hint{margin:3px 0 0}
+#sp-flash-card .row.btnrow>label.chk.arm{flex:0 0 auto;margin-right:auto}
 /* 四个参数**排一行**（原来是 2×2，读模式那个长下拉把 dummy 顶到最右边，看着很散）——
    顺带省下一整行的高度。窄窗口下 grid 自己会挤，不会溢出。 */
 #sp-flash-card .framegrid{grid-template-columns:1.35fr .75fr 1.1fr .75fr}

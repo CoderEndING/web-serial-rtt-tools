@@ -1028,10 +1028,10 @@
           </div>
           <div class="log fill" id="sp-fl-out">（还没测过）</div>
 
-          <div class="row" style="margin-top:2px">
-            <label class="chk" title="擦写是破坏性的：先解锁，再点下面的按钮。地址 / 数据都在上面或下面填"><input type="checkbox" id="sp-fl-armed"> 我确认要擦写这颗 flash</label>
-          </div>
+          <!-- 擦写行：「我确认要擦写」和那几个按钮**同一行** —— 原来它自己占一行（18px + 行距），
+               而这一卡的控件行本来就多，两个数据窗口会被压到接近 min-height。 -->
           <div class="row btnrow">
+            <label class="chk arm" title="擦写是破坏性的：先解锁，再点后面的按钮。地址 / 数据都在上面或下面填"><input type="checkbox" id="sp-fl-armed"> 我确认要擦写这颗 flash</label>
             <select id="sp-fl-erase-mode"></select>
             <button id="sp-fl-erase" disabled>擦除</button>
             <button id="sp-fl-write" disabled title="按页编程 + 页间自动等 tPP + 写完自动回读校验">写 + 校验</button>
