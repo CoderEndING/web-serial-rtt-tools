@@ -55,14 +55,22 @@ static int wait_field(uintptr_t addr, uint32_t mask, uint32_t want, uint32_t spi
 /**
  * 配 PLL1 的源/分频/倍频。**必须在 PLL1ON=0 时调用**（否则这些寄存器写不进去）。
  *   src   ：RCC_PLLCKSELR_PLLSRC_xxx
- *   divm  ：参考分频（实际值，内部写 divm-1）
+ *   divm  ：参考分频（**写分频值本身**，1..63 —— 与 N/P/Q/R 不同，那三个才是写"值-1"）
  *   divn  ：倍频（实际值，内部写 divn-1）
  *   rge   ：参考频率档位值（0:1~2MHz 1:2~4 2:4~8 3:8~16）
  * PLL1P/Q/R 固定 /2（P 给 CPU，Q/R 填合法值免得被 assert 的等价物坑）。
  */
 static void pll1_config(uint32_t src, uint32_t divm, uint32_t divn, uint32_t rge){
-  /* 🚨 DIVM1 在 bit[9:4]、PLLSRC 在 bit[1:0] —— 这是 H7B0(RM0455)，不是 H743！ */
-  RCC_PLLCKSELR = src | ((divm - 1u) << RCC_PLLCKSELR_DIVM1_SHIFT);
+  /* DIVM1 在 bit[9:4]（6 位）、PLLSRC 在 bit[1:0] —— 按本机 SDK 的 stm32h7b0xx.h 逐位核过
+   * （RCC_PLLCKSELR_DIVM1_Pos = 4、RCC_PLLCKSELR_PLLSRC_Pos = 0）。
+   *
+   * 🚨 2026-10 修正 off-by-one：这里原来写的是 `(divm - 1u)`，而 DIVM1 要写**分频值本身**
+   *    （依据：HAL 的 __HAL_RCC_PLL_CONFIG 宏就是 `(__PLLM1__) << 4U`，HAL_RCC_GetSysClockFreq
+   *    里也是 `pllm = (PLLCKSELR & DIVM1) >> 4` 之后直接做除）。
+   *    写 divm-1 的后果：HSE 路径实际 25/4 × 112 / 2 = **350 MHz**，而固件把 g_sysclk_hz 报成
+   *    280 MHz —— H7B0 是 280 MHz 的片子，等于一直在**超规格**跑（HSI 后备路径同理）。
+   *    注意只有 DIVM1 是"写值本身"，N1/P1/Q1/R1 仍是"写值-1"（见下面 PLL1DIVR）。 */
+  RCC_PLLCKSELR = src | (divm << RCC_PLLCKSELR_DIVM1_SHIFT);
   RCC_PLL1FRACR = 0;                                   /* 不用小数分频 */
   RCC_PLLCFGR   = (rge << RCC_PLLCFGR_PLL1RGE_SHIFT)   /* 参考频率档 */
                 | RCC_PLLCFGR_DIVP1EN                  /* CPU 时钟走 PLL1P，必须开 */
