@@ -554,7 +554,17 @@ console.log('== 13. SWD 串行化（后台轮询不许和用户动作交错）==
   const b = s5.exclusive(async () => { seq.push('B1'); await sleep(10); seq.push('B2'); });
   await Promise.all([a, b]);
   ok(seq.join(',') === 'A1,A2,B1,B2', '两个独占动作排队：A 全程跑完才轮到 B', seq.join(','));
-  ok(s5._opBusy === false, '队列跑空后锁已释放', String(s5._opBusy));
+  ok(s5._opDepth === 0, '队列跑空后锁已释放', String(s5._opDepth));
+
+  /* 🚨 回归（2026-10 代码审查）：**两个**独占动作排队时，第一个结束时第二个**还没开始跑** ——
+   *    那段时间后台轮询必须仍然"跳过"，不能排队进来。用布尔标志在这里会失效。 */
+  const q = [];
+  const a2 = s5.exclusive(async () => { q.push('A1'); await sleep(50); q.push('A2'); });
+  const b2 = s5.exclusive(async () => { q.push('B1'); await sleep(50); q.push('B2'); });
+  await sleep(80);                                  // A 已结束、B 正在跑
+  const mid = await s5.tryExclusive(async () => { q.push('BG'); });
+  ok(mid.skipped === true, '第一个跑完、第二个还在跑时后台轮询仍跳过（布尔标志会漏掉的那段）', JSON.stringify(q));
+  await Promise.all([a2, b2]);
   await s5.disconnect();
 }
 

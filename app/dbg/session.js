@@ -85,8 +85,18 @@ export class DebugSession {
     this._prev = null;                     // 上一次读到的寄存器值（算 changed 高亮）
     this._cfbp = 0;
     this._opChain = Promise.resolve();     // 串行化用的队列（见 exclusive/tryExclusive）
-    this._opBusy = false;
+    /**
+     * 独占队列的**深度**（不是布尔！）。
+     * 🚨 为什么必须是计数（2026-10 代码审查）：两个操作排队时（`b` 跟在 `a` 后面），
+     *    `a` 一结束就把布尔标志清成 false，可 `b` **还没开始跑** —— 这段时间后台轮询
+     *    （观察循环 / RTT 泵）会以为"没人占着"而排队进来，正好违反上面注释里承诺的
+     *    "忙就跳过这一拍、绝不排队堆积"。计数归零才算真的空闲。
+     */
+    this._opDepth = 0;
   }
+
+  /** 只读视图：现在有没有人被独占队列压着（真正的状态是 `_opDepth`）*/
+  get _opBusy(){ return this._opDepth > 0; }
 
   get connected(){ return !!this.probe; }
   get bpCapacity(){ return this.caps.numCode || 0; }
@@ -112,19 +122,19 @@ export class DebugSession {
     const prev = this._opChain;
     let release;
     this._opChain = new Promise(res => { release = res; });
-    this._opBusy = true;
+    this._opDepth++;                       // 🚨 计数，不是布尔（见构造函数里的说明）
     try {
       await prev.catch(() => {});
       return await fn();
     } finally {
-      this._opBusy = false;
+      this._opDepth--;
       release();
     }
   }
 
   /** 后台轮询专用：正忙就返回 `{ skipped: true }`（不排队、不等待） */
   async tryExclusive(fn){
-    if (this._opBusy) return { skipped: true };
+    if (this._opDepth > 0) return { skipped: true };
     const r = await this.exclusive(fn);
     return { skipped: false, value: r };
   }

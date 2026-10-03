@@ -7,6 +7,8 @@
  *   B. `registers.js`       —— 输入解析 / 改动 diff / ASCII / bit 操作
  *   C. 会话层端到端（**假探针**）：readLong 128 B → 改位 → writeLong「只写改动」→ 回读逐字节对账
  *   D. **EEPROM 页写回卷**这条真实世界的坑：不按页分片会把数据写花、不等 tWR 第 2 片必失败
+ *   E. **页对齐**（2026-10 代码审查抓到）：只给 `chunkMax` 挡不住"起始地址不是页倍数"，
+ *      必须给 `pageSize` 让每一片落在同一页内 —— 正反两面都钉住（给了对、不给花）
  *
  * 这几条都是"肉眼看不出来"的：分片边界差一个字节、地址 bump 少加一、页写回卷 —— 表里都是
  * 一堆十六进制，看着都挺像对的。
@@ -216,6 +218,63 @@ console.log('== D. EEPROM 页写回卷 + tWR（这面板为什么要给「写分
   // ③ 不等 tWR 连发两片 → 第 2 片被器件 NACK（假 EEPROM 如实建模）
   const noGap = await s.writeLong({ dev: 0x50, addr: [0x00], data: payload, chunkMax: 8, gapMs: 0 }, { quiet: true });
   ok(noGap.err !== P.E.OK, '不等 tWR 连发：第 2 片失败并被如实报出来', `（err=${noGap.err}）`);
+}
+
+// ==================================================================== E
+console.log('== E. 页对齐（只设 chunkMax 挡不住"起始地址不是页倍数"）==');
+{
+  // ① 纯逻辑：任何一片都不许跨页
+  const b = n => Uint8Array.from({ length: n }, (_, i) => i);
+  const noCross = (plan, base, page) => plan.cmds.every(c =>
+    (P.addrNum(P.bump(base, c.off)) % page) + c.wr.length <= page);
+
+  const plan1 = P.planWrite([0x05], b(16), { pageSize: 8, chunkMax: 8 });
+  ok(noCross(plan1, [0x05], 8), '从 0x05 起按页 8 分片：没有一片跨页');
+  eq(plan1.chunks, 3, '从 0x05 起 16 B 分 3 片');
+  eqArr(plan1.cmds.map(c => c.off), [0, 3, 11], '分片起点跟着页边界走（0x05..07 / 08..0F / 10..14）');
+
+  const plan2 = P.planWrite([0x00], b(16), { offsets: [6, 7, 8, 9], pageSize: 8 });
+  eqArr(plan2.cmds.map(c => c.off), [6, 8], '只改 +6..+9 且跨页：拆成 +6..+7 与 +8..+9');
+
+  const plan3 = P.planWrite([0x01, 0x05], b(64), { pageSize: 32, addrLen: 2 });
+  ok(noCross(plan3, [0x01, 0x05], 32), '2 字节地址 0x0105、页 32：没有一片跨页');
+  eq(plan3.cmds[0].wr.length, 27, '第一片收窄到 27 B（0x105 在页内偏移 5）');
+
+  eq(P.planWrite([0x05], b(16), {}).chunks, 1, 'pageSize=0（寄存器型器件）：行为与以前一致，不切');
+
+  // ② 端到端（假 AT24C02，页 8）：审查里的两个场景现在必须逐字节对上
+  const s = new I2cSession();
+  await s.connect(false, { mock: true });
+  await s.setEnabled(true);
+  const wait = ms => new Promise(r => setTimeout(r, ms));
+  const zero = new Uint8Array(16);
+
+  await s.writeLong({ dev: 0x50, addr: [0x00], data: zero, chunkMax: 8, pageSize: 8, gapMs: 6 }, { quiet: true });
+  await wait(8);
+  const payA = Uint8Array.from({ length: 16 }, (_, i) => 0xa0 + i);
+  const wa = await s.writeLong({ dev: 0x50, addr: [0x05], data: payA, chunkMax: 8, pageSize: 8, gapMs: 6 }, { quiet: true });
+  eq(wa.err, P.E.OK, '场景 A：从 0x05 写 16 B 提交成功');
+  await wait(8);
+  const ra = await s.readLong({ dev: 0x50, addr: [0x05], rd: 16 }, { quiet: true });
+  ok(hex(ra.data) === hex(payA), '场景 A：回读逐字节一致（审查里这里是花的）', `（回读 ${hex(ra.data)}）`);
+
+  await s.writeLong({ dev: 0x50, addr: [0x00], data: zero, chunkMax: 8, pageSize: 8, gapMs: 6 }, { quiet: true });
+  await wait(8);
+  const cur = new Uint8Array(16); cur.set([0x11, 0x22, 0x33, 0x44], 6);
+  await s.writeLong({ dev: 0x50, addr: [0x00], data: cur, offsets: [6, 7, 8, 9], chunkMax: 8, pageSize: 8, gapMs: 6 },
+    { quiet: true });
+  await wait(8);
+  const rb = await s.readLong({ dev: 0x50, addr: [0x00], rd: 16 }, { quiet: true });
+  ok(hex(rb.data) === hex(cur), '场景 B：只改 +6..+9（跨页）回读逐字节一致', `（回读 ${hex(rb.data)}）`);
+
+  // ③ 反证：不给 pageSize 时**仍然会**写花 —— 证明这一格是真防线，也是"写后回读"存在的理由
+  await s.writeLong({ dev: 0x50, addr: [0x00], data: zero, chunkMax: 8, gapMs: 6 }, { quiet: true });
+  await wait(8);
+  const bad = await s.writeLong({ dev: 0x50, addr: [0x05], data: payA, chunkMax: 8, gapMs: 6 }, { quiet: true });
+  eq(bad.err, P.E.OK, '反证：不给页大小时器件照样回 OK（"写成功"是假的）');
+  await wait(8);
+  const rc = await s.readLong({ dev: 0x50, addr: [0x05], rd: 16 }, { quiet: true });
+  ok(hex(rc.data) !== hex(payA), '反证：不给页大小时数据确实是花的', `（回读 ${hex(rc.data)}）`);
 }
 
 console.log(`\n${fail ? 'FAIL' : 'OK'}  ${pass} 通过 / ${fail} 失败`);

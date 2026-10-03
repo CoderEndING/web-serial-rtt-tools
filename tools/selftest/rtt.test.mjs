@@ -88,7 +88,7 @@ console.log('== 3. 环形缓冲绕回（一次读要跨过缓冲末尾）==');
 console.log('== 3.5 错位读的"立刻重读"也必须按同样两段走（审查：老代码会读越界）==');
 {
   // 老代码里正常路径绕回时分两段读，可 corrupt 重试是单段 `readMem(pbuf + rd, n)` ——
-  // 绕回时那会跨过缓冲末端去读相邻内存；只要重试内容里恰好没有 "SEGGER RTT" 签名，
+  // 绕回时那会跨过缓冲末端去读相邻内存；只要重试内容里恰好没有"控制块指纹"，
   // 就被当成正常数据用掉并推进 RdOff（**静默数据损坏**）。
   const probe = new MockProbe();
   const rtt = new Rtt(probe, { addr: probe.cbAddr });
@@ -113,8 +113,14 @@ console.log('== 3.5 错位读的"立刻重读"也必须按同样两段走（审�
     const out = await orig(addr, len);
     // 只污染**第一遍**的读（绕回时两段），重试那遍必须干净 → 触发并验证重读路径
     if (inBuf && ++dataCalls <= (wrapped ? 2 : 1)){
-      const sig = new TextEncoder().encode('SEGGER RTT');
-      out.set(sig.subarray(0, Math.min(sig.length, out.length)), 0);
+      /* 复刻"错位读把控制块读回来了"：整块头 24 B —— 签名 + MaxUp@+16 + MaxDown@+20。
+       * ⚠️ 只写那 10 字节签名**不算**错位读（目标自己 printf 这串字是合法的），判据见
+       *    protocol.js 的 `_looksCorrupt`（2026-10 代码审查）。 */
+      const hdr = new Uint8Array(24);
+      hdr.set(new TextEncoder().encode('SEGGER RTT'), 0);
+      const dv = new DataView(hdr.buffer);
+      dv.setUint32(16, rtt.maxUp, true); dv.setUint32(20, rtt.maxDown, true);
+      out.set(hdr.subarray(0, Math.min(hdr.length, out.length)), 0);
     }
     return out;
   };
@@ -128,6 +134,47 @@ console.log('== 3.5 错位读的"立刻重读"也必须按同样两段走（审�
      `所有读都没跨过缓冲末端（越界读 ${overrun.length} 次${overrun.length ? '：' + JSON.stringify(overrun[0]) : ''}）`);
   ok(!text.includes('SEGGER') && text.length > 0, '没把控制块签名当数据用掉');
   ok(/^#\d+\.+/.test(text), `重读回来的就是真实数据：${JSON.stringify(text.slice(0, 12))}`);
+}
+
+console.log('== 3.6 目标自己打印 "SEGGER RTT" 不再被判错位读（审查：会把通道永久卡死）==');
+{
+  // 老判据是 `data.includes('SEGGER RTT')`：目标 printf 这串字时每轮重读都一样 →
+  // 整段丢弃、RdOff 永不推进 → **一条日志都出不来**，上层还误报"SWD 链路不稳定"。
+  const probe = new MockProbe();
+  const rtt = new Rtt(probe, { addr: probe.cbAddr });
+  await rtt.init();
+  const msg = 'boot: SEGGER RTT ready\n';
+  probe._pushUp(msg);
+  const r1 = await rtt.readUp(0);
+  ok(!r1.corrupt && dec(r1.bytes) === msg, `目标自己打印的这行照常读出：${JSON.stringify(dec(r1.bytes))}`);
+  const r2 = await rtt.readUp(0);
+  ok(!r2.corrupt && r2.bytes.length === 0, '第二轮没有新数据（不是卡在"重读同一段"上）');
+
+  // 反证：真"把整个控制块读回来"的错位读**仍然要拦住**（RdOff 不动，数据不丢）
+  const probe2 = new MockProbe();
+  const rtt2 = new Rtt(probe2, { addr: probe2.cbAddr });
+  await rtt2.init();
+  // 负载要够长：读取窗口装不下"签名 + MaxUp + MaxDown"这 24 B 时，按判据只能当正常数据放行
+  probe2._pushUp('hello world 0123456789 abcdefghijklmnopqrstuvwxyz\n');
+  const e2 = await rtt2._entry(rtt2.upBase, 0);
+  rtt2.up[0] = e2;
+  const orig2 = probe2.readMem.bind(probe2);
+  probe2.readMem = async (addr, len) => {
+    const out = await orig2(addr, len);
+    if (addr >= e2.pbuf && addr < e2.pbuf + e2.size){
+      const hdr = new Uint8Array(24);
+      hdr.set(new TextEncoder().encode('SEGGER RTT'), 0);
+      const dv = new DataView(hdr.buffer);
+      dv.setUint32(16, rtt2.maxUp, true); dv.setUint32(20, rtt2.maxDown, true);
+      out.set(hdr.subarray(0, Math.min(hdr.length, out.length)), 0);
+    }
+    return out;
+  };
+  const rr = await rtt2.readUp(0);
+  probe2.readMem = orig2;
+  const rdAfter = (await rtt2._entry(rtt2.upBase, 0)).rd;
+  ok(!!rr.corrupt && rr.bytes.length === 0, '把整个控制块读回来的错位读仍然判 corrupt');
+  ok(rdAfter === e2.rd, `而且 RdOff 没被推进（rd 仍为 ${rdAfter}，下一轮原样重读）`);
 }
 
 console.log('== 4. 过载/丢包的可观测信号 ==');
@@ -212,14 +259,22 @@ console.log('== 6. ELF 符号解析 ==');
   }
 }
 
-console.log('== 7. HEX 解析 ==');
+console.log('== 7. HEX 解析（分隔符 = 字节边界）==');
 {
   ok(bytesToHex(parseHex('01 03 0A').bytes) === '01 03 0A', '空格分隔');
   ok(bytesToHex(parseHex('01030a').bytes) === '01 03 0A', '连写 6 位数字自动两两分组');
   ok(bytesToHex(parseHex('0x01,0x03').bytes) === '01 03', '0x 前缀 + 逗号');
   ok(parseHex('01 0G').error !== null, '非法字符报错');
-  ok(parseHex('01 3').error !== null, '奇数位报错');
-  ok(parseHex('01-03').bytes.length === 2, '连字符分隔');
+  ok(parseHex('01030').error !== null, '连续串奇数位报错');
+  ok(bytesToHex(parseHex('01-03').bytes) === '01 03', '连字符分隔');
+  // 🚨 2026-10 代码审查：老实现用 pending 把上一段的零头带到下一段，写了一位数字的 token
+  //    会跟后一个**拼成一个字节** —— 用户明明写了分隔符，发出去的却是别的东西。
+  ok(bytesToHex(parseHex('0x1,0x2').bytes) === '01 02', '「0x1,0x2」是两个字节 01 02（不是 0x12）');
+  ok(bytesToHex(parseHex('1 2').bytes) === '01 02', '「1 2」是两个字节 01 02');
+  ok(bytesToHex(parseHex('A 5 F 0').bytes) === '0A 05 0F 00', '「A 5 F 0」是四个字节 0A 05 0F 00');
+  ok(bytesToHex(parseHex('0x01 0x2 0x03').bytes) === '01 02 03', '「0x01 0x2 0x03」= 01 02 03（老代码报奇数位）');
+  ok(bytesToHex(parseHex('01 3').bytes) === '01 03', '「01 3」= 01 03（一位数字当一位）');
+  ok(bytesToHex(parseHex('0x0103').bytes) === '01 03', '带 0x 的连续串仍然两位一组');
 }
 
 console.log('== 8. 内存访问锁：外部并发调用必须排队（审查：可重入快路径让互斥失效）==');

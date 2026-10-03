@@ -110,5 +110,40 @@ console.log('== 3. Intel HEX 与 .bin ==');
   ok(b.length === 1 && b[0].addr === 0x08000000, '.bin 用调用方给的基地址');
 }
 
+console.log('== 4. HEX 完整性：校验和 / 长度 / 段重叠（2026-10 代码审查）==');
+{
+  /* 🚨 以前这两样都不查：坏数据照烧，而"回读校验"比对的正是这份坏数据 → 界面显示校验通过。 */
+  const good = ':10010000214601360121470136007EFE09D2190140\n:00000001FF';
+  ok(parseIntelHex(good).length === 1, '好文件照常解析');
+
+  // ① 数据位翻错（0x21 → 0x20），校验和就不再是 0
+  let msg = '';
+  try { parseIntelHex(good.replace('2146', '2046')); } catch (e){ msg = e.message; }
+  ok(/校验和/.test(msg), '数据位翻错 → 报"校验和不对"', msg);
+
+  // ② 行被截断：长度字段说 16 B，实际只有 3 B 数据 + 校验字节
+  msg = '';
+  try { parseIntelHex(':10010000214601' + '40\n:00000001FF'); } catch (e){ msg = e.message; }
+  ok(/长度不对/.test(msg), '行被截断 → 报"长度不对"（不会把校验字节当数据收下）', msg);
+
+  // ③ 报错要带**行号**，不然几千行的 HEX 没法查
+  //    （注意 EOF 记录会让解析提前 break，所以坏行要排在 EOF 之前）
+  msg = '';
+  try { parseIntelHex([':0400000000010203F6', ':0400040004050607E3', ':00000001FF'].join('\n')); }
+  catch (e){ msg = e.message; }
+  ok(/第 2 行/.test(msg), '报错带行号（这里应是第 2 行）', msg);
+
+  // ④ 地址重叠的两段 → 直接报错（老代码会把后一段接到前一段末尾，地址静默错位）
+  const over = [':0400000000010203F6', ':0400020004050607E4', ':00000001FF'].join('\n');
+  msg = '';
+  try { parseIntelHex(over); } catch (e){ msg = e.message; }
+  ok(/重叠/.test(msg), '地址重叠的记录 → 报"重叠"而不是悄悄挪地址', msg);
+
+  // ⑤ 正常相邻的段仍然照合（别把合法文件也拦了）
+  const adj = [':0400000000010203F6', ':0400040004050607E2', ':00000001FF'].join('\n');
+  const s = parseIntelHex(adj);
+  ok(s.length === 1 && s[0].data.length === 8, '相邻不重叠的两段照常合并成 8 B');
+}
+
 console.log(`\n${fail ? '❌' : '✅'} flash-image.test: ${pass} 通过 / ${fail} 失败`);
 process.exit(fail ? 1 : 0);

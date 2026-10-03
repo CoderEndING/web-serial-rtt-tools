@@ -16,7 +16,7 @@
  *   · **`refreshButtons()` 是唯一的可用性中枢**，tab 化之后也不能改成"只更新可见 tab"：
  *     隐藏 tab 里的按钮同样得是对的，切过去要立刻能用。
  */
-import { $, setStatus, appendLogLine } from '../ui/dom.js';
+import { $, setStatus, appendLogLine, esc } from '../ui/dom.js';
 import { yieldTask, waitMs } from '../core/pace.js';
 import { store } from '../core/store.js';
 import * as P from './protocol.js';
@@ -29,8 +29,7 @@ import { AcqView } from './acq-view.js';
 /** 右列 tab 的 id（与 HTML 的 data-dock 一一对应）*/
 const DOCK_IDS = ['cmd', 'reg', 'dsl', 'live', 'flash', 'loop'];
 
-/** HTML 转义（DSL 的错误表要原样显示用户写的那行）*/
-const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+/** HTML 转义见 `ui/dom.js` 的 `esc`（DSL 的错误表要原样显示用户写的那行）*/
 /** 十六进制转储（每行 16 B，带偏移）*/
 function hexDump(bytes, max = 256){
   const b = bytes instanceof Uint8Array ? bytes.subarray(0, max) : new Uint8Array(0);
@@ -840,7 +839,26 @@ export class SpiBusView {
   // ==================================================================== SPI / NOR Flash
 
   flMode(){ return FL.READ_MODES.find(m => m.v === (+$('sp-fl-mode').value || 0)) || FL.READ_MODES[0]; }
-  flAddr(){ return Number($('sp-fl-addr').value) >>> 0; }
+  /**
+   * 「地址」格 → 数字。**严格解析，非法直接抛**（绝不悄悄变成 0）。
+   *
+   * 🚨 老实现是 `Number(v) >>> 0`，配着"帧里地址固定 3 字节"这两件事会咬人（2026-10 代码审查）：
+   *     · 空串 / `abc` → 0（`NaN >>> 0`）；`4096.7` → 4096；`-1` → 0xFFFFFFFF；
+   *     · ≥16 MB 的地址在线上回绕到低地址。
+   *    擦除 / 编程 / 测速都直接吃这个值 —— 手一抖就把 0 号扇区（通常是启动代码）擦了。
+   */
+  flAddr(){
+    const raw = String($('sp-fl-addr').value ?? '').trim();
+    if (!raw) throw new Error('Flash 地址是空的：填 0x000000 ~ 0xFFFFFF（帧里地址固定 3 字节）');
+    const m = /^(?:0[xX])?([0-9a-fA-F]+)$/.exec(raw);
+    if (!m) throw new Error(`Flash 地址「${raw}」不是十六进制数（例：0x000000 / 800000）`);
+    const v = parseInt(m[1], 16);
+    if (v > FL.ADDR_MAX){
+      throw new Error(`Flash 地址 0x${v.toString(16).toUpperCase()} 超过 3 字节上限 ` +
+        `0x${FL.ADDR_MAX.toString(16).toUpperCase()} —— 帧里地址只有 3 字节，再大会回绕到低地址（会擦错地方）`);
+    }
+    return v;
+  }
   flDummy(){ return Math.max(0, Math.min(4, +$('sp-fl-dummy').value || 0)); }
 
   flOut(text, kind = ''){
@@ -1061,13 +1079,19 @@ export class SpiBusView {
   }
 
   flWriteData(){
-    let bytes = parseHexBytes($('sp-fl-data').value);
-    if (!bytes.length){
+    /* 🚨 「留空 → 用 256 B 递增图案」这个兜底**只能**在用户真的什么都没填时生效。
+     *    老写法是 `parseHexBytes(...)` 之后再判 `!bytes.length`，而那时的解析器会把非法字符
+     *    删光 —— 于是框里填了一堆乱码（`zzz`）也会落进这个分支，**把 256 B 图案写进 flash**
+     *    （2026-10 代码审查）。现在解析器对非法字符直接抛错，判空只看原始文本。 */
+    const raw = String($('sp-fl-data').value ?? '').trim();
+    if (!raw){
       const n = 256;
-      bytes = new Uint8Array(n);
+      const bytes = new Uint8Array(n);
       for (let i = 0; i < n; i++) bytes[i] = i & 0xff;
       this.session.log('i', '写数据留空 → 用 256 B 递增图案', this.tag);
+      return bytes;
     }
+    const bytes = parseHexBytes(raw);          // 非法字符在这里抛错，不会静默变成空
     if (bytes.length > 4096) throw new Error('一次最多写 4 KB（收到 ' + fmtBytes(bytes.length) + '）');
     return bytes;
   }
@@ -1129,13 +1153,21 @@ export class SpiBusView {
       for (let i = 0; i < n; i++) data[i] = (i * 31 + 7) & 0xff;
       s.log('i', `写测速：先擦 0x${addr.toString(16)} 起 ${kb} KB`, this.tag);
       const tErase0 = performance.now();
-      await s.sendFrames(FL.eraseItems(addr, { opcode: FL.OP.SE }), { tag: this.tag, quiet: true });
-      for (let off = 0; off < n; off += FL.SECTOR_SIZE){
-        await s.sendFrames(FL.eraseItems(addr + off, { opcode: FL.OP.SE }), { tag: this.tag, quiet: true });
+      /* 🚨 擦除序列有两个坑（2026-10 代码审查，两个都会让"已经擦干净了"变成假的）：
+       *   ① 老代码先单独擦一次 addr，循环里又从 addr+0 擦一遍 —— 第一条就让器件忙起来，
+       *      后面几条**在 BUSY 期间全被忽略**（NOR 忙时只认 RDSR 之类的读命令），
+       *      于是只有扇区 0 真被擦了，后面几个扇区还是旧数据 → 回读不一致，
+       *      而日志会把它归因成「tPP 太短」，方向完全错；
+       *   ② 每条 SE 之间不等 BUSY。扇区擦除要几十~几百 ms，连发等于白发。
+       *   现在：按扇区走（一直到 `addr+n-1` 所在的扇区，起始地址不对齐时也不会漏最后一个），
+       *   并且**每条之后都等 BUSY 清**再发下一条。 */
+      const lastSec = FL.sectorOf(addr + n - 1);
+      for (let a = FL.sectorOf(addr); a <= lastSec; a += FL.SECTOR_SIZE){
+        await s.sendFrames(FL.eraseItems(a, { opcode: FL.OP.SE }), { tag: this.tag, quiet: true });
+        const w = await this.flWaitReady(20000);
+        if (!w.ok) throw new Error(`擦除扇区 0x${a.toString(16)} 等 BUSY 超时（器件一直忙？）`);
       }
-      const w0 = await this.flWaitReady(20000);
       const tErase = performance.now() - tErase0;
-      if (!w0.ok) throw new Error('擦除等 BUSY 超时');
       const t0 = performance.now();
       const r = await s.sendFrames(FL.programItems(addr, data, { pageDelayMs: tpp }), { tag: this.tag, quiet: true });
       const bad = r.rsps.filter(x => x && x.status !== P.ST.OK).length;

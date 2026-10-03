@@ -830,19 +830,30 @@ export class FlashView {
       const chipInfo = await flasher.setup();
       this._log(`   flashloader 就绪：容量 ${(chipInfo.totalBytes / 1048576).toFixed(2)} MB · 扇区 ${chipInfo.sectorBytes} B`);
 
-      // ③ 擦 → 写 → 校验
+      /**
+       * ③ **先把所有段擦完，再写、再校验**（与 ARM 那条路同序）。
+       *
+       * 🚨 老代码是按段"擦一段 → 写一段 → 校验一段"。只要 flashloader 自报的扇区比
+       *    `mergeSegs` 的合并间隔（4 KB）还大，**后一段的擦除就会把前一段刚写进去的尾巴擦掉**
+       *    （实测 HPM 的扇区正好是 4 KB，所以现在不会触发 —— 但这是运气，不是设计）。
+       *    ARM 路径本来就是"全部擦完再写"，这里对齐它（2026-10 代码审查）。
+       */
       for (const seg of regions){
         this._status(`擦除 0x${seg.addr.toString(16)} 起 ${fBytes(seg.data.length)}…`);
         await flasher.erase(seg.addr, seg.data.length);
         this._log(`擦除 OK：0x${seg.addr.toString(16)} + ${seg.data.length} B`);
+      }
+      for (const seg of regions){
         await flasher.program(seg.addr, seg.data);
         this._log(`烧写 OK：0x${seg.addr.toString(16)} + ${seg.data.length} B`);
-        if (verify){
+        done += seg.data.length;
+      }
+      if (verify){
+        for (const seg of regions){
           this._status('校验（读回 flash 逐字节比）…');
           await flasher.verify(seg.addr, seg.data);
           this._log(`校验 OK：0x${seg.addr.toString(16)} + ${seg.data.length} B`);
         }
-        done += seg.data.length;
       }
       this._bar(100);
       await flasher.finish({ run: doReset });

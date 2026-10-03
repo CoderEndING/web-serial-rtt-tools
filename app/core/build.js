@@ -12,4 +12,4 @@
  * `main.js` 会把它显示在标题栏，并在加载后做一次自检：用 cache-buster 重新拉本文件，
  * 若里面的 BUILD 与内存里的不一致 → 说明页面是旧的，提示刷新。
  */
-export const BUILD = '2026-10-03 (新面板：USB→I2C 读 128 B 逐位改 · SPI 桥按器件档位读写 + loop 定时采集 · 工程生成页三 tab · 屏页风景照片素材)';
+export const BUILD = '2026-10-03b (代码审查整改：EEPROM 页写按页对齐 + 写后回读 · SPI 写测速擦除序列/地址校验 · RTT 不再被日志里的 "SEGGER RTT" 卡死 · HEX 校验和 · 串口可恢复错误不再当断开 · 数据面 STALL/看门狗)';

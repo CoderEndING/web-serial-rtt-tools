@@ -22,6 +22,7 @@
 import { DM, DMI_OP, DMI_STATUS, SBCS, sbcsBlock, sbcsWrite, sbcsHold, dmiRequest, dmiResponse,
          tapReset, tapLoadIR, drScan, bitsToUint, abstractCommand, ABSTRACTCS, DMSTATUS, DMSTATUS_LAYOUT,
          DMCONTROL, CMDTYPE, REGNO, DCSR_EBREAK, PROGBUF_FENCE } from './jtag.js';
+import { waitMs } from '../../core/pace.js';
 
 /** IR 值（RISC-V DTM 规范：0x01 = IDCODE、0x10 = DTMCS、0x11 = DMI） */
 export const IR_IDCODE = 0x01;
@@ -158,7 +159,7 @@ export class RiscvTransport {
     for (let i = 0; i < 5; i++){
       try {
         await this.dmiWrite(DM.DMCONTROL, DMCONTROL.dmactive);
-        await new Promise(r => setTimeout(r, 50));
+        await waitMs(50);
         const st = (await this.dmiRead(DM.DMSTATUS)) >>> 0;
         if (st) return st;
       } catch { /* 继续试 */ }
@@ -342,7 +343,7 @@ export class RiscvTransport {
   /** reset-halt（兜底）：ndmreset 拉高带 haltreq → 松开 ndmreset（haltreq 保持）*/
   async _haltByReset(hart = 0, timeoutMs = 3000){
     await this.dmiWrite(DM.DMCONTROL, this._ctl(hart, DMCONTROL.ndmreset | DMCONTROL.haltreq));
-    await new Promise(r => setTimeout(r, 50));
+    await waitMs(50);
     // 🚨 放开 ndmreset 这一步**必须执行**（卡住就把整芯片按在复位态，见 resetHalt() 的注释）
     try {
       await this.dmiWrite(DM.DMCONTROL, this._ctl(hart, DMCONTROL.haltreq));
@@ -366,7 +367,7 @@ export class RiscvTransport {
       this.log(` ⚠ dmcontrol 回读 0x${(dmc ?? 0).toString(16)}：ndmreset 还没放开，再写一次`);
       try { await this.dmiWrite(DM.DMCONTROL, this._ctl(hart, DMCONTROL.haltreq)); }
       catch { /* 下一次回读会再判断 */ }
-      await new Promise(r => setTimeout(r, 20));
+      await waitMs(20);
     }
     return await this.waitHalted(timeoutMs);
   }
@@ -401,7 +402,7 @@ export class RiscvTransport {
     let released = false;
     try {
       await this.dmiWrite(DM.DMCONTROL, this._ctl(hart, DMCONTROL.ndmreset | DMCONTROL.haltreq));
-      await new Promise(r => setTimeout(r, 50));
+      await waitMs(50);
     } finally {
       try {
         await this.dmiWrite(DM.DMCONTROL, this._ctl(hart, DMCONTROL.haltreq));
@@ -441,9 +442,9 @@ export class RiscvTransport {
   /** 系统复位后运行（烧完让固件自己跑起来）：ndmreset 脉冲 + 不置 haltreq */
   async resetRun(hart = 0){
     await this.dmiWrite(DM.DMCONTROL, this._ctl(hart, DMCONTROL.ndmreset));
-    await new Promise(r => setTimeout(r, 50));
+    await waitMs(50);
     await this.dmiWrite(DM.DMCONTROL, this._ctl(hart));
-    await new Promise(r => setTimeout(r, 10));
+    await waitMs(10);
   }
 
   /**
@@ -459,7 +460,7 @@ export class RiscvTransport {
     for (let i = 0; i < 20; i++){
       v = await this.dmiRead(DM.DMSTATUS);
       if (v & (legacyMask | specMask)) break;
-      await new Promise(r => setTimeout(r, 25));
+      await waitMs(25);
     }
     // 两套布局的 halted 位互不相同：哪一对置起就用哪套（都没置起就按实测的 legacy 来）
     this.dmLayout = (v & legacyMask) ? 'legacy' : (v & specMask) ? 'spec' : 'legacy';
@@ -625,7 +626,7 @@ export class RiscvTransport {
     // ③ 系统复位（ndmreset）—— 最后手段，会把目标重启一次
     if (allowSystemReset){
       this.log('SBA 仍不健康 → 系统复位（ndmreset）自愈');
-      try { await this.resetRun(); await new Promise(r => setTimeout(r, 1500)); } catch {}
+      try { await this.resetRun(); await waitMs(1500); } catch {}
       try { await this.dmiWrite(DM.DMCONTROL, 0); await this.dmiWrite(DM.DMCONTROL, DMCONTROL.dmactive); } catch {}
       after = await readSbcs();
       if (!dirty(after) && await peek()){

@@ -675,6 +675,11 @@ export class SpiPanelView {
       const acts = `<button class="mini" data-act="one" data-i="${i}">单发</button> ` +
         `<button class="mini" data-act="from" data-i="${i}">从此重放</button>` +
         (this.rowDirty(i) ? ` <button class="mini" data-act="revert" data-i="${i}" title="这一行改回解析出来的原值">改回</button>` : '');
+      /* ⚠️ 这里的 `r.name` **只有内置补行（`isAuto`）才有**，取值来自 panel-code.js 的
+       *    `REQUIRED_PREFIX` 常量（'MADCTL（内存访问控制）' 之类），**不是用户粘贴的文本** ——
+       *    所以不需要转义（2026-10 代码审查把它当成用户输入了，是误报；用户写的那行原文
+       *    只在 errors/warnings 的 `text` 里，那条走 session.log → textContent，天然安全）。
+       *    真要哪天让 `name` 变成可编辑的，这里必须补 `esc()`（ui/dom.js 已有）。 */
       return `<tr${cls ? ` class="${cls}"` : ''}>` +
         `<td>${i}</td><td style="color:var(--fg2)">${isAuto ? '补' : (r.line || '')}</td>` +
         `<td><input class="bx cmd" data-i="${i}" maxlength="2" spellcheck="false" value="${hx(r.cmd)}" title="命令字节（DCS 命令）—— 直接敲十六进制"></td>` +

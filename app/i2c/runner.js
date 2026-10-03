@@ -14,9 +14,12 @@
  *      所以 `group`（由 `loop…end` / `every` 产生）是任务的边界，不是装饰。
  *
  * ── 两条纪律 ─────────────────────────────────────────────────────────
- *   1. **等待用对原语**（见 core/pace.js）：轮询间隔用 `waitMs`（不受后台限速影响），
- *      循环周期与 `delay` 用定时器 —— 它们本来就是"至少等这么久"，页面切后台被钳到 1 s
- *      只是采样变慢（面板上会显示**实测周期**，看得见），不会把一笔事务算错。
+ *   1. **等待用对原语**（见 core/pace.js）：**≤128 ms 的等待一律走 `waitMs`**（让路自旋，
+ *      时长真实且不受后台限速影响）。这条以前写成"周期与 delay 用定时器没关系、只是变慢"，
+ *      是错的：定时采集的节拍与 ADS1115/EEPROM 那类**器件时序**都在这条路上，页面一切到后台
+ *      就被钳到 ≥1 s —— 采样率悄悄掉到 1 Hz（50 kHz 的目标波形会严重混叠），
+ *      而按 1 Hz 采到的传感器读数还会让人误判"器件坏了"（2026-10 代码审查）。
+ *      更长的等待仍然交定时器：那是"等久点没关系"的地方。
  *   2. **停止要立刻响应**：`stop()` 会打断等待中的周期，并把在飞的那一笔等完
  *      （浏览器取消不了已经发出的 USB 传输，硬断只会留下半截状态）。
  *   3. **稳态不刷日志**：一轮 50 ms × 几行的循环 = 每秒几十行，日志环（600 条）十几秒就被
@@ -25,6 +28,7 @@
  *      但每个任务最多再补 `ERR_LOGS_AFTER` 条，免得器件一直 NACK 时把日志刷爆。
  */
 
+import { waitMs } from '../core/pace.js';
 import { KIND, describeItem } from './dsl.js';
 import { applyAs } from './expr.js';
 import { hexBytes, errText, RD_MAX } from './protocol.js';
@@ -81,10 +85,18 @@ export class ScriptRunner {
 
   _emit(e){ try { this.onEvent(e); } catch (err){ console.warn('[i2c] runner 事件回调出错', err); } }
 
-  /** 可中断的等待（定时器语义：至少等这么久）*/
-  _sleep(ms){
-    if (!(ms > 0)) return Promise.resolve();
-    return new Promise(resolve => {
+  /**
+   * 可中断的等待（定时器语义：至少等这么久）。
+   *
+   * 🚨 **≤128 ms 必须走 `pace.waitMs`**（让路自旋），不能用 `setTimeout`：采样节拍与器件
+   *    时序都在这条路上，页面不可见时定时器被钳到 ≥1 s，采样率会**悄悄**掉到 1 Hz。
+   *    这段等待只有 128 ms 上限，丢掉"可中断"没有实际代价（`stop()` 最多晚 128 ms 生效，
+   *    调用方在每拍开头还会再查一次 `stopping`）。
+   */
+  async _sleep(ms){
+    if (!(ms > 0)) return;
+    if (ms <= 128) return await waitMs(ms);
+    return await new Promise(resolve => {
       let done = false;
       const off = this.signal?.onAbort?.(() => finish());
       const timer = setTimeout(finish, ms);

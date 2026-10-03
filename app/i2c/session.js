@@ -304,14 +304,17 @@ export class I2cSession {
    *   · `data`      完整数据（`offsets` 是它里面的下标）
    *   · `offsets`   只写这些下标（缺省整块）—— 「寄存器」面板的「只写改动」用它
    *   · `chunkMax`  单片上限（缺省 51；**EEPROM 页写要按页给**，AT24C02 是 8）
+   *   · `pageSize`  器件**页大小**（缺省 0 = 不限）。给了就保证每一片不跨页 —— 这是 EEPROM
+   *                 页写回卷的真正防线：只设 `chunkMax` 的话，起始地址不是页倍数时第一片照样跨页
+   *                 （见 `protocol.planWrite` 的 🚨）
    *   · `gapMs`     **片间等待**（缺省 0）。EEPROM 每写完一页要等 tWR（约 5 ms）才认下一笔，
    *                 所以按页写 EEPROM 时给 6 ms 左右；寄存器型器件不需要。
    * @returns {Promise<{err:number, ms:number, bytes:number, chunks:number, failNote?:string}>}
    */
-  async writeLong({ dev, addr = [], data, offsets = null, chunkMax = P.WR_MAX, gapMs = 0 },
+  async writeLong({ dev, addr = [], data, offsets = null, chunkMax = P.WR_MAX, pageSize = 0, gapMs = 0 },
     { label = '', quiet = false, resultTimeout = 2000 } = {}){
     const bytes = data instanceof Uint8Array ? data : Uint8Array.from(data || []);
-    const plan = P.planWrite(addr, bytes, { chunkMax, offsets });
+    const plan = P.planWrite(addr, bytes, { chunkMax, offsets, pageSize });
     const head = label || `写 ${P.addr7(dev)}${addr.length ? '[' + P.hexBytes(addr) + ']' : ''} × ${plan.bytes} B`;
     if (!plan.chunks){
       if (!quiet) this.log('w', `${head} —— 没有要写的字节`);

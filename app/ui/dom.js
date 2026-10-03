@@ -2,6 +2,19 @@
 export const $ = id => document.getElementById(id);
 
 /**
+ * 把一段文本转义成能安全放进 `innerHTML` 的形式。
+ *
+ * 🚨 什么时候必须用：拼进 innerHTML 的字符串**只要有一点可能来自外部**（ELF 里的变量名、
+ *    用户粘贴的面板初始化表、器件名、串口读回来的文本……）就得套一层。
+ *    本项目的输入面比一般网页大：ELF / HEX / 用户粘贴的 C 数组 / 目标回来的日志都算外部输入，
+ *    不转义的话 `<img onerror=…>` 这类东西会被真的解析执行（self-XSS）。
+ *    （2026-10 代码审查：scope/view.js 与 spi/panel-view.js 有三处直接拼 name。）
+ *
+ * 只转 `& < > "` 四个字符就够（进得去 HTML 文本节点与双引号属性值），别写成 HTML 实体大全。
+ */
+export const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+/**
  * 分段按钮组（HTML 里 <div class="seg" data-group="xxx">），返回可读写的小对象。
  * 独立成函数是因为到处都要用（ASCII/HEX、终端/文本/HEX…）。
  */

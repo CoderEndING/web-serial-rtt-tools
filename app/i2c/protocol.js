@@ -371,25 +371,31 @@ export function planRead(start, len, { mode = 'reset', addrLen } = {}){
  * 所以这里的每一片线上都是 `START dev+W + 子地址 + 数据 + STOP`。
  *
  * ⚠️ **EEPROM 的页写会回卷**：器件内部只按"页"缓存，一页写超了就从页首重新盖
- *    （AT24C02 页 = 8 B、AT24C32 = 32 B）。往 EEPROM 写长块时必须把 `chunkMax`
- *    设成**页大小**并让分片落在页边界上 —— 所以这个参数是显式可给的，不写死 51。
- *    寄存器型器件（MPU6050 / ADS1115 / Si5351…）没有页，用默认 51 即可。
+ *    （AT24C02 页 = 8 B、AT24C32 = 32 B）。所以往 EEPROM 写长块要**同时**给两个参数：
+ *      · `pageSize`  = 器件的页大小 → 本函数会把每一片**收窄到不跨页**（真正的防线）；
+ *      · `chunkMax`  = 单片数据上限 → 只在没有 pageSize 时单独用。
+ *    🚨 **只把 `chunkMax` 设成页大小是不够的**（2026-10 代码审查抓到）：起始地址不是页倍数时，
+ *       第一片照样跨页 —— 例如从 0x05 起按 8 B 分片，第一片就是 0x05..0x0C，越过 0x08 那条页界，
+ *       器件把 0x08..0x0C 绕回页首写成 0x00..0x04，回读与写入不一致而器件全程老实 ACK。
+ *    寄存器型器件（MPU6050 / ADS1115 / Si5351…）没有页，`pageSize` 给 0 即可。
  *
  * @param {number[]} start 子地址（原序字节）
  * @param {Uint8Array|number[]} bytes 要写的完整数据（`offsets` 是它里面的下标）
  * @param {object} [o]
  *   · `addrLen`   子地址字节数（缺省 = `start.length`）
  *   · `chunkMax`  单片数据上限（缺省 `WR_MAX` = 51，即协议上限）
+ *   · `pageSize`  器件页大小（0 = 不限，见上）。给了就保证**每一片都落在同一页内**
  *   · `offsets`   只写这些下标（缺省 = 整块）。**相邻下标会合并成一片**，
  *                 中间断开就分成两片（"只写改过的那几个字节"就靠它）
- * @returns {{cmds:Array<{addr:number[],wr:number[],off:number,note:string}>, bytes:number, chunks:number}}
+ * @returns {{cmds:Array<{addr:number[],wr:number[],off:number,note:string}>, bytes:number, chunks:number, pageSize:number}}
  */
-export function planWrite(start, bytes, { addrLen, chunkMax = WR_MAX, offsets = null } = {}){
+export function planWrite(start, bytes, { addrLen, chunkMax = WR_MAX, offsets = null, pageSize = 0 } = {}){
   const data = Array.from(bytes || []);
   const src = Array.from(start || []);
   const n = addrLen == null ? src.length : Math.max(0, Math.min(ADDR_MAX, addrLen | 0));
   const base = src.slice(0, n);
   const cap = Math.max(1, Math.min(WR_MAX, chunkMax | 0 || WR_MAX));
+  const page = Math.max(0, pageSize | 0);
   // 越界的下标直接丢掉（调用方给的是"改过的下标"，不该因为它整笔失败）
   const offs = (offsets == null ? data.map((_, i) => i) : Array.from(offsets))
     .filter(o => Number.isInteger(o) && o >= 0 && o < data.length)
@@ -397,14 +403,29 @@ export function planWrite(start, bytes, { addrLen, chunkMax = WR_MAX, offsets = 
   const cmds = [];
   for (let i = 0; i < offs.length;){
     const off = offs[i];
+    /* 本片最多几个字节：协议上限 cap，**且不许跨页**。
+       页内偏移要按**完整的子地址**算（bump 之后的那个地址），不能拿 `off` 当地址用 ——
+       起始地址可能是 1 B 也可能是 2 B，而且 bump 会在地址位宽处回绕。 */
+    let maxLen = cap;
+    if (page > 0){
+      const inPage = addrNum(bump(base, off)) % page;
+      maxLen = Math.max(1, Math.min(cap, page - inPage));
+    }
     let j = i + 1;
-    while (j < offs.length && offs[j] === offs[j - 1] + 1 && (offs[j] - off) < cap) j++;
+    while (j < offs.length && offs[j] === offs[j - 1] + 1 && (offs[j] - off) < maxLen) j++;
     const wr = [];
     for (let k = i; k < j; k++) wr.push(data[offs[k]] & 0xff);
     cmds.push({ addr: bump(base, off), wr, off, note: `片@+${off} × ${wr.length}` });
     i = j;
   }
-  return { cmds, bytes: offs.length, chunks: cmds.length };
+  return { cmds, bytes: offs.length, chunks: cmds.length, pageSize: page };
+}
+
+/** 子地址字节数组（大端）→ 数字。只用来算页边界（例：AT24C32 的 `[0x01,0x05]` → 0x105）*/
+export function addrNum(bytes){
+  let v = 0;
+  for (const b of bytes || []) v = ((v * 256) + (b & 0xff)) >>> 0;
+  return v;
 }
 
 /** 子地址按"原序字节"做加法（EEPROM 是 8 位地址就只加最低字节） */

@@ -1440,7 +1440,14 @@ export class DbgView {
     if (!bytes?.length) return;
     const el = $('d-rtt');
     if (!el) return;
-    el.textContent += new TextDecoder().decode(bytes);
+    /**
+     * 🚨 **必须流式解码**（`{ stream: true }` + 复用同一个 decoder）。
+     *    以前是每次 `new TextDecoder().decode(bytes)` —— 一次读的边界正好切在一个中文字符
+     *    中间时，那半个字符会被解成 `�`（而且**补不回来**，下一个字节又被当成新字符的开头）。
+     *    主 RTT Viewer 页用的是流式的 `RxBuffer`，所以那边没这个毛病（2026-10 代码审查）。
+     */
+    if (!this._rttDec) this._rttDec = new TextDecoder();
+    el.textContent += this._rttDec.decode(bytes, { stream: true });
     if (el.textContent.length > 40000) el.textContent = el.textContent.slice(-24000);
     el.scrollTop = el.scrollHeight;
   }

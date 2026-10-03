@@ -26,18 +26,27 @@ const X_APnDP = 0x01, X_RnW = 0x02, X_ADDR = 0x0c;
 const AP_CSW = 0x00, AP_TAR = 0x04, AP_DRW = 0x0c;
 const DP_IDCODE = 0x00, DP_CTRL_STAT = 0x04, DP_SELECT = 0x08, DP_RDBUFF = 0x0c;
 /**
- * DP CTRL/STAT 的上电值 = **两个请求位**：CDBGPWRUPREQ(bit31) | CSYSPWRUPREQ(bit30)。
- * 🚨 按 ADIv5：**28/29 是只读 ACK（CSYSPWRUPACK / CDBGPWRUPACK），30/31 才是请求位**。
- *    本文件早期把这四个位写反了，于是值是 0x70000000 —— 给两个只读 ACK 位写 1、
- *    又**没置 bit31 的调试上电请求**。实测后果（STM32H7B0 + MicroLink/akaLinkPro）：
- *      · H7 的 DP 直接回 FAULT → 页面报「SWD FAULT（…地址 0x4）」，连接彻底失败；
- *        （这也正是早先误判"MicroLink 写不了 H7 的 DP 寄存器"的原因 —— 其实是页面写错了位）
- *      · F1 的 DP 恰好容忍写只读位，所以 F103 一直"能用"，掩盖了这个 bug；
- *      · ACK 位恰好已是 1 时又"碰巧能连上" → 就是那句"RTT 总是连不上、偶尔也能连上"。
- *    正确值 0xC0000000（见 tools/target-firmware/stm32h7b0_rtt_speed/RESULTS.md 的排查记录）。
+ * DP CTRL/STAT 的位排法（ADIv5，**别按名字猜位号**）：
+ *   · bit28 CDBGPWRUPREQ ／ bit29 CDBGPWRUPACK   ← 调试域
+ *   · bit30 CSYSPWRUPREQ ／ bit31 CSYSPWRUPACK   ← 系统域
+ *   即 **28/30 是请求位（REQ，主机写），29/31 是只读应答位（ACK，目标置）**。
+ * 上电请求值 = CDBGPWRUPREQ | CSYSPWRUPREQ = `0x50000000`；判"被应答了没有" = `st & 0xA0000000`。
+ *
+ * 🚨 这里踩过两个坑（详见 `_powerUpDP` 的注释）：
+ *   ① 早期把 REQ/ACK 写反（用过 0x70000000 / 0xC0000000 = 给只读位写 1、又漏了请求位）
+ *      → STM32H7B0 的 DP 直接回 FAULT，页面报「SWD FAULT（…地址 0x4）」，连接彻底失败；
+ *      F1 恰好容忍写只读位，所以 F103 一直"能用"，把这个 bug 掩盖了很久。
+ *   ② 判上电用了**错的掩码** `0x30000000`（= bit29|bit28 = CDBGPWRUPACK|CDBGPWRUPREQ）——
+ *      等于拿"我们自己刚写下去的请求位"当应答，系统域还没上电就可能提前判成功
+ *      （2026-10 代码审查）。正确掩码是 `0xA0000000`（bit31|bit29）。
  */
-const DP_PWRUP = 0xc0000000;
 const SWJ_nRESET = 1 << 7;
+/** 上电请求值：CDBGPWRUPREQ(bit28) | CSYSPWRUPREQ(bit30) */
+const DP_PWRUP_REQ = 0x50000000;
+/** 两个**只读应答位**的掩码：CSYSPWRUPACK(bit31) | CDBGPWRUPACK(bit29) —— 判上电只认它 */
+const DP_PWRUP_ACK = 0xa0000000;
+/** 写 CTRL/STAT 时顺手清掉的 sticky 位：SSTICKYERR(bit1) | SSTICKYCMP(bit5)（带 sticky 的 DP 会拒绝写） */
+const DP_STICKY_CLR = 0x22;
 const ACK = { 1: 'OK', 2: 'WAIT', 4: 'FAULT', 7: 'NO ACK' };
 const reqByte = (ap, rnw, addr) => (ap ? X_APnDP : 0) | (rnw ? X_RnW : 0) | (addr & X_ADDR);
 
@@ -788,17 +797,20 @@ export class WebUsbDapProbe {
   }
 
   /**
-   * 给调试口上电：写 DP CTRL/STAT 的 **CDBGPWRUPREQ(bit28) | CSYSPWRUPREQ(bit29)**。
+   * 给调试口上电：写 DP CTRL/STAT 的**两个请求位**
+   * `CDBGPWRUPREQ(bit28) | CSYSPWRUPREQ(bit30)` = `0x50000000`。
    *
-   * 🚨 **两个请求位都要置**。历史上这里写的是 `0x50000000` —— 只有 CDBGPWRUPREQ(bit28)
-   *    加上只读的 CDBGPWRUPACK(bit30)，**漏了 CSYSPWRUPREQ(bit29)**：
-   *      · STM32F1（Cortex-M3）容忍这一点（AP 照样能访问），所以一直没暴露，只是
-   *        CTRL/STAT 的 bit31（CSYSPWRUPACK）永远读不到 —— 那条"DP 电源应答位没起来"的
-   *        警告就是它；
+   * 🚨 **两个请求位都要置**（历史教训，别改回去）。本文件早期把这四个位记错、写出的值
+   *    漏了系统域的请求：
+   *      · STM32F1（Cortex-M3）容忍，所以一直没暴露；
    *      · **STM32H7B0（Cortex-M7）不容忍**：系统电源没请求 → AP 访问直接 FAULT，
-   *        表现和"SWD 连不上"一模一样（实测：H7 上电写 `0x50000000` → `SWD FAULT（地址 0x4）`）。
-   *    现在写成 `0x70000000` = CDBGPWRUPREQ | CSYSPWRUPREQ | 那个只读 ACK 位（写 1 无害），
-   *    两块板子都通过。
+   *        表现和"SWD 连不上"一模一样（实测：H7 上电写错值 → `SWD FAULT（地址 0x4）`）。
+   *    ⇒ 上电值就是 `0x50000000`（再加一次性的 sticky 清除位，见下）。
+   *
+   * ⚠️ **不要用 CTRL/STAT 的 ACK 位判死**（应答位是 bit31 = CSYSPWRUPACK、bit29 = CDBGPWRUPACK，
+   *    掩码 `0xA0000000`）：这颗探针刚做完一串 AP 读之后会稳定回**残留值**
+   *    （实测拿到过 AP 读出来的 CPUID，连读两遍都一样），照它判会得出"电源没起来"的假结论。
+   *    现在的策略与 OpenOCD 一致：**写了请求就不判死**，让第一笔 AP 访问去证伪。
    *
    * 🚨 **千万别先写 0「掉电」再上电**（6bba430 加过这一步，直接把 RTT 连接搞挂）：
    *    本机 MicroLink(CherryUSB) + STM32F103 实测，掉电写之后那个上电写会稳定返回
@@ -815,25 +827,29 @@ export class WebUsbDapProbe {
      *      = **0x50000022** —— 关键就是最后两位 sticky 清除位：
      *      **带着 sticky 的 DP 会拒绝写**，所以"先 ABORT 清、再写 0x50000000"那条路是死路
      *      （页面实测：写 CTRL/STAT 恒 FAULT）；OpenOCD 是**一笔写里同时请求上电 + 清 sticky**。
-     *   ② 轮询 CTRL/STAT 等 PWRUPACK（本机 H7B0 上这两位可能一直是 0，所以**只当参考**，
-     *      不通过也继续 —— OpenOCD 能跑通就证明 AP 可用性与这两位不必绑定）。
+     *   ② 轮询 CTRL/STAT 等 PWRUPACK（**CSYSPWRUPACK = bit31、CDBGPWRUPACK = bit29**，掩码
+     *      `0xA0000000`；本机 H7B0 上这两位可能一直是 0，所以**只当参考**，不通过也继续 ——
+     *      OpenOCD 能跑通就证明 AP 可用性与这两位不必绑定）。
      *   ③ 再写一次 `0x50000000`（撤掉 sticky 清除位，保留电源请求）——与 OpenOCD 一致。
      */
     for (let i = 0; i < attempts; i++){
       try {
-        await this._writeDP(DP_CTRL_STAT, 0x50000022);
+        await this._writeDP(DP_CTRL_STAT, DP_PWRUP_REQ | DP_STICKY_CLR);
       } catch (e){
         if (e.ack !== 4) throw e;
       }
       let st = 0;
       for (let k = 0; k < 20; k++){
         try { st = ((await this._transfer([{ ap: false, rnw: true, addr: DP_CTRL_STAT }]))[0]) >>> 0; } catch { st = 0; }
-        if ((st & 0x30000000) === 0x30000000) break;
+        /* 🚨 掩码是 bit31|bit29（两个**只读 ACK**）。老代码用 0x30000000 = bit29|bit28，
+         *    把"我们自己刚写下去的 CDBGPWRUPREQ(bit28)"也算进了应答里 —— 系统域还没上电
+         *    就可能提前判成功（2026-10 代码审查）。 */
+        if ((st & DP_PWRUP_ACK) === DP_PWRUP_ACK) break;
         await waitMs(10);
       }
-      try { await this._writeDP(DP_CTRL_STAT, 0x50000000); } catch {}
+      try { await this._writeDP(DP_CTRL_STAT, DP_PWRUP_REQ); } catch {}
       this.lastDpStat = st;
-      if ((st & 0x30000000) === 0x30000000) return true;
+      if ((st & DP_PWRUP_ACK) === DP_PWRUP_ACK) return true;
       try {
         await this.swdActivation();
         await this._transfer([{ ap: false, rnw: true, addr: DP_IDCODE }]);

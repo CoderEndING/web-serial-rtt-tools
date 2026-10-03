@@ -134,7 +134,7 @@ export class SpiSession {
       }
       this.transport = t;
       this.stream.reset();
-      await t.start(bytes => this._onBytes(bytes));
+      await t.start(bytes => this._onBytes(bytes), e => this._onDataPlaneDead(e));
       this.log('g', `数据端点已连接：${t.label}`);
       this._setState('数据端点已连接');
       return true;
@@ -317,8 +317,30 @@ export class SpiSession {
 
   // ==================================================================== 数据面
 
+  /**
+   * 数据面**不可恢复**地停了（USB 读异常 / 端点反复 STALL）。
+   *
+   * 🚨 以前这种情况下 worker 是悄悄 break 的：几条都退出后数据面停死，而 `running` 还是 true、
+   *    界面照旧显示"数据端点已连接"，一个应答都收不到 —— 上层只能看到一串"应答超时"
+   *    （2026-10 代码审查）。现在把原因直接写进日志与状态。
+   */
+  _onDataPlaneDead(e){
+    const msg = e?.message || String(e);
+    this.log('e', `数据面中断：${msg} —— 点「连接数据端点」重连，或拔插一次探针`);
+    this._setState('数据面中断', 'err');
+  }
+
   _onBytes(bytes){
-    for (const pkt of this.stream.push(bytes)){
+    const pkts = this.stream.push(bytes);
+    /* 流错位时切包器把整个缓冲丢了 —— 同一块里**排在后面的正常应答也一起没了**，
+     * 表现是"接下来一串请求各自等 1 s 超时"。这条日志专门把因果对上
+     * （2026-10 代码审查：以前只报超时，根因看不出来）。 */
+    const dz = this.stream.takeDesync();
+    if (dz){
+      this.log('e', `数据流错位：${dz.why} —— 丢弃了 ${dz.dropped} B 缓冲。` +
+        `同一批里后面的应答也会跟着丢，所以接下来可能出现**一串"应答超时"：那是结果不是原因**（bulk 本身可靠，出现即说明两边对包的理解错位了）`);
+    }
+    for (const pkt of pkts){
       const r = P.parseRsp(pkt);
       if (!r){ this.log('e', '收到一个解析不了的应答包（magic/长度不对）'); continue; }
       if (r.type === P.R.EVT){
@@ -427,13 +449,34 @@ export function parseHexByte(s, fallback = 0){
   return parseInt(t, 16) & 0xff;
 }
 
-/** "12 34 ab" / "1234ab" / 换行分隔 → Uint8Array（非法字符直接报错，别静默吞）*/
+/**
+ * "12 34 ab" / "1234ab" / "0x12,0x34" / 换行分隔 → Uint8Array。
+ *
+ * **非法字符直接报错，不静默吞。** 注释一直这么写，代码以前却是把它们删掉（2026-10 代码审查）：
+ *   · 全非法的输入（`zzz`）会被清成空串 → flash 卡的「写数据」把空串当成"用户没填"，
+ *     于是拿 256 B 递增图案**写进 flash**；
+ *   · 落在成对位置上的非法字符还会被静默拼成别的字节（`12 3g4` → `12 34`），
+ *     既不报错也不等于用户输入。
+ *
+ * 分词规则与 `core/hex.js` 的 `parseHex` 一致：**分隔符（空格/逗号/0x…）= 字节边界**，
+ * 只有完全没分隔符的连续串才两位一组拆。
+ */
 export function parseHexBytes(s){
-  const t = String(s ?? '').replace(/0x/gi, ' ').replace(/[^0-9a-fA-F]/g, '');
-  if (!t) return new Uint8Array(0);
-  if (t.length % 2) throw new Error('十六进制要成对（每个字节两位）');
-  const out = new Uint8Array(t.length / 2);
-  for (let i = 0; i < out.length; i++) out[i] = parseInt(t.substr(i * 2, 2), 16);
-  return out;
+  const src = String(s ?? '');
+  const t = src.replace(/0[xX]/g, ' ').replace(/[\s,;:_\-|]+/g, ' ').trim();
+  if (!t) return new Uint8Array(0);                 // 真的什么都没填 → 空（怎么处理由调用方定）
+  const out = [];
+  for (const tok of t.split(' ')){
+    if (!/^[0-9a-fA-F]+$/.test(tok)){
+      const bad = [...tok].find(c => !/[0-9a-fA-F]/.test(c)) || tok;
+      const shown = src.trim();
+      throw new Error(`十六进制里有非法字符「${bad}」—— 只认 0-9 / a-f，分隔符用空格或逗号：` +
+        `${shown.slice(0, 32)}${shown.length > 32 ? '…' : ''}`);
+    }
+    if (tok.length <= 2){ out.push(parseInt(tok, 16)); continue; }   // 有分隔符 → 这一段就是一个字节
+    if (tok.length % 2) throw new Error(`「${tok}」位数是奇数 —— 每个字节要两位（连写时要成对）`);
+    for (let i = 0; i < tok.length; i += 2) out.push(parseInt(tok.substr(i, 2), 16));
+  }
+  return Uint8Array.from(out);
 }
 

@@ -11,9 +11,11 @@
  *   1. **发送才是节拍器，但"只晚不丢"**：到点发帧、再按下一次的目标时刻算等待；某拍拖到超过一个周期时
  *      这一拍**照样跑**（只把"迟了多少"记进 `late` 与日志）。丢拍等于悄悄少一个采样点 —— 比晚一点坏得多。
  *      轮数（`loop … 3`）按**成功采样**算，一次失败的发送不吃掉用户要的那一轮。
- *   2. **周期用定时器、不用 pace.waitMs**：周期本来就是"至少等这么久"，页面被切到后台
- *      被钳到 1 s 只是采样变慢（面板上显示**实测频率**，看得见）。真正的短等待（重试/握手）
- *      才用 `pace.waitMs`。
+ *   2. **≤128 ms 的等待必须走 `pace.waitMs`**：以前这里写的是"周期用定时器没关系、只是变慢"，
+ *      是错的 —— 页面切到后台时 `setTimeout` 被钳到 ≥1 s，采样率**悄悄**掉到 1 Hz
+ *      （波形严重混叠，而界面看着还在跑；面板上的"实测频率"只说明它慢了，不说明数据还能用）。
+ *      更长的等待仍交定时器：那属于 pace.js 说的"等久点没关系"，而且能用 `timers` 立刻取消
+ *      （2026-10 代码审查）。
  *   3. **解码偏移是"这一帧自己的读数据"**：SPI 一次 xfer 通常就是一个寄存器/一次转换，
  *      把偏移定义在整组拼起来的大缓冲上会算不清（I2C 那边是"一次逻辑读"，语义不同）。
  */
@@ -138,12 +140,19 @@ export class SpiRunner {
       }
       const nextTarget = t0 + n * period;
       const wait = Math.max(0, nextTarget - performance.now());
+      // ≤128 ms 走让路自旋（后台不被钳到 1 s）；更长交给定时器（能立刻取消）
+      if (wait <= 128){
+        await waitMs(wait);
+        if (this.stopping || !this.running) return;
+        loop();                      // 不 await：与 setTimeout 那条路同形，别让调用栈长高
+        return;
+      }
       const t = setTimeout(() => { this.timers.delete(t); loop(); }, wait);
       this.timers.add(t);
     };
     // 立刻打第一拍（不等一个周期）—— 用户点了「开始」就该马上看到数
-    const t = setTimeout(() => { this.timers.delete(t); loop(); }, 0);
-    this.timers.add(t);
+    // （别用 `setTimeout(...,0)`：后台页里它同样会被钳到 1 s，点一下要等一秒才见数）
+    loop();
   }
 
   /** 发一组帧 → 解码 → 广播；返回 {ok, sent, ms}（`ok` = 这一拍算不算一次成功采样） */

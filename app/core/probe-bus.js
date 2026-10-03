@@ -66,6 +66,7 @@ export class ProbeBus {
     /** 收到别人"让出探针"时要做的事（返回 Promise）。没设 = 本页签本来就不占探针 */
     this.onRelease = null;
     this._acked = 0;
+    this._releasing = 0;          // 收到过多少次 'releasing'（对方答应了让出）——请求方据此放宽等待上限
     /** 本轮"还活着"的同伴（说过话的）与"连续几轮没动静"的计数 —— 用来清掉已经不在的页签 */
     this._heard = null;
     this._missed = new Map();
@@ -118,6 +119,9 @@ export class ProbeBus {
           .catch(() => {})
           .then(() => { this._post({ t: 'released' }); });
         break;
+      case 'releasing':                            // 对方答应了、正在收（请求方据此放宽等待上限）
+        this._releasing = (this._releasing || 0) + 1;
+        break;
       case 'released':
         this._acked++;
         break;
@@ -132,10 +136,11 @@ export class ProbeBus {
    *   asked = 这次真的喊到的同源页签数；acked = 回执"已让出"的个数；
    *   ghosts = 其中**已经不在**的页签数（关掉/冻结/刷新掉，连喊话都不应答）
    */
-  async requestRelease({ why = '', settleMs = 250, waitMs: waitCap = 1200 } = {}){
+  async requestRelease({ why = '', settleMs = 250, waitMs: waitCap = 1200, hardMs = 6000 } = {}){
     if (!this._channel) return { supported: false, asked: 0, acked: 0, ghosts: 0, ms: 0 };
     const t0 = Date.now();
     this._acked = 0;
+    this._releasing = 0;
     this._heard = new Set();
     const asked = this.peers.size;
     this._post({ t: 'release', why });
@@ -145,7 +150,20 @@ export class ProbeBus {
      */
     if (asked) await sleep(settleMs);
     else await waitMs(Math.min(settleMs, 80));
-    while (Date.now() - t0 < waitCap && this._acked < this.peers.size) await sleep(40);
+    /**
+     * 🚨 **有人明确答应了让出，就把上限放宽到 `hardMs`**（2026-10 代码审查）：
+     *    被请让出的那个页签通常在**后台**，它的 onRelease 要依次断开 RTT / J-Scope / 转发桥 /
+     *    SPI / 调试器 / I2C，这条路上有好几处 120~250 ms 的 sleep，后台会被节流成各 1 s ——
+     *    加起来轻松超过原来的 1.2 s。等不到"已让出"就去抢接口，只会撞
+     *    `Unable to claim interface`（而那个接口还得等 GC 才放开）。
+     *    一声不吭的同伴仍按原来的 `waitCap` 收工：它们多半已经不在了（见下面的"清鬼"）。
+     */
+    while (this._acked < this.peers.size){
+      const waited = Date.now() - t0;
+      const pending = (this._releasing || 0) > this._acked;      // 有人答应了、还没做完
+      if (waited >= (pending ? hardMs : waitCap)) break;
+      await sleep(40);
+    }
     /**
      * 清鬼：一轮下来**一句话都没说过**的同伴，就是已经不在了 —— 它会让每次烧录都白等满 waitMs。
      * 判据很稳：活着的页签收到 'release' 会立刻回一句 'releasing'（同步发的），
@@ -160,7 +178,8 @@ export class ProbeBus {
       if (n >= 2){ this.peers.delete(p); this._missed.delete(p); ghosts++; }
     }
     this._heard = null;
-    return { supported: true, asked, acked: this._acked, ghosts, ms: Date.now() - t0 };
+    return { supported: true, asked, acked: this._acked, ghosts, ms: Date.now() - t0,
+             releasing: this._releasing || 0 };
   }
 
   close(){

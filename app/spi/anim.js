@@ -380,7 +380,14 @@ export class PanelAnim {
     });
     if (this._stop) return;                       // 用户按了停止：这一帧是半截的，别记账也别报错
     const bad = r.rsps.filter(x => x && x.status !== P.ST.OK).length;
-    if (bad) this.log('e', `动画第 ${this.stat.frames + 1} 帧有 ${bad} 个非 OK 应答`, 'panel');
+    if (bad){
+      this.log('e', `动画第 ${this.stat.frames + 1} 帧有 ${bad} 个非 OK 应答`, 'panel');
+      /* 🚨 这一帧其实**没画上去**，可 `partial.plan()` 在发之前就把基准帧换成它了 ——
+       *    后面的局部帧会拿"屏上并不存在的那一帧"做差分，于是坏掉的那块要等下一次
+       *    整帧刷新才会修好（画面一直花着）。这里把基准帧作废，逼下一帧整刷一次。
+       *    （2026-10 代码审查） */
+      this.partial.reset();
+    }
     this.stat.frames++;
     if (plan.action === 'partial') this.stat.partial++;
     this.stat.bytes += plan.bytes;

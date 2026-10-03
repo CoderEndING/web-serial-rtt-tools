@@ -96,8 +96,12 @@ export class RttCdcStreamView {
       $('c-scan').disabled = true; $('c-pick').disabled = true; $('c-port').disabled = true;
       setFlag($('conn-flag'), `已连接 ${info} @${opts.baudRate}`, 'on');
       setStatus($('c-err'), '', null);
-      toast(`已打开 ${info}（CDC 波特率不生效，随便填）`, 'ok');
-      if ($('c-record-auto').checked && !this.rec.active) this._autoStartRecord();
+      /* 三个页面共用这一个串口会话 → **只对"自己发起的那次"弹提示 / 起自动记录**：
+       * 本页专门连探针的 CDC 口，所以在串口助手里开一个普通 UART 时不该冒出
+       * 「CDC 波特率不生效」这句（2026-10 代码审查）。连接状态照旧更新。 */
+      const mine = opts.owner === 'rtt';
+      if (mine) toast(`已打开 ${info}（CDC 波特率不生效，随便填）`, 'ok');
+      if (mine && $('c-record-auto').checked && !this.rec.active) this._autoStartRecord();
       this._stats();
     });
     this.s.on('close', ({ unexpected }) => {
@@ -179,6 +183,7 @@ export class RttCdcStreamView {
       await this.s.open(port, {
         baudRate: Number($('c-baud').value) || 115200,
         dataBits: 8, stopBits: 1, parity: 'none', flowControl: 'none',
+        owner: 'rtt',                // 见 session.open 的说明：只对发起方弹提示/起自动记录
       });
     } catch (e){ setStatus($('c-err'), String(e?.message || e), 'err'); }
   }

@@ -3,15 +3,28 @@
  * ELF/HEX 自带地址；BIN 没有地址信息，由调用方给基地址。
  */
 
-/** 相邻（间隔 ≤ 4KB）的段合并成连续段，空隙补 0xFF（flash 擦除后的默认值） */
+/**
+ * 相邻（间隔 ≤ 4KB）的段合并成连续段，空隙补 0xFF（flash 擦除后的默认值）。
+ *
+ * 🚨 **重叠的段直接报错，不合并**（2026-10 代码审查）：老代码遇到 `s.addr < end` 时
+ *    `gap` 被 `Math.max(0, …)` 夹成 0，后一段就被**接在前一段末尾**（地址整体抬高），
+ *    而不是落到它自己的地址上 —— 既不报错也不提示，数据静默错位。
+ *    正常 ELF 的各节不重叠，触发它的是 HEX 里的重复记录（或者坏文件）。
+ */
 function mergeSegs(segs){
   segs.sort((a, b) => a.addr - b.addr);
   const out = [];
   for (const s of segs){
     const last = out[out.length - 1];
+    if (last && s.addr < last.addr + last.data.length){
+      const end = last.addr + last.data.length;
+      throw new Error(`固件里有两段重叠的地址：0x${s.addr.toString(16)} 起的 ${s.data.length} B ` +
+        `落在前一段 0x${last.addr.toString(16)}..0x${(end - 1).toString(16)} 里面 —— ` +
+        `文件里有重复/冲突的记录（HEX 重复段、或两个节映射到同一地址），不敢猜哪个对，请先修好文件`);
+    }
     if (last && s.addr <= last.addr + last.data.length + 4096){
       const end = last.addr + last.data.length;
-      const gap = Math.max(0, s.addr - end);
+      const gap = s.addr - end;                        // 上面已保证 ≥ 0
       const merged = new Uint8Array(end - last.addr + gap + s.data.length);
       merged.set(last.data);
       merged.fill(0xff, end - last.addr, end - last.addr + gap);
@@ -95,14 +108,33 @@ export function parseIntelHex(text){
   const HEX = /^([0-9a-fA-F]{2})+$/;
   const segs = [];
   let upper = 0;
-  for (const raw of text.split(/\r?\n/)){
-    const line = raw.trim();
+  const lines = text.split(/\r?\n/);
+  for (let li = 0; li < lines.length; li++){
+    const line = lines[li].trim();
     if (!line || !line.startsWith(':')) continue;
     const body = line.slice(1);
-    if (!HEX.test(body)) throw new Error(`HEX 行格式不对：${line.slice(0, 20)}…`);
+    if (!HEX.test(body)) throw new Error(`HEX 第 ${li + 1} 行格式不对：${line.slice(0, 20)}…`);
     const bin = new Uint8Array(body.length / 2);
     for (let i = 0; i < bin.length; i++) bin[i] = parseInt(body.substr(i * 2, 2), 16);
     const len = bin[0];
+    /**
+     * 🚨 **长度与校验和都要核**（2026-10 代码审查）。记录形状是 `:llaaaatt[dd..]cc`，
+     *    一共 `len + 5` 字节。老代码两个都不看，后果是**静默烧坏数据**：
+     *      · 行被截断时 `slice(4, 4+len)` 会把**校验字节当成数据**收下（少掉的那几个字节没人发现）；
+     *      · 数据位翻错也照收 —— 而烧录后的"回读校验"比对的正是这份已经坏掉的数据，
+     *        所以界面会显示**校验通过**。
+     *    "所有字节按 uint8 累加 == 0"是这个格式唯一的完整性依据，必须查。
+     */
+    if (bin.length !== len + 5){
+      throw new Error(`HEX 第 ${li + 1} 行长度不对：长度字段说 ${len} 字节数据（整行应为 ${len + 5} 字节），` +
+        `实际 ${bin.length} 字节 —— 文件被截断或改坏了`);
+    }
+    let sum = 0;
+    for (const b of bin) sum = (sum + b) & 0xff;
+    if (sum !== 0){
+      throw new Error(`HEX 第 ${li + 1} 行**校验和不对**（所有字节之和应为 0，实得 0x${sum.toString(16).padStart(2, '0')}）` +
+        ` —— 文件损坏了，别烧（烧坏的数据回读校验也会"通过"，因为它比的就是这份坏数据）`);
+    }
     const addr = ((bin[1] << 8) | bin[2]) >>> 0;
     const type = bin[3];
     const data = bin.slice(4, 4 + len);
