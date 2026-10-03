@@ -5,6 +5,7 @@
  * 事件：open / close / data(Uint8Array, Date) / tx(Uint8Array) / error(Error)
  */
 import { Bus } from '../core/bus.js';
+import { waitMs } from '../core/pace.js';
 
 export class SerialSession extends Bus {
   constructor(){
@@ -39,7 +40,15 @@ export class SerialSession extends Bus {
     return vid && pid ? `${vid}:${pid}` : '（无 USB 信息）';
   }
 
-  /** @param {SerialPort} port @param {{baudRate:number,dataBits:number,stopBits:number,parity:string,flowControl:string,dtr?:boolean,rts?:boolean}} opts */
+  /**
+   * @param {SerialPort} port
+   * @param {{baudRate:number,dataBits:number,stopBits:number,parity:string,flowControl:string,
+   *          dtr?:boolean,rts?:boolean,owner?:string}} opts
+   *   `owner` = **这次打开是谁发起的**（'assistant' / 'rtt' …）。它会随 `open` 事件带出去：
+   *   三个页面共用这一个会话，各自只该对"自己发起的那次"弹提示 / 起自动记录
+   *   （2026-10 代码审查：以前不带，于是在串口助手里开普通 UART 也会弹 RTT 转发页那句
+   *   「CDC 波特率不生效」，两页都勾自动记录还会把同一路数据写成两个文件）。
+   */
   async open(port, opts){
     if (this.isOpen) await this.close();
     const o = {
@@ -48,7 +57,16 @@ export class SerialSession extends Bus {
       stopBits: Number(opts.stopBits) || 1,
       parity: opts.parity || 'none',
       flowControl: opts.flowControl || 'none',
+      /**
+       * 🚨 **保持 4 KB，别学 2026-10 审查建议提到 64 KB**（我们试过、真机打脸）：
+       *    它的理由是"高速流下读取端慢一拍就 BufferOverrunError"，听着无害，实测在
+       *    RTT→CDC 打流 **2.9 MB/s** 时**把整页冻住**（页面来不及排空大缓冲，用户看到的是
+       *    "打开 CDC 串口"那步超时、像串口/探针坏了）—— 已回退（见 git 历史 743e66e）。
+       *    这里是主机侧读+渲染的路径，缓冲大小不是吞吐杠杆；真要动它，先在真机上按
+       *    `make hw-campaign`（转发 2.9 MB/s + 10 s 存盘）验一轮再说。
+       */
       bufferSize: 4096,
+      owner: opts.owner || '',
     };
     await port.open(o);
     this.port = port;
@@ -68,11 +86,27 @@ export class SerialSession extends Bus {
       while (this.isOpen && port.readable){
         this.reader = port.readable.getReader();
         try {
+          /**
+           * 🚨 外层 while **每轮都重新取 `port.readable`**，这是 Web Serial 的标准读法：
+           *    帧错误（FramingError）/ 奇偶校验错（ParityError）/ `BufferOverrunError` 都是
+           *    **非致命**的 —— 规范规定它们不会关端口，只是把 `readable` 换成一个**新流**，
+           *    读循环接着读就行；只有真断开（拔线/被抢占）时 `readable` 才变成 null。
+           *
+           *    老代码内层**只有 finally、没有 catch**：线上一个坏字节（波特率选错、干扰、
+           *    高速下缓冲溢出）就把整个循环掀到外层 catch，然后当成"串口已断开"发出去 ——
+           *    可端口其实还开着（`isOpen` 仍是 true、`port.close()` 从没调过），状态前后不一致；
+           *    而串口助手 / 终端 / RTT 转发共用这一个会话，于是**三个页面一起"断"**。
+           *    （2026-10 代码审查）
+           */
           while (true){
             const { value, done } = await this.reader.read();
-            if (done) break;
+            if (done) break;                       // 这个流结束：回外层看 readable 还在不在
             if (value && value.length) this.emit('data', value, new Date());
           }
+        } catch (e){
+          // 非致命错误：报一声继续（readable 已换成新流，外层的 while 会拿到它）
+          if (this.isOpen && !this._closing) this.emit('error', e);
+          await waitMs(20);                        // 让一步：万一 readable 没被换掉也不会把 CPU 空转满
         } finally {
           try { this.reader.releaseLock(); } catch {}
           this.reader = null;

@@ -108,8 +108,13 @@ export class Assistant {
       $('s-open').disabled = true; $('s-close').disabled = false;
       $('s-scan').disabled = true; $('s-pick').disabled = true; $('s-port').disabled = true;
       setStatus($('s-err'), '', null);
-      toast(`已打开串口 ${info} @ ${opts.baudRate} 8${opts.parity === 'none' ? 'N' : opts.parity === 'even' ? 'E' : 'O'}${opts.stopBits}`, 'ok');
-      if ($('s-record-auto').checked && !this.rec.active) this._autoStartRecord();
+      /* 三个页面共用这一个串口会话 → **只对"自己发起的那次"弹提示 / 起自动记录**。
+       * 否则（2026-10 代码审查）：在串口助手里开一个普通 UART，也会弹出 RTT 转发页那句
+       * 「CDC 波特率不生效」；两页都勾了"连接自动记录"时同一路数据会被写成两个文件。
+       * 连接状态本身照旧更新（按钮/状态灯是所有页面都该看到的）。 */
+      const mine = opts.owner === 'assistant';
+      if (mine) toast(`已打开串口 ${info} @ ${opts.baudRate} 8${opts.parity === 'none' ? 'N' : opts.parity === 'even' ? 'E' : 'O'}${opts.stopBits}`, 'ok');
+      if (mine && $('s-record-auto').checked && !this.rec.active) this._autoStartRecord();
       this._armTimer();
       this._stats();
     });
@@ -256,6 +261,7 @@ export class Assistant {
         flowControl: $('s-flow').value,
         dtr: $('s-dtr').checked,
         rts: $('s-rts').checked,
+        owner: 'assistant',          // 见 session.open 的说明：只对发起方弹提示/起自动记录
       });
       store.set('serial.lastDesc', SerialSession.describe(port));
       this.refreshPorts();
