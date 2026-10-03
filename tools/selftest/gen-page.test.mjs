@@ -354,6 +354,132 @@ console.log('== 7b. 桥包（本地桥安装包）：内容与「下载桥包」
   ok(await evaluate(`!!document.getElementById('g-zip-bridge')`), '「下载桥包（ZIP）」按钮在页面上');
 }
 
+// ==================================================================== 8
+console.log('== 8. 右列 tab 化 + 左栏联动（2026-10 重构）==');
+{
+  /* 起手自带前置：`gen.dock` 是持久化设置，上一轮留在别的 tab 会让这一节整片红
+     （和 #i2c / #spi 的页面套件同一个纪律）。 */
+  await evaluate(`(()=>{
+    const K = 'serial-rtt-tools:v1';
+    const st = JSON.parse(localStorage.getItem(K) || '{}');
+    delete st['gen.dock'];
+    localStorage.setItem(K, JSON.stringify(st));
+    return true;})()`);
+  await send('Page.reload', { ignoreCache: true });
+  for (let i = 0; i < 40; i++){
+    await sleep(400);
+    try { if (await evaluate('!!window.__tools?.gen')) break; } catch {}
+  }
+  await evaluate(`(()=>{document.querySelector('#tabs .tab[data-tab="gen"]').click(); return true;})()`);
+  await sleep(300);
+
+  const shape = await evaluate(`(()=>{
+    const ids = [...document.querySelectorAll('#g-dock-tabs button[data-dock]')].map(b => b.dataset.dock);
+    const pages = [...document.querySelectorAll('#g-box-dock .dockpage')].map(p => p.dataset.dock);
+    const on = [...document.querySelectorAll('#g-box-dock .dockpage.on')].map(p => p.dataset.dock);
+    const left = [...document.querySelectorAll('#tab-gen .side fieldset')].filter(f => !f.hidden)
+      .map(f => f.querySelector('legend').textContent.trim());
+    const leftAll = [...document.querySelectorAll('#tab-gen .side fieldset')].map(f => f.dataset.dock);
+    return { ids, pages, on, left, leftAll };})()`);
+  ok(shape.ids.join(',') === 'files,params,bridge', `三个 tab：工程文件 / 调试参数 / 本地桥（${shape.ids.join(',')}）`);
+  ok(shape.pages.join(',') === shape.ids.join(','), '每个 tab 都有对应的内容块（顺序一致）');
+  ok(shape.on.length === 1 && shape.on[0] === 'files', '🚨 同时**只有一个**内容块可见，默认「工程文件」');
+  ok(shape.left.join(',') === '工程,生成哪些,落地方式', `左栏默认只显示本 tab 的三张卡（${shape.left.join(' / ')}）`);
+  ok(shape.leftAll.join(',') === 'files,files,params,files,bridge', '五张卡都带 data-dock 归属（不是靠删节点）');
+
+  // 切 tab → 左栏跟着换
+  const switched = await evaluate(`(async()=>{
+    const click = d => document.querySelector('#g-dock-tabs button[data-dock="'+d+'"]').click();
+    const snap = () => ({
+      on: [...document.querySelectorAll('#g-box-dock .dockpage.on')].map(p => p.dataset.dock),
+      btnOn: [...document.querySelectorAll('#g-dock-tabs button.on')].map(b => b.dataset.dock),
+      left: [...document.querySelectorAll('#tab-gen .side fieldset')].filter(f => !f.hidden)
+        .map(f => f.querySelector('legend').textContent.trim()),
+      saved: (JSON.parse(localStorage.getItem('serial-rtt-tools:v1') || '{}') || {})['gen.dock'],
+      dock: window.__tools.gen.dock,
+      pill: document.getElementById('g-dock-pill').textContent,
+    });
+    const out = {};
+    for (const d of ['params', 'bridge', 'files']){
+      click(d); await new Promise(r => setTimeout(r, 150));
+      out[d] = snap();
+    }
+    return out;})()`);
+  ok(switched.params.on.join(',') === 'params' && switched.params.left.join(',') === '参数',
+     `切「调试参数」→ 左边只剩「参数」卡（${switched.params.left.join('/')}）`);
+  ok(switched.bridge.on.join(',') === 'bridge' && switched.bridge.left.length === 1 && /本地桥/.test(switched.bridge.left[0]),
+     `切「本地桥」→ 左边只剩「本地桥」卡（${switched.bridge.left.join('/')}）`);
+  ok(switched.files.left.length === 3 && switched.files.left.includes('工程'),
+     `切回「工程文件」→ 三张卡都回来（${switched.files.left.join('/')}）`);
+  ok(['params', 'bridge', 'files'].every(d => switched[d].saved === d && switched[d].dock === d),
+     '每次切换都落 localStorage 且 view.dock 同步（刷新/切页回来还在）');
+  ok(/项参数/.test(switched.params.pill) && /个文件/.test(switched.bridge.pill) && /个文件/.test(switched.files.pill),
+     `tab 栏的胶囊跟着 tab 走（参数「${switched.params.pill}」/ 桥「${switched.bridge.pill}」/ 工程「${switched.files.pill}」）`);
+
+  // 「调试参数」tab：参数一览表（长值看得全、点值复制）
+  const params = await evaluate(`(async()=>{
+    document.querySelector('#g-dock-tabs button[data-dock="params"]').click();
+    await new Promise(r => setTimeout(r, 250));
+    const rows = [...document.querySelectorAll('#g-params-body tr')];
+    const heads = rows.filter(r => r.classList.contains('gparamhead')).map(r => r.textContent.trim());
+    const find = k => {
+      const tr = rows.find(r => r.querySelector('.gpk')?.textContent.trim() === k);
+      return tr ? { v: tr.querySelector('.gpv code').textContent, title: tr.querySelector('.gpv code').title } : null;
+    };
+    return { count: rows.length, heads, project: find('项目名'), openocdRoot: find('OpenOCD 根'),
+             device: find('器件'), projSame: find('项目名')?.v === document.getElementById('g-project').value,
+             text: window.__tools.gen.paramsText().slice(0, 80) };})()`);
+  ok(params.count > 20, `参数表列了 ${params.count} 行（含分组标题）`);
+  /**
+   * 参数表**故意列全五张卡的值**（包括当前 tab 藏起来的那些）—— 它的用途就是"一屏复核我到底填了什么"，
+   * 分组标题写着每个值属于哪张卡（隐藏 ≠ 没填）。
+   */
+  ok(['工程', '参数', '本地桥'].every(k => params.heads.some(h => h.includes(k))),
+     `按左栏卡片分组（五张卡都列）：${params.heads.join(' / ')}`);
+  ok(params.projSame === true, `「项目名」的值与左栏输入框一致（${params.project?.v}）`);
+  ok(/点击复制/.test(params.openocdRoot?.title || ''), '长路径那一行带"点击复制"提示（值不被侧栏宽度截断）');
+  ok(/^\[工程\]/.test(params.text), `「复制全部」的文本以分组标题开头（${JSON.stringify(params.text.slice(0, 24))}）`);
+
+  // 「本地桥」tab：7 个文件各有预览；关掉开关就只剩提示
+  const kit = await evaluate(`(async()=>{
+    document.querySelector('#g-dock-tabs button[data-dock="bridge"]').click();
+    await new Promise(r => setTimeout(r, 200));
+    const btns = [...document.querySelectorAll('#g-kit-files button')];
+    const names = btns.map(b => b.textContent);
+    btns.find(b => b.textContent === 'start-bridge.bat')?.click();
+    await new Promise(r => setTimeout(r, 150));
+    const prev = document.getElementById('g-kit-preview').textContent;
+    const projPrevKeeps = document.getElementById('g-preview').textContent.length;   // 工程预览不该被清掉
+    return { names, prevHead: prev.slice(0, 40), hasDoctor: /--doctor/.test(prev),
+             projPrevKeeps, projBtns: [...document.querySelectorAll('#g-files button')].length };})()`);
+  ok(kit.names.length === 7, `桥 tab 的文件栏就是那 7 个（${kit.names.join(' · ')}）`);
+  ok(/^@echo off/.test(kit.prevHead) && kit.hasDoctor, `点 start-bridge.bat → 右侧预览的是它（${JSON.stringify(kit.prevHead)}）`);
+  ok(kit.projBtns === 6 && kit.projPrevKeeps > 3000,
+     `桥包不再挤进「工程文件」那条栏（那边 ${kit.projBtns} 个），工程预览也没被清掉`);
+
+  const kitOff = await evaluate(`(async()=>{
+    const e = document.getElementById('g-bk-on');
+    e.checked = false; e.dispatchEvent(new Event('change', { bubbles: true }));
+    await new Promise(r => setTimeout(r, 350));
+    const btns = [...document.querySelectorAll('#g-kit-files button')].length;
+    const prev = document.getElementById('g-kit-preview').textContent;
+    e.checked = true; e.dispatchEvent(new Event('change', { bubbles: true }));
+    await new Promise(r => setTimeout(r, 300));
+    return { btns, prev, back: [...document.querySelectorAll('#g-kit-files button')].length };})()`);
+  ok(kitOff.btns === 0 && /勾上/.test(kitOff.prev), '关掉「生成桥包」→ 桥 tab 给明确提示（不是空白）');
+  ok(kitOff.back === 7, '再勾上 → 7 个文件回来');
+
+  // 收尾：把 tab 拨回默认，别给下一次测试留个"停在本地桥"
+  await evaluate(`(()=>{
+    document.querySelector('#g-dock-tabs button[data-dock="files"]').click();
+    const K = 'serial-rtt-tools:v1';
+    const st = JSON.parse(localStorage.getItem(K) || '{}');
+    st['gen.dock'] = 'files'; localStorage.setItem(K, JSON.stringify(st));
+    return true;})()`);
+  const err = await evaluate('window.__tools.summary().errors');
+  ok(err.length === 0, '这一节跑完页面无未捕获错误', JSON.stringify(err));
+}
+
 console.log(`\n${fail ? 'FAIL' : 'OK'}  ${pass} 通过 / ${fail} 失败`);
 ws.close();
 process.exit(fail ? 1 : 0);

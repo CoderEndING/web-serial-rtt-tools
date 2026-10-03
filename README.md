@@ -82,7 +82,7 @@ RTT 转发 · J-Scope 波形 · SPI/QSPI 桥 · SPI/QSPI 屏（含**局部刷新
 | **SPI/QSPI 桥** | 探针当 USB→SPI/QSPI 主站。右列分六个 tab：**命令表**（一行一条 `XFER`）· **寄存器**（按"器件档位"读一段回来——读/写 opcode、地址并入 opcode 还是独立字节、dummy、每寄存器字节数、自增都可配；16 列字节表里每个字节能点开 8 个 bit 改，改完「只写改动 / 整块写回」）· **脚本**（贴 C 表 / 手写帧 DSL，支持 `loop 20ms … end` 定时采集与行尾 `as ax=i16be(0)/16384` 解码，`cmd=0x80\|0x3B` 这种位运算直接写）· **实时值**（`as` 解出来的变量 + 迷你曲线，用于 SPI 接口的 ADC / 传感器连续采集）· **Flash 测试**（外接 NOR：读 ID/SFDP/状态、读测速、擦写校验）· **回环自检**（MOSI↔MISO 跳线）。tab 栏常驻**运行胶囊**与共享「中止」；SCLK、模式、CS 策略、辅助脚与有效电平在左栏配 | akaLinkPro 探针（HID `0x35` 控制面 + bulk 帧流）；接线照上面的 40pin 图；方案见 [`docs/spi-bridge-page.md`](docs/spi-bridge-page.md)、寄存器面板与常见 SPI 器件寄存器约定见 [`docs/spi-register-panel.md`](docs/spi-register-panel.md) |
 | **SPI/QSPI 屏** | 把屏点亮那一页。右列分三个 tab：**刷屏**（内置图案 / 拖入图片 → 预览 → 开窗对齐、492 B 切片刷；**局部刷新**——只发与上一帧不同的包围盒，同内容重刷整帧跳过；**动画/视频** MP4/WebM/GIF 逐帧发，发送当节拍器）· **面板初始化**（贴 C 数组 → 解析成步骤表 → 重放；每个字节可直接改、点开看/改它的 8 个 bit）· **读回**（读寄存器 / 读 GRAM 还原成一帧图 + 存 BMP）。tab 栏常驻**运行胶囊**与共享「中止」，日志常驻底部（高度可拖） | 与「SPI/QSPI 桥」页**共用同一次连接** |
 | **USB→I2C** | 探针当 **USB 转 I2C 主机**。右列分五个 tab：**扫描总线**（0x08..0x77）· **命令表**（读/写/探测/延时，一行一次事务）· **寄存器**（读一段，默认 **128 B = 16×8 表**；每个字节点开就是 8 个 bit 的开关板，改完按「只写改动 / 整块写回」发下去 —— 调器件寄存器不用自己把 `0x55` 拆成 8 位再拼回去）· **脚本**（贴 C 表或写脚本，`loop 100ms … end` 就是 while(1) 定时读/写）· **实时值**（`as` 解码把字节变成有名字的量：g / ℃ / V + 迷你曲线）。**长读自动分片**（`rd 0x50 0x00 256` 直接写，内部拆成 5 笔、日志只出一行），长写也分片（EEPROM 页写可给「写分片 / 片间等待」按页写、等 tWR）；tab 栏常驻**运行胶囊**与「停止」，切到哪个 tab 都知道任务还在跑。内置 **AT24C02 / MPU6050 / ADS1115 / Si5351** 四个模块示例，后两个是传感器，示例里直接做成 while(1) 连续采样 | akaLinkPro 探针（HID `0x36`，**只走 HID** 一条通路）；**仅 HPM5301EVKLite** 固件；方案见 [`docs/i2c-page.md`](docs/i2c-page.md) |
-| **工程生成** | 拖进 Keil `.uvprojx` 就能生成调试/下载配套文件：`Makefile.jlink`、`jlink_gdb.script`、`Makefile.pyocd`、`Makefile.openocd`（连带 `rtt_logger.py`）、`test_sram.bin`；参数可填可勾，产物**实时预览** | 不需要任何硬件/后端（纯前端生成） |
+| **工程生成** | 拖进 Keil `.uvprojx` 就能生成调试/下载配套文件：`Makefile.jlink`、`jlink_gdb.script`、`Makefile.pyocd`、`Makefile.openocd`（连带 `rtt_logger.py`）、`test_sram.bin`；右列分三个 tab：**工程文件**（产物实时预览 + 复制/单独下载）· **调试参数**（把左栏填的值逐项列全，长路径看得全、点值即复制）· **本地桥**（安装包 7 个文件的预览 + 一键下载桥包）。**左栏卡片跟着 tab 走**（只显示当组的设置） | 不需要任何硬件/后端（纯前端生成） |
 
 
 ## 40pin 引脚定义（HPM5301EVKLite / J3）
@@ -177,7 +177,7 @@ RTT 转发 · J-Scope 波形 · SPI/QSPI 桥 · SPI/QSPI 屏（含**局部刷新
 | `make test-i2c` / `test-i2c-dsl` / `test-i2c-reg` USB→I2C 逻辑层（协议+假器件 / 命令表与脚本 / 寄存器面板与长写分片） | **170 / 251 / 76** |
 | `make test-scope` / `test-dwarf` J-Scope 协议 / DWARF 解析 | **127 / 78** |
 | `make test-rtt` / `test-hid` RTT 协议 / akaLinkPro HID 协议 | **45 / 55** |
-| `make test-gen` / `test-gen-page` 工程生成对账（与 Python 工具逐字节）+ 真页面 | **34 / 57** |
+| `make test-gen` / `test-gen-page` 工程生成对账（与 Python 工具逐字节）+ 真页面（含三 tab 与左栏联动） | **55 / 78** |
 | `make test-ui` 整页 UI 步进自测 | **19/19** |
 | `make check` 语法/引用体检 + 上面这些的合集入口 | 全绿 |
 

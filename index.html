@@ -1707,7 +1707,9 @@
 <section class="panel" id="tab-gen">
   <div class="ws">
     <aside class="side">
-      <fieldset>
+      <!-- 左栏卡片按右列的 tab 分组：`data-dock` 决定它属于哪个 tab，切 tab 时只显示当组的卡片
+           （用户 2026-10：左栏太长 → 跟右列联动，"分类简洁"）。见 app/gen/view.js 的 _dockSelect()。 -->
+      <fieldset data-dock="files">
         <legend>工程</legend>
         <div class="row btnrow">
           <button id="g-uvpick" class="primary" title="读取 .uvprojx 里的器件/Flash 信息，自动填下面的参数（也可以直接把文件拖到右边）">选择 .uvprojx…</button>
@@ -1720,7 +1722,7 @@
         <p class="hint" id="g-detect">把 .uvprojx 拖进来（或点上面的按钮）：项目名、器件、Flash 起址会自动填好，其余都能手改。</p>
       </fieldset>
 
-      <fieldset>
+      <fieldset data-dock="files">
         <legend>生成哪些</legend>
         <label class="chk"><input type="checkbox" id="g-c-jlink" checked> Makefile.jlink（J-Link 烧录/调试）</label>
         <label class="chk"><input type="checkbox" id="g-c-gdb" checked> jlink_gdb.script（GDB 脚本）</label>
@@ -1730,7 +1732,7 @@
         <label class="row"><span>bin 大小</span><input id="g-testbin-size" class="num" value="20480" inputmode="numeric"></label>
       </fieldset>
 
-      <fieldset>
+      <fieldset data-dock="params">
         <legend>参数</legend>
         <label class="row"><span>接口</span>
           <select id="g-if"><option>SWD</option><option>JTAG</option></select>
@@ -1759,7 +1761,7 @@
         <label class="row"><span>RTT 端口</span><input id="g-rtt-port" class="num" value="9090" inputmode="numeric" title="openocd-rtt 目标里 rtt server start 的端口"></label>
       </fieldset>
 
-      <fieldset>
+      <fieldset data-dock="files">
         <legend>落地方式</legend>
         <label class="row"><span>换行符</span>
           <select id="g-newline" title="CRLF = 与 uvprojx2cmake.py 的产物逐字节一致；LF 更贴近 git 习惯">
@@ -1777,8 +1779,8 @@
         <p class="hint">网页不能自动写你的项目目录：得你亲手选一次文件夹（浏览器安全模型）。Edge/Chrome 支持直写，其它浏览器自动走 ZIP。</p>
       </fieldset>
 
-      <!-- 本地桥：跟"工程配套文件"是两回事（那是本机跑的程序包），所以放在「落地方式」之后 -->
-      <fieldset id="g-bridge-card">
+      <!-- 本地桥：跟"工程配套文件"是两回事（那是本机跑的程序包）—— 单独一个 tab（用户 2026-10 要求） -->
+      <fieldset id="g-bridge-card" data-dock="bridge">
         <legend>本地桥（J-Link / OpenOCD）</legend>
         <label class="chk"><input type="checkbox" id="g-bk-on" checked title="J-Link / OpenOCD 都是本机程序，浏览器无权启动它们 —— 要用这两条后端就得有个本机桥。零安装的 WebUSB 通路不需要它">生成「本地桥」安装包（双击即用）</label>
         <label class="row"><span>端口</span><input id="g-bk-port" class="num" value="17321" inputmode="numeric" title="桥监听的本地端口；页面与桥都走它"></label>
@@ -1801,22 +1803,65 @@
             <option value="0">官方优先（nodejs.org）</option>
           </select></label>
         <label class="chk"><input type="checkbox" id="g-bk-autonode" checked title="关掉 = 没 Node 时只提示、不下载（企业内网/杀软敏感时用）">没 Node 时自动下便携版</label>
-        <div class="row btnrow"><button id="g-zip-bridge" title="只打包桥的文件（zip 里是 rtt-bridge-kit/…）：解压后双击 start-bridge.bat 就能起桥">下载桥包（ZIP）</button></div>
         <p class="hint">包里：启动器（bat/sh）+ 桥本体 + 配置 + 预检脚本 + 便携 Node 下载器 + 说明。
           <b>路径留空 = 桥自己探测</b>（ESP-IDF 的 openocd-esp32 → Program Files → PATH；J-Link 找 SEGGER 目录里版本号最大的）；
-          起桥前会先跑一次环境预检，把"该改哪一行"打出来。退出用 <b>Ctrl+C</b>（会把 OpenOCD / J-Link 子进程一起收掉）。</p>
+          起桥前会先跑一次环境预检，把"该改哪一行"打出来。退出用 <b>Ctrl+C</b>（会把 OpenOCD / J-Link 子进程一起收掉）。
+          <b>每个文件的预览与「下载桥包（ZIP）」在右边「本地桥」tab</b>。</p>
       </fieldset>
     </aside>
 
     <section class="main">
-      <div class="toolbar">
-        <span class="hint" style="margin:0">产物</span>
-        <div class="seg" id="g-files"></div>
-        <span class="spacer"></span>
-        <button id="g-copy" class="mini">复制当前文件</button>
-        <button id="g-dl" class="mini">下载当前文件</button>
-      </div>
-      <pre class="rx" id="g-preview" tabindex="0"></pre>
+      <!-- 右列 = 一个带 tab 的面板（照 #spi / #i2c 的 `.seg.docktabs` + `.dockpage` 那套）。
+           为什么 tab 化：13 个产物原来挤在一条文件栏里（桥包那 7 个还另占一行），而
+           「工程配套文件」与「本地桥安装包」本来就是两件事；顺带让左栏能按 tab 分组（用户 2026-10 要求）。 -->
+      <fieldset class="gendock" id="g-box-dock">
+        <legend>
+          <span class="seg docktabs" id="g-dock-tabs">
+            <button data-dock="files" class="on">工程文件</button>
+            <button data-dock="params">调试参数</button>
+            <button data-dock="bridge">本地桥</button>
+          </span>
+          <span class="hint dockrun" id="g-dock-pill" title="当前 tab 的一句话状态">待生成</span>
+          <span class="spacer"></span>
+        </legend>
+
+        <div class="dockpage on" data-dock="files" id="g-files-card">
+          <div class="toolbar">
+            <span class="hint" style="margin:0">产物</span>
+            <div class="seg" id="g-files"></div>
+            <span class="spacer"></span>
+            <button id="g-copy" class="mini">复制当前文件</button>
+            <button id="g-dl" class="mini">下载当前文件</button>
+          </div>
+          <pre class="rx fill" id="g-preview" tabindex="0"></pre>
+          <p class="hint" style="margin:0">这几件是 <code>uvprojx2cmake.py</code> 的模板产物（默认套 4 项修正）——
+            落地用左栏「落地方式」里的「写入文件夹…」/「打包 ZIP」。</p>
+        </div>
+
+        <div class="dockpage" data-dock="params" id="g-params-card">
+          <div class="toolbar">
+            <span class="hint" style="margin:0">左栏填的值在这里逐项列全（长路径不再被侧栏宽度截断；<b>点值即复制</b>）</span>
+            <span class="spacer"></span>
+            <button id="g-params-copy" class="mini">复制全部（键=值）</button>
+          </div>
+          <div class="scroll fill" id="g-params-wrap">
+            <table class="sp gparamtab"><tbody id="g-params-body"></tbody></table>
+          </div>
+        </div>
+
+        <div class="dockpage" data-dock="bridge" id="g-kit-card">
+          <div class="toolbar">
+            <span class="hint" style="margin:0">安装包里的文件</span>
+            <div class="seg" id="g-kit-files"></div>
+            <span class="spacer"></span>
+            <button id="g-kit-copy" class="mini">复制当前文件</button>
+            <button id="g-zip-bridge" class="primary mini" title="只打包桥的文件（zip 里是 rtt-bridge-kit/…）：解压后双击 start-bridge.bat 就能起桥">下载桥包（ZIP）</button>
+          </div>
+          <pre class="rx fill" id="g-kit-preview" tabindex="0"></pre>
+          <p class="hint" style="margin:0">7 个文件：启动器（bat / sh）+ 桥本体 + 配置 + 预检脚本 + 便携 Node 下载器 + 说明 ——
+            参数在左栏「本地桥」那张卡里改，改完这里立刻跟着变。</p>
+        </div>
+      </fieldset>
       <div class="stats">
         <span id="g-status">待生成</span>
         <span class="spacer"></span>

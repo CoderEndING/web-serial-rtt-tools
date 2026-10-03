@@ -192,17 +192,33 @@ dialog form{margin-top:16px;text-align:right}
 /* ---------------- 工程生成 ---------------- */
 #tab-gen.dragging{outline:2px dashed var(--acc);outline-offset:-6px}
 #tab-gen .side .row>span:first-child{width:88px}   /* 参数名比别的页长（OpenOCD 接口…） */
-#g-files{flex-wrap:wrap;border-radius:6px}
-/* 产物按钮分两行：工程配套文件（uvprojx2cmake 那几件）/ 本地桥安装包（`rtt-bridge-kit/…`）。
-   两类东西用途不同，混成一片时标签栏会挤成三行还认不出谁是谁（用户 2026-10 要求）。 */
-#g-files{display:flex;flex-direction:column;align-items:flex-start;gap:3px;border:none;overflow:visible}
-#g-files .filerow{display:flex;flex-wrap:wrap;border:1px solid var(--line);border-radius:6px;overflow:hidden}
-#g-files .filerow.kit{border-color:#3d5a80}
-#g-files .filerow.kit button{color:#9dc1e8}
-#g-preview{white-space:pre;overflow:auto}          /* 代码别折行，横向滚 */
+/* 右列 = tab 面板（照 #spi/#i2c 那套）；左栏卡片按 `data-dock` 分组，切 tab 时只显示当组。
+   为什么 tab 化见 index.html 里的注释：13 个产物挤一条栏、桥包另占一行，且左栏太长。 */
+#tab-gen .main{gap:6px}
+#tab-gen .gendock{display:flex;flex-direction:column;min-width:0;min-height:0;overflow:hidden;flex:1 1 auto}
+#tab-gen .gendock>legend{white-space:nowrap;overflow:hidden;display:flex;align-items:center;gap:6px;width:100%;box-sizing:border-box}
+#tab-gen .gendock>legend .hint{margin:0;display:inline}
+#tab-gen .dockpage{display:none;flex:1 1 auto;min-height:0;flex-direction:column;gap:6px}
+#tab-gen .dockpage.on{display:flex}
+#tab-gen .dockpage>.toolbar{margin:0;flex:none}
+#tab-gen .dockpage>p.hint{margin:0;flex:none}
+#g-files,#g-kit-files{flex-wrap:wrap;border-radius:6px}
+#g-dock-pill{color:var(--fg2)}
+/* 预览：代码别折行（横向滚），并吃掉剩余高度 */
+#g-preview,#g-kit-preview{white-space:pre;overflow:auto;flex:1 1 auto;min-height:0}
 .fixlist{margin:4px 0 0;padding-left:18px}
 .fixlist li{margin:3px 0}
 .fixlist code{font-size:11.5px}
+
+/* 「调试参数」tab 的参数一览表：左列参数名、右列值（等宽，长路径不截断、点一下复制） */
+.gparamtab{width:100%;border-collapse:collapse;font-size:12px}
+.gparamtab td{padding:2px 8px;border-bottom:1px solid rgba(255,255,255,.06);vertical-align:top}
+.gparamtab tr.gparamhead td{padding-top:8px;color:var(--acc);font-weight:600;font-size:11.5px;
+  letter-spacing:.4px;border-bottom:1px solid var(--line);background:rgba(74,163,255,.06)}
+.gparamtab td.gpk{width:150px;color:var(--fg2);white-space:nowrap}
+.gparamtab td.gpv code{font-family:var(--mono);font-size:11.5px;color:#cdd6e4;white-space:pre-wrap;
+  word-break:break-all;cursor:copy;border-bottom:1px dashed transparent}
+.gparamtab td.gpv code:hover{color:#9fd0ff;border-bottom-color:#9fd0ff}
 
 /* ---------------- 终端页的 RTT→CDC 转发面板 ---------------- */
 #tab-terminal .side .row>span:first-child{width:74px}   /* 「RTT 地址 / 搜索长度」比默认 60px 宽些 */
