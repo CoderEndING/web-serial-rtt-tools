@@ -183,9 +183,40 @@ if (rtt_write_word(s_up_addr + RTT_UP_RDOFF_OFF, new_rd) != 0) {
 
 ---
 
-## 三、修复与验收
+## 三、修复与验收（已落地）
 
-（本节在改完探针固件并跑完验收后填写。）
+### 3.1 探针固件改动（akaLinkPro `bbb86a8`，4 文件 +116/-13）
+
+| 问题 | 改动 |
+| --- | --- |
+| ① `rc=-4` | `rtt_bridge.c` 新增导出 `rtt_bridge_link_recover()`：SWD 侧"能降就降一档 + 清 sticky + **重新初始化**（含 20 MHz 斜坡）"，RISC-V 侧重开 TAP/DM；桥自己的自愈 `rtt_link_recover()` 改为它的包装（最低档也照样重 init）。`scope_sampler.c` 的 AP 验收读失败时调它再读一次，仍失败才回 -4；恢复成功后把 `s_clock_hz` 同步成**实际生效**档位（降过档要如实上报）。 |
+| ② 会话边界 ≤2 KB 重读 | HID 的 `RTT_ACT_STOP` 与 scope 的 `START` 改成 `rtt_bridge_request_stop()` —— **停桥排队到主循环**（USB 中断里不能碰 SWD）。主循环服务时先 `rtt_bridge_flush_pending_rd()`：把没落地的 RdOff 补写回去（幂等，最多 4 次 + 清 sticky，失败就放弃）。**重启（START）前若会话还活着也补一笔**。另外 `rtt_bridge_note_dap_activity()` 里把 pending 作废 —— 主机碰过 DAP 后目标可能刚被复位/重烧，把旧位置写进去会让采样位置凭空前进（真丢数据），宁可放弃补写。 |
+
+### 3.2 验收数据
+
+| 项 | 改前 | 改后 |
+| --- | --- | --- |
+| scope START @60 MHz × 200 | **31 失败** | **0 失败**（其中 8 次走了恢复路径，状态字如实报 45 MHz） |
+| `make regression-swd`（akaLinkPro） | PASS 3/3（P2 偶发 lost） | **PASS fails=0，64.4 s**：P1 八档通过；P2 20/45/60M = **1389 / 2512 / 2977 KB/s 全部 LOSSLESS**（lost=dup=rd_err=wr_err=0）；P3 bench/run 全过（吞吐与改前基线一致，无回归） |
+| 带序号靶子 @45 MHz × 6 窗口（132 MB） | 每会话 1 次 `wr_err`；约 1/3 窗口开头出现 ≤2 KB **重读**前缀 | **真丢 0 B、跳变 0、回退 0、`wr_err` 0**；`drained − 主机 = 0±2048`（在飞边界） |
+| `make full_flow_f103ze`（本仓端到端） | 曾因偶发 -4 需要页面级重试 | **绿**：campaign 两轮（转发 2.90/2.90 MB/s、J-Scope 50 kHz 零 USB 丢、**页面级重试未触发**）、调试压力 77/0 |
+
+### 3.3 两条操作注意（都是这轮踩出来的）
+
+1. **HID-only 测 scope 会把探针的包缓冲池耗光**：`--mode=scope/disc/bench/recover` 会让采样器往
+   USB 0x83 推 DEF/DATA 包，而本工具**不读**那条端点 —— 8 个包缓冲一直"在飞"回不来，
+   之后点 scope「标定真实速率」会稳定报 `err=-5`（没有空闲包缓冲）。
+   恢复：**重烧探针**（RAM 重来）或让页面/脚本正常读一次 0x83。跑完这类模式建议重烧。
+2. **RISC-V 侧未在本轮验证**：本机只挂了 F103ZE，改动里 RISC-V 分支保持与原实现逐语句等价
+   （只是把静态函数提成导出），但要真正确认还得在 HPM6800EVK 上跑
+   `make regression-riscv`（那套要求"刚烧过的探针"，sbastat 计数是开机累计的）。
+
+### 3.4 给 akaLinkPro P2 的建议（还没做，随时可做）
+
+判据本身仍是相位级的；仓库里现在有现成的**同长（13 B）带序号靶子**
+`tools/target-firmware/stm32f103_rtt_seq`，搬过去把 `rtt_probe_bridge.py` 的
+`PATTERN` 检查换成"逐条对账序号"即可（跳号 = 真丢 ×13 字节、回退 = 重复、解析不出 = 写坏），
+再顺手丢弃每个窗口开头 4 KB 就彻底不受边界现象影响。
 
 ---
 

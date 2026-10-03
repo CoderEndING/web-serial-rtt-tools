@@ -23,7 +23,15 @@
     改固件后地址会变，PEEK 前先核对；
   · 启动/收尾的字节会把"探针 drained vs 主机收到"打偏 ≤2 KB（在飞缓冲），
     所以要**从桥 start 起就计数**（含预热排空），不能只算窗口；
+  · loss 模式必须有一个**后台读线程**从会话一开始就排空：驱动 rx 缓冲只有 4 KB，
+    2.6 MB/s 下 1.6 ms 就满，一边 HID 轮询一边不读，OS 会静默丢字节（量出来的"丢"
+    全是主机自己的）；
   · 固定图案的 gap/lost 是**相位**口径（1..24），不能当字节数；要字节数就 --seq。
+
+⚠️ 跑完 scope 类模式（scope/disc/bench/recover/rc4）建议**重烧探针**：
+  这些模式会让采样器往 USB 0x83 推 DEF/DATA 包，而本工具不读那条端点 —— 8 个包缓冲
+  会一直"在飞"回不来，之后点页面上的 scope「标定真实速率」会稳定 err=-5（没有空闲
+  包缓冲）。重烧（RAM 重来）或让页面正常读一次就恢复。
 
 短超时 + 轮询 + 看门狗；不改固件、不写磁盘（--seq 只读流做统计）。
 """
@@ -202,6 +210,36 @@ def drain(ser, secs):
         if n:
             got += n
     return got
+
+
+class _Reader(threading.Thread):
+    """后台排空串口。
+
+    必须从**会话一开始**就在读：驱动侧 rx 缓冲只有 4 KB（pyserial 默认），2.6 MB/s
+    下 1.6 ms 就满，而握手/状态轮询期间主线程不读 —— OS 会静默丢字节，量出来的
+    "丢"全是主机自己的。线程里只做 readinto + extend，收尾 join 之后再取数据。
+    """
+
+    def __init__(self, ser):
+        super().__init__(daemon=True)
+        self.ser = ser
+        self.buf = bytearray()
+        self.total = 0
+        self._stop = False
+
+    def run(self):
+        rbuf = bytearray(1 << 20)
+        while not self._stop:
+            try:
+                n = self.ser.readinto(rbuf)
+            except Exception:
+                return
+            if n:
+                self.buf.extend(rbuf[:n])
+                self.total += n
+
+    def stop(self):
+        self._stop = True
 
 
 def analyze_seq(stream, dump=True):
@@ -467,48 +505,44 @@ def mode_recover(probe, a):
 def mode_loss(probe, a):
     """分层：探针 drained（它读出来并放进 CDC 环的字节） vs 主机实际收到
 
-    口径要点：**从"桥刚起来"就开始数主机的字节**，把启动瞬间的积压与预热排空都算进去；
-    探针的 s_drained 也是从桥 start 起清零的 → 两个计数器覆盖同一段时间。
-    差 > 0 = 字节死在探针 CDC 环之后（USB/驱动/主机读），差 = 0 而流里有断裂 = 断在
-    探针读目标环这一段（SWD 侧读错/读漏）。
+    口径要点（两条都是踩出来的）：
+      ① **必须有一个后台读线程从会话一开始就排空**。驱动侧 rx 缓冲只有 4 KB，
+         2.6 MB/s 下 1.6 ms 就满 —— 一边用 HID 轮询握手一边不读，OS 会**静默丢字节**，
+         量出来的"丢"全是主机自己的（实测差 = drained-主机 恒为正、且漂到几 KB）。
+      ② 计数从"桥刚起来"起算（含预热排空）：探针的 s_drained 也是从桥 start 起清零的，
+         两个计数器才覆盖同一段时间。
+    于是：差 > 0 = 字节死在探针 CDC 环之后（USB/驱动/主机读）；差 = 0 而流里有跳号
+    = 断在探针读目标环这一段（SWD 侧）。
     """
     ser = open_ser(a.com, a.rxbuf)
     if ser is None:
         print("!! 没有串口就没法做主计（需要主机侧读者）")
         return
     probe.scope(S_ACT["STOP"])
-    rbuf = bytearray(1 << 20)
     for it in range(a.iters):
+        # 先把上一个会话的尾巴读干净（不计入本轮），再起后台读者
+        probe.rtt(R_ACT["STOP"])
+        drain(ser, 0.3)
+        rd = _Reader(ser)
+        rd.start()
         if a.clk:
             probe.rtt(R_ACT["CONFIG"], a.clk * 1000000, 0xFF000000, 0)
         probe.rtt(R_ACT["AUTOSTART"])
+        t_start = time.perf_counter()
         brc, _ = wait_bridge_ready(probe)
         if brc != 0:
+            rd.stop(); rd.join(timeout=2.0)
             print("  #%02d 桥起不来 rc=%s" % (it + 1, brc))
             continue
-        total, stream = 0, bytearray()
-
-        def pull(secs):
-            nonlocal total
-            t = time.perf_counter()
-            while time.perf_counter() - t < secs:
-                n = ser.readinto(rbuf)
-                if n:
-                    total += n
-                    stream.extend(rbuf[:n])
-
-        pull(a.warm)                       # 预热排空（计进 total）
-        t0 = time.perf_counter()
-        pull(a.window)
-        dur = time.perf_counter() - t0
+        time.sleep(a.warm)                 # 预热：排空启动积压（计进 total）
+        n0, t0 = rd.total, time.perf_counter()
+        time.sleep(a.window)
+        n1, t1 = rd.total, time.perf_counter()
         probe.rtt(R_ACT["STOP"])
-        t1 = time.perf_counter()
-        while time.perf_counter() - t1 < 1.0:   # 收尾：生产者已停，剩下的都是真丢
-            n = ser.readinto(rbuf)
-            if n:
-                total += n
-                stream.extend(rbuf[:n])
-                t1 = time.perf_counter()
+        time.sleep(0.8)                    # 收尾：生产者已停，剩下的都是真丢
+        rd.stop()
+        rd.join(timeout=3.0)
+        total, stream, dur = rd.total, rd.buf, (t1 - t0)
         _, w1 = probe.rtt(R_ACT["STATUS"])
         drained = w1[3]
         if a.seq:
@@ -521,8 +555,9 @@ def mode_loss(probe, a):
             chk = pattern_check(stream)
             desc = ("GARBLED" if chk is None else "gap=%d lost=%d dup=%d first@%d" %
                     (chk["gaps"], chk["lost"], chk["dup"], chk["first"]))
-        print("  #%02d %.2fs 主机=%d (%.1f KB/s) 探针drained=%d 差=%+d | rd_err=%d wr_err=%d rescan=%d zips=%d | %s" %
-              (it + 1, dur, total, total / dur / 1024.0, drained, drained - total,
+        print("  #%02d %.2fs 窗口=%.1f KB/s(读线程累计 %d B) 探针drained=%d 差=%+d | rd_err=%d wr_err=%d rescan=%d zips=%d | %s" %
+              (it + 1, dur, ((n1 - n0) / dur / 1024.0) if dur > 0 else 0, total,
+               drained, drained - total,
                w1[5] & 0xFFFF, w1[5] >> 16, w1[7] >> 16, w1[6] >> 16, desc))
     ser.close()
 
