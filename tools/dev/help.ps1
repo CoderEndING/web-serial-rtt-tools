@@ -26,6 +26,8 @@ $lines = @(
   '  make spi-partial-hw  屏「局部刷新」真机验收：线上字节逐字节对账（ARGS=--panel=st77916 换档）'
   '  make test-record    记录到文件的落盘语义（.crswap / 积压 / 落盘进度；OPFS 替身，不需硬件）'
   '  make test-hw       真机 WebUSB RTT 验收（探针 + 目标板）'
+  '  make probe-diag    探针 HID 直驱诊断（绕开页面）：rc=-4 归因 / RTT 字节级完整性'
+  '                     ARGS="--mode=disc --iters=40 --clk=60"；口径与实测见 docs/probe-rc4-and-rtt-loss.md'
   '  make flash-timing  烧录耗时体检（真机：慢在哪一步、是不是探针的锅；ARGS=--clamp 模拟后台节流）'
   '  make hw-campaign   真机场景基准 · STM32F103ZE（烧录 / RTT Viewer / RTT 转发 / J-Scope，全跑一遍并判决）'
   '  make hw-campaign-hpm  真机场景基准 · HPM6800EVK（RISC-V/JTAG，含 RTT Viewer 的 RISC-V 通路）'
