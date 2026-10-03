@@ -29,7 +29,7 @@ FW_DIR   = tools/target-firmware/stm32f103
 LA       = tools/la/kingst_la.py
 
 .DEFAULT_GOAL := help
-.PHONY: help serve serve-dev serve-stop browser open page-prep test test-ui test-gen test-gen-page gen-embed samples-anim test-hid test-dwarf test-scope test-scope-page test-scope-render test-spi test-read test-spi-page test-hw test-record test-bridge test-bridge-gate test-hpm test-image test-all test-dbg test-dbg-page test-dbg-hw test-dbg-stress test-dbg-riscv test-idcode test-dsl test-flash flash-timing hw-campaign hw-campaign-hpm campaign-summary \
+.PHONY: help serve serve-dev serve-stop browser open page-prep idcode board-check-f103ze board-check-h743 board-check-6800evk test test-ui test-gen test-gen-page gen-embed samples-anim test-hid test-dwarf test-scope test-scope-page test-scope-render test-spi test-read test-spi-page test-hw test-record test-bridge test-bridge-gate test-hpm test-image test-all test-dbg test-dbg-page test-dbg-hw test-dbg-stress test-dbg-stress-f103ze flash-dbgstress-f103ze flash-dbgstress-h743 flash-dbgstress-6800evk test-dbg-riscv test-idcode test-dsl test-flash flash-timing hw-campaign hw-campaign-h743 hw-campaign-hpm hw-campaign-riscv campaign-summary full_flow_f103ze full_flow_h743 full_flow_6800evk \
         bridge bridge-stop fw-build fw-flash fw-restore fw-h7-build fw-h7-flash \
         algo-check flash-plan la-info la-capture git-status git-log check clean spi-hw spi-flow i2c-hw spi-partial-hw dbg-step-hw
 
@@ -133,15 +133,35 @@ test-dbg-hw: page-prep
 dbg-step-hw: page-prep
 	$(NODE) tools/selftest/dbg-step-hw.mjs $(ARGS)
 
-# 调试器**真机压力测试**（发布前总验收，76~81 项断言）：
+# 调试器**真机压力测试**（发布前总验收，80+ 项断言）：
 #   断点 / 代码同步 / 单步(in-out-over) / 复位重跑 / 结构体树与位域 / FPB 泄漏 / 总线 FAULT 自愈 /
-#   连续 60 轮"停—走—停"，并在有 tmp/gdb-oracle.json 时与 gdb **逐地址**比对。
-#   需要先把靶子固件烧进去（tools/target-firmware/stm32h743_dbgstress/build/fw.elf），
-#   烧录：node tmp/dbg-flash.mjs /tools/target-firmware/stm32h743_dbgstress/build/fw.elf
+#   连续 60 轮"停—走—停"，并在有 gdb 对照 JSON 时与 gdb **逐地址**比对。
+#   ⚠️ 需要先把靶子固件烧进去；`make full_flow_h743` 会替你烧（flash-dbgstress-h743），
+#      单独跑这条时也要先烧：make flash-dbgstress-h743
 #   换 DWARF5 靶子：make test-dbg-stress ARGS="--elf=/tools/.../build-dw5/fw.elf --oracle=tmp/none.json"
 #   生成 gdb 对照：node tmp/probe-free.mjs --blank && node tmp/dbg-gdb-oracle.mjs
 test-dbg-stress: page-prep
 	$(NODE) tools/selftest/dbg-hw-stress.mjs $(ARGS)
+
+# 同一套压测 · **F103ZE 靶子**（Cortex-M3，6 个比较器；同一份源码换个芯片编出来）。
+#   make test-dbg-stress-f103ze                 # 自己会先把靶子固件烧进去
+#   make test-dbg-stress-f103ze ARGS=--keep-going
+# 与 H743 那几处差别（都在脚本的 BOARD 表里）：靶子固件/源码目录、BOOT0=1 的唤醒配方、
+# 比较器个数按硬件报的来（不再写死 8）。
+test-dbg-stress-f103ze: page-prep flash-dbgstress-f103ze
+	$(NODE) tools/selftest/dbg-hw-stress.mjs --board=f103ze $(ARGS)
+
+# 调试器的靶子固件（就是各自 target-firmware/*_dbgstress 那份）烧进板子 —— 页面 WebUSB 烧录。
+# 为什么要有这一步：跑完 hw-campaign 的板子上是"狂发/scope"固件，不换靶子压测必然连不上；
+# 以前这一步藏在 tmp/ 的脚手架里（tmp/ 不进仓库，新克隆根本没有）。
+flash-dbgstress-f103ze:
+	$(NODE) tools/selftest/flash-elf.mjs --board=f103ze $(ARGS)
+
+flash-dbgstress-h743:
+	$(NODE) tools/selftest/flash-elf.mjs --board=h743 $(ARGS)
+
+flash-dbgstress-6800evk:
+	$(NODE) tools/selftest/flash-elf.mjs --board=6800evk $(ARGS)
 
 # 调试器 **RISC-V 真机验收**（HPM6800EVK 靶子 + akaLinkPro 的 JTAG 通路，约 53 项断言）：
 #   断点（文件:行 / 符号 / static / 多断点轮转）/ 代码同步 / 单步 n·si·fin（RV32 解码 + dcsr.step）/
@@ -300,8 +320,20 @@ test-record: page-prep
 # 真机场景基准（探针 + 目标板）:烧录 / RTT Viewer / RTT 转发 / J-Scope 全场景跑一遍并记时
 #   make hw-campaign                        # 3 轮全场景 + 狂发↔scope 交替烧录 5 遍（约 4 分钟）
 #   make hw-campaign ARGS="--cycles=1 --alt=1"   # 只冒烟一遍
+#   make hw-campaign ARGS="--board=h743"    # 换 H743 靶子（靶子固件与 RTT 控制块区间一起换）
+#   make hw-campaign ARGS=--local           # 打**本地 8899 页面**（默认打线上已发布那份）
+# 🚨 三条 full_flow_* 会**强制加 --local**（见下面 FLOW_LOCAL 的说明）：流程验的是当前这棵树，
+#    而线上是"最后一次 push 的快照"，可能落后到会把流程带沟里。
 hw-campaign: page-prep
-	$(NODE) tools/selftest/hw-campaign.mjs $(ARGS)
+	$(NODE) tools/selftest/hw-campaign.mjs $(FLOW_LOCAL) $(ARGS)
+
+# 同上，靶子是 STM32H743（阿波罗 H743）：狂发/scope 固件换成 stm32h743_*，
+# RTT 控制块在 **AXI SRAM(0x24000000)** —— H7 的 DTCM 探针走 AHB-AP 读不到，
+# 所以自动搜的区间必须跟着换（脚本的 BOARD 表里写着）。F103 那条线不适用于 H7。
+#   make hw-campaign-h743                         # 2 轮 + 交替 5 遍
+#   make hw-campaign-h743 ARGS="--cycles=1 --alt=1"   # 只冒烟一遍
+hw-campaign-h743: page-prep
+	$(NODE) tools/selftest/hw-campaign.mjs --board=h743 $(FLOW_LOCAL) $(ARGS)
 
 # 真机场景基准 · HPM6800EVK（HPM6880 / RISC-V + JTAG，akaLinkPro 探针）
 # 与上面那份同一套编排，差别：目标类型 RISC-V、RTT 控制块地址取自 ELF（AXI SRAM 0x01240000）、
@@ -310,7 +342,61 @@ hw-campaign: page-prep
 #   make hw-campaign-hpm                        # 之后：按 SPEC 判决（2 轮 + 交替 5 遍，约 7 分钟）
 #   make hw-campaign-hpm ARGS="--cycles=1 --alt=1"   # 只冒烟一遍
 hw-campaign-hpm: page-prep
-	$(NODE) tools/selftest/hw-campaign-hpm.mjs $(ARGS)
+	$(NODE) tools/selftest/hw-campaign-hpm.mjs $(FLOW_LOCAL) $(ARGS)
+
+# 别名（用户口径叫"RISC-V 那条"）：就是上面 hw-campaign-hpm（脚本名按探针/芯片叫 hpm）
+hw-campaign-riscv: hw-campaign-hpm
+
+# ---------------------------------------------------------------- 认板子（真机流程的硬前置）
+# 在**真页面**上点「读 IDCODE」，把目标身份读出来：
+#   ARM/SWD：DP IDCODE（1BA01477 = Cortex-M3 / 6BA02477 = Cortex-M7）→ CPUID →
+#            STM32 DBGMCU DEV_ID（**这个才认得出型号**：0x414 = F103ZE、0x450 = H743）→ flash 容量
+#   RISC-V ：JTAG TAP IDCODE（1000563D = HPM6800）
+#   make idcode                      # 只读 + 打印（人工看）
+#   make idcode ARGS=--board=h743    # 按板子档案判决，型号对不上退 1
+# 🚨 规矩（用户 2026-10）：**换板子 / 换探针之后先认板子再跑流程** —— 流程每一步都跟着
+#    "是哪块板"走（烧哪份靶子、控制块去哪个窗口找、判决线取哪套），认错板就是十几分钟
+#    跑在错的假设上，失败信息还看着像"工具坏了"。下面三条 full_flow_* 各自带这个前置。
+idcode: page-prep
+	$(NODE) tools/selftest/read-idcode.mjs $(ARGS)
+
+board-check-f103ze: page-prep
+	$(NODE) tools/selftest/read-idcode.mjs --board=f103ze
+
+board-check-h743: page-prep
+	$(NODE) tools/selftest/read-idcode.mjs --board=h743
+
+board-check-6800evk: page-prep
+	$(NODE) tools/selftest/read-idcode.mjs --board=6800evk
+
+# ---------------------------------------------------------------- 全流程（一块板一条命令）
+# 每条 =「认板子」+「真机场景基准」+（把调试压测靶子固件烧进去）+「调试器真机压测」。
+# 中间那一步不能省：跑完基准的板子上是狂发/scope 固件，不换靶子压测必然连不上；
+# 烧录走 tools/selftest/flash-elf.mjs（以前藏在 tmp/ 里，新克隆没有）。
+#
+#   make full_flow_f103ze     探针挂 STM32F103ZE 时用：hw-campaign + test-dbg-stress-f103ze
+#   make full_flow_h743       换阿波罗 H743 之后用：  hw-campaign-h743 + 烧靶子 + test-dbg-stress
+#   make full_flow_6800evk    换 HPM6800EVK 之后用：  hw-campaign-hpm + 烧靶子 + test-dbg-riscv
+#
+# 🚨 **流程一律打本地页面**（下面每条都带 `FLOW_LOCAL = --local`）。
+#    为什么：流程验的是**工作区这棵树**，而线上 GitHub Pages 是"最后一次 push 的快照"——
+#    2026-10 真机现场就栽在这上面：线上还是 review 那版 `bufferSize: 65536`（本地已经是 4096），
+#    转发跑到 2.9 MB/s 时整页被冻住，于是"打开 CDC 串口"那步超时，看着像串口/探针坏了。
+#    想故意打线上（例如验收线上版本）就 `make full_flow_f103ze FLOW_LOCAL=`。
+#
+# 三条都会把结果写进 tmp/（campaign-result.json / dbg-stress-page*.json），出错**立刻停**；
+# 想只跑其中一段就单独叫那一条（ARGS 照样透传）。
+full_flow_f103ze: FLOW_LOCAL = --local
+full_flow_f103ze: board-check-f103ze hw-campaign test-dbg-stress-f103ze
+	pwsh -NoProfile -Command "Write-Host 'full flow (f103ze) done'"
+
+full_flow_h743: FLOW_LOCAL = --local
+full_flow_h743: board-check-h743 hw-campaign-h743 flash-dbgstress-h743 test-dbg-stress
+	pwsh -NoProfile -Command "Write-Host 'full flow (h743) done'"
+
+full_flow_6800evk: FLOW_LOCAL = --local
+full_flow_6800evk: board-check-6800evk hw-campaign-hpm flash-dbgstress-6800evk test-dbg-riscv
+	pwsh -NoProfile -Command "Write-Host 'full flow (6800evk) done'"
 
 # 把基准结果打成小结表（跑完会自动打；这里是对着历史 JSON 重打，不用碰硬件）
 #   make campaign-summary                                   # 默认读 HPM 那份

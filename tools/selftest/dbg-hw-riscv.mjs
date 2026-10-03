@@ -17,8 +17,10 @@
  *   · 复位是 ndmreset（会从 boot ROM 重新起，不像 H743 能靠 VC_CORERESET 钉在复位向量上）；
  *   · 靶子里没有中断（HPM 的 MCHTMR 走 SDK 的中断分发，留给下一轮），所以没有"ISR 里下断点"这一节。
  */
-import { Cdp, sleep, DEV_RE } from '../../tmp/cdp-lib.mjs';
-import { writeFileSync, existsSync, readFileSync } from 'node:fs';
+import { Cdp, sleep, DEV_RE } from './cdp-lib.mjs';
+import { writeFileSync, existsSync, readFileSync, readdirSync } from 'node:fs';
+import { dirname, relative, resolve, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const argv = process.argv.slice(2);
 const arg = (k, d = null) => { const h = argv.find(a => a.startsWith('--' + k + '=')); return h ? h.split('=').slice(1).join('=') : (argv.includes('--' + k) ? true : d); };
@@ -28,6 +30,15 @@ const ELF = String(arg('elf', '/tools/target-firmware/hpm6800evk_dbgstress/fw.el
 const SRCDIR = String(arg('src', 'E:\\web-serial-rtt-tools\\tools\\target-firmware\\hpm6800evk_dbgstress\\src'));
 const ORACLE = String(arg('oracle', 'tmp/rv-gdb-oracle.json'));
 const JSON_OUT = String(arg('out', 'tmp/rv-stress-page.json'));
+/**
+ * 页面侧拿源码只能走**静态服务**（8899 的根 = 仓库根），所以把磁盘路径换算成 URL 路径。
+ * 为什么要这么绕：见下面"源码目录"那段的 🚨。
+ */
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
+const SRC_REL = relative(ROOT, resolve(SRCDIR));
+if (SRC_REL.startsWith('..')) throw new Error('--src 必须指向仓库里的目录（页面是通过 8899 静态服务取源码的）：' + SRCDIR);
+const SRC_HTTP = '/' + SRC_REL.split(sep).join('/');
+const SRC_NAMES = readdirSync(resolve(SRCDIR)).filter(f => /\.(c|h)$/i.test(f)).sort();
 setTimeout(() => { console.error('[WATCHDOG] 25 分钟'); process.exit(9); }, 1500000);
 
 const engLines = readFileSync(SRCDIR + '\\engine.c', 'utf8').split(/\r?\n/);
@@ -107,18 +118,30 @@ await cdp.eval(`
   };
   return true;`);
 
-{
-  const doc = await cdp.send('DOM.getDocument', { depth: -1 });
-  const node = await cdp.send('DOM.querySelector', { nodeId: doc.root.nodeId, selector: '#d-src-dir' });
-  await cdp.send('DOM.setFileInputFiles', { nodeId: node.nodeId, files: [SRCDIR] });
-  await sleep(500);
-}
-
+/**
+ * 源码目录用**真文件**喂进去 —— 但**不能**用 `DOM.setFileInputFiles`。
+ *
+ * 🚨 2026-10 查实（Chrome 153）：那条 CDP 命令对 `webkitdirectory` 的 input **静默无效** ——
+ *    命令不报错，可 `input.files.length` 恒为 0、`change` 也不触发，`d.src` 永远是空的。
+ *    对照实验：同一个命令喂普通 file input（`#d-elf-file`）读回 1 个文件 ✔，
+ *    喂 `#d-src-dir` 读回 0 个 ✘（传目录、传文件列表都一样）。ARM 版套件同样中招。
+ *
+ * 现在改成：页面里 fetch 这些 .c/.h（就在静态服务根下）→ 造 `File` → `_indexSrcFiles()`，
+ * 与用户手选目录走的是同一条索引/反查路径。喂源码并进下面那次求值（跟载 ELF 一起）。
+ */
 sec('== 0. 前置：ELF + 源码目录 + RISC-V 后端 + 连接 ==');
 const elfInfo = await cdp.json(`(async () => {
     const d = window.__tools.dbg;
     const r = await fetch(${JSON.stringify(ELF)} + '?t=' + Date.now());
     const st = d.loadElfBuffer(await r.arrayBuffer(), 'fw.elf');
+    // 源码：页面里取真文件（见上面 🚨 —— webkitdirectory 的 input 喂不进去）
+    const files = [];
+    for (const n of ${JSON.stringify(SRC_NAMES)}){
+      const rr = await fetch(${JSON.stringify(SRC_HTTP)} + '/' + n + '?t=' + Date.now());
+      if (!rr.ok) return { err: '源码 ' + n + ' 取不到：HTTP ' + rr.status + '（' + ${JSON.stringify(SRC_HTTP)} + '，检查 --src 是否在仓库里）' };
+      files.push(new File([await rr.text()], n));
+    }
+    await d._indexSrcFiles(files);
     const be = document.getElementById('d-backend');
     be.value = 'riscv'; be.dispatchEvent(new Event('change'));
     await new Promise(r => setTimeout(r, 250));

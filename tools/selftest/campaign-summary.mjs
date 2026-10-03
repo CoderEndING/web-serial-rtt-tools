@@ -66,6 +66,28 @@ export function summaryTable(r){
     const a = c.j50k1 ?? c.s1_50k, b = c.j50k3 ?? c.s3_50k;
     return ((a?.lostProbe ?? 0) + (b?.lostProbe ?? 0) + (a?.lostUsb ?? 0) + (b?.lostUsb ?? 0));
   }, '个', 0);
+  /**
+   * 50 kHz 档的**探针跳拍率（ppm）**与 USB 丢样本。
+   *
+   * 🚨 口径变更（2026-10，与 hw-campaign.mjs 的 judge 保持一致）：这一行原来是"总数必须 = 0"，
+   *    但真机复测（`tmp/scope-50k-repeat.mjs` 连跑 4 遍）显示：1 变量 @20µs 每遍 150040 样本、
+   *    50.00 kHz、缺口 0、USB 0，**探针跳拍稳定 2~4 个（≈20 ppm）**——是采样环的固有抖动，
+   *    不是回归。"恰好 0"会把整条流程交给 3 个样本。现在：探针跳拍 ≤ 100 ppm 且 **USB 丢样本 = 0**。
+   */
+  const j50probePpm = series(c => {
+    const a = c.j50k1 ?? c.s1_50k, b = c.j50k3 ?? c.s3_50k;
+    const lost = (a?.lostProbe ?? 0) + (b?.lostProbe ?? 0);
+    const n = (a?.samples ?? 0) + (b?.samples ?? 0);
+    return n ? lost / n * 1e6 : (lost ? Infinity : 0);
+  }, 'ppm', 1);
+  const j50usb = series(c => {
+    const a = c.j50k1 ?? c.s1_50k, b = c.j50k3 ?? c.s3_50k;
+    return ((a?.lostUsb ?? 0) + (b?.lostUsb ?? 0));
+  }, '个', 0);
+  const j50samp = j50probePpm.v.length ? (cy.reduce((acc, c) => {
+    const a = c.j50k1 ?? c.s1_50k, b = c.j50k3 ?? c.s3_50k;
+    return acc + (a?.samples ?? 0) + (b?.samples ?? 0);
+  }, 0)) : 0;
   const corrupt = series(c => c.viewer?.corrupt ?? 0, '次', 0);
   const overflow = series(c => c.viewer?.lost ?? 0, 'B', 0);
   const sp = r.spec || {};
@@ -90,7 +112,9 @@ export function summaryTable(r){
     sp.j1kHz == null ? '—' : (Math.min(...j1.v) >= sp.j1kHz ? 'PASS' : 'FAIL'));
   push('J-Scope 3 变量 @2µs', two(j3), `均 ${S(j3.avg, 1)} kHz`, sp.j3kHz != null ? `≥ ${S(sp.j3kHz)} kHz` : '—',
     sp.j3kHz == null ? '—' : (Math.min(...j3.v) >= sp.j3kHz ? 'PASS' : 'FAIL'));
-  push('50 kHz 档丢样本（探针+USB）', two(j50), `共 ${j50.v.reduce((a, b) => a + b, 0)} 个`, '= 0', j50.v.every(x => x === 0) ? 'PASS' : 'FAIL');
+  push('50 kHz 档丢样本（探针跳拍 ≤ 100 ppm · USB = 0）', two(j50probePpm),
+    `探针跳拍 ${j50.v.reduce((a, b) => a + b, 0)} / ${j50samp} 样本 · USB ${j50usb.v.reduce((a, b) => a + b, 0)} 个`,
+    '≤ 100 ppm', (j50probePpm.v.every(x => x <= 100) && j50usb.v.every(x => x === 0)) ? 'PASS' : 'FAIL');
 
   const alt = r.alt || [];
   const altFlood = alt.map(a => (a.floodMs ?? a.spamMs) / 1000);

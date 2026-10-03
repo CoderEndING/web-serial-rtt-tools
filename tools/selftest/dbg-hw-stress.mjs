@@ -1,14 +1,23 @@
 /**
  * 调试器页（#dbg）**真机压力测试** —— 发布前的总验收（2026-10）
  *
- *   node tools/selftest/dbg-hw-stress.mjs
+ *   node tools/selftest/dbg-hw-stress.mjs                       # 默认 H743 靶子
+ *   node tools/selftest/dbg-hw-stress.mjs --board=f103ze        # F103ZE 靶子（同一套断言）
  *   node tools/selftest/dbg-hw-stress.mjs --elf=/tools/.../build-dw5/fw.elf    # 换 DWARF5 靶子
  *
  * 前置（跟其它页面套件一样）：
- *   1) 靶子固件已经烧进板子 —— tools/target-firmware/stm32h743_dbgstress/build/fw.elf
- *      （烧录：node tmp/dbg-flash.mjs /tools/target-firmware/stm32h743_dbgstress/build/fw.elf）
+ *   1) 靶子固件已经烧进板子 —— 见下面的 BOARDS 表（两块板的固件都在 tools/target-firmware/）
  *   2) 8899 静态服务 + 9333 调试浏览器在跑（make page-prep）
  *   3) akaLinkPro 探针插着，且**没有被别的工具占着**（OpenOCD/pyOCD 要先退掉）
+ *
+ * 两块板的差别只有三处（其余断言逐条相同，这就是"一块靶子两种芯片"的意思）：
+ *   · **靶子固件/源码目录**：h743 = stm32h743_dbgstress，f103ze = stm32f103_dbgstress
+ *     （同一套源码，只换 -mcpu 与链接脚本，见各自目录的 README）；
+ *   · **BOOT0**：本机那块 F103ZE 的 **BOOT0 = 1**，复位后核先进 ROM bootloader，
+ *     所以"复位并停"之后要按**唤醒配方**把 VTOR/SP/PC 搬回 flash（脚本自己会做，
+ *     日志里会写明"BOOT0 唤醒"）。H743 那块板 BOOT0=0，复位即进固件，不需要。
+ *   · **FPB 比较器个数**：M7 = 8、M3 = 6（脚本按 `session.caps.numCode` 直读硬件，
+ *     不再写死 8 —— 早先那份 `fpb()` 固定读 8 个，在 M3 上会多读两个不存在的槽）。
  *
  * 与 `dbg-hw.mjs` / `tmp/dbg-hw-new.mjs` 的分工：那两个是"冒烟"，本文件是**压**：
  *   · 断点：文件:行 / 符号 / static 函数 / 函数+偏移 / 多断点 / ISR / 反复命中 / 越界与内联函数报错
@@ -20,22 +29,70 @@
  *   · 泄漏：每一段之后 FPB 比较器必须"只剩用户断点占的那些"（直读 FP_COMP 核对）
  *   · 压力：连续 60 次停-走-停，看有没有比较器泄漏 / 页面未捕获错误
  *
- * 有 `tmp/gdb-oracle.json` 时（由 tmp/dbg-gdb-oracle.mjs 生成）会**逐地址比对**
+ * 有 gdb 对照文件时（H743 由 tmp/dbg-gdb-oracle.mjs 生成）会**逐地址比对**
  * "单步序列"与"断点落点" —— 与 arm-none-eabi-gdb 的结果必须完全一致，
  * 这是"和 MDK/gdb 一个水平"这句话的硬证据。
  */
-import { Cdp, sleep, DEV_RE } from '../../tmp/cdp-lib.mjs';
-import { writeFileSync, existsSync, readFileSync } from 'node:fs';
+import { Cdp, sleep, DEV_RE } from './cdp-lib.mjs';
+import { writeFileSync, existsSync, readFileSync, readdirSync } from 'node:fs';
+import { dirname, join, relative, resolve, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const argv = process.argv.slice(2);
 const arg = (k, d = null) => { const h = argv.find(a => a.startsWith('--' + k + '=')); return h ? h.split('=').slice(1).join('=') : (argv.includes('--' + k) ? true : d); };
 
+/**
+ * 板子档案：芯片相关的**默认值**全在这里（命令行仍可用 --elf / --src / --oracle / --out 覆盖）。
+ * `boot0: 1` = 复位后核先进 ROM bootloader，套件会在"复位并停"之后自动唤醒。
+ */
+const BOARDS = {
+  h743: {
+    label: 'STM32H743（阿波罗 H743 · Cortex-M7）',
+    elf: '/tools/target-firmware/stm32h743_dbgstress/build/fw.elf',
+    src: 'tools\\target-firmware\\stm32h743_dbgstress\\src',
+    oracle: 'tmp/gdb-oracle.json',
+    out: 'tmp/dbg-stress-page.json',
+    /** 读它必须总线 FAULT：DTCM(0x20000000+128K) 之后是空洞 */
+    faultAddr: 0x20020000,
+    faultText: 'DTCM 末尾之后的空洞',
+    boot0: 0,
+    clockKhz: 10000,
+  },
+  f103ze: {
+    label: 'STM32F103ZE（本机那块 · Cortex-M3）',
+    elf: '/tools/target-firmware/stm32f103_dbgstress/build/fw.elf',
+    src: 'tools\\target-firmware\\stm32f103_dbgstress\\src',
+    /** 别跟 H743 那份共用：忘了删的旧 oracle 会让逐地址比对整段"假红" */
+    oracle: 'tmp/gdb-oracle-f103.json',
+    out: 'tmp/dbg-stress-page-f103.json',
+    /** 读它必须总线 FAULT：SRAM(0x20000000+64K) 之后是空洞 */
+    faultAddr: 0x20020000,
+    faultText: 'SRAM 末尾之后的空洞',
+    boot0: 1,
+    clockKhz: 10000,
+  },
+};
+const BOARD_ID = String(arg('board', 'h743'));
+const BOARD = BOARDS[BOARD_ID];
+if (!BOARD) throw new Error(`--board 只认 ${Object.keys(BOARDS).join(' / ')}（给的是 ${BOARD_ID}）`);
+
 const APP = 'http://127.0.0.1:8899/index.html';
-const ELF = String(arg('elf', '/tools/target-firmware/stm32h743_dbgstress/build/fw.elf'));
-const SRCDIR = String(arg('src', 'E:\\web-serial-rtt-tools\\tools\\target-firmware\\stm32h743_dbgstress\\src'));
-const SRC_ENGINE = String(arg('engine-c', SRCDIR + '\\engine.c'));
-const ORACLE = String(arg('oracle', 'tmp/gdb-oracle.json'));
-const JSON_OUT = String(arg('out', 'tmp/dbg-stress-page.json'));
+const ELF = String(arg('elf', BOARD.elf));
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
+const SRCDIR = String(arg('src', resolve(ROOT, BOARD.src)));
+const SRC_ENGINE = join(SRCDIR, 'engine.c');
+/**
+ * 页面侧拿源码只能走**静态服务**（8899 的根 = 仓库根），所以把磁盘路径换算成 URL 路径。
+ * 为什么要这么绕：见下面"源码目录"那段的 🚨。
+ */
+const SRC_REL = relative(ROOT, resolve(SRCDIR));
+if (SRC_REL.startsWith('..')) throw new Error('--src 必须指向仓库里的目录（页面是通过 8899 静态服务取源码的）：' + SRCDIR);
+const SRC_HTTP = '/' + SRC_REL.split(sep).join('/');
+const SRC_NAMES = readdirSync(resolve(SRCDIR)).filter(f => /\.(c|h)$/i.test(f)).sort();
+const ORACLE = String(arg('oracle', BOARD.oracle));
+const JSON_OUT = String(arg('out', BOARD.out));
+/** SWD 时钟（kHz）：默认取板子档案；`--clock=5000` 可覆盖（排"是链路还是代码"时用） */
+const CLOCK_KHZ = Number(arg('clock', BOARD.clockKhz || 10000));
 setTimeout(() => { console.error('[WATCHDOG] 25 分钟'); process.exit(9); }, 1500000);
 
 // 靶子源码里的两个关键行号（"调用 engine_leaf 的那一句" / "内联那一句"）—— 用来把
@@ -60,12 +117,17 @@ await cdp.connect();
 await cdp.send('Page.navigate', { url: APP + '?t=' + Date.now() });
 for (let i = 0; i < 80; i++){ await sleep(300); if (await cdp.eval('return !!window.__tools?.dbg;').catch(() => false)) break; }
 await cdp.eval(`document.querySelector('#tabs .tab[data-tab="dbg"]').click(); await new Promise(r=>setTimeout(r,250)); return true;`);
+log(`== 靶子：${BOARD.label}（--board=${BOARD_ID}）==`);
+log(`   ELF   ${ELF}`);
+log(`   源码  ${SRC_HTTP}（${SRC_NAMES.length} 个文件）${BOARD.boot0 ? ' · 该板 BOOT0=1，复位后脚本会自动唤醒' : ''}`);
 
 /** 页面里的小工具（一次注入；`cmd()` 会丢掉回显行，`go/step` 会等到停下为止） */
 await cdp.eval(`
   const d = window.__tools.dbg;
   window.__S = {
     d,
+    /** 「目标被意外复位 → 自愈」的记录（收尾会打出来；不该有，有就得看是哪一步） */
+    recoveries: [],
     async cmd(line){
       const el = document.getElementById('d-out');
       const n0 = el.children.length;
@@ -88,15 +150,74 @@ await cdp.eval(`
     },
     /** 继续运行，等到停下来（断点命中/手动暂停）或超时 */
     async go(ms = 4000){
+      const wait = async (budget) => {
+        const t0 = Date.now();
+        while (Date.now() - t0 < budget){
+          await new Promise(r => setTimeout(r, 25));
+          await d.session.refresh();
+          if (d.session.halted) break;
+        }
+      };
       await d.session.cont();
-      const t0 = Date.now();
-      while (Date.now() - t0 < ms){
-        await new Promise(r => setTimeout(r, 25));
-        await d.session.refresh();
-        if (d.session.halted) break;
+      await wait(ms);
+      if (d.session.halted){ await d.afterStop(); return this.snap(); }
+      /**
+       * 🚨 超时不一定是"断点没命中"——**靶子可能已经不在跑我们的固件了**。
+       *
+       * 2026-10 F103 真机定因（本文件最费劲的一条）：探针偶发 AP FAULT 时，页面会走
+       * _healIfFaulted() → _targetInit() → **把目标复位**。这块 F103ZE 的 BOOT0 = 1，
+       * 复位后核进 ROM bootloader 且 **VTOR = 0**（向量表指向 0）—— 固件一条指令都取不到，
+       * 表现就是"SysTick 不再加 g_ticks、断点永远不命中、DHCSR 却说在跑"，
+       * 而且**会一直坏到有人把 VTOR/SP/PC 搬回来为止**（跨会话也一直坏，实测过）。
+       *
+       * 所以这里做一次"看它还活着吗 → 不活就按唤醒配方拉回来 → 重新下发断点 → 再等一次"。
+       * 复位会把 FPB 比较器一起清掉（调试单元复位），所以断点表必须重发。
+       * 这一步**只做一次**，而且会记进 __S.recoveries 让收尾打出来 —— 不掩盖问题。
+       */
+      const a = await this.alive();
+      if (!a.ok){
+        const w = await this.wake();
+        this.recoveries.push({ ...w, alive: a, at: new Date().toISOString() });
+        try { await d.session._programBps(); } catch (e){ this.recoveries.push({ bpErr: String(e.message || e) }); }
+        await new Promise(r => setTimeout(r, 200));
+        await d.session.cont();
+        await wait(ms);
+        if (d.session.halted) await d.afterStop();
       }
-      if (d.session.halted) await d.afterStop();
       return this.snap();
+    },
+    /** 靶子还活着吗：SysTick 在给 g_ticks 加一 / 主循环在给 g_loops 加一（都比 PC 可靠） */
+    async alive(){
+      const rd = async n => { const s = d.sym.find(n); if (!s) return null;
+        try { return (await d.session.memRead(s.addr >>> 0, 4)).reduce((a, b, i) => a | (b << (8 * i)), 0) >>> 0; } catch { return null; } };
+      const t0 = await rd('g_ticks'), l0 = await rd('g_loops');
+      await new Promise(r => setTimeout(r, 250));
+      const t1 = await rd('g_ticks'), l1 = await rd('g_loops');
+      const moved = (x, y) => x != null && y != null && y > x;
+      return { t0, t1, l0, l1, ok: moved(t0, t1) || moved(l0, l1) };
+    },
+    /** 唤醒配方：复位清异常态 → VTOR/SP/PC 搬回 flash（BOOT0=1 的板子只能这么拉回来） */
+    async wake(){
+      const u32 = b => (b[0] | (b[1] << 8) | (b[2] << 16) | (b[3] << 24)) >>> 0;
+      const w32 = v => Uint8Array.of(v & 0xff, (v >>> 8) & 0xff, (v >>> 16) & 0xff, (v >>> 24) & 0xff);
+      const out = { before: {}, after: {} };
+      try { out.before = { vtor: '0x' + u32(await d.session.memRead(0xE000ED08, 4)).toString(16),
+                           cfsr: '0x' + u32(await d.session.memRead(0xE000ED28, 4)).toString(16),
+                           hfsr: '0x' + u32(await d.session.memRead(0xE000ED2C, 4)).toString(16),
+                           dhcsr: '0x' + ((await d.session.probe._readWord(0xE000EDF0)) >>> 0).toString(16) }; } catch {}
+      await d.session.probe.writeMem(0xE000ED0C, w32(0x05fa0004));            // AIRCR.SYSRESETREQ
+      await new Promise(r => setTimeout(r, 400));
+      await d.session.halt().catch(() => {});
+      await d.session.probe.writeMem(0xE000ED08, w32(0x08000000));           // VTOR → flash 向量表
+      const v = await d.session.probe.readMem(0x08000000, 8);
+      await d.session.writeReg('SP', u32(v));
+      await d.session.writeReg('PC', u32(v.subarray(4, 8)));
+      await d.session.writeReg('PRIMASK', 0).catch(() => {});
+      await d.session.writeReg('FAULTMASK', 0).catch(() => {});
+      await d.session.cont();
+      await new Promise(r => setTimeout(r, 300));
+      try { out.after = { vtor: '0x' + u32(await d.session.memRead(0xE000ED08, 4)).toString(16) }; } catch {}
+      return out;
     },
     /** 单步（n / si / fin / s），等到停下 */
     async step(cmd, ms = 4000){
@@ -110,31 +231,136 @@ await cdp.eval(`
       if (rows.length && rows[0].startsWith('>')) rows = rows.slice(1);
       return { ...this.snap(), out: rows, text: rows.join('\\n') };
     },
-    /** FPB 比较器占用：直读 FP_CTRL/FP_COMPx（泄漏检查的硬证据） */
+    /**
+     * FPB 比较器占用：直读 FP_CTRL/FP_COMPx（泄漏检查的硬证据）。
+     *
+     * 🚨 两个位置都得对，否则计数整体错位（2026-10 F103 真机抓到）：
+     *    · 比较器从 **FP_COMP0 = 0xE0002008** 起，4 字节一个（0xE0002004 是 FP_REMAP，
+     *      它**不是**比较器 —— 老版这份写成 4 + i*4 就把 REMAP 当成了 0 号比较器，
+     *      而 F103 上 REMAP 读出来是 0x326720c0 这种非零残值 → 每次计数都多 1）；
+     *    · 个数按硬件报的来（session.caps.numCode：M7 = 8、M3 = 6），别写死 8：
+     *      M3 只有 6 个，多读的两个槽读到的是**别的寄存器**（本机实测 0xE0002020/24
+     *      有非零残值），同样会让计数虚高。
+     */
     async fpb(){
-      const raw = await d.session.memRead(0xE0002000, 36);
+      const n = d.session.caps?.numCode || 0;
+      const ctrl = (await d.session.probe._readWord(0xE0002000)) >>> 0;
+      const raw = n ? await d.session.memRead(0xE0002008, 4 * n) : new Uint8Array(0);
       const dv = new DataView(raw.buffer, raw.byteOffset, raw.length);
-      const ctrl = dv.getUint32(0, true);
       const comps = [];
-      for (let i = 0; i < 8; i++) comps.push(dv.getUint32(4 + i * 4, true) >>> 0);
-      return { ctrl: ctrl >>> 0, enabled: !!(ctrl & 1), used: comps.filter(c => c !== 0).length, comps };
+      for (let i = 0; i < n; i++) comps.push(dv.getUint32(i * 4, true) >>> 0);
+      return { ctrl, n, enabled: !!(ctrl & 1), used: comps.filter(c => c !== 0).length, comps };
+    },
+    /**
+     * 「复位并停」+ （BOOT0=1 的板子）**唤醒配方**。
+     *
+     * 本机那块 F103ZE 的 BOOT0 是 1：复位后核进的是**系统存储区的 ROM bootloader**，
+     * 复位向量取自 ROM（PC 落在 0x1FFFxxxx），flash 里的固件一条指令都取不到 ——
+     * 于是"复位并停 → 继续 → 断点命中"这条链在它身上必失败，而这不是调试链的问题。
+     *
+     * 唤醒配方（与 tmp/dbg-step-hw.mjs / tools/selftest/dbg-step-hw.mjs 同款）：
+     *   ① 写 VTOR = 0x08000000（BOOT0=1 时复位后 VTOR=0，向量表指向 ROM，固件里的向量都用不上）；
+     *   ② 从 0x08000000 取 SP / 复位向量写回内核寄存器，清 PRIMASK / FAULTMASK。
+     * 之后 PC 就停在**固件的复位向量**上，等价于"复位并停"该有的样子（断点、单步都从这儿开始）。
+     *
+     * @returns {{pc:number, woken:boolean, romPc:number, log:string[]}}
+     */
+    async resetToFirmware(useWake){
+      const l = [];
+      const r = await this.cmd('reset halt');
+      const u32 = b => (b[0] | (b[1] << 8) | (b[2] << 16) | (b[3] << 24)) >>> 0;
+      const w32 = v => Uint8Array.of(v & 0xff, (v >>> 8) & 0xff, (v >>> 16) & 0xff, (v >>> 24) & 0xff);
+      let pc = d.session.pc >>> 0;
+      const romPc = pc;
+      let woken = false;
+      if (useWake && pc >= 0x1ff00000 && pc < 0x20000000){
+        const p = d.session.probe;
+        await p.writeMem(0xE000ED08, w32(0x08000000));
+        const w = await p.readMem(0x08000000, 8);
+        await d.session.writeReg('SP', u32(w));
+        await d.session.writeReg('PC', u32(w.subarray(4, 8)));
+        await d.session.writeReg('PRIMASK', 0).catch(() => {});
+        await d.session.writeReg('FAULTMASK', 0).catch(() => {});
+        await d.session.refresh();
+        await d.afterStop();
+        pc = d.session.pc >>> 0;
+        woken = true;
+        l.push('BOOT0 唤醒：ROM ' + '0x' + romPc.toString(16) + ' → flash 复位向量 0x' + pc.toString(16));
+      }
+      return { pc, woken, romPc, log: l, out: r.text.slice(0, 100) };
     },
     /** 泄漏 = 硬件比较器占用有没有超出"用户断点"该占的个数 */
     async leak(){
       const f = await this.fpb();
       const bps = d.session.bpList().length;
-      return { bps, used: f.used, extra: f.used - bps, ctrl: '0x' + f.ctrl.toString(16) };
+      return { bps, used: f.used, extra: f.used - bps, ctrl: '0x' + f.ctrl.toString(16),
+               comps: f.comps.map(c => '0x' + c.toString(16)) };
     },
   };
   return true;`);
 
-// 源码目录用**真文件**喂进去（CDP 给 <input webkitdirectory> 设文件，等价于用户点"选择源码目录"）
-{
-  const doc = await cdp.send('DOM.getDocument', { depth: -1 });
-  const node = await cdp.send('DOM.querySelector', { nodeId: doc.root.nodeId, selector: '#d-src-dir' });
-  await cdp.send('DOM.setFileInputFiles', { nodeId: node.nodeId, files: [SRCDIR] });
-  await sleep(500);
-}
+/**
+ * 🚨 这颗探针**偶发 AP FAULT**：`SWD FAULT（传输 0/1 条，地址 0x4）`（2026-10 F103 真机实测，
+ * 2 MHz 与 10 MHz 一样会撞，跟时钟档无关）。页面对此的既定设计是：**标脏 + `abort()` 清 sticky，
+ * 并在下一次访问前走 `_healIfFaulted()` → `_targetInit()` 把口子重新初始化**（dap-webusb.js:482-497）。
+ * 也就是说"一次 FAULT"对页面是**可恢复**的瞬态，而套件如果一撞就整轮 throw，
+ * 测的就不是被测代码、而是这根线的脾气了。
+ *
+ * 所以这里给 session 的传输类方法统一包一层"**撞 FAULT 就重试（最多 4 次）**"，
+ * 并把次数记进 `window.__faulWrap.n`（收尾打出来 —— 悄悄重试等于把问题藏了）。
+ */
+await cdp.eval(`
+  const S = window.__tools.dbg.session;
+  if (!window.__faultWrap){
+    window.__faultWrap = { n: 0, which: {} };
+    const isFault = e => /FAULT|NO ACK|传输 0\\/1 条|Unable to (claim|reset)|device was disconnected/i.test(String(e?.message || e));
+    const wrap = (name) => {
+      const fn = S[name];
+      if (typeof fn !== 'function' || fn.__wrapped) return;
+      const w = async (...a) => {
+        let last;
+        for (let i = 0; i < 4; i++){
+          try { return await fn.apply(S, a); }
+          catch (e){
+            last = e;
+            if (!isFault(e)) throw e;
+            window.__faultWrap.n++; window.__faultWrap.which[name] = (window.__faultWrap.which[name] || 0) + 1;
+            /**
+             * 🚨 光重试是不够的：**FAULT 会把 AHB-AP 的 sticky 错误位留在那里**，
+             *    而 _dhcsr()/_setTAR() 这条路径上**没有** heal 调用（readMem/writeMem 里才有），
+             *    于是"同一个 halt() 连试 4 次全都 FAULT"（2026-10 实测就是这样）。
+             *    这里显式走一次页面自己的自愈入口，再重试。
+             */
+            try { await S.probe._healIfFaulted(); }
+            catch (e2){ window.__faultWrap.healErr = String(e2?.message || e2); }
+            await new Promise(r => setTimeout(r, 200));
+          }
+        }
+        throw last;
+      };
+      w.__wrapped = true; S[name] = w;
+    };
+    for (const m of ['memRead', 'memWrite', 'halt', 'run', 'cont', 'refresh', 'refreshRegs', 'readReg',
+                     'writeReg', 'step', 'bpAdd', 'bpDel', 'bpClear', '_programFpb', '_programBps', 'ensureHalted']) wrap(m);
+  }
+  return true;`);
+
+/**
+ * 源码目录用**真文件**喂进去 —— 但**不能**用 `DOM.setFileInputFiles`。
+ *
+ * 🚨 2026-10 查实（Chrome 153）：那条 CDP 命令对 `webkitdirectory` 的 input **静默无效** ——
+ *    命令不报错，可 `input.files.length` 恒为 0、`change` 事件也不触发，于是 `d.src` 永远是空的。
+ *    对照实验（都是同一个命令、同一个存在的文件）：
+ *      · `#d-elf-file`（普通 file input）      → 读回 `files.length = 1` ✔
+ *      · `#d-src-dir`（webkitdirectory input） → 读回 `files.length = 0` ✘（传目录 / 传文件列表都一样）
+ *    后果就是 `make test-dbg-stress` **稳定**报「源码目录已喂进页面（真文件）：还没选源码目录」，
+ *    而且这跟被测代码无关（页面侧选择目录那条路是好的，只有自动化喂不进去）。
+ *
+ * 现在改成：在**页面里** fetch 这些 .c/.h（它们就在静态服务的根下）、造 `File` 对象，交给
+ * `_indexSrcFiles()`。页面侧的索引、ELF 绝对路径的后缀匹配、读源码全都走同一条路
+ * （`indexFileList()` 对没有 `webkitRelativePath` 的 File 走 `f.name` 分支，反查照样命中）。
+ * 喂源码这一步放进下面那次求值里（跟载入 ELF 一起，少一次往返）。
+ */
 
 sec('== 0. 前置：ELF + 源码目录 + 连接探针 ==');
 const elfInfo = await cdp.json(`(async () => {
@@ -142,6 +368,14 @@ const elfInfo = await cdp.json(`(async () => {
     const r = await fetch(${JSON.stringify(ELF)} + '?t=' + Date.now());
     const st = d.loadElfBuffer(await r.arrayBuffer(), 'fw.elf');
     if (!st) return { err: document.getElementById('d-out').textContent.slice(-300) };
+    // 源码：页面里取真文件（见上面 🚨 —— webkitdirectory 的 input 喂不进去）
+    const files = [];
+    for (const n of ${JSON.stringify(SRC_NAMES)}){
+      const rr = await fetch(${JSON.stringify(SRC_HTTP)} + '/' + n + '?t=' + Date.now());
+      if (!rr.ok) return { err: '源码 ' + n + ' 取不到：HTTP ' + rr.status + '（' + ${JSON.stringify(SRC_HTTP)} + '，检查 --src 是否在仓库里）' };
+      files.push(new File([await rr.text()], n));
+    }
+    await d._indexSrcFiles(files);
     return { summary: st.summary(), lines: st.lines ? st.lines.summary() : null, src: d.src.summary(), srcReady: d.src.ready };
   })()`);
 if (elfInfo.err) throw new Error('ELF 载入失败：' + elfInfo.err);
@@ -158,10 +392,72 @@ await cdp.eval(`const off = (id) => { const el = document.getElementById(id); if
   await new Promise(r => setTimeout(r, 300)); return true;`);
 
 await cdp.eval(`const be = document.getElementById('d-backend'); be.value = 'webusb'; be.dispatchEvent(new Event('change')); return true;`);
+/**
+ * SWD 时钟：页面默认 10 MHz（2026-10 真机验收过 PPB/内存都对）。套件允许按板子调 ——
+ * `--clock=5000` 这种，用来在"链路偶发 FAULT / 目标偶发跑飞"的板子上换更保守的档位，
+ * 好把"是链路不稳还是代码有问题"分开。设不上（不在下拉里）会明确报出来。
+ */
+const clkSet = await cdp.json(`(() => { const sel = document.getElementById('d-clock');
+    if (!sel) return { err: '页面上没有 #d-clock' };
+    const has = [...sel.options].some(o => o.value === ${JSON.stringify(String(CLOCK_KHZ))});
+    if (!has) return { err: '下拉里没有 ' + ${JSON.stringify(String(CLOCK_KHZ))} + ' kHz', options: [...sel.options].map(o => o.value) };
+    const before = sel.value; sel.value = ${JSON.stringify(String(CLOCK_KHZ))}; sel.dispatchEvent(new Event('change'));
+    return { before, now: sel.value }; })()`);
+if (clkSet.err) throw new Error('设 SWD 时钟失败：' + clkSet.err + (clkSet.options ? '（可选 ' + clkSet.options.join('/') + '）' : ''));
+log(`   SWD 时钟：${clkSet.before || '(默认)'} → ${clkSet.now} kHz`);
 const connP = cdp.eval(`await window.__tools.dbg.connect(); return true;`, true);
 await cdp.settle(DEV_RE, 'window.__tools.dbg.session.connected', 12000).catch(() => {});
 await connP.catch(e => log('   连接异常：' + e.message));
 await cdp.eval(`await window.__tools.dbg.session.halt(); await window.__tools.dbg.afterStop(); return true;`);
+
+/**
+ * 靶子固件**真的在跑吗** —— 这一步是"整份套件的前提"，必须自己确认，不能假设。
+ *
+ * 三种真机现场都会让"板子上其实没在跑我们的固件"，而后面每一节都会以看不懂的方式挂掉：
+ *   ① 上一轮测试/烧录把核留在了 halt 或异常（`b .` 自旋）里；
+ *   ② **BOOT0=1 的板子**（本机那块 F103ZE；或者板子只靠探针供电 → BOOT0 悬空被读成高电平）：
+ *      复位后核进的是系统存储区的 ROM bootloader 且 **VTOR=0**，flash 里的固件根本不被取指 ——
+ *      现象是"提示烧录成功、板子一动不动"（`app/flash/view.js` 的 `_bootCheck` 也记着这条）；
+ *   ③ 探针偶发 AP FAULT → 页面 `_healIfFaulted()` → `_targetInit()` **把目标复位**（同 ② 的后果）。
+ *
+ * 判据不看 PC 落在哪（那只能说明"取指地址合理"），而是**看变量有没有在动**：
+ * SysTick 每 100 µs 给 `g_ticks` 加一、主循环每轮给 `g_loops` 加一 —— 差一下就知道固件活着。
+ */
+const alive = await cdp.json(`(async () => {
+    const d = window.__tools.dbg, S = window.__S;
+    const dh = async () => '0x' + ((await d.session.probe._readWord(0xE000EDF0)) >>> 0).toString(16);
+    const samp = async () => { const a = await S.alive();
+      return { ticks: a.t1, loops: a.l1, dhcsr: await dh(), pc: '0x' + (d.session.pc >>> 0).toString(16) }; };
+    const log = [];
+    // 先清一次 FPB：接手别人的会话时比较器里可能留着**已使能**的残留值 = 幽灵断点
+    // （页面的 connect() 里也清一次，但它的循环遇到读失败会 break，而这颗探针的 PPB 写偶发不落地）
+    try { await d.session.bpClear(); } catch (e){ log.push('清 FPB 失败：' + (e?.message || e)); }
+    if (!d.session.halted) await d.session.halt();
+    const s0 = await samp();
+    await d.session.cont();
+    await new Promise(r => setTimeout(r, 350));
+    const s1 = await samp();
+    let woken = false;
+    if (!(s1.ticks > s0.ticks || s1.loops > s0.loops)){
+      log.push('靶子没在跑（' + JSON.stringify(s0) + ' → ' + JSON.stringify(s1) + '），按唤醒配方拉起');
+      await S.wake();
+      woken = true;
+    }
+    const s2 = await samp();
+    await new Promise(r => setTimeout(r, 350));
+    const s3 = await samp();
+    await d.session.halt();
+    await d.afterStop();
+    return { s0, s1, s2, s3, woken, log, running: s3.ticks > s2.ticks || s3.loops > s2.loops,
+             detail: 'g_ticks ' + [s0, s1, s2, s3].map(x => x.ticks).join(' → ')
+                   + ' · g_loops ' + [s0, s1, s2, s3].map(x => x.loops).join(' → ')
+                   + ' · DHCSR ' + [s0, s1, s2, s3].map(x => x.dhcsr).join(' → ') };
+  })()`);
+if (alive.log.length) log('   ' + alive.log.join('；'));
+log(`   靶子存活：${alive.detail}`);
+log(`   ${alive.running ? '在跑 ✓' : '不动 ✗'} · 停点 PC=${hex(alive.s3.pc)}`);
+ok(alive.running, `靶子固件在跑（${alive.detail}）${alive.woken ? '［唤醒配方已用］' : ''}`);
+
 const env = await cdp.json(`(async () => {
     const d = window.__tools.dbg, S = window.__S;
     return { cap: d.session.caps, name: d.session.name, idcode: '0x' + ((d.session.idcode ?? 0) >>> 0).toString(16),
@@ -295,7 +591,7 @@ sec('== 2. 代码同步：停下时 PC → 源码位置必须自洽（跨文件�
         await d.session.bpClear();
       }
       // main 的第一条指令在"复位之后"才会被走到 —— 先复位并停（停在复位向量），再继续
-      await S.cmd('reset halt');
+      const rz = await S.resetToFirmware(${JSON.stringify(!!BOARD.boot0)});
       await S.cmd('b main');
       const sm = await S.go(4000);
       const atm = d.sym.at(sm.pc);
@@ -460,23 +756,28 @@ sec('== 4. 复位重跑：必须停在复位向量 → 断点仍然有效 → �
       await S.cmd('b engine_linear');
       const want = d.sym.find('engine_linear').addr >>> 0;
       for (let i = 0; i < 3; i++){
-        const r = await S.cmd('reset halt');
+        const r = await S.resetToFirmware(${JSON.stringify(!!BOARD.boot0)});
         const s0 = S.snap();
         const fpb = await S.fpb();
         const s1 = await S.go(4000);
         rounds.push({ resetPc: s0.pc, resetName: s0.name, halted: s0.halted, bpPage: s0.bps, compUsed: fpb.used,
-                      hit: s1.halted, hitPc: s1.pc, hitName: s1.name, out: r.text.slice(0, 100) });
+                      woken: r.woken, romPc: r.romPc,
+                      hit: s1.halted, hitPc: s1.pc, hitName: s1.name, out: r.out });
         if (!s1.halted) break;
       }
       await d.session.bpClear();
       return { rounds, want };
     })()`);
   for (const [i, r] of rst.rounds.entries()){
-    log(`   第 ${i + 1} 轮：复位后 PC=${hex(r.resetPc)} ${r.resetName}（比较器 ${r.compUsed}）→ 继续命中=${r.hit} ${hex(r.hitPc)} ${r.hitName}`);
+    log(`   第 ${i + 1} 轮：复位后 PC=${hex(r.resetPc)} ${r.resetName}（比较器 ${r.compUsed}）`
+      + (r.woken ? ` ← BOOT0 唤醒（ROM ${hex(r.romPc)}）` : '')
+      + ` → 继续命中=${r.hit} ${hex(r.hitPc)} ${r.hitName}`);
   }
   ok(rst.rounds.length === 3, '复位 3 轮都跑完了');
   ok(rst.rounds.every(r => r.resetPc === RESET_VEC),
-    `「复位并停」停在**复位向量**上（${hex(RESET_VEC)} = Reset_Handler）：` + rst.rounds.map(r => hex(r.resetPc)).join(' , '));
+    `「复位并停」停在**复位向量**上（${hex(RESET_VEC)} = Reset_Handler）`
+    + (BOARD.boot0 ? `［本机 BOOT0=1：脚本按唤醒配方把 PC 从 ROM 搬回 flash］` : '')
+    + '：' + rst.rounds.map(r => hex(r.resetPc)).join(' , '));
   ok(rst.rounds.every(r => r.hit && r.hitPc === rst.want),
     '复位之后断点仍然有效、继续就能命中：' + rst.rounds.map(r => `${hex(r.hitPc)}`).join(' , '));
 }
@@ -586,7 +887,7 @@ sec('== 5. 内存 / 监视：结构体树、位域、复合路径 ==');
   const fault = await cdp.json(`(async () => {
       const S = window.__S, d = window.__tools.dbg;
       let msg = '';
-      try { await d.session.memRead(0x20020000, 16); } catch (e){ msg = String(e?.message || e); }
+      try { await d.session.memRead(${BOARD.faultAddr}, 16); } catch (e){ msg = String(e?.message || e); }   // ${BOARD.faultText}
       let after = null;
       try { after = [...await d.session.memRead(0x08000000, 8)].map(x => x.toString(16)).join(' '); } catch (e){ after = 'ERR ' + e.message; }
       return { msg, after, heals: d.session.probe.faultHeals || 0 };
@@ -632,6 +933,28 @@ sec('== 7. 收尾 + 与 gdb 对照 ==');
 {
   const errs = await cdp.eval('return window.__tools.errors || [];');
   ok(Array.isArray(errs) && errs.length === 0, '整轮没有一个页面未捕获错误', JSON.stringify(errs).slice(0, 300));
+
+  /**
+   * 自愈记录（见 `S.go()` 里那段 🚨）。**不算失败**：它证明的是"探针偶发 FAULT →
+   * 页面 `_targetInit()` 把目标复位 → BOOT0=1 的板子掉进 ROM"这条链真的会发生，
+   * 而不是被测代码有问题；但必须显式打出来（悄悄重试等于把问题藏了）。
+   */
+  const recov = await cdp.eval('return window.__S.recoveries || [];');
+  const faultW = await cdp.eval('return window.__faultWrap || { n: 0 };');
+  if (faultW.n){
+    log(`\n   ⚠ 本轮撞上 ${faultW.n} 次探针 FAULT，已自动重试（页面在下一次访问前会 _targetInit 修口子）：`);
+    log('     ' + JSON.stringify(faultW.which || {}));
+  } else {
+    log('   探针 FAULT：0 次');
+  }
+  if (recov.length){
+    log(`\n   ⚠ 本轮发生过 ${recov.length} 次「目标被意外复位 → 自动唤醒」：`);
+    for (const r of recov) log('     ' + JSON.stringify(r));
+    log('     （成因：探针偶发 AP FAULT → 页面 _healIfFaulted()/_targetInit() 复位目标；'
+      + '本机 F103ZE 的 BOOT0=1，复位后 VTOR=0、固件取不到指，只能靠唤醒配方搬回 VTOR/SP/PC）');
+  } else {
+    log('   自愈记录：0 次（目标全程没被意外复位）');
+  }
 
   if (existsSync(ORACLE)){
     const g = JSON.parse(readFileSync(ORACLE, 'utf8'));
@@ -681,7 +1004,8 @@ sec('== 7. 收尾 + 与 gdb 对照 ==');
   }
 
   await cdp.eval(`await window.__tools.dbg.session.bpClear(); await window.__tools.dbg.disconnect(); return true;`);
-  writeFileSync(JSON_OUT, JSON.stringify({ at: new Date().toISOString(), elf: ELF, pass, fail, failures, oracle }, null, 1));
+  writeFileSync(JSON_OUT, JSON.stringify({ at: new Date().toISOString(), elf: ELF, board: BOARD_ID, clockKhz: CLOCK_KHZ,
+                                           pass, fail, failures, recoveries: recov, oracle }, null, 1));
   log('   测量结果已写入 ' + JSON_OUT);
 }
 

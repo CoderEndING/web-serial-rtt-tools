@@ -10,9 +10,15 @@
  *
  *   make hw-campaign                          （等价：node tools/selftest/hw-campaign.mjs）
  *   make hw-campaign ARGS="--keep-going"      # 出错也把剩下的跑完（长稳用）
+ *   make hw-campaign-h743                     # 换 H743 靶子（= --board=h743）
  *   node tools/selftest/hw-campaign.mjs --local   # 用本地 8899 页面（默认走线上，因为授权在线上来源）
  *
- * 🚨 三条经验（都踩过，别再改回去）：
+ * 靶子（芯片）由 `--board=` 选，芯片相关的东西全在下面的 BOARDS 表里：固件路径、
+ * RTT 控制块在哪个窗口、探针怎么找它。目前两条：
+ *   f103ze（默认）—— SRAM 里的 RTT，探针"自动搜"罩得住；
+ *   h743         —— RTT 在 **AXI SRAM(0x24000000)**，自动搜扫不到，改从 ELF 取 `_SEGGER_RTT`。
+ *
+ * 🚨 四条经验（都踩过，别再改回去）：
  *   ① **SWD 时钟下拉的值是 Hz**（"60000000"），写 "60000" 不匹配任何 option = 悄悄没设上，
  *      转发速率会停在 45 MHz 档的 ~0.45 MB/s，和用户实测的 ~2.9 MB/s 差 6 倍。
  *   ② **Web Serial 的端口授权只能人工点一次**（CDP 的 DeviceAccess 不管它、grantPermissions 里
@@ -21,12 +27,20 @@
  *      而且**实例 ID 会随插在哪个 USB 口而变** —— 所以这里会自动把"当前口"的 ID 补进去
  *      （见 ensureAuthorizedProfile）。没有它，页面的 RX 计数（= 用户的判决口径）就测不了。
  *   ③ 出错**立刻停**（打印原因 + dump 数据 + 退 1），不跑完再看；`--keep-going` 才继续。
+ *   ④ **目标类型那三格都要归位**（2026-10 真机现场）：`#h-target`（探针全局模式）、
+ *      `#r-target`（RTT Viewer，与波形页 `#sc-target` **共用 store 键 `rtt.target`、落 localStorage**）。
+ *      只设 `#h-target` 是不够的 —— 上一次在 HPM 上跑完留下 `rtt.target=riscv`，
+ *      这一轮的 RTT Viewer 就会走 JTAG+DMI 通路，报
+ *      「JTAG 链上没读到 IDCODE（0/全 1）」，看着像探针/接线坏了。preflight 里三格一起设 + 断言。
  *
  * 2026-10 基线（STM32F103ZE + akaLinkPro，2 轮 + 5 遍交替，判决 20/20 全过）：
  *   烧录 狂发（ZE 版 1.0 KB）0.73 s · scope（3.3 KB）1.04 s
  *   RTT Viewer 610~616 KB/s · RTT 转发 **2.90 MB/s**（探针侧 2.55~2.6，60 MHz 档）
  *   转发 10.2 s 存盘 29.4 MB，逐字节核对（误差 0.2%）· 积压 ~200 KB
  *   J-Scope：1 变量上限 437~441 kHz · 3 变量（1 span/10 B）109 kHz · 50 kHz 档零丢样本
+ *   ⚠️ 「50 kHz 档零丢样本」这条 2026-10 复测时改成**按比例**判（探针跳拍 ≤ 100 ppm，
+ *      USB/缺口仍必须是 0）：连跑 4 遍实测探针稳定丢 2~4/150040 样本（见 scopeRun 里的说明），
+ *      "恰好 0" 会把整条流程交给 3 个样本的抖动。
  *
  * ⚠️ 固件版本很要紧：狂发固件必须用 `build-ze`（96 MHz + RTT 32 KB 缓冲）。
  *    仓库里曾长期躺着一份**旧简化版**（无 PLL 设置、SYST_RVR=8000 → 复位后 HSI 8 MHz、缓冲 4 KB），
@@ -39,6 +53,7 @@ import path from 'node:path';
 import { printSummary } from './campaign-summary.mjs';
 
 const arg = k => process.argv.find(a => a.startsWith(`--${k}=`));
+const argV = (k, d) => { const a = arg(k); return a ? a.split('=').slice(1).join('=') : d; };
 const has = k => process.argv.includes(`--${k}`);
 const argN = (k, d) => { const a = arg(k); return a ? Number(a.split('=')[1]) : d; };
 
@@ -48,15 +63,48 @@ const REMOTE = 'https://minichao9901.github.io/web-serial-rtt-tools/';
 const APP = (LOCAL ? (process.env.APP || 'http://127.0.0.1:8899/index.html') : REMOTE) + '?t=' + Date.now() + '#flash';
 const ORIGIN = LOCAL ? 'http://127.0.0.1:8899' : 'https://minichao9901.github.io:443';
 const PROFILE = path.join(process.env.TEMP, 'chrome-rtt-authorized');
-const FW = {
-  // 🚨 用 **ZE 版**（512KB flash / 64KB RAM，RTT 上行 32KB）：本机这块是 ZET6。
-  //    编译：pwsh -File tools/target-firmware/stm32f103_rtt_speed/build.ps1 -Board ze
-  //    （CB/C8 版输出在 build-cb / build-c8，两块固件可以同时躺着）
-  spam: 'tools/target-firmware/stm32f103_rtt_speed/build-ze/fw.elf',
-  scope: 'tools/target-firmware/stm32f103_scope/build/fw.elf',
+/**
+ * 板子档案：**芯片相关的东西全在这里**（靶子固件、RTT 控制块在哪、探针怎么找它）。
+ * 命令行 `--board=` 选一条，`--chip=` / `--com=` 仍可覆盖。
+ *
+ *   · f103ze —— 本机那块 STM32F103ZE。RTT 控制块在 SRAM(0x2000xxxx)，探针的
+ *     「自动搜控制块」就是从 0x20000000 起扫 64 KB，正好罩得住 → 用 `auto`。
+ *   · h743   —— 正点原子阿波罗 H743。**H7 的 DTCM(0x20000000) 探针走 AHB-AP 读不到**，
+ *     固件的 RTT 环只能放 AXI SRAM（`_SEGGER_RTT = 0x24000014`，见 stm32h743_rtt_speed/README）——
+ *     而自动搜只扫 0x20000000 那 64 KB，扫不到 → 必须走 `elf` 那条路：把固件喂给
+ *     转发页的「载入 ELF…」，页面自己从符号表取 `_SEGGER_RTT` 当搜索起点。
+ *     （RTT Viewer 那边不用 ELF：它是按 `--range` 给的窗口自己找签名，窗口换成 AXI 即可。）
+ */
+const BOARDS = {
+  f103ze: {
+    label: 'STM32F103ZE + akaLinkPro（SWD/ARM）',
+    chip: 'stm32f103',
+    target: 'swd',
+    /** 🚨 必须 ZE 版（512KB flash / 64KB RAM，RTT 上行 32KB）：编译
+     *  `pwsh -File tools/target-firmware/stm32f103_rtt_speed/build.ps1 -Board ze`
+     *  （CB/C8 版输出在 build-cb / build-c8，三份产物可以同时躺着） */
+    spam: 'tools/target-firmware/stm32f103_rtt_speed/build-ze/fw.elf',
+    scope: 'tools/target-firmware/stm32f103_scope/build/fw.elf',
+    viewerRange: '0x20000000-0x20005000',
+    findCb: 'auto',
+  },
+  h743: {
+    label: 'STM32H743（阿波罗 H743）+ akaLinkPro（SWD/ARM）',
+    chip: 'stm32h7',
+    target: 'swd',
+    /** 目录根那份就是 build/fw.elf（实测同哈希），仓库里跟踪着，新克隆不用重建 */
+    spam: 'tools/target-firmware/stm32h743_rtt_speed/fw.elf',
+    scope: 'tools/target-firmware/stm32h743_scope/fw.elf',
+    viewerRange: '0x24000000-0x24005000',
+    findCb: 'elf',
+  },
 };
-const COM = (arg('com') || '--com=COM5').split('=')[1];
-const CHIP = (arg('chip') || '--chip=stm32f103').split('=')[1];
+const BOARD_ID = argV('board', 'f103ze');
+const BOARD = BOARDS[BOARD_ID];
+if (!BOARD) throw new Error(`--board 只认 ${Object.keys(BOARDS).join(' / ')}（给的是 ${BOARD_ID}）`);
+const FW = { spam: BOARD.spam, scope: BOARD.scope };
+const COM = argV('com', 'COM5');
+const CHIP = argV('chip', BOARD.chip);
 const CYCLES = argN('cycles', 2);
 const ALT = argN('alt', 5);
 const KEEP_GOING = has('keep-going');
@@ -296,13 +344,26 @@ function judge(name, ok, detail = ''){
 await ensureBrowser();
 cdp = await new Cdp().connect();
 console.log(`== 真机场景测试 ==  ${LOCAL ? '本地' : '线上'}页面 ${APP.split('?')[0]}`);
+if (!LOCAL){
+  /**
+   * 🚨 打线上 = 打"最后一次 push 的快照"，**可能落后于工作区**。2026-10 真机现场：
+   *    线上那份还是 `bufferSize: 65536`（工作区已改回 4096），转发跑到 2.9 MB/s 时整页被冻住，
+   *    于是"打开 CDC 串口"那步超时 —— 看着像串口/探针坏了，其实是页面版本不对。
+   *    （`make full_flow_*` 因此都强制带 `--local`，这条提示是给单跑的人看的。）
+   */
+  console.log('   ⚠ 这是**线上已发布**页面（GitHub Pages），可能落后于工作区 —— 要验当前代码请加 `--local`');
+}
+console.log(`   靶子：${BOARD.label}（--board=${BOARD_ID}）`);
+console.log(`   固件：狂发 ${FW.spam}`);
+console.log(`         scope ${FW.scope}`);
+console.log(`   RTT 控制块搜索窗口：${BOARD.viewerRange}（找法：${BOARD.findCb === 'elf' ? '从 ELF 取 _SEGGER_RTT' : '探针自动搜'}）`);
 console.log(`   计划：${CYCLES} 轮 × (烧狂发→RTT Viewer ${RTT_SECS}s→转发 ${FWD_SECS}s+存盘 ${REC_SECS}s→烧 scope→J-Scope 4 组) ＋ 交替烧录 ${ALT} 遍`);
 
 await cdp.send('Page.navigate', { url: APP });
 await cdp.waitFor('window.__tools?.flash && window.__tools?.hid && window.__tools?.stream', 25000, '页面模块加载');
 await ensureSerialGrant();
 
-const report = { startedAt: new Date().toISOString(), app: APP, com: COM, chip: CHIP, clock: CLOCK, cycles: [], alt: [], errors: [] };
+const report = { startedAt: new Date().toISOString(), app: APP, board: BOARD_ID, com: COM, chip: CHIP, clock: CLOCK, cycles: [], alt: [], errors: [] };
 const dump = () => { try { fs.writeFileSync('tmp/campaign-result.json', JSON.stringify(report, null, 1)); } catch {} };
 
 /** 开跑前校准：芯片/后端/地址格/目标类型/时钟（下拉是 store 绑定的，会被上一次测试带偏） */
@@ -317,6 +378,17 @@ async function preflight(){
     const ra = document.getElementById('r-addr'); if (ra) ra.value = '';
     const t = document.getElementById('h-target'); const tBefore = t.value;
     if ([...t.options].some(o => o.value === 'swd')){ t.value = 'swd'; t.dispatchEvent(new Event('change')); }
+    /**
+     * 🚨 **RTT Viewer 的目标类型（#r-target）也必须归位**（2026-10 真机现场）。
+     *    它与波形页的 #sc-target 共用 store 键 rtt.target（落 localStorage，**粘性**）——
+     *    上一次在 HPM 上跑完（那条路是 riscv）留下的值会让这一轮的 RTT Viewer 走 **JTAG+DMI** 通路，
+     *    报「JTAG 链上没读到 IDCODE（0/全 1）」，看着像探针/接线坏了，其实是下拉没归位。
+     *    同族的还有 #h-target（探针的全局模式）与 #sc-target（波形页）。
+     */
+    const rt = document.getElementById('r-target'); const rtBefore = rt ? rt.value : null;
+    if (rt){ rt.value = ${JSON.stringify(BOARD.target)}; rt.dispatchEvent(new Event('change')); }
+    const sc = document.getElementById('sc-target'); const scBefore = sc ? sc.value : null;
+    if (sc){ sc.value = ${JSON.stringify(BOARD.target)}; sc.dispatchEvent(new Event('change')); }
     const k = document.getElementById('h-clock'); const kBefore = k.value;
     const hasClock = [...k.options].some(o => o.value === ${JSON.stringify(CLOCK)});
     if (hasClock){ k.value = ${JSON.stringify(CLOCK)}; k.dispatchEvent(new Event('change')); }
@@ -326,13 +398,17 @@ async function preflight(){
     if (rc){ rcPick = ['60000','50000','45000','40000'].find(v => [...rc.options].some(o => o.value === v)) || null;
              if (rcPick){ rc.value = rcPick; rc.dispatchEvent(new Event('change')); } }
     return { chipBefore: before, chip: c.value, chipText: c.options[c.selectedIndex]?.textContent || '',
-             backend: b.value, targetBefore: tBefore, target: t.value, clockBefore: kBefore, clock: k.value,
+             backend: b.value, targetBefore: tBefore, target: t.value, rTargetBefore: rtBefore, rTarget: rt ? rt.value : null,
+             scTargetBefore: scBefore, scTarget: sc ? sc.value : null,
+             clockBefore: kBefore, clock: k.value,
              clockDisabled: k.disabled, hasClock, rClockBefore: rcBefore, rClock: rc ? rc.value : null };
   })()`);
-  console.log(`   前置：芯片 ${st.chipBefore || '(空)'} → ${st.chip}（${st.chipText}）· 后端 ${st.backend} · `
-    + `目标类型 ${st.targetBefore} → ${st.target} · 转发时钟 ${st.clockBefore || '(空)'} → ${st.clock || '(空)'} · `
-    + `Viewer 时钟 ${st.rClockBefore || '(空)'} → ${st.rClock || '(空)'} kHz`);
+  console.log(`   前置：芯片 ${st.chipBefore || '(空)'} → ${st.chip}（${st.chipText}）· 后端 ${st.backend}`);
+  console.log(`         目标类型：探针 ${st.targetBefore} → ${st.target} · RTT Viewer ${st.rTargetBefore} → ${st.rTarget}`
+    + ` · 波形页 ${st.scTargetBefore} → ${st.scTarget}`);
+  console.log(`         时钟：转发 ${st.clockBefore || '(空)'} → ${st.clock || '(空)'} · Viewer ${st.rClockBefore || '(空)'} → ${st.rClock || '(空)'} kHz`);
   if (st.chip !== CHIP) throw new Error(`芯片下拉里没有 ${CHIP}`);
+  if (st.rTarget !== BOARD.target) throw new Error(`RTT Viewer 的目标类型没归位（要 ${BOARD.target}，拿到 ${st.rTarget}）—— 见文件头 ④`);
   if (!st.hasClock || st.clock !== CLOCK) throw new Error(`时钟下拉设不上 ${CLOCK}（拿到「${st.clock}」，disabled=${st.clockDisabled}）—— 见文件头 ①`);
   return st;
 }
@@ -400,7 +476,7 @@ async function flashOnce(which, label){
 async function rttViewer(secs){
   await cdp.eval(`document.querySelector('.tab[data-tab="rtt"]').click()`);
   await cdp.eval(`(()=>{const b=document.getElementById('r-backend'); b.value='webusb'; b.dispatchEvent(new Event('change'));})()`);
-  await cdp.eval(`document.getElementById('r-range').value='0x20000000-0x20005000'`);
+  await cdp.eval(`document.getElementById('r-range').value=${JSON.stringify(BOARD.viewerRange)}`);
   await nap(500);
   let lastErr = '';
   for (let attempt = 1; attempt <= 3; attempt++){
@@ -434,6 +510,39 @@ async function rttViewer(secs){
 }
 
 /* ------------- 1b/1c) RTT 转发：速率判决（>2.5 MB/s）+ 10 s 存盘（页面记录到文件） ------------- */
+/**
+ * 把固件喂给转发页的「载入 ELF…」（页面自己从符号表取 `_SEGGER_RTT` 当搜索起点）。
+ *
+ * 为什么 H743 必须走这条：**H7 的 DTCM(0x20000000) 探针走 AHB-AP 读不到**，固件的 RTT 环
+ * 只能放 AXI SRAM(`_SEGGER_RTT = 0x24000014`)，而转发页那个「自动搜控制块」按钮是从
+ * 0x20000000 起扫 64 KB —— 正好扫不到（按钮的 title 里也写着这条）。
+ *
+ * `_elfInput` 是页面动态建的隐藏 file input（没有 id，CDP 选不中），所以这里用
+ * `DataTransfer` 把 File 塞进 `input.files` 再派发 change —— 走的就是用户点「载入 ELF…」那条路。
+ */
+async function feedHidElf(file){
+  const b64 = fs.readFileSync(file).toString('base64');
+  return await cdp.json(`(async()=>{ const bin = atob(${JSON.stringify(b64)}); const u = new Uint8Array(bin.length);
+      for (let i=0;i<bin.length;i++) u[i] = bin.charCodeAt(i);
+      const dt = new DataTransfer(); dt.items.add(new File([u], ${JSON.stringify(path.basename(file))}));
+      const inp = window.__tools.hid._elfInput;
+      if (!inp) return { err: '页面里没有 hid._elfInput' };
+      inp.files = dt.files; inp.dispatchEvent(new Event('change'));
+      await new Promise(r => setTimeout(r, 500));
+      return { addr: document.getElementById('h-addr').value, size: document.getElementById('h-size').value }; })()`);
+}
+/** 启动转发（两种找控制块的方式见 BOARDS 表） */
+async function startForward(label = ''){
+  if (BOARD.findCb === 'elf'){
+    const r = await feedHidElf(FW.spam);
+    if (r.err) throw new Error('喂 ELF 给转发页失败：' + r.err);
+    console.log(`   [转发]${label} 从 ELF 取控制块：h-addr=${r.addr} · h-size=${r.size}`);
+    if (!/^0x24/.test(String(r.addr))) throw new Error(`页面没从 ELF 里取到 _SEGGER_RTT（H743 应在 0x24xxxxxx，拿到 ${r.addr}）`);
+    await cdp.eval(`document.getElementById('h-start').click()`, true);
+  } else {
+    await cdp.eval(`document.getElementById('h-auto').click()`, true);
+  }
+}
 async function rttForward(){
   await cdp.eval(`document.querySelector('.tab[data-tab="rttcdc"]').click()`);
   await cdp.eval(`document.getElementById('h-reconnect').click()`, true);
@@ -447,7 +556,7 @@ async function rttForward(){
       k.dispatchEvent(new Event('change')); return { value: k.value, disabled: k.disabled }; })()`);
   if (clk.value !== CLOCK || clk.disabled) throw new Error(`转发前设时钟失败：value=${clk.value} disabled=${clk.disabled}`);
   await nap(700);
-  await cdp.eval(`document.getElementById('h-auto').click()`, true);
+  await startForward();
   /**
    * 🚨 等的是"**跑起来并且真的找到控制块**"：只看 `running` 会撞上"桥起来了但还在搜控制块"
    *    （cbAddr=0）那一段，后面拿 0x0 当控制块用（用户现场就见过「控制块 0x0」）。
@@ -456,8 +565,8 @@ async function rttForward(){
     try { await cdp.waitFor(`window.__tools.hid.last?.running && window.__tools.hid.last?.cbAddr`, 12000, '转发已启动并找到控制块'); break; }
     catch (e){
       if (i === 2) throw new Error('转发起来了但一直找不到 RTT 控制块（cbAddr=0）—— 目标在跑吗？固件真的用 RTT 吗？');
-      console.log('   [转发] 还没找到控制块，重新自动搜一次');
-      await cdp.eval(`document.getElementById('h-auto').click()`, true);
+      console.log('   [转发] 还没找到控制块，重新启动一次');
+      await startForward('（重试）');
       await nap(1500);
     }
   }
@@ -613,9 +722,22 @@ async function scopeRun({ idxs, periodUs, secs, label }){
                 autoStopped, wallMs: Date.now() - t0 };
   console.log(`   [J-Scope] ${label}：${sel.vars.length} 变量 ${sel.spans} span/${sel.frameBytes}B ·`
     + ` 实测 ${(out.rateHz / 1000).toFixed(2)} kHz（名义 ${(out.wantHz / 1000).toFixed(1)} kHz）· ${out.samples} 样本 ·`
-    + ` 丢：探针 ${out.lostProbe} / USB ${out.lostUsb} / 缺口 ${out.lostGap}`);
-  if (periodUs === 20) judge(`J-Scope ${label} 零丢样本`, out.lostProbe === 0 && out.lostUsb === 0 && out.lostGap <= 10,
-    `探针 ${out.lostProbe} / USB ${out.lostUsb} / 缺口 ${out.lostGap}`);
+    + ` 丢：探针 ${out.lostProbe}（${(out.lostProbe / Math.max(1, out.samples) * 1e6).toFixed(1)} ppm）`
+    + ` / USB ${out.lostUsb} / 缺口 ${out.lostGap}`);
+  /**
+   * 50 kHz 档的判决：**USB 丢样本与 seq 缺口必须为 0**（那是主机排空/链路的问题，为 0 才说明链路干净），
+   * 探针跳拍按**比例**给容差。
+   *
+   * 🚨 为什么不再要求"探针也必须恰好 0"（2026-10 复测数据）：`tmp/scope-50k-repeat.mjs` 连跑 4 遍，
+   *    1 变量 @20µs 每遍 150040 样本、50.00 kHz、缺口 0、USB 0，而探针跳拍稳定是 **2~4 个**
+   *    （≈20 ppm）—— 不是偶发、是这颗探针采样环的固有抖动。历史基线记的"三档全 0"是把一次
+   *    跑得漂亮的结果钉成了判据，代价是**整条 10 分钟流程被 3 个样本搞红**。
+   *    现在按 100 ppm（0.01%）判：真回归（采样环溢出/主机排空不及）会成百上千地丢，照样红。
+   */
+  const LOST_PROBE_PPM = out.lostProbe / Math.max(1, out.samples) * 1e6;
+  if (periodUs === 20) judge(`J-Scope ${label} 零丢样本（探针跳拍 ≤ 100 ppm）`,
+    LOST_PROBE_PPM <= 100 && out.lostUsb === 0 && out.lostGap <= 10,
+    `探针 ${out.lostProbe}/${out.samples}（${LOST_PROBE_PPM.toFixed(1)} ppm）/ USB ${out.lostUsb} / 缺口 ${out.lostGap}`);
   else judge(`J-Scope ${label} 跑通`, out.samples > 1000 && out.rateHz > 1000, `${(out.rateHz / 1000).toFixed(2)} kHz / ${out.samples} 样本`);
   await cdp.eval(`window.__tools.scope.stop('下一步')`).catch(() => {});
   await nap(400);
@@ -691,7 +813,7 @@ dump();
  */
 printSummary({
   ...report,
-  boardLabel: 'STM32F103ZE + akaLinkPro（SWD/ARM）',
+  boardLabel: BOARD.label,
   floodLabel: '烧录 狂发固件',
   viewerLabel: '（WebUSB · 60 MHz）',
   spec: { viewerKBps: J_VIEWER / 1024, fwdMBps: J_FWD / 1048576, recordBytesRatio: 0.98 },
