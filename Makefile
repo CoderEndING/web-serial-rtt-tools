@@ -31,7 +31,17 @@ LA       = tools/la/kingst_la.py
 .DEFAULT_GOAL := help
 .PHONY: help serve serve-dev serve-stop browser open page-prep spi-flash-hw idcode board-check-f103ze board-check-h743 board-check-6800evk test test-ui test-gen test-gen-page gen-embed samples-anim test-hid test-dwarf test-scope test-scope-page test-scope-render test-spi test-read test-spi-page test-hw test-record test-bridge test-bridge-gate test-hpm test-image test-all test-dbg test-dbg-page test-dbg-hw test-dbg-stress test-dbg-stress-f103ze flash-dbgstress-f103ze flash-dbgstress-h743 flash-dbgstress-6800evk test-dbg-riscv test-idcode test-dsl test-flash flash-timing hw-campaign hw-campaign-h743 hw-campaign-hpm hw-campaign-riscv campaign-summary full_flow_f103ze full_flow_h743 full_flow_6800evk \
         bridge bridge-stop fw-build fw-flash fw-restore fw-h7-build fw-h7-flash \
-        algo-check flash-plan la-info la-capture git-status git-log check clean spi-hw spi-flow i2c-hw spi-partial-hw dbg-step-hw
+        algo-check flash-plan la-info la-capture git-status git-log check clean spi-hw spi-flow i2c-hw spi-partial-hw dbg-step-hw probe-diag
+
+# 探针 HID 直驱诊断（绕开页面）：rc=-4 归因 / RTT 字节级完整性
+#   make probe-diag ARGS="--mode=disc --iters=40 --clk=60"
+#   make probe-diag ARGS="--mode=loss --seq --clk=45 --iters=3 --window=15"
+# 各模式与实测数据见 docs/probe-rc4-and-rtt-loss.md §四
+probe-diag:
+	python tools/selftest/probe-hid-diag.py $(ARGS)
+
+probe-diag-help:
+	python tools/selftest/probe-hid-diag.py --help
 
 help:
 	pwsh -NoProfile -ExecutionPolicy Bypass -File tools/dev/help.ps1
