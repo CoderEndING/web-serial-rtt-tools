@@ -64,6 +64,14 @@
 RTT 转发 · J-Scope 波形 · SPI/QSPI 桥 · SPI/QSPI 屏（含**局部刷新**）· USB→I2C · 工程生成。
 纯静态页面，**没有任何构建步骤**：GitHub Pages 直接托管，也可以下载下来双击打开。
 
+> ⚠️ **发布给 Pages 的话**：那边的 `pages build and deployment` 会用 Jekyll 把**每个 `.md`
+> 都送进 Liquid**（有 `jekyll-optional-front-matter`，没有 front matter 也渲染）。所以文档里
+> 写 C 代码时别出现 **Liquid 定界符**（两个连续左花括号、或"花括号 + 百分号"）—— 它会被当成
+> 变量起始，一句 `= { {cmd, len, …} }`（原文无空格）就足以让**整个部署失败**，而
+> `git push` 本身却是成功的（2026-10-03 实测：线上因此停更了三次构建）。
+> 兜底：`make check` 里的 `tools/dev/check-liquid.mjs` 会扫出所有没被 Liquid 的 **raw 块**
+> 包住的定界符（真要在文档里写这种字符，就用 raw 块把它包起来）。
+
 > 为什么"零安装"这件事不容易：J-Link 与 OpenOCD 都是**本机程序**，浏览器无权启动进程、
 > 也无权开 TCP。所以这里的零安装通路是 **WebUSB 直连 CMSIS-DAP 探针**（RTT / J-Scope / 烧录 /
 > 调试全走它），想用 J-Link 或 OpenOCD 时再启动那个**可选**的本仓库 `bridge/`。
@@ -894,7 +902,9 @@ tools/
                         make-40pin-figure.mjs（生成 README 开头那张 **J3 40pin 引脚定义图**）、
                         make-anim-samples.py（造屏页动画/视频示例素材，`make samples-anim`）、
                         make-scenery-samples.py（造风景照片素材：Commons 原图 → 裁剪/缩放到两套
-                        屏几何，写 manifest 与署名表，`make samples-scenery`）
+                        屏几何，写 manifest 与署名表，`make samples-scenery`）、
+                        check-liquid.mjs（**Pages 地雷检查**：Markdown 里没被 raw 块包住的
+                        Liquid 定界符会让 Jekyll 整个构建失败，`make check` 里会跑）
   target-firmware/          **靶子固件总索引见 tools/target-firmware/README.md**；
                             每个目录根上的 `fw.elf` 是**编好的产物（入库）**，用户不必装工具链
     stm32f103/          STM32F103 测试固件（UART + RTT，含 SEGGER RTT 源码）
