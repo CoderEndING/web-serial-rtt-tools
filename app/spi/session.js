@@ -148,17 +148,17 @@ export class SpiSession {
   }
 
   /** 假探针：HID 与 bulk **必须**指向同一个实例（两个实例会造出"配置发给 A、数据从 B 出来"的假象）*/
-  async setMock(on){
+  async setMock(on, opts = {}){
     await this.teardown();
     if (on){
-      const probe = new MockSpiProbe();
+      const probe = new MockSpiProbe(opts.device ? { device: opts.device } : {});
       this.mockProbe = probe;
       this.hid = probe;
       this.transport = new MockSpiTransport({ probe });
       this.usingMock = true;
       this.stream.reset();
       await this.transport.start(bytes => this._onBytes(bytes));
-      this.log('g', '已切到假探针（无需硬件）：HID 与数据面共用同一个实例');
+      this.log('g', `已切到假探针（无需硬件）：HID 与数据面共用同一个实例 · 末级器件 ${probe.deviceInfo().name}`);
       this._setState('假探针');
       await this.loadCfg({ quiet: true });
       await this.loadProfile({ quiet: true });
@@ -172,6 +172,23 @@ export class SpiSession {
     }
     this._emit('state', this.stateInfo());
     return this.usingMock;
+  }
+
+  /**
+   * 换假探针的**末级器件**：`'flash'`（默认，回环 + 一颗 W25Q128）/ `'regs'`（寄存器器件）/
+   * `'adc'`（命令型 ADC）。SPI 没有器件地址，所以这三者是"换一个末级"，不是"多挂几个"。
+   * 真机上这个动作没意义（会如实拒绝）。
+   */
+  setMockDevice(kind){
+    if (!this.usingMock || !this.mockProbe){
+      this.log('w', '「假器件」只在假探针模式下有意义 —— 真机上末级器件就是你接的那颗');
+      return null;
+    }
+    const k = this.mockProbe.setDeviceKind(kind);
+    const info = this.mockProbe.deviceInfo();
+    this.log('i', `假器件 → ${info.name}`);
+    this._emit('state', this.stateInfo());
+    return k;
   }
 
   async teardown(){

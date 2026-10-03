@@ -159,6 +159,126 @@ export function mockPickSclk(wantHz){
   return Math.round(best);
 }
 
+/**
+ * 假 **SPI 寄存器器件**（默认 BMP280 风格：读 `0x80|reg` + 1 字节 dummy、写 `reg&0x7F`）。
+ *
+ * 为什么要有它：「寄存器」面板与定时采集那条路在离线时也要能跑通（跟 I2C 页的四个假器件同理）。
+ * 它按**档位**建模，所以同一份代码也能装成 MPU-9250 风格（无 dummy）、MCP23S17 风格（地址是独立字节）：
+ *   · `addrMode: 'orOp'`  —— 寄存器号在 opcode 低位（掩码 = `(1<<addrBits)-1`）
+ *   · `addrMode: 'bytes'` —— opcode 固定，寄存器号在 XFER 的地址字段（页面上是"地址字节"）
+ *
+ * 两个"照真机来"的行为（这正是面板要能改 dummy/自增的原因）：
+ *   ① **dummy 不符 → 数据整体错位**：器件在主机的 dummy 相位之后才开始吐数据；
+ *      主机少给 1 字节 dummy，读回来的就是"前一字节"；
+ *   ② **`autoInc:false` 的器件连读会原地踏步**（每字节都是同一个寄存器的值），
+ *      面板上就看到"读 8 B 全是同一个数" —— 真机上就是这个症状。
+ */
+export class SpiRegDevice {
+  constructor(opts = {}){
+    this.name = opts.name || 'BMP280 风格（读 0x80|reg、无 dummy、写不自增）';
+    this.addrMode = opts.addrMode === 'bytes' ? 'bytes' : 'orOp';
+    this.readOp = (opts.readOp ?? 0x80) & 0xff;
+    this.writeOp = (opts.writeOp ?? 0x00) & 0xff;
+    this.addrBits = Math.max(0, Math.min(8, opts.addrBits ?? 7));
+    this.dummy = Math.max(0, opts.dummy ?? 0);
+    this.autoInc = opts.autoInc !== false;
+    /** 写是否自增（**与读分开**）：BMP280 读自增、写不自增 —— 见 regs.js 的 writePlan 注释 */
+    this.autoIncWrite = opts.autoIncWrite !== false;
+    this.size = opts.size ?? 256;
+    this.regs = new Uint8Array(this.size);
+    /** 读之前刷新"活数据"（传感器那种会动的值）：`(reg, len, now) => void` */
+    this.onRead = null;
+    this.onWrite = null;
+  }
+  get mask(){ return (1 << this.addrBits) - 1; }
+  isRead(op){
+    if (this.addrMode === 'bytes') return (op & 0xff) === this.readOp;
+    return (op & ~this.mask & 0xff) === (this.readOp & ~this.mask & 0xff);
+  }
+  isWrite(op){
+    if (this.addrMode === 'bytes') return (op & 0xff) === this.writeOp;
+    return (op & ~this.mask & 0xff) === (this.writeOp & ~this.mask & 0xff);
+  }
+  regOf(op, addr, addrEn){
+    if (this.addrMode === 'bytes') return (addrEn ? addr : 0) & 0xff;
+    return op & this.mask;
+  }
+  exec({ cmd, cmdEn, addr, addrEn, dummy, tx, rxLen, now }){
+    const op = cmd & 0xff;
+    if (rxLen > 0 && cmdEn && this.isRead(op)){
+      const reg = this.regOf(op, addr, addrEn);
+      this.onRead?.(reg, rxLen, now);
+      const out = new Uint8Array(rxLen);
+      const shift = this.dummy - (dummy | 0);         // >0：主机少给了 dummy → 读到的整体前移
+      for (let i = 0; i < rxLen; i++){
+        const j = i + shift;
+        if (j < 0){ out[i] = 0x00; continue; }
+        out[i] = this.regs[(this.autoInc ? reg + j : reg) % this.size];
+      }
+      return { rx: out, why: shift ? `dummy 不符：器件要 ${this.dummy} B，主机给了 ${dummy | 0} → 数据错位 ${shift} 字节` : '' };
+    }
+    if (rxLen === 0 && tx.length && this.isWrite(op)){
+      const reg = this.regOf(op, addr, addrEn);
+      this.onWrite?.(reg, tx, now);
+      /**
+       * 🚨 **写不自增的器件（BMP280 就是）**：一帧里的多个字节会全落到同一个寄存器上
+       *    （最后一个生效）—— 真机症状是"我明明写了 3 个字节，怎么只有最后一个像生效了"。
+       *    面板的 `writePlan` 会按 `autoIncWrite` 自动"一寄存器一帧"，这里如实复现器件行为。
+       */
+      if (!this.autoIncWrite && tx.length > 1){
+        const warn = `写不自增：这一帧的 ${tx.length} 个字节都写进了寄存器 ${reg}（只有最后一个生效）`;
+        for (let i = 0; i < tx.length; i++) this.regs[reg % this.size] = tx[i];
+        return { why: warn };
+      }
+      for (let i = 0; i < tx.length; i++){
+        const r = this.autoIncWrite ? (reg + i) : reg;
+        this.regs[r % this.size] = tx[i];
+      }
+      return {};
+    }
+    return { why: `不认识的操作码 0x${op.toString(16).padStart(2, '0')}（本器件：读 0x${this.readOp.toString(16)}|reg / 写 0x${this.writeOp.toString(16)}|reg）` };
+  }
+}
+
+/**
+ * 假 **命令型 SPI ADC**（默认 MCP3008 风格：`tx = [0x01, 0x80|(ch<<4), 0x00]`，回 3 B）。
+ * 采样值是"活的"（每通道一条会动的正弦），所以定时采集那条路在离线时也能看出波形。
+ */
+export class SpiCmdAdc {
+  constructor(opts = {}){
+    this.name = opts.name || 'MCP3008 风格（10 位 8 通道 ADC）';
+    /** 命令型 SPI 器件**天生全双工**：发命令的同时就在读结果（tx 与 rx 等长） */
+    this.fullDuplex = true;
+    this.bits = opts.bits ?? 10;
+    this.channels = opts.channels ?? 8;
+    this.periodMs = opts.periodMs ?? 2000;
+    this.lastCh = 0;
+    this.samples = 0;
+  }
+  /** 第 ch 通道的"当前值"（0..满量程）—— 正弦 + 通道相位差 */
+  value(ch, now = 0){
+    const phase = ((now % this.periodMs) / this.periodMs) * Math.PI * 2;
+    const v = 0.5 + 0.45 * Math.sin(phase + ch * 0.7);
+    return Math.round(Math.max(0, Math.min(1, v)) * ((1 << this.bits) - 1));
+  }
+  exec({ tx, rxLen, now }){
+    const b0 = tx[0] ?? 0, b1 = tx[1] ?? 0;
+    if (!(b0 & 0x01)) return { why: '命令缺起始位（tx[0] 的 bit0 必须是 1）' };
+    if (!(b1 & 0x80)) return { why: '只实现了单端模式（tx[1] 的 bit7 = SGL/DIFF 必须是 1）' };
+    const ch = (b1 >> 4) & 0x07;
+    this.lastCh = ch;
+    this.samples++;
+    const v = this.value(ch, now);
+    // 线上形状：1 字节前导（null/0）+ 高位字节（低 bits-8 位有效）+ 低位字节
+    const hi = this.bits > 8 ? (v >> 8) & ((1 << (this.bits - 8)) - 1) : (v & 0xff);
+    const lo = this.bits > 8 ? v & 0xff : 0x00;
+    const out = new Uint8Array(rxLen);
+    const bytes = [0x00, hi, lo];
+    for (let i = 0; i < rxLen; i++) out[i] = bytes[i] ?? 0x00;
+    return { rx: out };
+  }
+}
+
 export class MockSpiProbe {
   constructor(opts = {}){
     this.opts = opts;
@@ -196,7 +316,15 @@ export class MockSpiProbe {
     this.flash = opts.flash === false ? null
       : opts.flash instanceof FlashDevice ? opts.flash
       : new FlashDevice({ ...(opts.flash && typeof opts.flash === 'object' ? opts.flash : {}), clock: this.now });
-    this.flashNotes = [];       // 器件侧拒绝/说明（模型给的，不是协议错）
+    /* 另外两种"末级器件"（寄存器器件 / 命令型 ADC）：SPI 没有地址，所以同一时刻只挂一个，
+       由 `device` 选（页面上的「假器件」下拉 = session.setMockDevice()）。 */
+    this.regdev = opts.regdev instanceof SpiRegDevice ? opts.regdev
+      : opts.regdev === false ? null : new SpiRegDevice(opts.regdev && typeof opts.regdev === 'object' ? opts.regdev : {});
+    this.adc = opts.adc instanceof SpiCmdAdc ? opts.adc
+      : opts.adc === false ? null : new SpiCmdAdc(opts.adc && typeof opts.adc === 'object' ? opts.adc : {});
+    /** 'flash'（默认）| 'regs' | 'adc' —— 见 activeDevice() */
+    this.deviceKind = opts.device || 'flash';
+    this.flashNotes = [];       // 器件侧拒绝/说明（模型给的，不是协议错）—— 三种器件共用这一个流水
 
     /**
      * 面板 GRAM 模型（读回功能用）。默认 240×296（AXS15352）；换屏时页面调 `setPanelGeometry()`。
@@ -605,6 +733,35 @@ export class MockSpiProbe {
     return this.gram;
   }
 
+  /**
+   * 当前挂在末级的"器件"。
+   * SPI 与 I2C 不同：**总线上没有地址**，所以同一时刻只能挂一个末级器件 ——
+   * 页面上的「假器件」下拉（回环+NOR / 寄存器器件 / 命令型 ADC）就是切这里。
+   */
+  activeDevice(){
+    if (this.deviceKind === 'regs') return this.regdev;
+    if (this.deviceKind === 'adc') return this.adc;
+    return this.flash;
+  }
+
+  /** 切换末级器件（'flash' | 'regs' | 'adc'）；切完清掉器件侧说明，免得旧告警误导 */
+  setDeviceKind(kind){
+    const k = ['flash', 'regs', 'adc'].includes(kind) ? kind : 'flash';
+    this.deviceKind = k;
+    this.flashNotes.length = 0;
+    this.wireLog.push(`假器件切到 ${k}（${this.activeDevice()?.name || '无'}）`);
+    return k;
+  }
+
+  /** 页面/自测用：三种假器件各自的一句话说明 */
+  deviceInfo(){
+    return {
+      kind: this.deviceKind,
+      name: this.activeDevice()?.name || '（没有末级器件：读回走回环）',
+      has: { flash: !!this.flash, regs: !!this.regdev, adc: !!this.adc },
+    };
+  }
+
 
   _execXfer(f, p){
     if (p.length < XFER_HDR) return ST.BAD_FRAME;
@@ -705,18 +862,23 @@ export class MockSpiProbe {
       }
     }
 
-    // 器件模型：**纯读 / 纯写**（不含全双工）交给它；全双工仍走回环 —— 回环自检就靠那个形状
+    // 器件模型：交给当前末级器件；**全双工**帧只有"本来就全双工的器件"（命令型 ADC）才认，
+    // 其余情况仍走回环 —— 回环自检（MOSI↔MISO 跳线）就靠那个形状。
     const duplex = txLen > 0 && rxLen > 0;
-    if (this.flash && !duplex && (cmdEn || addrEn || rxLen)){
-      const r = this.flash.exec({
+    const dev = this.activeDevice();
+    const devWants = !!dev && (dev.fullDuplex
+      ? (rxLen > 0 && txLen === rxLen)                 // 命令型 ADC：边发命令边读结果
+      : (!duplex && (cmdEn || addrEn || rxLen)));      // NOR / 寄存器器件：纯读或纯写
+    if (devWants){
+      const r = dev.exec({
         cmd: p[0], cmdEn, addr: dv.getUint32(8, true), addrEn,
         dummy: p[3], lines: (tcfg & TC.LINES_MASK) === TC.LINES_4 ? 4 : (tcfg & TC.LINES_MASK) === TC.LINES_2 ? 2 : 1,
-        tx, rxLen, csHold: !!(f.flags & F.CS_HOLD),
-      });
+        tx, rxLen, csHold: !!(f.flags & F.CS_HOLD), now: this.now(),
+      }) || {};
       if (r.rx){ this._lastRx = r.rx; this.stats.bytesRx += r.rx.length; }
       if (r.why){ this.flashNotes.push(r.why); this.wireLog.push(`器件：${r.why}`); }
       this.wireLog.push(`XFER cmd=0x${p[0].toString(16).padStart(2, '0')} tx=${txLen} rx=${rxLen}` +
-        `${cmdEn ? '' : '（续读）'}${(f.flags & F.CS_HOLD) ? ' CS_HOLD' : ''} → 器件`);
+        `${cmdEn ? '' : '（续读）'}${(f.flags & F.CS_HOLD) ? ' CS_HOLD' : ''} → 器件（${this.deviceKind}）`);
       return ST.OK;
     }
 

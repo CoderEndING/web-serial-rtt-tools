@@ -67,8 +67,12 @@ const FIELDS = [
 
 export class GenView {
   constructor(){
-    this.files = [];
-    this.sel = 0;
+    this.files = [];           // 全部产物（工程配套文件 + 本地桥安装包）
+    this.projFiles = [];       // 前一半：uvprojx2cmake.py 的模板产物
+    this.kitFiles = [];        // 后一半：本地桥安装包（`rtt-bridge-kit/…`）
+    this.selP = 0;             // 两个 tab 各自记住"当前在看哪个文件"
+    this.selK = 0;
+    this.dock = 'files';       // 右列当前 tab（files / params / bridge）—— 左栏跟着它显示
     this.info = null;          // parseUvprojx 的结果（提示用）
     this.folderName = '';      // 上次写入的文件夹名（提示用）
     this._bound = false;
@@ -85,6 +89,9 @@ export class GenView {
 
     // 绑定 + 持久化（刷新不丢）
     for (const [id, key, kind] of FIELDS) store.bind($(id), key, kind);
+
+    // 右列 tab（与左栏卡片联动，见 _dockSelect）
+    this._bindDock();
 
     // 任何改动 → 重新生成（防抖）
     const again = debounce(() => this.refresh(), 90);
@@ -114,6 +121,8 @@ export class GenView {
     $('g-zip-bridge').addEventListener('click', () => this.downloadBridgeZip());
     $('g-copy').addEventListener('click', () => this.copyCurrent());
     $('g-dl').addEventListener('click', () => this.downloadCurrent());
+    $('g-kit-copy').addEventListener('click', () => this.copyCurrent());
+    $('g-params-copy').addEventListener('click', () => this.copyParams());
     // 改了桥那几项就地重算（和别的字段一样：input/change 都挂）
     for (const el of $('tab-gen').querySelectorAll('input,select')){
       if (el.id.startsWith('g-bk-')) el.addEventListener('change', () => this.refresh());
@@ -123,6 +132,54 @@ export class GenView {
   }
 
   onShow(){ this.refresh(); }
+
+  // ---------------------------------------------------------------- 右列 tab ⇄ 左栏卡片
+
+  /**
+   * 右列 tab 与**左栏卡片**是**一套分组**（卡片上的 `data-dock` 就是它的归属）：
+   *   · `files`  —— 工程文件：左栏「工程 / 生成哪些 / 落地方式」+ 右列模板产物预览
+   *   · `params` —— 调试参数：左栏「参数」+ 右列"我到底填了什么"一览表（长路径看得全、可复制）
+   *   · `bridge` —— 本地桥：左栏「本地桥」+ 右列安装包那 7 个文件的预览
+   * 切 tab 时**左栏只显示本组的卡片**（用户 2026-10：左栏太长 → 分类简洁）。
+   */
+  _bindDock(){
+    const tabs = $('g-dock-tabs');
+    if (!tabs) return;
+    for (const b of tabs.querySelectorAll('button[data-dock]')) b.addEventListener('click', () => this._dockSelect(b.dataset.dock));
+    const saved = store.get('gen.dock', 'files');
+    this._dockSelect(['files', 'params', 'bridge'].includes(saved) ? saved : 'files', { save: false });
+  }
+
+  _dockSelect(name, { save = true } = {}){
+    const tabs = $('g-dock-tabs');
+    if (tabs) for (const b of tabs.querySelectorAll('button[data-dock]')) b.classList.toggle('on', b.dataset.dock === name);
+    const box = $('g-box-dock');
+    if (box) for (const p of box.querySelectorAll('.dockpage')) p.classList.toggle('on', p.dataset.dock === name);
+    // 左栏：只留本组的卡片（`hidden` 而不是删节点 —— 表单值/绑定都不受影响）
+    for (const fs of document.querySelectorAll('#tab-gen .side fieldset')){
+      fs.hidden = !!fs.dataset.dock && fs.dataset.dock !== name;
+    }
+    this.dock = name;
+    if (save) store.set('gen.dock', name);
+    // 刚显示出来的内容补一次刷新（隐藏期间不渲染，省得白算）
+    if (name === 'params') this.renderParams();
+    if (name === 'bridge') this.renderPreview();
+    if (name === 'files') this.renderPreview();
+    this.renderPill();
+  }
+
+  /** tab 栏上的状态胶囊：当前 tab 一句话（跟 #spi / #i2c 的运行胶囊同一个位置与用途）*/
+  renderPill(){
+    const pill = $('g-dock-pill');
+    if (!pill) return;
+    if (!this.files?.length && !this.p) return;
+    const proj = this.projFiles?.length || 0;
+    const kit = this.kitFiles?.length || 0;
+    const bytes = (this.files || []).reduce((a, f) => a + f.data.length, 0);
+    if (this.dock === 'params') pill.textContent = `${document.querySelectorAll('#g-params-body tr:not(.gparamhead)').length} 项参数 · 点值即复制`;
+    else if (this.dock === 'bridge') pill.textContent = kit ? `${kit} 个文件 · ${(kitBytes(this.kitFiles) / 1024).toFixed(0)} KB` : '桥包未生成（左栏勾上）';
+    else pill.textContent = `${proj} 个文件 · ${(bytes / 1024).toFixed(1)} KB · ${this.p?.newline === 'lf' ? 'LF' : 'CRLF'}`;
+  }
 
   // ---------------------------------------------------------------- 参数
   params(){
@@ -169,7 +226,7 @@ export class GenView {
      * 产物 = Python 模板那几件 + **本地桥安装包**（桥那几件在 `bridge-kit.js` 里单独生成，
      * 不掺进 `buildOutputs()` —— 那个函数的产物要和 Python 工具逐字节对账，不能动）。
      */
-    this.kitFiles = kitFiles({
+    this.kitOut = kitFiles({
       on: this.p.bridgeKit,
       port: this.p.bridgePort, token: '',
       target: this.p.bridgeTarget, customCfgs: this.p.bridgeCfgs, speed: this.p.bridgeSpeed,
@@ -177,10 +234,14 @@ export class GenView {
       jlinkDevice: this.p.bridgeJlinkDevice, jlinkSpeed: this.p.bridgeJlinkSpeed,
       nodeVersion: this.p.bridgeNodeVer, mirror: this.p.bridgeMirror, autoNode: this.p.bridgeAutoNode,
     });
-    this.files = [...buildOutputs(this.p), ...this.kitFiles];
-    if (this.sel >= this.files.length) this.sel = Math.max(0, this.files.length - 1);
+    this.projFiles = buildOutputs(this.p);
+    this.kitFiles = this.kitOut;
+    this.files = [...this.projFiles, ...this.kitFiles];
+    if (this.selP >= this.projFiles.length) this.selP = Math.max(0, this.projFiles.length - 1);
+    if (this.selK >= this.kitFiles.length) this.selK = Math.max(0, this.kitFiles.length - 1);
     this.renderFileTabs();
     this.renderPreview();
+    if (this.dock === 'params') this.renderParams();      // 只有正看着它时才重画（隐藏时白算）
 
     const bytes = this.files.reduce((a, f) => a + f.data.length, 0);
     const kb = (bytes / 1024).toFixed(1);
@@ -192,43 +253,121 @@ export class GenView {
         (this.kitFiles.length ? ` · 含桥包 ${(kitBytes(this.kitFiles) / 1024).toFixed(0)} KB` : ''), 'ok');
     }
     this.renderDetect();
+    this.renderPill();
     return this.files;
   }
 
+  /**
+   * 两个 tab 各自一条文件栏：
+   *   · `#g-files`      —— 工程配套文件（uvprojx2cmake.py 那几件）
+   *   · `#g-kit-files`  —— 本地桥安装包那 7 个（`rtt-bridge-kit/…`）
+   * 以前它们挤在同一个 seg 里分两行（桥包那行还是后加的）；tab 化之后各归各的页面
+   * —— 顺带解决了"标签栏三行、认不出谁是谁"的老问题。
+   */
   renderFileTabs(){
-    const box = $('g-files');
-    box.innerHTML = '';
-    /**
-     * 两行：第一行 = 工程配套文件（uvprojx2cmake.py 那几件），第二行 = **本地桥安装包**的文件。
-     * 桥包那 7 个带 `rtt-bridge-kit/` 前缀，跟工程是两回事 —— 混在一行里既挤又认不出谁是谁
-     * （用户 2026-10 要求："他们都属于本地桥的，把他们放到第二行"）。
-     */
-    const row1 = document.createElement('div'); row1.className = 'filerow';
-    const row2 = document.createElement('div'); row2.className = 'filerow kit';
-    this.files.forEach((f, i) => {
-      const b = document.createElement('button');
-      // 标签只显示文件名（桥包那 7 个带 rtt-bridge-kit/ 前缀，全写出来会把标签栏撑成三行）；
-      // 完整路径放 title，鼠标悬停能看全
-      b.textContent = f.name.split('/').pop();
-      b.title = f.name;
-      b.className = i === this.sel ? 'on' : '';
-      b.addEventListener('click', () => { this.sel = i; this.renderFileTabs(); this.renderPreview(); });
-      (/^rtt-bridge-kit\//.test(f.name) ? row2 : row1).appendChild(b);
-    });
-    box.appendChild(row1);
-    if (row2.childElementCount) box.appendChild(row2);   // 没勾桥包时不显示空行
+    const draw = (box, list, selKey) => {
+      if (!box) return;
+      box.innerHTML = '';
+      list.forEach((f, i) => {
+        const b = document.createElement('button');
+        b.textContent = f.name.split('/').pop();       // 标签只显示文件名，完整路径进 title
+        b.title = f.name;
+        b.className = i === this[selKey] ? 'on' : '';
+        b.addEventListener('click', () => { this[selKey] = i; this.renderFileTabs(); this.renderPreview(); });
+        box.appendChild(b);
+      });
+    };
+    draw($('g-files'), this.projFiles, 'selP');
+    draw($('g-kit-files'), this.kitFiles, 'selK');
   }
 
+  /** 两个预览框各自画自己的（切 tab、改参数都会调到）*/
   renderPreview(){
-    const f = this.files[this.sel];
-    const pre = $('g-preview');
-    if (!f){
-      pre.textContent = '';
-      return;
+    const paint = (box, f) => {
+      if (!box) return;
+      if (!f){ box.textContent = f === undefined ? '（这个 tab 没有文件 —— 左栏把「生成『本地桥』安装包」勾上）' : ''; return; }
+      box.textContent = f.bin ? hexPreview(f.data) : f.text;
+      box.scrollTop = 0;
+    };
+    paint($('g-preview'), this.projFiles[this.selP]);
+    paint($('g-kit-preview'), this.kitFiles.length ? this.kitFiles[this.selK]
+      : (this.p?.bridgeKit ? null : undefined));
+  }
+
+  /**
+   * 「调试参数」tab 的右列：把左栏**实际填的值**逐项列出来（长路径能看全、点一下复制）。
+   *
+   * 用**遍历 DOM** 的办法生成（不是写一张字段清单）：左栏加了新字段这里自动就有，
+   * 不会出现"表里漏了一项"这种漂移。分组照左栏卡片的 legend。
+   */
+  renderParams(){
+    const body = $('g-params-body');
+    if (!body) return;
+    const groups = [];
+    for (const fs of document.querySelectorAll('#tab-gen .side fieldset')){
+      const legend = fs.querySelector('legend')?.textContent?.trim() || '（未命名）';
+      const rows = [];
+      for (const lab of fs.querySelectorAll('label.row, label.chk')){
+        const nameEl = lab.querySelector('span');
+        const ctl = lab.querySelector('input, select');
+        if (!ctl) continue;
+        let value;
+        if (ctl.type === 'checkbox') value = ctl.checked ? '✓ 开' : '✗ 关';
+        else value = ctl.value;
+        if (nameEl) rows.push({ name: nameEl.textContent.trim(), value });
+        else rows.push({ name: lab.textContent.trim(), value, isChk: true });
+        void ctl;
+      }
+      // 卡片里除了 label.row 还有按钮/提示，这里只列"有值的输入项"
+      if (rows.length) groups.push({ legend, rows, dock: fs.dataset.dock || '' });
     }
-    if (f.bin) pre.textContent = hexPreview(f.data);
-    else pre.textContent = f.text;
-    pre.scrollTop = 0;
+    body.innerHTML = '';
+    for (const g of groups){
+      const trh = document.createElement('tr');
+      trh.className = 'gparamhead';
+      const tdh = document.createElement('td');
+      tdh.colSpan = 2;
+      tdh.textContent = g.legend;
+      trh.appendChild(tdh);
+      body.appendChild(trh);
+      for (const r of g.rows){
+        const tr = document.createElement('tr');
+        const td1 = document.createElement('td');
+        td1.className = 'gpk';
+        td1.textContent = r.name;
+        const td2 = document.createElement('td');
+        td2.className = 'gpv';
+        const code = document.createElement('code');
+        code.textContent = r.value === '' ? '（留空）' : r.value;
+        code.title = '点击复制：' + r.value;
+        code.addEventListener('click', () => {
+          navigator.clipboard?.writeText(r.value);
+          toast(`已复制：${r.value.length > 40 ? r.value.slice(0, 40) + '…' : r.value}`, 'ok', 2500);
+        });
+        td2.appendChild(code);
+        tr.append(td1, td2);
+        body.appendChild(tr);
+      }
+    }
+    this.renderPill();          // 胶囊上的"N 项参数"跟着刷新
+  }
+
+  /** 参数表 → `键=值` 文本（喂给别人的时候直接贴）*/
+  paramsText(){
+    const out = [];
+    for (const tr of document.querySelectorAll('#g-params-body tr')){
+      if (tr.classList.contains('gparamhead')){ out.push(`\n[${tr.textContent.trim()}]`); continue; }
+      const k = tr.querySelector('.gpk')?.textContent ?? '';
+      const v = tr.querySelector('.gpv code')?.textContent ?? '';
+      out.push(`${k}=${v}`);
+    }
+    return out.join('\n').trim();
+  }
+
+  copyParams(){
+    const text = this.paramsText();
+    navigator.clipboard?.writeText(text);
+    toast(`已复制 ${text.split('\n').length} 行参数`, 'ok', 3000);
   }
 
   renderDetect(){
@@ -361,15 +500,23 @@ export class GenView {
     toast(`已打包桥包 ${this.kitFiles.length} 个文件（${(zip.length / 1024).toFixed(1)} KB）：解压后双击 start-bridge.bat`, 'ok', 6000);
   }
 
+  /**
+   * 当前 tab 里"正在看的那一件"：工程文件 tab → `selP`；本地桥 tab → `selK`。
+   * （「调试参数」tab 没有文件，复制/下载按钮在那儿不显示 —— 那边是参数表。）
+   */
+  currentFile(){
+    return this.dock === 'bridge' ? this.kitFiles[this.selK] : this.projFiles[this.selP];
+  }
+
   downloadCurrent(){
-    const f = this.files[this.sel];
+    const f = this.currentFile();
     if (!f) return;
     saveBlob(new Blob([f.data], { type: f.bin ? 'application/octet-stream' : 'text/plain' }), f.name);
     toast('已下载 ' + f.name, 'ok');
   }
 
   async copyCurrent(){
-    const f = this.files[this.sel];
+    const f = this.currentFile();
     if (!f) return;
     if (f.bin) return toast('二进制文件不支持复制，用「下载当前文件」', 'warn');
     try {
@@ -389,6 +536,9 @@ export class GenView {
       newline: this.p?.newline,
       detect: this.info,
       folder: this.folderName,
+      dock: this.dock,
+      leftCards: [...document.querySelectorAll('#tab-gen .side fieldset')]
+        .filter(fs => !fs.hidden).map(fs => fs.querySelector('legend')?.textContent?.trim() || ''),
       // 本地桥安装包：开了就有 7 个文件（tools/selftest/bridge-kit.test.mjs 管内容，这里只管"在不在"）
       bridgeKit: {
         on: !!this.p?.bridgeKit,

@@ -44,9 +44,21 @@ import {
   F, LINE, T, TC, XFER_HDR, XFER_TX_MAX, csPayload, delayPayload, gpioPayload,
   linesToTcfg, resetPayload, stepPayload, tcfgToLines, xferPayload,
 } from './protocol.js';
+import { parseAs } from '../core/expr.js';
 
 /** 行首关键字（第一段不是 key=value 也不是裸字节时按关键字认）*/
 const KEYWORDS = ['xfer', 'spi', 'step', 'delay', 'gpio', 'cs', 'reset', 'ping', 'auxin'];
+
+/**
+ * **块级 / 行尾修饰**关键字（与 `#i2c` 的脚本 DSL 同一套语义，学一次两边都会用）：
+ *   · `loop 50ms [20]` … `end` —— 块内每行按 50 ms 周期跑（限一段块；`20` = 跑 20 轮自停）
+ *   · `every 100ms [50]`        —— 不成块也行：把**后面所有行**设成周期
+ *   · `once`                    —— 取消周期，回到一次性
+ *   · 行尾 `as a=u8(0), b=u16be(2)` / `every 20ms` —— 只作用于这一行
+ */
+const BLOCK_KEYS = new Set(['loop', 'repeat', 'end', 'endloop', 'every', 'once']);
+/** 行尾修饰（`buildXfer` / `parseCRow` 会把它们从参数流里摘走）*/
+const MOD_KEYS = new Set(['as', 'every', 'tag']);
 
 /** gpio 的行号写法（大小写不敏感；也吃协议里的数字 0..3）*/
 const LINE_ALIAS = {
@@ -116,12 +128,66 @@ export function parseNum(tok, defHex = false){
   const t = String(tok ?? '').trim();
   if (t === '') return { ok: false, why: '空值' };
   const m = /^(0x|0X)?([0-9a-fA-F]+)$/.exec(t);
-  if (!m) return { ok: false, why: `"${t}" 不是数字` };
-  const hex = !!m[1] || defHex;
-  if (!hex && !/^[0-9]+$/.test(t)) return { ok: false, why: `"${t}" 不是十进制数字（十六进制请写 0x…）` };
-  const v = parseInt(m[2], hex ? 16 : 10);
-  if (!Number.isFinite(v)) return { ok: false, why: `"${t}" 解析失败` };
-  return { ok: true, v };
+  if (m){
+    const hex = !!m[1] || defHex;
+    if (!hex && !/^[0-9]+$/.test(t)) return { ok: false, why: `"${t}" 不是十进制数字（十六进制请写 0x…）` };
+    const v = parseInt(m[2], hex ? 16 : 10);
+    if (!Number.isFinite(v)) return { ok: false, why: `"${t}" 解析失败` };
+    return { ok: true, v };
+  }
+  // （2）位运算表达式：`0x80|0x3B`、`0x40|(0x2<<1)`、`0xFF&0x0F`
+  //     寄存器面板那套 "opcode | 寄存器号" 直接写进脚本就行，不必先自己算成 0xBB
+  if (/^[0-9a-fA-FxX\s|&<>+\-()]+$/.test(t)){
+    try {
+      return { ok: true, v: evalBitExpr(t, defHex) };
+    } catch (e){
+      return { ok: false, why: `"${t}" 不是数字（位运算表达式：${e?.message || e}）` };
+    }
+  }
+  return { ok: false, why: `"${t}" 不是数字` };
+}
+
+/**
+ * 位运算小计算器：支持 `| & << >> + -` 与括号。
+ * **刻意从简：从左到右、不分优先级**（`0x80|0x3B` 才是常见写法，没人会写混合优先级的式子）；
+ * 数字按 `defHex` 决定裸写法是十进制还是十六进制（`cmd=` 那颗是十六进制）。
+ */
+export function evalBitExpr(src, defHex = false){
+  const s = String(src).replace(/\s+/g, '');
+  let i = 0;
+  const atom = () => {
+    if (s[i] === '('){
+      i++;
+      const v = expr();
+      if (s[i] !== ')') throw new Error('括号没配对');
+      i++;
+      return v;
+    }
+    const m = /^(0[xX][0-9a-fA-F]+|[0-9a-fA-F]+)/.exec(s.slice(i));
+    if (!m) throw new Error(`第 ${i + 1} 个字符处应该是数字`);
+    i += m[1].length;
+    const hex = /^0[xX]/.test(m[1]) || defHex;
+    if (!hex && !/^[0-9]+$/.test(m[1])) throw new Error(`"${m[1]}" 不是十进制（十六进制请写 0x…）`);
+    return parseInt(m[1].replace(/^0[xX]/, ''), hex ? 16 : 10);
+  };
+  const expr = () => {
+    let v = atom();
+    for (;;){
+      const op = /^(<<|>>|[|&+\-])/.exec(s.slice(i));
+      if (!op) break;
+      i += op[1].length;
+      const r = atom();
+      v = op[1] === '|' ? (v | r)
+        : op[1] === '&' ? (v & r)
+        : op[1] === '<<' ? (v << r)
+        : op[1] === '>>' ? (v >>> r)
+        : op[1] === '+' ? (v + r) : (v - r);
+    }
+    return v;
+  };
+  const v = expr();
+  if (i !== s.length) throw new Error(`第 ${i + 1} 个字符起看不懂`);
+  return v;
 }
 
 /** 十六进制字节串：`00,01,02` / `0x00 0x01`（带空格要引号）/ `000102` */
@@ -159,19 +225,77 @@ export function parseFrames(text, opts = {}){
   const maxTx = opts.maxTx ?? XFER_TX_MAX;
   const src = String(text ?? '').split(/\r?\n/);
   const items = [], errors = [], warns = [];
+  /** 解析期的块状态（loop / every 会改它）—— 与 `#i2c` 的脚本区同一套口径 */
+  const st = { period: 0, count: 0, group: 0, loops: [], declared: [] };
 
   for (let i = 0; i < src.length; i++){
     const lineNo = i + 1;
     const raw = stripComment(src[i]);
     if (!raw.trim()) continue;
     const text0 = src[i].trim();
+    /**
+     * 嗅行首关键字**只用正则**（不 tokenize）：`tokenize` 会对没配对的引号抛错，
+     * 而这个嗅探发生在 try 之外 —— 用 tokenize 的话 `xfer cmd="0x03` 这种行会**直接抛穿**
+     * 整个解析（原本应该作为"第 N 行报错"收集起来）。踩过：自测里那条"引号没配对"就是这么红的。
+     */
+    const headM = /^([A-Za-z_][A-Za-z0-9_]*)/.exec(raw.trim());
+    const head = (headM ? headM[1] : '').toLowerCase();
     try {
+      // ── 块级关键字：loop / end / every / once（不进帧列表，只改周期状态）
+      if (BLOCK_KEYS.has(head)){
+        const rest = tokenize(raw.trim()).slice(1);
+        if (head === 'loop' || head === 'repeat'){
+          if (st.loops.length) throw new Error('loop 不能嵌套（一段脚本只支持一个 loop 块）');
+          if (!rest.length) throw new Error('loop 后面要跟周期，例如 `loop 50ms`');
+          const d = parseDuration(rest[0]);
+          if (!d.ok) throw new Error(`loop 的周期有问题：${d.why}`);
+          if (d.us <= 0) throw new Error('loop 的周期必须是正数');
+          const n = rest[1] != null ? parseNum(rest[1]) : null;
+          if (n && (!n.ok || n.v <= 0)) throw new Error('loop 的次数必须是正整数（省略 = 一直跑）');
+          st.period = Math.max(1, Math.round(d.us / 1000));
+          st.count = n ? n.v : 0;
+          st.group++;
+          st.loops.push({ line: lineNo, period: st.period, count: st.count, group: st.group });
+          st.declared.push({ line: lineNo, period: st.period, count: st.count, group: st.group });
+          continue;
+        }
+        if (head === 'end' || head === 'endloop'){
+          if (!st.loops.length) throw new Error('这里没有对应的 loop（多了一个 end）');
+          st.loops.pop();
+          st.period = 0; st.count = 0;
+          continue;
+        }
+        if (head === 'once'){
+          st.period = 0; st.count = 0;
+          continue;
+        }
+        // every：不成块也行
+        if (!rest.length) throw new Error('every 后面要跟周期，例如 `every 100ms`');
+        const d = parseDuration(rest[0]);
+        if (!d.ok) throw new Error(`every 的周期有问题：${d.why}`);
+        if (d.us <= 0) throw new Error('every 的周期必须是正数');
+        const n = rest[1] != null ? parseNum(rest[1]) : null;
+        if (n && (!n.ok || n.v <= 0)) throw new Error('every 的次数必须是正整数');
+        st.period = Math.max(1, Math.round(d.us / 1000));
+        st.count = n ? n.v : 0;
+        st.group++;
+        continue;
+      }
       const it = parseLine(raw.trim(), text0, lineNo, maxTx, warns);
-      if (it) items.push(it);
+      if (it){
+        // 行内没写 every → 跟着块/全局的周期走
+        if (it.period == null && st.period){
+          it.period = st.period;
+          it.count = st.count;
+          it.group = st.group;
+        }
+        items.push(it);
+      }
     } catch (e){
       errors.push({ line: lineNo, text: text0, msg: e?.message || String(e) });
     }
   }
+  if (st.loops.length) errors.push({ line: src.length, text: '', msg: `有 ${st.loops.length} 个 loop 没有对应的 end` });
 
   // 规则 3：整段一条 RSP 都没有 → 给最后一条帧补上
   if (items.length && !items.some(x => x.flags & F.RSP)){
@@ -184,6 +308,12 @@ export function parseFrames(text, opts = {}){
     xfer: items.filter(x => x.type === T.XFER).length,
     bytes: items.reduce((n, x) => n + x.payload.length + 8, 0),
     kinds: [...new Set(items.map(x => x.kind))],
+    /** 定时采集：有周期的帧（分组按 group）、解码变量名、一次性帧数 —— 见 app/spi/runner.js */
+    oneShots: items.filter(x => !x.period).length,
+    timed: items.filter(x => x.period).length,
+    groups: [...new Set(items.filter(x => x.period).map(x => x.group))].length,
+    loops: st.declared.map(l => ({ ...l })),
+    vars: items.filter(x => x.as).flatMap(x => x.as.map(a => a.name)),
   };
   return { items, errors, warns, stats };
 }
@@ -273,8 +403,14 @@ export function parseLine(line, text0, lineNo, maxTx, warns = []){
     return buildXfer(toks.slice(1), text0, maxTx, warns, cmd);
   }
 
-  // ── C 表的一行：{cmd, lines, addr_len, addr, dummy, rx_len, tx}
-  if (line.trimStart().startsWith('{')) return parseCRow(line, maxTx);
+  // ── C 表的一行：{cmd, lines, addr_len, addr, dummy, rx_len, tx}（花括号后还能跟 `as … every …`）
+  if (line.trimStart().startsWith('{')){
+    const close = line.lastIndexOf('}');
+    const row = close > 0 ? line.slice(0, close + 1) : line;
+    const tail = close > 0 ? line.slice(close + 1).replace(/^[\s,]+/, '') : '';
+    const it = parseCRow(row, maxTx);
+    return tail ? applyModifiers(it, extractModifiers(tokenize(tail))) : it;
+  }
 
   throw new Error(`认不出这一行："${text0}"（裸字节 / xfer / step / delay / gpio / cs / reset / ping / auxin / {C 表行}）`);
 }
@@ -477,6 +613,63 @@ function mk(type, payload, flags, label, kind){
 }
 
 /**
+ * 把**行尾修饰**从参数流里摘出来：`as a=u8(0), b=u16be(2)` / `every 20ms [50]` / `tag 名字`。
+ *
+ * 为什么要单独摘：`as` 的值会被空格切开（`as ax=i16be(0)/16384, az=…`），直接丢给 `readKV`
+ * 会被当成"不认识的 key"报错。摘出来之后：
+ *   · `as` 的值交给 `core/expr.js` 的 `parseAs` 解析（语法错**在解析期**就带行号报出来，而不是等发送时）
+ *   · `every` 只作用于这一行（覆盖块级周期）
+ * @returns {{core:Array<string>, asText:string, everyText:string, countText:string, tag:string}}
+ */
+export function extractModifiers(toks){
+  const core = [];
+  let asText = '', everyText = '', countText = '', tag = '';
+  const keyOf = t => { const low = t.toLowerCase(); const eq = low.indexOf('='); return eq >= 0 ? low.slice(0, eq) : low; };
+  for (let i = 0; i < toks.length; i++){
+    const t = toks[i];
+    const key = keyOf(t);
+    if (!MOD_KEYS.has(key)){ core.push(t); continue; }
+    const eq = t.indexOf('=');
+    const inline = eq >= 0 ? t.slice(eq + 1) : '';
+    if (key === 'as'){
+      const parts = inline ? [inline] : [];
+      while (i + 1 < toks.length && !MOD_KEYS.has(keyOf(toks[i + 1]))) parts.push(toks[++i]);
+      if (!parts.length) throw new Error('as 后面要跟表达式，例：as ax=u16be(0)/16384, az=u16be(4)/16384');
+      asText += (asText ? ',' : '') + parts.join('');
+    } else if (key === 'every'){
+      if (inline) everyText = inline;
+      else if (i + 1 < toks.length && !MOD_KEYS.has(keyOf(toks[i + 1]))) everyText = toks[++i];
+      if (!everyText) throw new Error('every 后面要跟周期，例：every 20ms');
+      // 可选次数：紧跟的纯数字
+      if (i + 1 < toks.length && /^\d+$/.test(toks[i + 1])) countText = toks[++i];
+    } else if (key === 'tag'){
+      tag = inline || (i + 1 < toks.length ? toks[++i] : '');
+    }
+  }
+  return { core, asText, everyText, countText, tag };
+}
+
+/** 修饰 → 挂到 item 上（`as` 在这里就解析，语法错带行号抛出去）*/
+function applyModifiers(it, mods){
+  if (!it) return it;
+  if (mods.asText){
+    const r = parseAs(mods.asText);
+    if (!r.ok) throw new Error(`as 有问题：${r.why}`);
+    it.asText = mods.asText;
+    it.as = r.fields;                        // [{name, ast, text}] —— runner 按它解码
+  }
+  if (mods.everyText){
+    const d = parseDuration(mods.everyText);
+    if (!d.ok) throw new Error(`every 的周期有问题：${d.why}`);
+    if (d.us <= 0) throw new Error('every 的周期必须是正数');
+    it.period = Math.max(1, Math.round(d.us / 1000));
+    it.count = mods.countText ? parseInt(mods.countText, 10) : 0;
+  }
+  if (mods.tag) it.tag = mods.tag;
+  return it;
+}
+
+/**
  * 收集 key=value 与**裸开关**（`cs_hold dma` 这种不带值的写法）。
  * unknown 交给调用方 done() 校验（裸开关也算 key —— 写错了要报出来，不能静默忽略）。
  */
@@ -531,7 +724,9 @@ function readKV(toks){
 }
 
 function buildXfer(toks, text0, maxTx, warns, presetCmd = null){
-  const kv = readKV(toks);
+  // 行尾修饰（as / every / tag）先摘走，剩下的才是帧参数 —— 见 extractModifiers 的注释
+  const mods = extractModifiers(toks);
+  const kv = readKV(mods.core);
   const known = ['cmd', 'tx', 'rx', 'addr', 'addrl', 'addrlen', 'alen', 'dummy', 'lines',
     'rsp', 'cs_hold', 'cshold', 'cs_off', 'csoff', 'cs_aux', 'csaux', 'poll', 'nodma',
     'dma', 'force_dma', 'forcedma', 'addrquad', 'addr_quad', 'token', 'dc', 'dcen', 'dc1',
@@ -573,8 +768,9 @@ function buildXfer(toks, text0, maxTx, warns, presetCmd = null){
   if (lines !== 1) body.push(`${lines}线`);
   if (tx.length) body.push(`tx=${tx.length}`);
   if (rx) body.push(`rx=${rx}`);
-  return mk(T.XFER, xferPayload({ cmd, tcfg, addrLen, dummy, addr, tx, rxLen: rx }), flags,
+  const it = mk(T.XFER, xferPayload({ cmd, tcfg, addrLen, dummy, addr, tx, rxLen: rx }), flags,
     `XFER ${body.join(' ')}`, 'xfer');
+  return applyModifiers(it, mods);
 }
 
 /**
@@ -606,6 +802,24 @@ C 表行        {0x9F, 1, 0, 0x000000, 0, 3, NULL},
 
 XFER 的 key：cmd= tx= rx= addr= addrl= dummy= lines=
 开关（不带值）：rsp cs_hold cs_off cs_aux poll dma addrquad token dc dc1 dc0
+
+定时采集（与「USB→I2C」页的脚本区**同一套语义**，学一次两边都会用）：
+  loop 20ms                      块开始：里面每行都按 20 ms 周期跑
+  loop 20ms 100 … end            带次数：跑 100 轮自己停（省略 = 一直跑到点「停止」）
+  every 100ms                    不成块也行：把**后面所有行**设成 100 ms 周期
+  once                           取消周期，回到一次性
+  行尾 every 20ms                只给这一行定周期（覆盖块级）
+  行尾 as ax=u16be(0)/16384, …   把读回的字节变成有名字的量（实时值面板画出曲线）
+  行尾 tag 名字                 给这条帧一个短名字（日志里好认）
+
+例（SPI 加速度计，每 20 ms 读 6 B 解成三轴 g 值）：
+  xfer cmd=0x80|0x75 rx=1 as who=u8(0)        # 一次性：先读 WHO_AM_I 认片子
+  loop 20ms
+    xfer cmd=0x80|0x3B rx=6 as ax=i16be(0)/16384, ay=i16be(2)/16384, az=i16be(4)/16384
+  end
+
+as 表达式的偏移是**这一组读帧拼起来的整块**上的偏移（与 I2C 侧一致）；可用函数见
+「USB→I2C」页的语法速查（u8/i8/u16be/u16le/i16be/i32be/f32be… + 四则与位运算）。
 
 三条自动规则：
   1. 写了 cmd= 自动加 cmd 相位；写了 addr= / addrl>0 自动加地址相位
@@ -640,5 +854,21 @@ step cmd=0x36 tx=00
 step cmd=0x3A tx=55
 step cmd=0x29
 delay 20ms`,
+  },
+  {
+    name: '传感器：WHO_AM_I + 每 20ms 采三轴（loop + as）',
+    text: `# 以 MPU-9250 风格（读 = 0x80|reg、无 dummy）为例：假探针切到「寄存器器件」就能跑
+xfer cmd=0x80|0x75 rx=1 as who=u8(0)          # 一次性：WHO_AM_I（0x71 / 0x68）
+loop 20ms
+  xfer cmd=0x80|0x3B rx=6 as ax=i16be(0)/16384, ay=i16be(2)/16384, az=i16be(4)/16384
+end`,
+  },
+  {
+    name: 'ADC：MCP3008 每 50ms 读 0 通道（命令型）',
+    text: `# 假探针切到「命令型 ADC」；真器件：VDD/GND + CH0 接被测电压
+# 命令型器件没有"命令相位"，整条命令都放在 tx 里，且**收发必须等长**（各 3 B）
+loop 50ms
+  xfer tx=01,80,00 rx=3 as v=u16be(1)&0x3FF
+end`,
   },
 ];

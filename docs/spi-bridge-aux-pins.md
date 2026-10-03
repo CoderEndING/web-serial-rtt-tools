@@ -96,6 +96,25 @@ CH7(PA10)：4.5 s 的整段采集里只有 12 个 ~20 ns 宽的毛刺，间隔�
 1. `led_write()` 前判断该 pad 是否已被桥当作辅助脚占用（或 LED 引脚等于 `s_pad_*` 里任一非 0 值时跳过写入）；
 2. 至少在协议文档/描述里把 pad 11 标成「不可用」并说明原因。
 
+### 4.2 pad 16/17（PA28/PA29）＝ I2C 桥的固定 SDA/SCL（2026-10-03 起在引脚分配图上固定标出）
+
+用户 2026-10-03 要求：「I2C 引脚固定、不做可变引脚，只希望显示在**引脚分配图**上，并且是固定显示位置的。」
+所以 `app/spi/bus-view.js` 的 `renderPinMap()` 里，**J3[19] / J3[21] 这两行的角色写死成 `i2c`**：
+`◆` + 「I2C 桥 SCL/SDA」+「固定」徽标 + `.is-i2c` 配色，图例与脚注也各加一句 ——
+**与配置、与 I2C 有没有使能都无关**（接线的人必须先看到这两根已经名花有主）。
+
+它们仍然**留在辅助脚下拉里、且不灰掉**：固件侧是**动态**拒的，不是永远不能用 ——
+
+| 事实 | 出处 |
+|---|---|
+| SDA = `BOARD_I2C_BRIDGE_SDA_PAD` = **PA28 = J3[21]**；SCL = `BOARD_I2C_BRIDGE_SCL_PAD` = **PA29 = J3[19]**（编译期常量，不可配） | `firmware/application_5301/src/i2c_bridge/i2c_bridge.c` 顶部注释 + `i2c_bridge.h` |
+| I2C 桥**使能期间**这两根被它占用：`i2c_bridge_owns_pad(pad)` 命中即拒 | `i2c_bridge.c:649` |
+| SPI 桥侧据此拒它们当辅助脚 | `spi_bridge.c:1918`（`if (i2c_bridge_owns_pad(pad) != 0U) …`） |
+| 若配置里真把 DC/RST/BL 配到这两根上（而 I2C 正使能），引脚图上会把它标红 ⚠ 并写明原因 | `renderPinMap()` 的 `stale` / `why`（`i2c: 'I2C 桥的固定脚（I2C 一使能就被它占用）'`） |
+
+回归：`tools/selftest/spi-bus-page.test.mjs` 第 3 节（6 条断言：两行的 PA29/PA28 + SCL/SDA 文案、
+「固定」徽标与配色各 2 处、图例里有 ◆、脚注给出 J3[19]/J3[21]）。
+
 ---
 
 ## 5. LA 通道映射（实测得出，不是照文档抄的）

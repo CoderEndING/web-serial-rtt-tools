@@ -87,6 +87,9 @@ test:
 	$(NODE) tools/selftest/dbg-core.test.mjs
 	$(NODE) tools/selftest/i2c-proto.test.mjs
 	$(NODE) tools/selftest/i2c-dsl.test.mjs
+	$(NODE) tools/selftest/i2c-registers.test.mjs
+	$(NODE) tools/selftest/spi-regs.test.mjs
+	$(NODE) tools/selftest/scenery-samples.test.mjs
 
 # USB→I2C 页的协议层 + 假探针 + 假器件（AT24C02/MPU6050/ADS1115/Si5351）—— 不需要硬件
 test-i2c:
@@ -95,6 +98,14 @@ test-i2c:
 # USB→I2C 页的命令协议（DSL + C 表 + as 解码 + 表格互转）+ 四个模块示例必须零错误
 test-i2c-dsl:
 	$(NODE) tools/selftest/i2c-dsl.test.mjs
+
+# SPI 桥的「寄存器」面板与定时采集：档位→帧、假器件（寄存器器件/命令型 ADC）端到端、loop/as 采集、DSL 语法
+test-spi-regs:
+	$(NODE) tools/selftest/spi-regs.test.mjs
+
+# USB→I2C 页的「寄存器」面板：长写分片 planWrite + 输入解析/diff/bit + 假探针端到端 + EEPROM 页写回归
+test-i2c-reg:
+	$(NODE) tools/selftest/i2c-registers.test.mjs
 
 # USB→I2C 页的真页面验收（假探针，不需要硬件；需要 8899 服务 + 9333 CDP 浏览器）
 test-i2c-page: page-prep
@@ -314,6 +325,14 @@ test-bridge:
 samples-anim:
 	$(PY) tools/dev/make-anim-samples.py $(ARGS)
 
+# 屏页「图片/图案刷屏」的风景照片素材（4 类 x 2 张 x 2 种屏）—— 见 samples/test_images/scenery/README.md
+samples-scenery:
+	$(PY) tools/dev/make-scenery-samples.py $(ARGS)
+
+# 风景照片素材的完整性（文件齐 + parseBMP 解得动 + sha256 对账）—— 纯 Node、离线
+test-scenery:
+	$(NODE) tools/selftest/scenery-samples.test.mjs
+
 test-all: test test-ui test-hw test-bridge
 	pwsh -NoProfile -Command "Write-Host '全部自测跑完'"
 
@@ -399,6 +418,14 @@ check:
 	$(NODE) --check app/spi/image.js
 	$(NODE) --check app/spi/frames-dsl.js
 	$(NODE) --check app/spi/flash.js
+	$(NODE) --check app/spi/regs.js
+	$(NODE) --check app/spi/reg-view.js
+	$(NODE) --check app/spi/runner.js
+	$(NODE) --check app/spi/acq-view.js
+	$(NODE) --check app/ui/reg-grid.js
+	$(NODE) --check app/ui/spark.js
+	$(NODE) --check app/core/bytes.js
+	$(NODE) --check app/core/expr.js
 	$(NODE) --check app/dbg/fmt.js
 	$(NODE) --check app/dbg/regs.js
 	$(NODE) --check app/dbg/bp.js

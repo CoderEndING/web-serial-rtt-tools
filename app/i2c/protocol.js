@@ -363,7 +363,52 @@ export function planRead(start, len, { mode = 'reset', addrLen } = {}){
   return { cmds, total, mode: m };
 }
 
+/**
+ * 大块写的**分片计划**（纯函数；`session.writeLong()` 按它执行）。
+ *
+ * 与 `planRead` 对称，但有一处**本质不同**：读可以靠器件的地址指针自增，写不行 ——
+ * 每片都必须**自带子地址**（`bump` 过），因为 STOP 之后器件指针回到哪儿是不保证的。
+ * 所以这里的每一片线上都是 `START dev+W + 子地址 + 数据 + STOP`。
+ *
+ * ⚠️ **EEPROM 的页写会回卷**：器件内部只按"页"缓存，一页写超了就从页首重新盖
+ *    （AT24C02 页 = 8 B、AT24C32 = 32 B）。往 EEPROM 写长块时必须把 `chunkMax`
+ *    设成**页大小**并让分片落在页边界上 —— 所以这个参数是显式可给的，不写死 51。
+ *    寄存器型器件（MPU6050 / ADS1115 / Si5351…）没有页，用默认 51 即可。
+ *
+ * @param {number[]} start 子地址（原序字节）
+ * @param {Uint8Array|number[]} bytes 要写的完整数据（`offsets` 是它里面的下标）
+ * @param {object} [o]
+ *   · `addrLen`   子地址字节数（缺省 = `start.length`）
+ *   · `chunkMax`  单片数据上限（缺省 `WR_MAX` = 51，即协议上限）
+ *   · `offsets`   只写这些下标（缺省 = 整块）。**相邻下标会合并成一片**，
+ *                 中间断开就分成两片（"只写改过的那几个字节"就靠它）
+ * @returns {{cmds:Array<{addr:number[],wr:number[],off:number,note:string}>, bytes:number, chunks:number}}
+ */
+export function planWrite(start, bytes, { addrLen, chunkMax = WR_MAX, offsets = null } = {}){
+  const data = Array.from(bytes || []);
+  const src = Array.from(start || []);
+  const n = addrLen == null ? src.length : Math.max(0, Math.min(ADDR_MAX, addrLen | 0));
+  const base = src.slice(0, n);
+  const cap = Math.max(1, Math.min(WR_MAX, chunkMax | 0 || WR_MAX));
+  // 越界的下标直接丢掉（调用方给的是"改过的下标"，不该因为它整笔失败）
+  const offs = (offsets == null ? data.map((_, i) => i) : Array.from(offsets))
+    .filter(o => Number.isInteger(o) && o >= 0 && o < data.length)
+    .sort((a, b) => a - b);
+  const cmds = [];
+  for (let i = 0; i < offs.length;){
+    const off = offs[i];
+    let j = i + 1;
+    while (j < offs.length && offs[j] === offs[j - 1] + 1 && (offs[j] - off) < cap) j++;
+    const wr = [];
+    for (let k = i; k < j; k++) wr.push(data[offs[k]] & 0xff);
+    cmds.push({ addr: bump(base, off), wr, off, note: `片@+${off} × ${wr.length}` });
+    i = j;
+  }
+  return { cmds, bytes: offs.length, chunks: cmds.length };
+}
+
 /** 子地址按"原序字节"做加法（EEPROM 是 8 位地址就只加最低字节） */
+
 export function bump(bytes, delta){
   const a = Array.from(bytes || []);
   let carry = delta | 0;

@@ -859,6 +859,12 @@
         </div>
         <p class="hint" id="sp-info">未连接</p>
         <label class="chk" title="不需要硬件：HID 与数据面共用同一个假探针，可跑通「配置 → 使能 → 发帧 → 应答 → 统计」整条链路"><input type="checkbox" id="sp-mock"> 用假探针（无需硬件）</label>
+        <label class="row" title="假探针的**末级器件**：SPI 总线上没有器件地址，所以同一时刻只挂一个 —— NOR（回环 + 一颗 W25Q128 模型）/ 寄存器器件（BMP280 风格，给寄存器面板与传感器采集用）/ 命令型 ADC（MCP3008 风格，10 位 8 通道，采样值是活的）"><span>假器件</span>
+          <select id="sp-mock-device">
+            <option value="flash">回环 + NOR（W25Q128）</option>
+            <option value="regs">寄存器器件（BMP280 风格）</option>
+            <option value="adc">命令型 ADC（MCP3008 风格）</option>
+          </select></label>
         <div class="row btnrow">
           <button id="sp-usb" title="授权 WebUSB 并认领 SPI 桥接口（class 0xFF + EP11 双向）：OUT 0x0B 发帧、IN 0x8B 收应答。⚠️ 第一次点会弹出**浏览器的设备选择框**（HID 与 WebUSB 要各授权一次）">连接数据端点…（授权）</button>
         </div>
@@ -950,11 +956,14 @@
         <legend>
           <span class="seg docktabs" id="sp-dock-tabs">
             <button data-dock="cmd" class="on">命令表</button>
+            <button data-dock="reg">寄存器</button>
             <button data-dock="dsl">脚本</button>
+            <button data-dock="live">实时值</button>
             <button data-dock="flash">Flash 测试</button>
             <button data-dock="loop">回环自检</button>
           </span>
           <span class="hint dockrun" id="sp-run-pill" title="桥当前在跑什么（切到哪个 tab 都看得见）——「忙」的时候大部分按钮会被灰掉，原因就在这">空闲</span>
+          <span class="hint dockrun" id="sp-acq-pill" title="定时采集的运行状态（在「脚本」tab 里点「开始定时」）—— 与 I2C 页一样放在 tab 栏，切到任何 tab 都看得见">未运行</span>
           <span class="spacer"></span>
           <button id="sp-run-abort" class="mini" disabled title="中止正在跑的回环自检（只有它可中止；擦/写不能中途停 —— 那会把 flash 留在半擦状态）">中止</button>
         </legend>
@@ -981,6 +990,42 @@
           <p class="hint">每行一条 <code>XFER</code>（一次 CS 窗口）：命令 → 地址 → dummy → 数据；留空的行不发，<b>每行都回应答</b>，成没成看「结果」列。</p>
         </div>
 
+        <!-- 寄存器面板：SPI 没有统一约定，所以先把"怎么把寄存器号发出去"用几个字段说清（档位下拉填默认值），
+             再读一段回来逐位改、只写改动写回。表格与位开关板与 #i2c 的寄存器面板共用 app/ui/reg-grid.js。 -->
+        <div class="dockpage" data-dock="reg" id="sp-reg-card">
+          <div class="toolrow">
+            <label class="row" style="margin:0"><span style="width:auto">器件档位</span><select id="sp-reg-profile" title="内置常见 SPI 器件的寄存器约定（读/写 opcode、dummy、地址宽度、是否自增）；选完下面每个字段仍可改"></select></label>
+            <label class="row" style="margin:0"><span style="width:auto">读命令</span><input id="sp-reg-rdop" value="0x80" size="5" title="读寄存器的基础 opcode（例：0x80 = 0x80|reg）"></label>
+            <label class="row" style="margin:0"><span style="width:auto">写命令</span><input id="sp-reg-wrop" value="0x00" size="5" title="写寄存器的基础 opcode（例：0x00 = reg&0x7F，或 nRF24 的 0x20|reg）"></label>
+            <label class="row" style="margin:0"><span style="width:auto">地址</span><select id="sp-reg-addrmode" title="寄存器号怎么发：并入 opcode 低位（0x80|reg 这类）/ 独立的地址字节（MCP23S17 这类）/ 无地址（命令型器件）">
+              <option value="orOp">并入 opcode</option><option value="bytes">独立字节</option><option value="none">无地址</option></select></label>
+            <label class="row" style="margin:0"><span style="width:auto">占位</span><input id="sp-reg-addrbits" value="7" size="3" inputmode="numeric" title="「并入 opcode」时 opcode 低几位留给地址（MPU/BMP 是 7、ADXL345 是 6、nRF24 是 5）"></label>
+            <label class="row" style="margin:0"><span style="width:auto">地址字节</span><input id="sp-reg-addrbytes" value="1" size="3" inputmode="numeric" title="「独立字节」时地址占几个字节（MCP23S17 是 1）"></label>
+            <label class="row" style="margin:0"><span style="width:auto">dummy</span><input id="sp-reg-dummy" value="0" size="3" inputmode="numeric" title="读之前插几个 dummy 字节。⚠️ 多数器件是 0（MPU-9250/LSM6DS3/BMP280/ADXL345 都不要）；只有 BMP380/BMP580 这类才要 1。给错 → 读回的数据整体错位"></label>
+            <label class="row" style="margin:0"><span style="width:auto">B/寄存器</span><input id="sp-reg-databytes" value="1" size="3" inputmode="numeric" title="每个寄存器占几字节（16 位寄存器填 2、24 位填 3）"></label>
+            <label class="chk" style="margin:0" title="多字节读时器件是否自动递增寄存器地址（多数会；不自增的器件连读会原地踏步）"><input type="checkbox" id="sp-reg-autoinc" checked> 地址自增</label>
+            <label class="row" style="margin:0"><span style="width:auto">起始</span><input id="sp-reg-start" value="0x00" size="6" title="起始寄存器号（十六进制）"></label>
+            <label class="row" style="margin:0"><span style="width:auto">个数</span><input id="sp-reg-count" value="128" size="5" inputmode="numeric" title="读多少个寄存器（默认 128；每帧读上限 480 B，超了自动多帧）"></label>
+            <span class="spacer"></span>
+            <button id="sp-reg-read" class="primary mini" title="按当前档位读一段回来（一条命令连读，或按档位一寄存器一帧）">读取</button>
+            <button id="sp-reg-write" class="mini" title="只把改过的字节写回（相邻的合并成一帧）">只写改动</button>
+            <button id="sp-reg-write-all" class="mini" title="整段写回（不管有没有改）—— 慎用">整块写回</button>
+            <button id="sp-reg-discard" class="mini">丢弃改动</button>
+          </div>
+          <div class="scroll fill" id="sp-reg-wrap">
+            <table class="sp regtab">
+              <thead><tr id="sp-reg-head"></tr></thead>
+              <tbody id="sp-reg-body"></tbody>
+            </table>
+          </div>
+          <p class="hint" id="sp-reg-sum">还没读</p>
+          <p class="hint">点表里任意字节 → 8 个 bit 的开关板（<b>点一下就翻转</b>，与原值不同的位套黄框；也能直接敲十六进制）。
+            读到的值 = <b>器件现值</b>，只有点「只写改动 / 整块写回」才真的发 SPI。<br>
+            ⚠️ SPI 没有统一约定，三个最常错的地方就在上面那排字段：<b>读命令怎么带寄存器号</b>、
+            <b>要不要 dummy</b>（MPU-9250/LSM6DS3/BMP280/ADXL345 都是 0 —— 网上"BMP280 要 dummy"是把它和 BMP380 搞混了）、<b>多字节读是否自增</b>。
+            假探针切到「寄存器器件」（BMP280 风格）时，档位选 BMP280 就对得上。</p>
+        </div>
+
         <div class="dockpage" data-dock="dsl" id="sp-dsl-card">
           <div class="toolrow">
             <span>示例</span>
@@ -991,6 +1036,8 @@
             <span class="spacer"></span>
             <button id="sp-dsl-parse" class="mini" title="只解析、不发：先把语法和字段核一遍">只看解析</button>
             <button id="sp-dsl-send" class="primary mini" title="解析整段后一次性发出去（自动打包、按需等应答）">解析并发送</button>
+            <button id="sp-dsl-run" class="primary mini" title="一次性帧先各发一遍，然后 loop/every 的定时部分按各自周期一直跑（这就是 while(1) 采集）">开始定时</button>
+            <button id="sp-dsl-stop" class="mini" disabled title="停止定时采集">停止</button>
           </div>
           <textarea id="sp-dsl-text" class="code" spellcheck="false" placeholder="一行一条命令，`#` 注释。例：&#10;&#10;0x9F rx=3                                   读 RDID（裸字节 = 一条 cmd 帧）&#10;{0x5A, 1, 3, 0x000000, 1, 8, NULL},         C 表行：cmd, lines, addr_len, addr, dummy, rx_len, tx&#10;{0x02, 1, 3, 0x001000, 0, 0, (uint8_t[]){0xAA, 0xBB}},&#10;delay 120ms&#10;gpio DC 1"></textarea>
           <div class="toolrow nw">
@@ -1008,6 +1055,24 @@
             <summary>语法速查</summary>
             <div class="hint" id="sp-dsl-help"></div>
           </details>
+        </div>
+
+        <!-- 实时值：定时采集里 `as` 解码出来的变量（SPI 接口的 ADC / 传感器就靠它看波形） -->
+        <div class="dockpage" data-dock="live" id="sp-live-card">
+          <div class="toolrow">
+            <span class="hint" id="sp-live-sum" style="margin:0">还没有数据</span>
+            <span class="spacer"></span>
+            <label class="chk" style="margin:0"><input type="checkbox" id="sp-live-spark" checked> 画曲线</label>
+            <button id="sp-live-reset" class="mini">清空</button>
+          </div>
+          <div class="scroll fill" id="sp-live-wrap">
+            <table class="sp"><thead><tr><th>变量</th><th>最新</th><th>最小</th><th>最大</th><th>次数</th><th>频率</th><th style="width:300px">曲线（最近 120 点）</th></tr></thead>
+            <tbody id="sp-live-body"></tbody></table>
+          </div>
+          <p class="hint">变量来自脚本里的行尾 <code>as 名字=表达式</code>。例：<br>
+            <code>loop 20ms</code> … <code>xfer cmd=0x80|0x3B rx=6 as ax=i16be(0)/16384, az=i16be(4)/16384</code> … <code>end</code><br>
+            偏移是**这一帧自己的读数据**上的偏移（SPI 一次 xfer 通常就是一个寄存器 / 一次转换）；
+            可用函数与 `#i2c` 页的 `as` 完全一样（u8/i8/u16be/i16be/u32be/f32be… + 常量四则与位运算）。</p>
         </div>
 
         <div class="dockpage" data-dock="flash" id="sp-flash-card">
@@ -1077,6 +1142,27 @@
         <span>协议：<code>HID 0x35</code> 控制面 + <code>bulk 0x0B/0x8B</code> 帧流</span>
       </div>
     </section>
+  </div>
+
+  <!-- 「寄存器」面板的位开关板（与 #i2c 页共用 .bitpop 皮肤与 app/ui/reg-grid.js；
+       DOM 是这一页自己的一份，id 前缀 sp-regpop —— 两页互不干扰） -->
+  <div class="bitpop" id="sp-regpop" hidden>
+    <div class="bp-head">
+      <span class="btitle" id="sp-regpop-title">—</span>
+      <span class="bval" id="sp-regpop-val"></span>
+      <span class="spacer"></span>
+      <label class="row" style="margin:0"><span style="width:auto">十六进制</span>
+        <input id="sp-regpop-hex" class="bx" size="3" maxlength="4" spellcheck="false" title="直接敲十六进制（1~2 位），与点 bit 同步"></label>
+    </div>
+    <div class="bits" id="sp-regpop-bits"></div>
+    <div class="bp-acts">
+      <button class="mini" data-bit="zero" title="这一字节清零">00</button>
+      <button class="mini" data-bit="ones" title="这一字节全置 1">FF</button>
+      <button class="mini" data-bit="inv" title="逐位取反">取反</button>
+      <button class="mini" data-bit="orig" title="恢复到读回来的原值">恢复原值</button>
+      <button class="mini" data-bit="close">完成</button>
+    </div>
+    <p class="hint" id="sp-regpop-hint"></p>
   </div>
 </section>
 
@@ -1459,6 +1545,7 @@
           <span class="seg docktabs" id="i2-dock-tabs">
             <button data-dock="scan" class="on">扫描总线</button>
             <button data-dock="cmd">命令表</button>
+            <button data-dock="reg">寄存器</button>
             <button data-dock="dsl">脚本</button>
             <button data-dock="live">实时值</button>
           </span>
@@ -1503,6 +1590,38 @@
             <b>写</b> = 子地址 + 数据（数据留空 = 只把地址指针推过去；<b>写不自动分片</b>，一次 ≤51 B）；
             <b>探测</b> = 只问 ACK；<b>延时</b> = 在「数据」格里填时长（如 <code>10ms</code>）。
             周期格写 <code>100ms</code> 或 <code>100ms×50</code>（×50 = 跑 50 轮自己停；不写 = 一直跑）。</p>
+        </div>
+
+        <!-- 寄存器面板：读一段（默认 128 B = 16×8）→ 表里逐位改 → 只写改动 / 整块写回。
+             交互照 #panel 页的字节开关板（同一个 .bitpop 皮肤，但 DOM 是这一页自己的一份）。 -->
+        <div class="dockpage" data-dock="reg">
+          <div class="toolrow">
+            <label class="row" style="margin:0"><span style="width:auto">器件</span><input id="i2-reg-dev" value="0x50" size="6" title="7 位地址（0x08..0x77）。在「扫描总线」里点「选用」也会带到这里"></label>
+            <label class="row" style="margin:0"><span style="width:auto">起始</span><input id="i2-reg-start" value="0x00" size="8" title="起始寄存器地址（大端）。0x0100 配「地址宽度 2 B」= 发 01 00"></label>
+            <label class="row" style="margin:0"><span style="width:auto">长度</span><input id="i2-reg-len" value="128" size="5" inputmode="numeric" title="一次读多少字节，1..4096，默认 128（16 列 × 8 行）。超过 54 B 自动分片读"></label>
+            <label class="row" style="margin:0"><span style="width:auto">地址宽度</span><select id="i2-reg-alen" title="子地址字节数：多数传感器/寄存器器件是 1 B；EEPROM（AT24C32 起）多是 2 B；0 B = 不带子地址的纯读">
+              <option value="1">1 B</option><option value="2">2 B</option><option value="0">0 B（纯读）</option></select></label>
+            <label class="row" style="margin:0"><span style="width:auto">读法</span><select id="i2-reg-chunk" title="reset = 每片重发子地址（最稳，默认）；ptr = 先推一次地址指针再续读（FIFO 型器件必须用这个）">
+              <option value="reset">每片重发地址</option><option value="ptr">地址指针自增</option></select></label>
+            <label class="row" style="margin:0"><span style="width:auto">写分片</span><select id="i2-reg-wrchunk" title="写回时每片最多多少字节。51 = 协议上限（寄存器/传感器用这个）；EEPROM 有页写回卷（AT24C02 页 8 B / AT24C32 页 32 B），必须按页给"></select></label>
+            <label class="row" style="margin:0"><span style="width:auto">片间等待</span><input id="i2-reg-gap" value="0" size="4" inputmode="numeric" title="每片之间等多少毫秒。EEPROM 每写完一页要等 tWR（约 5 ms），按页写时填 6；寄存器型器件填 0"></label>
+            <span class="spacer"></span>
+            <button id="i2-reg-read" class="primary mini" title="读一段回来（超过 54 B 自动分片）。读到的值成为「器件现值」，之后黄框标的都是与它的差异">读取</button>
+            <button id="i2-reg-write" class="mini" title="只把改过的字节写回器件（相邻的合并成一片，中间断开的会分开写）">只写改动</button>
+            <button id="i2-reg-write-all" class="mini" title="把整段都写回去（不管有没有改）—— 慎用：会重写没改的寄存器">整块写回</button>
+            <button id="i2-reg-discard" class="mini" title="丢弃表里的改动，回到读回来的那份">丢弃改动</button>
+          </div>
+          <div class="scroll fill" id="i2-reg-wrap">
+            <table class="sp regtab">
+              <thead><tr id="i2-reg-head"></tr></thead>
+              <tbody id="i2-reg-body"></tbody>
+            </table>
+          </div>
+          <p class="hint" id="i2-reg-sum">还没读</p>
+          <p class="hint">点表里任意一个字节 → 弹出 8 个 bit（<b>点一下就翻转</b>，和原值不同的位套黄框；也能直接敲十六进制）。
+            <b>读到的是"器件现值"</b>，只有点「只写改动 / 整块写回」才真的发 I2C。<br>
+            EEPROM 注意两条：写分片要按<b>页</b>给（AT24C02 页 8 B、AT24C32 页 32 B，给大了器件内部会回卷覆盖）；
+            每写完一页要等 <b>tWR</b>（约 5 ms）才认下一笔 —— 填在「片间等待」里（例如 6 ms）。</p>
         </div>
 
         <div class="dockpage" data-dock="dsl">
@@ -1565,13 +1684,36 @@
       </div>
     </section>
   </div>
+
+  <!-- 寄存器面板的位开关板（.bitpop 皮肤与 #panel 页共用；DOM 是这一页自己的一份，
+       id 前缀 i2-regpop —— 两页各自的弹窗互不干扰） -->
+  <div class="bitpop" id="i2-regpop" hidden>
+    <div class="bp-head">
+      <span class="btitle" id="i2-regpop-title">—</span>
+      <span class="bval" id="i2-regpop-val"></span>
+      <span class="spacer"></span>
+      <label class="row" style="margin:0"><span style="width:auto">十六进制</span>
+        <input id="i2-regpop-hex" class="bx" size="3" maxlength="4" spellcheck="false" title="直接敲十六进制（1~2 位），与点 bit 同步"></label>
+    </div>
+    <div class="bits" id="i2-regpop-bits"></div>
+    <div class="bp-acts">
+      <button class="mini" data-bit="zero" title="这一字节清零">00</button>
+      <button class="mini" data-bit="ones" title="这一字节全置 1">FF</button>
+      <button class="mini" data-bit="inv" title="逐位取反">取反</button>
+      <button class="mini" data-bit="orig" title="恢复到读回来的原值">恢复原值</button>
+      <button class="mini" data-bit="close">完成</button>
+    </div>
+    <p class="hint" id="i2-regpop-hint"></p>
+  </div>
 </section>
 
 <!-- ============================ 工程生成 ============================ -->
 <section class="panel" id="tab-gen">
   <div class="ws">
     <aside class="side">
-      <fieldset>
+      <!-- 左栏卡片按右列的 tab 分组：`data-dock` 决定它属于哪个 tab，切 tab 时只显示当组的卡片
+           （用户 2026-10：左栏太长 → 跟右列联动，"分类简洁"）。见 app/gen/view.js 的 _dockSelect()。 -->
+      <fieldset data-dock="files">
         <legend>工程</legend>
         <div class="row btnrow">
           <button id="g-uvpick" class="primary" title="读取 .uvprojx 里的器件/Flash 信息，自动填下面的参数（也可以直接把文件拖到右边）">选择 .uvprojx…</button>
@@ -1584,7 +1726,7 @@
         <p class="hint" id="g-detect">把 .uvprojx 拖进来（或点上面的按钮）：项目名、器件、Flash 起址会自动填好，其余都能手改。</p>
       </fieldset>
 
-      <fieldset>
+      <fieldset data-dock="files">
         <legend>生成哪些</legend>
         <label class="chk"><input type="checkbox" id="g-c-jlink" checked> Makefile.jlink（J-Link 烧录/调试）</label>
         <label class="chk"><input type="checkbox" id="g-c-gdb" checked> jlink_gdb.script（GDB 脚本）</label>
@@ -1594,7 +1736,7 @@
         <label class="row"><span>bin 大小</span><input id="g-testbin-size" class="num" value="20480" inputmode="numeric"></label>
       </fieldset>
 
-      <fieldset>
+      <fieldset data-dock="params">
         <legend>参数</legend>
         <label class="row"><span>接口</span>
           <select id="g-if"><option>SWD</option><option>JTAG</option></select>
@@ -1623,7 +1765,7 @@
         <label class="row"><span>RTT 端口</span><input id="g-rtt-port" class="num" value="9090" inputmode="numeric" title="openocd-rtt 目标里 rtt server start 的端口"></label>
       </fieldset>
 
-      <fieldset>
+      <fieldset data-dock="files">
         <legend>落地方式</legend>
         <label class="row"><span>换行符</span>
           <select id="g-newline" title="CRLF = 与 uvprojx2cmake.py 的产物逐字节一致；LF 更贴近 git 习惯">
@@ -1641,8 +1783,8 @@
         <p class="hint">网页不能自动写你的项目目录：得你亲手选一次文件夹（浏览器安全模型）。Edge/Chrome 支持直写，其它浏览器自动走 ZIP。</p>
       </fieldset>
 
-      <!-- 本地桥：跟"工程配套文件"是两回事（那是本机跑的程序包），所以放在「落地方式」之后 -->
-      <fieldset id="g-bridge-card">
+      <!-- 本地桥：跟"工程配套文件"是两回事（那是本机跑的程序包）—— 单独一个 tab（用户 2026-10 要求） -->
+      <fieldset id="g-bridge-card" data-dock="bridge">
         <legend>本地桥（J-Link / OpenOCD）</legend>
         <label class="chk"><input type="checkbox" id="g-bk-on" checked title="J-Link / OpenOCD 都是本机程序，浏览器无权启动它们 —— 要用这两条后端就得有个本机桥。零安装的 WebUSB 通路不需要它">生成「本地桥」安装包（双击即用）</label>
         <label class="row"><span>端口</span><input id="g-bk-port" class="num" value="17321" inputmode="numeric" title="桥监听的本地端口；页面与桥都走它"></label>
@@ -1665,22 +1807,65 @@
             <option value="0">官方优先（nodejs.org）</option>
           </select></label>
         <label class="chk"><input type="checkbox" id="g-bk-autonode" checked title="关掉 = 没 Node 时只提示、不下载（企业内网/杀软敏感时用）">没 Node 时自动下便携版</label>
-        <div class="row btnrow"><button id="g-zip-bridge" title="只打包桥的文件（zip 里是 rtt-bridge-kit/…）：解压后双击 start-bridge.bat 就能起桥">下载桥包（ZIP）</button></div>
         <p class="hint">包里：启动器（bat/sh）+ 桥本体 + 配置 + 预检脚本 + 便携 Node 下载器 + 说明。
           <b>路径留空 = 桥自己探测</b>（ESP-IDF 的 openocd-esp32 → Program Files → PATH；J-Link 找 SEGGER 目录里版本号最大的）；
-          起桥前会先跑一次环境预检，把"该改哪一行"打出来。退出用 <b>Ctrl+C</b>（会把 OpenOCD / J-Link 子进程一起收掉）。</p>
+          起桥前会先跑一次环境预检，把"该改哪一行"打出来。退出用 <b>Ctrl+C</b>（会把 OpenOCD / J-Link 子进程一起收掉）。
+          <b>每个文件的预览与「下载桥包（ZIP）」在右边「本地桥」tab</b>。</p>
       </fieldset>
     </aside>
 
     <section class="main">
-      <div class="toolbar">
-        <span class="hint" style="margin:0">产物</span>
-        <div class="seg" id="g-files"></div>
-        <span class="spacer"></span>
-        <button id="g-copy" class="mini">复制当前文件</button>
-        <button id="g-dl" class="mini">下载当前文件</button>
-      </div>
-      <pre class="rx" id="g-preview" tabindex="0"></pre>
+      <!-- 右列 = 一个带 tab 的面板（照 #spi / #i2c 的 `.seg.docktabs` + `.dockpage` 那套）。
+           为什么 tab 化：13 个产物原来挤在一条文件栏里（桥包那 7 个还另占一行），而
+           「工程配套文件」与「本地桥安装包」本来就是两件事；顺带让左栏能按 tab 分组（用户 2026-10 要求）。 -->
+      <fieldset class="gendock" id="g-box-dock">
+        <legend>
+          <span class="seg docktabs" id="g-dock-tabs">
+            <button data-dock="files" class="on">工程文件</button>
+            <button data-dock="params">调试参数</button>
+            <button data-dock="bridge">本地桥</button>
+          </span>
+          <span class="hint dockrun" id="g-dock-pill" title="当前 tab 的一句话状态">待生成</span>
+          <span class="spacer"></span>
+        </legend>
+
+        <div class="dockpage on" data-dock="files" id="g-files-card">
+          <div class="toolbar">
+            <span class="hint" style="margin:0">产物</span>
+            <div class="seg" id="g-files"></div>
+            <span class="spacer"></span>
+            <button id="g-copy" class="mini">复制当前文件</button>
+            <button id="g-dl" class="mini">下载当前文件</button>
+          </div>
+          <pre class="rx fill" id="g-preview" tabindex="0"></pre>
+          <p class="hint" style="margin:0">这几件是 <code>uvprojx2cmake.py</code> 的模板产物（默认套 4 项修正）——
+            落地用左栏「落地方式」里的「写入文件夹…」/「打包 ZIP」。</p>
+        </div>
+
+        <div class="dockpage" data-dock="params" id="g-params-card">
+          <div class="toolbar">
+            <span class="hint" style="margin:0">左栏填的值在这里逐项列全（长路径不再被侧栏宽度截断；<b>点值即复制</b>）</span>
+            <span class="spacer"></span>
+            <button id="g-params-copy" class="mini">复制全部（键=值）</button>
+          </div>
+          <div class="scroll fill" id="g-params-wrap">
+            <table class="sp gparamtab"><tbody id="g-params-body"></tbody></table>
+          </div>
+        </div>
+
+        <div class="dockpage" data-dock="bridge" id="g-kit-card">
+          <div class="toolbar">
+            <span class="hint" style="margin:0">安装包里的文件</span>
+            <div class="seg" id="g-kit-files"></div>
+            <span class="spacer"></span>
+            <button id="g-kit-copy" class="mini">复制当前文件</button>
+            <button id="g-zip-bridge" class="primary mini" title="只打包桥的文件（zip 里是 rtt-bridge-kit/…）：解压后双击 start-bridge.bat 就能起桥">下载桥包（ZIP）</button>
+          </div>
+          <pre class="rx fill" id="g-kit-preview" tabindex="0"></pre>
+          <p class="hint" style="margin:0">7 个文件：启动器（bat / sh）+ 桥本体 + 配置 + 预检脚本 + 便携 Node 下载器 + 说明 ——
+            参数在左栏「本地桥」那张卡里改，改完这里立刻跟着变。</p>
+        </div>
+      </fieldset>
       <div class="stats">
         <span id="g-status">待生成</span>
         <span class="spacer"></span>

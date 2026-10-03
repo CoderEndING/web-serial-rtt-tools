@@ -192,17 +192,39 @@ dialog form{margin-top:16px;text-align:right}
 /* ---------------- 工程生成 ---------------- */
 #tab-gen.dragging{outline:2px dashed var(--acc);outline-offset:-6px}
 #tab-gen .side .row>span:first-child{width:88px}   /* 参数名比别的页长（OpenOCD 接口…） */
-#g-files{flex-wrap:wrap;border-radius:6px}
-/* 产物按钮分两行：工程配套文件（uvprojx2cmake 那几件）/ 本地桥安装包（`rtt-bridge-kit/…`）。
-   两类东西用途不同，混成一片时标签栏会挤成三行还认不出谁是谁（用户 2026-10 要求）。 */
-#g-files{display:flex;flex-direction:column;align-items:flex-start;gap:3px;border:none;overflow:visible}
-#g-files .filerow{display:flex;flex-wrap:wrap;border:1px solid var(--line);border-radius:6px;overflow:hidden}
-#g-files .filerow.kit{border-color:#3d5a80}
-#g-files .filerow.kit button{color:#9dc1e8}
-#g-preview{white-space:pre;overflow:auto}          /* 代码别折行，横向滚 */
+/* 右列 = tab 面板（照 #spi/#i2c 那套）；左栏卡片按 `data-dock` 分组，切 tab 时只显示当组。
+   为什么 tab 化见 index.html 里的注释：13 个产物挤一条栏、桥包另占一行，且左栏太长。 */
+#tab-gen .main{gap:6px}
+#tab-gen .gendock{display:flex;flex-direction:column;min-width:0;min-height:0;overflow:hidden;flex:1 1 auto}
+#tab-gen .gendock>legend{white-space:nowrap;overflow:hidden;display:flex;align-items:center;gap:6px;width:100%;box-sizing:border-box}
+#tab-gen .gendock>legend .hint{margin:0;display:inline}
+#tab-gen .dockpage{display:none;flex:1 1 auto;min-height:0;flex-direction:column;gap:6px}
+#tab-gen .dockpage.on{display:flex}
+#tab-gen .dockpage>.toolbar{margin:0;flex:none}
+#tab-gen .dockpage>p.hint{margin:0;flex:none}
+#g-files,#g-kit-files{flex-wrap:wrap;border-radius:6px}
+#g-dock-pill{color:var(--fg2)}
+/* 🚨 `.scroll` 是**按页写的**（`#tab-spi .scroll` / `#tab-i2c .scroll` / `#tab-panel .scroll`），
+   本页原来没有这条 → 「调试参数」的表格撑高后被 `.gendock{overflow:hidden}` 裁掉、**连滚动条都没有**
+   （用户 2026-10 现场："下面显示不全，还没有滑条"）。这里补上本页的滚动区规则：
+   吃满剩余高度 + 自己滚（`min-height:0` 是关键，flex 子项默认 min-height:auto 会顶破父容器）。 */
+#tab-gen .dockpage>.scroll{flex:1 1 auto;min-height:0;max-height:none;overflow:auto;
+  border:1px solid var(--line);border-radius:8px;margin-top:0}
+/* 预览：代码别折行（横向滚），并吃掉剩余高度 */
+#g-preview,#g-kit-preview{white-space:pre;overflow:auto;flex:1 1 auto;min-height:0}
 .fixlist{margin:4px 0 0;padding-left:18px}
 .fixlist li{margin:3px 0}
 .fixlist code{font-size:11.5px}
+
+/* 「调试参数」tab 的参数一览表：左列参数名、右列值（等宽，长路径不截断、点一下复制） */
+.gparamtab{width:100%;border-collapse:collapse;font-size:12px}
+.gparamtab td{padding:2px 8px;border-bottom:1px solid rgba(255,255,255,.06);vertical-align:top}
+.gparamtab tr.gparamhead td{padding-top:8px;color:var(--acc);font-weight:600;font-size:11.5px;
+  letter-spacing:.4px;border-bottom:1px solid var(--line);background:rgba(74,163,255,.06)}
+.gparamtab td.gpk{width:150px;color:var(--fg2);white-space:nowrap}
+.gparamtab td.gpv code{font-family:var(--mono);font-size:11.5px;color:#cdd6e4;white-space:pre-wrap;
+  word-break:break-all;cursor:copy;border-bottom:1px dashed transparent}
+.gparamtab td.gpv code:hover{color:#9fd0ff;border-bottom-color:#9fd0ff}
 
 /* ---------------- 终端页的 RTT→CDC 转发面板 ---------------- */
 #tab-terminal .side .row>span:first-child{width:74px}   /* 「RTT 地址 / 搜索长度」比默认 60px 宽些 */
@@ -641,6 +663,11 @@ fieldset.folded > legend::after{content:' · 已折叠';color:var(--fg2);font-si
 .pintab .is-aux{color:#ffd479}
 .pintab .is-no{color:#ff7b72}
 .pintab .is-plain{color:var(--fg2,#999)}
+/* I2C 桥的固定脚（PA29=SCL / PA28=SDA）：**无论配置与否都显示**，因为它们在固件里是写死的 ——
+   接线的人必须一眼看到这两根已经名花有主（详见 i2c_bridge.c 的 BOARD_I2C_BRIDGE_*_PAD）。 */
+.pintab .is-i2c{color:#c792ea}
+.pintab .is-i2c .p-fixed{margin-left:8px;padding:0 5px;border:1px solid rgba(199,146,234,.5);
+  border-radius:3px;font-size:11px;color:#c792ea}
 .pintab .p-sel.is-bad{color:#ff7b72;font-weight:600}
 /* 未配置、按屏型号推荐值先标出来的脚位（虚线）—— 接线时照它接，配完会变成实心 */
 .pintab .p-sel.is-dflt{color:#8fa6bb;border-bottom:1px dashed rgba(143,166,187,.65)}
@@ -740,6 +767,27 @@ fieldset.folded > legend::after{content:' · 已折叠';color:var(--fg2);font-si
 #tab-i2c #i2-dsl-sum.ok{color:var(--ok)}
 #tab-i2c #i2-dsl-sum.warn{color:var(--warn)}
 #tab-i2c #i2-dsl-sum.err{color:var(--err)}
+
+/* ---- 寄存器面板（`#i2c` 与 `#spi` 各有一个，共用这一套样式）：16 列的字节表 + 位开关板 ----
+   表格本身吃满高度（.scroll.fill 已经在管滚动），格子做小一点、密一点：
+   128 个字节要能一屏看完，才谈得上"扫一眼看哪儿变了"。
+   ⚠️ 这些类**不带页面前缀**（两个页面共用）：`.regtab` 只在寄存器面板里用，别拿它当通用表格类。 */
+.regtab{width:100%;border-collapse:collapse;font-family:var(--mono);font-size:12px}
+.regtab th,.regtab td{padding:1px 2px;text-align:center;border:none}
+.regtab thead th{color:var(--fg2);font-weight:400;font-size:11px;position:sticky;top:0;
+  background:var(--bg2,#1b1b1b);z-index:1}
+.regtab td.ra,.regtab th.ra{color:var(--fg2);text-align:right;padding-right:8px;white-space:nowrap;font-size:11px}
+.regtab td.rascii,.regtab th.rascii{color:#8fa6bb;text-align:left;padding-left:10px;
+  white-space:pre;letter-spacing:.5px}
+.regtab td.rbc{padding:0 1px}
+/* 每个字节 = 一个按钮；改过的套黄框（和 .bitpop 的 chg 同一套语义） */
+.regtab button.rb{width:26px;padding:1px 0;font-family:var(--mono);font-size:11.5px;
+  background:#171b21;color:#cdd6e4;border:1px solid #2b3340;border-radius:3px;cursor:pointer}
+.regtab button.rb:hover{border-color:var(--acc);background:#1d2530}
+.regtab button.rb.chg{border-color:var(--warn);background:#3a2f12;color:#ffd479;font-weight:700}
+.regtab button.rb:focus{outline:1px solid var(--acc)}
+.bitpop .bx{width:42px;text-align:center;font-family:var(--mono)}
+.bitpop .bx.bad{border-color:var(--err);background:#3a1a1a}
 
 /* ============================ 调试器（#tab-dbg） ============================ */
 /**
