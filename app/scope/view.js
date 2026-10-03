@@ -65,6 +65,8 @@ export class ScopeView {
     this._lastPktT = null;      // 上一包的起始时刻 / 帧数（用来估包内真实间隔，见 DATA 分支）
     this._lastPktN = 0;
     this._capturing = false;    // 本轮采集还开着吗（DATA 分支据此决定入不入缓冲，见 start/stop）
+    this._wdTimer = null;       // 数据面看门狗（采集中断流的兜底）
+    this._lastPktAt = 0;        // 最近收到一个包的时刻
     this.backend = null;        // **生效**后端：swd | riscv（只认探针回报的 DEF flags bit6 / 状态字 0 bit1）
     this.targetRiscv = null;    // 我们**请求**的目标类型（用于发现"请求 ≠ 生效"）
     this._askedAt = 0;          // 上次"请求切换目标类型"的时刻（见 uiBackend()：请求 vs 生效谁说了算）
@@ -479,9 +481,9 @@ export class ScopeView {
       const sel = this.selected.some(s => s.name === v.name && s.addr === v.addr);
       const row = document.createElement('label');
       row.className = 'vrow' + (sel ? ' sel' : '') + (!sel && this.selected.length >= MAX_VARS ? ' dis' : '');
+      /* 🚨 变量名与类型名都来自**载入的 ELF**（外部输入）——拼进 innerHTML 前必须转义，
+       *    否则一个名字里带 `<img onerror=…>` 的符号就能在这页执行脚本（2026-10 代码审查）。 */
       row.innerHTML = `<input type="checkbox" ${sel ? 'checked' : ''} ${!sel && this.selected.length >= MAX_VARS ? 'disabled' : ''}>` +
-        /* 🚨 变量名与类型名都来自**载入的 ELF**（外部输入）——拼进 innerHTML 前必须转义，
-         *    否则一个名字里带 `<img onerror=…>` 的符号就能在这页执行脚本（2026-10 代码审查）。 */
         `<span class="nm" title="${esc(v.name)}">${esc(v.name)}</span>` +
         `<span class="ty">${esc(v.scalar || v.typeName || '?')}</span>` +
         `<span class="ad">0x${v.addr.toString(16)}</span>`;
@@ -716,7 +718,20 @@ export class ScopeView {
         | ($('sc-cdcoff')?.checked ? P.SCOPE_FLAG.CDC_OFF : 0)
         | (this.targetRiscv ? P.SCOPE_FLAG.RISCV : 0);
       if (clockKhz > 0 && this.backend !== P.BACKEND.RISCV) await this.hidXfer(P.HID_CMD, P.clockData(clockKhz * 1000));
-      await this.hidXfer(P.HID_CMD, P.configData({ periodUs, flags, vars }));
+      /**
+       * 🚨 **CONFIG 之后当场读一次 rc**（2026-10 代码审查）：固件的配置动作是**同步判定**的，
+       *    应答里那个返回码就是本次配置的结果（0 = 已采纳、-6 = 被拒：变量宽度非法）。
+       *    不看它的话，被拒之后固件已经**把变量表清空了**，紧接着的 START 会回 -3 →
+       *    页面显示"变量表为空（先在左侧选 1~8 个变量）"，而用户明明选了变量，方向全错。
+       */
+      const cfgRes = await this.hidXfer(P.HID_CMD, P.configData({ periodUs, flags, vars }));
+      const cfgRc = this.signed(cfgRes?.[2]);
+      if (cfgRc < 0 && cfgRc !== P.START_PENDING){
+        this._capturing = false;
+        await this.transport.stop().catch(() => {});
+        this.setStatusText('采样配置被拒：' + P.scopeRcText(cfgRc), 'err');
+        return;
+      }
 
       /**
        * 🚨 **先开数据面读，再让探针开跑** —— 顺序反了会丢起跑线。
@@ -725,7 +740,8 @@ export class ScopeView {
        *    早就被丢掉**，于是"等 DEF 当起跑线"的守卫永远等不到、新采集一个样本都没有。
        *    现在先 start() 读起来（顺便把上一轮的残留吃掉），再发 START。
        */
-      await this.transport.start(chunk => this.onChunk(chunk));
+      await this.transport.start(chunk => this.onChunk(chunk), e => this._onDataPlaneDead(e));
+      this._startWatchdog();          // 采集中途断流的兜底（见 _onDataPlaneDead 的说明）
       this._awaitDefSince = performance.now();
       /**
        * 「本轮采集还开着」的开关（DATA 分支据此决定要不要入缓冲）。
@@ -771,7 +787,44 @@ export class ScopeView {
     this._needDraw = true;
   }
 
+  /** 数据面看门狗：采集期间 **>2.5 s 一个包都没来**就判流断了（正常最少也是几十 Hz）*/
+  _startWatchdog(){
+    this._stopWatchdog();
+    this._lastPktAt = performance.now();
+    /* 1 s 一跳：看门狗只做"粗粒度判死"，被后台节流成 1 s 也无所谓（不是短等待，
+     * 所以这里用 setInterval 是对的 —— pace.js 管的是 ≤128 ms 那类等待）。 */
+    this._wdTimer = setInterval(() => {
+      if (!this._capturing) return;
+      const age = performance.now() - this._lastPktAt;
+      if (age > 2500){
+        this._stopWatchdog();
+        this._onDataPlaneDead(new Error(`超过 ${(age / 1000).toFixed(1)} s 没收到任何数据包`));
+      }
+    }, 1000);
+  }
+
+  _stopWatchdog(){
+    if (this._wdTimer){ clearInterval(this._wdTimer); this._wdTimer = null; }
+  }
+
+  /**
+   * 数据面**不可恢复**地停了（USB 读异常 / 端点反复 STALL / 看门狗超时）——统一收口。
+   *
+   * 🚨 以前只有"1.5 s 没等到 DEF 包"那一种兜底：采集中途断了流，worker 悄悄退出、
+   *    `running` 还是 true、界面照旧显示"采样中"，一个字节都不来，用户只能干等
+   *    （2026-10 代码审查）。现在停采集 + 把原因写进状态栏。
+   */
+  _onDataPlaneDead(e){
+    this._stopWatchdog();
+    if (!this._capturing && !this.running) return;
+    const msg = e?.message || String(e);
+    void this.stop('数据流中断：' + msg).then(() => {
+      this.setStatusText(`采样中断：${msg} —— 探针掉线了？拔插一次，或改用假探针`, 'err');
+    });
+  }
+
   async stop(reason){
+    this._stopWatchdog();
     if (!this.running && !this.transport?.running) return;
     this.running = false;
     this._capturing = false;                 // DATA 分支据此停止入缓冲（见那里的说明）
@@ -1036,6 +1089,7 @@ export class ScopeView {
 
   /** 数据面回调：字节流 → 包 → 解码 → 缓冲（+触发 +统计）*/
   onChunk(chunk){
+    this._lastPktAt = performance.now();       // 看门狗据此判"流断没断"（见 _startWatchdog）
     if (this.captureRaw){
       const copy = chunk instanceof Uint8Array ? chunk.slice() : new Uint8Array(chunk);
       this.raw.push(copy); this.rawBytes = (this.rawBytes || 0) + copy.length;

@@ -37,6 +37,10 @@ export class WebUsbSpiTransport {
     this.iface = null; this.epIn = null; this.epOut = null;
     this.running = false;
     this.workers = [];
+    this.gen = 0;                 // 收流"轮次"代号：stop() 一加，超时残留在飞的 worker 就作废
+    this.stalledInFlight = 0;     // 上一轮 stop() 里 800 ms 没等回来的在飞读笔数
+    this.onError = null;          // 数据面不可恢复时的回调（由 start() 传入）
+    this._fatal = null;
     this.writes = 0; this.writeBytes = 0; this.reads = 0; this.readBytes = 0;
     this.errors = 0; this.lastError = null; this.dirty = false;
   }
@@ -107,27 +111,63 @@ export class WebUsbSpiTransport {
     return this;
   }
 
-  /** 开始收应答（onRsp 收到的是**原始字节块**，切包交给上层 / RspStream）*/
-  async start(onRsp){
+  /**
+   * 开始收应答（onRsp 收到的是**原始字节块**，切包交给上层 / RspStream）。
+   * @param {(bytes:Uint8Array)=>void} onRsp
+   * @param {(e:Error)=>void} [onError] 数据面**不可恢复**地停了（读异常 / 反复 STALL）时叫一次。
+   *        与 `scope/transport.js` 同一套纪律：老写法是读抛异常就 `break`，几条 worker 全退出后
+   *        数据面停死，而 `running` 还是 true、界面毫无反应（2026-10 代码审查）。
+   */
+  async start(onRsp, onError){
     if (this.running) return;
     this.running = true;
-    this.workers = Array.from({ length: this.inFlight }, () => this._readWorker(onRsp));
+    this.gen++;                                   // 新一轮代号：上一轮没收干净的 worker 靠它作废
+    this._fatal = null;
+    this.onError = typeof onError === 'function' ? onError : null;
+    const g = this.gen;
+    this.workers = Array.from({ length: this.inFlight }, () => this._readWorker(onRsp, g));
   }
 
-  async _readWorker(onRsp){
-    while (this.running){
+  /** 数据面出事 → 停掉整条流并把原因交给页面（只报一次）*/
+  _fail(why){
+    if (this._fatal) return;
+    this._fatal = why;
+    this.errors++; this.lastError = why;
+    this.running = false; this.dirty = true;
+    try { this.onError?.(new Error(why)); } catch { /* 页面自己出错不该拖垮这里 */ }
+  }
+
+  async _readWorker(onRsp, g){
+    let stalls = 0;
+    // 循环条件带**代号** g：stop() 等在飞的读回来最多 800 ms，超时的那条会活到下一轮，
+    // 那时 running 又被 start() 置回 true —— 只判 running 它就"复活"了，而且不在 workers 里（2026-10 代码审查）
+    while (this.running && g === this.gen){
       let r;
       try { r = await this.device.transferIn(this.epIn, this.chunkBytes); }
       catch (e){
-        if (this.running){ this.errors++; this.lastError = e?.message || String(e); this.dirty = true; }
+        if (this.running && g === this.gen){
+          this.errors++; this.lastError = e?.message || String(e); this.dirty = true;
+          this._fail('数据流中断：' + (e?.message || String(e)) + '（探针掉线了？拔插一次）');
+        }
         break;
       }
-      if (!this.running) break;                       // 收尾：这一条读到了也不再用
+      if (!this.running || g !== this.gen) break;     // 收尾 / 换轮：这一条读到了也不再用
       if (r.status === 'ok' && r.data?.byteLength){
+        stalls = 0;
         this.reads++; this.readBytes += r.data.byteLength;
         onRsp(new Uint8Array(r.data.buffer, r.data.byteOffset, r.data.byteLength));
       } else if (r.status !== 'ok'){
         this.errors++; this.lastError = r.status;
+        if (r.status === 'stall'){
+          /* STALL 要 `clearHalt` 才解得开：老代码只加个计数就回头再读 → 端点一直 STALL、
+           * 循环空转烧 CPU、一个应答都收不到（2026-10 代码审查）。 */
+          try { await this.device.clearHalt('in', this.epIn); } catch { /* 有的平台不支持 */ }
+          await sleep(10);
+          if (++stalls >= 8){
+            this._fail(`端点 0x${(this.epIn | 0x80).toString(16)} 连续 ${stalls} 次 STALL，clearHalt 也解不开 —— 数据面已停`);
+            break;
+          }
+        }
       }
     }
   }
@@ -201,10 +241,15 @@ export class WebUsbSpiTransport {
 
   /** 停止收流：等在飞的读全部回来（最多 800 ms），**不要**让它们挂在那儿 */
   async stop(){
-    if (!this.running) return;
+    this.gen++;                    // 代号一变，超时残留在飞的那条读回来后就自行作废
+    if (!this.running){ this.workers = []; this.stalledInFlight = 0; return; }
     this.running = false;
-    await Promise.race([Promise.allSettled(this.workers), sleep(800)]);
+    let settled = 0;
+    const all = this.workers.map(p => p.then(() => { settled++; }, () => { settled++; }));
+    await Promise.race([Promise.allSettled(all), sleep(800)]);
     this.workers = [];
+    /** 800 ms 还没回来的在飞读有几笔（WebUSB 取消不掉，只能如实记账）*/
+    this.stalledInFlight = Math.max(0, all.length - settled);
   }
 
   async close(){

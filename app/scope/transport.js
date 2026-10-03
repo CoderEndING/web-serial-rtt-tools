@@ -27,6 +27,10 @@ export class VendorEpTransport {
     this.inFlight = opts.inFlight ?? 3;          // 同时在飞的读
     this.running = false;
     this.workers = [];
+    this.gen = 0;                 // 收流"轮次"代号：stop() 一加，超时残留在飞的 worker 就作废
+    this.stalledInFlight = 0;     // 上一轮 stop() 里 800 ms 没等回来的在飞读笔数
+    this.onError = null;          // 数据面不可恢复时的回调（由 start() 传入）
+    this._fatal = null;
     this.chunks = 0; this.bytes = 0; this.errors = 0; this.lastError = null;
   }
 
@@ -116,39 +120,88 @@ export class VendorEpTransport {
     return this;
   }
 
-  /** 开始收流（onChunk 会被持续调用，参数是**原始字节**）*/
-  async start(onChunk){
+  /**
+   * 开始收流（onChunk 会被持续调用，参数是**原始字节**）。
+   * @param {(bytes:Uint8Array)=>void} onChunk
+   * @param {(e:Error)=>void} [onError] 数据面**不可恢复**地停了（读异常 / 反复 STALL）时叫一次 ——
+   *        页面据此停采集并提示。以前没有这条回调：worker 悄悄退出、`running` 还是 true、
+   *        界面照旧显示"采样中"，而一个字节都不来（2026-10 代码审查）。
+   */
+  async start(onChunk, onError){
     if (this.running) return;
     this.running = true;
+    this._fatal = null;
+    this.onError = typeof onError === 'function' ? onError : null;
+    this.gen++;                                   // 新一轮的代号：上一轮没收干净的 worker 靠它作废
     this.chunks = 0; this.bytes = 0; this.errors = 0;
-    this.workers = Array.from({ length: this.inFlight }, () => this._worker(onChunk));
+    const g = this.gen;
+    this.workers = Array.from({ length: this.inFlight }, () => this._worker(onChunk, g));
   }
 
-  async _worker(onChunk){
-    while (this.running){
+  /** 数据面出事 → 停掉整条流，并把原因交给页面（只报一次：N 条 worker 会同时撞上）*/
+  _fail(why){
+    if (this._fatal) return;
+    this._fatal = why;
+    this.errors++; this.lastError = why;
+    this.running = false;
+    try { this.onError?.(new Error(why)); } catch { /* 页面自己出错不该拖垮这里 */ }
+  }
+
+  async _worker(onChunk, g){
+    let stalls = 0;
+    /**
+     * 🚨 循环条件要带上**代号** `g`：`stop()` 等在飞的读回来最多 800 ms，超时的那一条会活到
+     *    下一轮 —— 那时 `running` 又被 `start()` 置回 true，只判 running 的话它会"复活"继续收，
+     *    而且已经不在 `workers` 里，后面的 `stop()` 再也等不到它（worker 数无界增长，2026-10 代码审查）。
+     */
+    while (this.running && g === this.gen){
       let r;
       try {
         r = await this.device.transferIn(this.ep, this.chunkBytes);
       } catch (e){
-        if (this.running){ this.errors++; this.lastError = e?.message || String(e); }
+        /* 读抛异常（USB 抖动、探针复位）以前是直接 break —— 几条 worker 全退出后数据面就停了，
+         * 而 `running` 还是 true、页面还显示"采样中"（2026-10 代码审查）。现在上报并整体停下。 */
+        if (this.running && g === this.gen){
+          this._fail('数据流中断：' + (e?.message || String(e)) + '（探针掉线了？拔插一次，或改用假探针）');
+        }
         break;
       }
-      if (!this.running) break;                       // 收尾：这一条读到了也不再用
+      if (!this.running || g !== this.gen) break;     // 收尾 / 换轮：这一条读到了也不再用
       if (r.status === 'ok' && r.data?.byteLength){
+        stalls = 0;
         this.chunks++; this.bytes += r.data.byteLength;
         onChunk(new Uint8Array(r.data.buffer, r.data.byteOffset, r.data.byteLength));
       } else if (r.status !== 'ok'){
         this.errors++; this.lastError = r.status;
+        if (r.status === 'stall'){
+          /**
+           * 🚨 STALL 必须 `clearHalt` 才解得开。老代码只给 errors 加一就立刻回头再读 ——
+           *    端点一直保持 STALL，于是**空转**（实测 100 ms 内 transferIn 调了 7 万次）、
+           *    CPU 占满、数据一个都不来（2026-10 代码审查）。这里清一次、让一拍，
+           *    连续解不开就把整条流停掉并如实报出来，别让页面傻等。
+           */
+          try { await this.device.clearHalt('in', this.ep); } catch { /* 有的平台不支持 */ }
+          await sleep(10);
+          if (++stalls >= 8){
+            this._fail(`端点 0x${(this.ep | 0x80).toString(16)} 连续 ${stalls} 次 STALL，clearHalt 也解不开 —— 数据流已停`);
+            break;
+          }
+        }
       }
     }
   }
 
   /** 停止收流：等在飞的读全部回来（最多 800 ms），**不要**让它们挂在那儿 */
   async stop(){
-    if (!this.running) return;
+    this.gen++;                    // 代号一变，超时残留在飞的那条读回来后就自行作废
+    if (!this.running){ this.workers = []; this.stalledInFlight = 0; return; }
     this.running = false;
-    await Promise.race([Promise.allSettled(this.workers), sleep(800)]);
+    let settled = 0;
+    const all = this.workers.map(p => p.then(() => { settled++; }, () => { settled++; }));
+    await Promise.race([Promise.allSettled(all), sleep(800)]);
     this.workers = [];
+    /** 800 ms 还没回来的在飞读有几笔（WebUSB 取消不掉，只能如实记账；页面可据此提示）*/
+    this.stalledInFlight = Math.max(0, all.length - settled);
   }
 
   async close(){
