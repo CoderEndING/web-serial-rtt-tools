@@ -10,7 +10,7 @@
 
 - 驱动注册宏 `LCD_DRIVER_EXPORT2(name, id, init_cfg, dev_ops, pixel_align)` 定义于 `rtos/rtthread/bsp/sifli/drivers/drv_lcd.h`。
 - 写命令函数：`LCD_WriteReg(hlcdc, cmd, param, len)`。延时：`HAL_Delay_us` / `HAL_Delay` / `LCD_DRIVER_DELAY_MS`。复位：`BSP_LCD_Reset(0/1)`。
-- 常见初始化表模式：`static const uint8_t 表名[][MAX_CMD_LEN] = {{cmd, len, p0..p5}, ...}`，消费循环一般写作
+- 常见初始化表模式：{% raw %}`static const uint8_t 表名[][MAX_CMD_LEN] = {{cmd, len, p0..p5}, ...}`{% endraw %}，消费循环一般写作
   `LCD_WriteReg(hlcdc, 表[i][0], (uint8_t *)&表[i][2], 表[i][1])`（**必须以该文件实际消费代码为准**，有些文件用别的偏移/写法）。
 
 ## driver 对象字段

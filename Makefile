@@ -448,6 +448,7 @@ check:
 	$(NODE) --check app/i2c/view.js
 	$(NODE) --check app/main.js
 	$(NODE) --check bridge/rtt-bridge.mjs
+	$(NODE) tools/dev/check-liquid.mjs
 	pwsh -NoProfile -Command "Write-Host '语法检查通过'"
 
 clean:
