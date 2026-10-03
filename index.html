@@ -1605,6 +1605,8 @@
               <option value="reset">每片重发地址</option><option value="ptr">地址指针自增</option></select></label>
             <label class="row" style="margin:0"><span style="width:auto">写分片</span><select id="i2-reg-wrchunk" title="写回时每片最多多少字节。51 = 协议上限（寄存器/传感器用这个）；EEPROM 有页写回卷（AT24C02 页 8 B / AT24C32 页 32 B），必须按页给"></select></label>
             <label class="row" style="margin:0"><span style="width:auto">片间等待</span><input id="i2-reg-gap" value="0" size="4" inputmode="numeric" title="每片之间等多少毫秒。EEPROM 每写完一页要等 tWR（约 5 ms），按页写时填 6；寄存器型器件填 0"></label>
+            <label class="row" style="margin:0"><span style="width:auto">页大小</span><select id="i2-reg-page" title="器件的写页大小。给了就保证每一片都不跨页 —— 这是 EEPROM 页写回卷的真正防线：只设「写分片」挡不住「起始地址不是页倍数」的情况（AT24C02 从 0x05 起按 8 B 写，第一片就会跨过 0x08 那条页界，器件把后半段绕回页首把前面的盖掉）。寄存器型器件选「不限」"></select></label>
+            <label class="chk" style="margin:0" title="写完自动回读同一段对账。器件回 ACK **不等于**写对了 —— 页写回卷、器件把字段夹掉、片间 tWR 没等够，都会让它老实 ACK 却存了别的东西。关掉就只能靠肉眼比对（默认开）"><input type="checkbox" id="i2-reg-verify" checked> 写后回读</label>
             <span class="spacer"></span>
             <button id="i2-reg-read" class="primary mini" title="读一段回来（超过 54 B 自动分片）。读到的值成为「器件现值」，之后黄框标的都是与它的差异">读取</button>
             <button id="i2-reg-write" class="mini" title="只把改过的字节写回器件（相邻的合并成一片，中间断开的会分开写）">只写改动</button>

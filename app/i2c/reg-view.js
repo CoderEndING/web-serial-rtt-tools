@@ -22,6 +22,8 @@ import * as P from './protocol.js';
 import * as R from './registers.js';
 
 const h2 = v => (v & 0xff).toString(16).toUpperCase().padStart(2, '0');
+/** 日志里给一小段十六进制做证据（只取头部，别把整屏刷满）*/
+const hexHead = (u8, n = 16) => Array.from(u8.subarray(0, n), h2).join(' ') + (u8.length > n ? ' …' : '');
 
 export class RegView {
   /** @param {{session:object, onOp?:(op:object)=>void}} opts */
@@ -35,6 +37,8 @@ export class RegView {
     this.chunk = 'reset';
     this.wrChunk = P.WR_MAX;
     this.gapMs = 0;
+    this.pageSize = 0;                   // 器件写页大小（0 = 不限）；见 registers.PAGE_CHOICES 的 🚨
+    this.verify = true;                  // 写完自动回读对账
     this.busy = false;
     this.connected = false;
     this.readKey = null;                 // 「这份数据是从哪儿读来的」指纹（写回前对账）
@@ -58,10 +62,14 @@ export class RegView {
   set cur(v){ this.grid.cur = v instanceof Uint8Array ? v : new Uint8Array(v || 0); }
 
   init(){
-    const ids = ['i2-reg-dev', 'i2-reg-start', 'i2-reg-len', 'i2-reg-alen', 'i2-reg-chunk', 'i2-reg-wrchunk', 'i2-reg-gap'];
+    const ids = ['i2-reg-dev', 'i2-reg-start', 'i2-reg-len', 'i2-reg-alen', 'i2-reg-chunk', 'i2-reg-wrchunk',
+      'i2-reg-gap', 'i2-reg-page', 'i2-reg-verify'];
     // 写分片档位（EEPROM 页写要按页给，见 registers.WRITE_CHOICES 注释）
     const wsel = $('i2-reg-wrchunk');
     for (const [v, t] of R.WRITE_CHOICES) wsel.appendChild(new Option(t, String(v)));
+    // 页大小档位：这一格才是页写回卷的防线（只设写分片挡不住起始地址不对齐）
+    const psel = $('i2-reg-page');
+    for (const [v, t] of R.PAGE_CHOICES) psel.appendChild(new Option(t, String(v)));
     // 恢复上次填的参数（调试时来回切页/刷新不该丢）
     $('i2-reg-dev').value = store.get('i2c.regDev', '0x50');
     $('i2-reg-start').value = store.get('i2c.regStart', '0x00');
@@ -70,6 +78,8 @@ export class RegView {
     $('i2-reg-chunk').value = store.get('i2c.regChunk', 'reset');
     wsel.value = String(store.get('i2c.regWrChunk', P.WR_MAX));
     $('i2-reg-gap').value = String(store.get('i2c.regGap', 0));
+    psel.value = String(store.get('i2c.regPage', 0));
+    $('i2-reg-verify').checked = store.get('i2c.regVerify', 1) !== 0;
     for (const id of ids) $(id).addEventListener('change', () => this._saveParams());
     // 面板上的三个动作都可能抛（输入非法、USB 掉线…）——统一兜住并写进日志，
     // 别变成"未捕获的 promise 错误"（页面自测会把它当失败，用户也看不到原因）
@@ -116,6 +126,8 @@ export class RegView {
     store.set('i2c.regChunk', $('i2-reg-chunk').value);
     store.set('i2c.regWrChunk', +$('i2-reg-wrchunk').value || P.WR_MAX);
     store.set('i2c.regGap', Math.max(0, +$('i2-reg-gap').value || 0));
+    store.set('i2c.regPage', Math.max(0, +$('i2-reg-page').value || 0));
+    store.set('i2c.regVerify', $('i2-reg-verify').checked ? 1 : 0);
   }
 
   /** 读参数（任何一项非法就抛，错误信息直接给用户看）*/
@@ -126,7 +138,9 @@ export class RegView {
     const len = R.parseLen($('i2-reg-len').value);
     return { dev, start, addrLen, len, chunk: $('i2-reg-chunk').value === 'ptr' ? 'ptr' : 'reset',
              wrChunk: +$('i2-reg-wrchunk').value || P.WR_MAX,
-             gapMs: Math.max(0, +$('i2-reg-gap').value || 0) };
+             gapMs: Math.max(0, +$('i2-reg-gap').value || 0),
+             pageSize: Math.max(0, +$('i2-reg-page').value || 0),
+             verify: $('i2-reg-verify').checked };
   }
 
   /** 「这份缓冲是从哪儿读来的」指纹（器件 + 起始地址 + 地址宽度）—— 写回前必须一致 */
@@ -182,11 +196,29 @@ export class RegView {
     this.busy = true; this._syncButtons();
     try {
       const r = await this.session.writeLong(
-        { dev: p.dev, addr: p.start, data: this.grid.cur, offsets: offs, chunkMax: p.wrChunk, gapMs: p.gapMs },
+        { dev: p.dev, addr: p.start, data: this.grid.cur, offsets: offs,
+          chunkMax: p.wrChunk, pageSize: p.pageSize, gapMs: p.gapMs },
         { label: `寄存器写 ${P.addr7(p.dev)}${p.addrLen ? '[' + R.addrLabel(p.start, 0, p.addrLen) + ']' : ''}` +
                  ` × ${offs ? offs.length : this.grid.cur.length} B${offs ? '（只写改动）' : '（整块）'}` });
       if (r.err !== P.E.OK) return;
-      // 写成功了 → "器件现状"就是现在这份，黄框随之清掉
+      /* 器件回了 ACK **不等于**写对了：EEPROM 页写回卷、器件把非法字段夹掉、片间 tWR 没等够，
+       * 都会让它老实 ACK 却存了别的东西。所以按需回读同一段对账一次。
+       * （2026-10 代码审查：旧代码这里直接 base = cur —— 黄框消失、界面显示成功，而数据其实是花的。）
+       * 对不上就**不更新 base**：黄框留着，用户一眼看得见哪几个字节没进去。 */
+      if (p.verify){
+        const want = this.grid.cur;
+        const vr = await this.session.readLong({ dev: p.dev, addr: p.start, rd: want.length, chunk: p.chunk },
+          { quiet: true });
+        if (vr.err !== P.E.OK){
+          this.session.log('w', `写后回读失败：${P.errText(vr.err)} —— 无法确认写进去了没有，先别当成功`);
+        } else if (vr.data.length !== want.length || !R.bytesEq(vr.data, want)){
+          this.session.log('e', `写后回读**与写入不一致** —— 器件里存的不是这份数据：` +
+            `写 ${hexHead(want)} / 读 ${hexHead(vr.data)}。常见原因：① 器件有页写回卷而「页大小」没给对` +
+            `（EEPROM 必填）；② 片间 tWR 等太短；③ 器件把非法字段夹掉。**黄框保留，别当写成功**`);
+          return;
+        }
+      }
+      // 写成功（必要时回读也一致）→ "器件现状"就是现在这份，黄框随之清掉
       this.grid.base = this.grid.cur.slice();
       this._render();
       if (diff.length) this.session.log('dim', '改动已写回：' + diff.slice(0, 8).map(d =>

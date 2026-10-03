@@ -244,6 +244,76 @@ if (!DO_WRITE){
   }
 }
 
+// ==================================================================== 5b
+/**
+ * 5b) **跨页写**真机回归（2026-10 代码审查 #1 的现场钉子）。
+ *
+ * 上面那条 8 B 写是从 `--addr`（默认 0）起的、**正好页对齐**，所以打不到这个 bug。
+ * 真正的坑：EEPROM 的页写在器件内部**按页回卷** —— 起始地址不是页倍数时，
+ * 越过页界的那几个字节绕回**本页页首**，盖掉刚写的，而器件全程老实 ACK、页面还报"写成功"。
+ * 修法是在 `planWrite` 里给 `pageSize`：每片收窄到不跨页（AT24C02 = 8 B）。
+ *
+ * 🚨 这段的"反证"**会真的写花**（2026-10 本机实测：不给 pageSize 时 `A5 5A DE` 写在 0x05..0x07、
+ *    剩下的 `AD BE EF 12 34` 绕回写进 **0x00..0x04**）—— 所以必须先**快照整页**、结束时还原整页，
+ *    只按"0x05 起的 8 B"读回是看不出来的（那一截是对的）。第一版就是这么把自己坑了：
+ *    反证写花 0x00..0x04 却没还原，后面 §6 解出来的 b0 从 0xA5 变成 0xAD。
+ */
+console.log('== 5b. 跨页写（起始地址不是页倍数）==');
+if (!DO_WRITE){
+  console.log('    （跳过：需要写 EEPROM，加 --write）');
+} else {
+  const PAGE = Number(String(argOf('page') ?? '8'));       // AT24C02 = 8 B
+  const cross = await ev(`
+    const t = window.__tools.i2c, addr = ${ADDR} + 5, n = ${PATTERN.length}, page = ${PAGE};
+    const pageStart = addr - (addr % page);
+    const rdPage = () => t.session.transaction({ dev:${DEV}, addr:[pageStart], wr:[], rd:page }, { quiet:true });
+    const rdOne = a => t.session.transaction({ dev:${DEV}, addr:[a], wr:[], rd:${PATTERN.length} }, { quiet:true });
+    const snapshot = await rdPage();
+    if (snapshot.err !== 0) return { step:'read-page', err: snapshot.err };
+    const orig = await rdOne(addr);
+    if (orig.err !== 0) return { step:'read-orig', err: orig.err };
+    // ① 按页对齐写（正式路径）：每片不许跨页
+    const good = await t.session.writeLong({ dev:${DEV}, addr:[addr],
+        data: Uint8Array.from([${PATTERN.join(',')}]), chunkMax: ${PATTERN.length}, pageSize: page, gapMs: 12 }, { quiet:true });
+    await new Promise(r => setTimeout(r, 12));
+    const back = await rdOne(addr);
+    // ② 反证（只为观察，不判）：不给 pageSize —— 会绕回写花本页页首
+    const bad = await t.session.writeLong({ dev:${DEV}, addr:[addr],
+        data: Uint8Array.from([${PATTERN.join(',')}]), chunkMax: ${PATTERN.length}, gapMs: 12 }, { quiet:true });
+    await new Promise(r => setTimeout(r, 12));
+    const badBack = await rdOne(addr);
+    const afterBad = await rdPage();
+    // ③ 还原**整页**（只还原 0x05 起那段会把绕回写花的部分留下 —— 见上面 🚨）
+    await t.session.writeLong({ dev:${DEV}, addr:[pageStart], data: Uint8Array.from(snapshot.data),
+        chunkMax: page, pageSize: page, gapMs: 12 }, { quiet:true });
+    await new Promise(r => setTimeout(r, 12));
+    const restored = await rdPage();
+    return { step:'done', addr, pageStart,
+             snap:[...snapshot.data], orig:[...orig.data], goodErr: good.err, chunks: good.chunks,
+             backErr: back.err, back:[...back.data], badErr: bad.err, badBack:[...badBack.data],
+             afterBad:[...afterBad.data], restoredErr: restored.err, restored:[...restored.data] };`);
+  if (cross.step !== 'done'){
+    ok(false, `跨页写在「${cross.step}」这一步失败（err=${cross.err}）`);
+  } else {
+    const want = PATTERN.join(',');
+    const ps = cross.pageStart;
+    /** 取前 PAGE 个字节（page 侧回的是数组；这里做一次归一，免得形状不对时报个看不懂的错） */
+    const head = (arr) => Array.from(arr ?? []).slice(0, PAGE).map(Number);
+    const slice = (arr) => head(arr).join(',');
+    console.log(`    起始 0x${cross.addr.toString(16)}（页 0x${ps.toString(16)} 起，页大小 ${PAGE}）→ 实得 ${cross.chunks} 片`);
+    console.log(`    整页快照 ${hex(head(cross.snap))}  类型 ${Array.isArray(cross.snap) ? 'array' : typeof cross.snap}`);
+    ok(cross.goodErr === 0 && cross.chunks >= 2, `页对齐写被切成多片（${cross.chunks} 片）`);
+    ok(cross.backErr === 0 && cross.back.join(',') === want,
+      `🚨 跨页写完回读逐字节对得上（${hex(cross.back)}）`, `期望 ${want}`);
+    const wrapped = slice(cross.afterBad) !== slice(cross.snap);
+    console.log(wrapped
+      ? `    ✅ 反证（不给页大小）：整页确实被写花 → ${hex(head(cross.afterBad))}（页首被绕回的数据盖掉了）`
+      : '    （反证：这块模块不给页大小也没花 —— 有些模块内部按字节写；离线假器件仍会花）');
+    ok(cross.restoredErr === 0 && slice(cross.restored) === slice(cross.snap),
+      `还原整页成功（读回 ${hex(head(cross.restored))}）`);
+  }
+}
+
 // ==================================================================== 6
 console.log('== 6. 页面上跑一段 while(1) 定时读（真机）==');
 {
