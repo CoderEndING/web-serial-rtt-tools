@@ -691,7 +691,34 @@ async function scopeEnsureElf(){
   if (!r.n) throw new Error('scope 固件里没解析出变量（ELF 载入失败？）');
   return r;
 }
-async function scopeRun({ idxs, periodUs, secs, label }){
+/**
+ * J-Scope 一组采样 —— **带一次"链路重连重试"**。
+ *
+ * 🚨 为什么要重试（2026-10 真机现场）：连着做完 RTT 转发（2.9 MB/s）+ 上几组采样之后，
+ *    探针偶尔会给采样器的 start 回 **rc=-4「该档位链路不可用」**（它自己把所有 SWD 档都试过了
+ *    仍没把链路初始化起来）。同一段编排在几分钟前刚跑过 4 组 × 2 轮全过，是**瞬态**，
+ *    但套件原来一撞就整轮抛错 —— 前面 18 条判决全白跑，10 分钟打水漂。
+ *    这里：失败就停掉采样、把 HID/USB 两条链路重连一遍再试一次；两次都不过才抛。
+ *    重试会**明确打印**（不掩盖：反复出现说明是链路/供电的问题，不是偶发）。
+ */
+async function scopeRun(opts){
+  for (let attempt = 1; attempt <= 2; attempt++){
+    try { return await scopeRunOnce(opts); }
+    catch (e){
+      const msg = String(e?.message || e).split('\n')[0];
+      const retryable = /起不来|不可用|没连|超时|未启动/.test(msg);
+      if (attempt === 2 || !retryable) throw e;
+      console.log(`   [J-Scope] ${opts.label} 第 ${attempt} 次没起来（${msg}）→ 停采样 + 重连 HID/USB 再试一次`);
+      await cdp.eval(`(async()=>{ const s=window.__tools.scope; try{ await s.stop('重试'); }catch(e){}
+                                  try{ await s.releaseProbe?.('重试'); }catch(e){} })()`).catch(() => {});
+      await nap(600);
+      const conn = await scopeConnect();
+      console.log(`   [J-Scope] 重连结果：hid=${conn.hid} usb=${conn.usb}`);
+      await nap(800);
+    }
+  }
+}
+async function scopeRunOnce({ idxs, periodUs, secs, label }){
   await cdp.eval(`document.querySelector('.tab[data-tab="scope"]').click()`);
   const conn = await scopeConnect();
   if (!conn.hid || !conn.usb) throw new Error(`J-Scope 链路没连上（hid=${conn.hid} usb=${conn.usb}）`);
