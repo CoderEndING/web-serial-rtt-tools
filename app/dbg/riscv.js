@@ -278,6 +278,7 @@ export class RiscvDebugSession extends DebugSession {
     const r = rvRegno(name);
     if (!r) throw new Error(`不认识的寄存器「${name}」（RV32：x0..x31 / ABI 名 / pc / 常用 CSR）`);
     if (!this.halted && r.kind !== 'gpr') throw new Error('抽象命令要先停住目标（先「暂停」）');
+    if (this.halted && r.kind !== 'gpr') await this._ensureHalted('readReg ' + name);
     return (await this.dm.readReg(r.regno)) >>> 0;
   }
 
@@ -285,8 +286,26 @@ export class RiscvDebugSession extends DebugSession {
     const r = rvRegno(name);
     if (!r) throw new Error(`不认识的寄存器「${name}」`);
     if (r.regno === 0x1000) throw new Error('x0 是硬连 0，写不进去');
+    if (this.halted) await this._ensureHalted('writeReg ' + name);
     await this.dm.writeReg(r.regno, value >>> 0);
     return (await this.dm.readReg(r.regno)) >>> 0;
+  }
+
+  /**
+   * 🚨 抽象命令要求 hart **真的停着**（否则 cmderr=4/5，而且那条 cmderr 还会 sticky 住
+   *    之后每一条命令）。而 `this.halted` 是**缓存**：上一格（编断点 / 临时断点单步 /
+   *    外部复位）可能已经把核放跑了，缓存却还是 true。
+   *
+   *    真机现场（2026-10，make full_flow_6800evk → test-dbg-riscv）：连续挂 4 个断点后
+   *    `go` 的第一步 `readReg('PC')` 就撞上 `cmderr=3`。所以这里**用 dmstatus 现场核一遍**，
+   *    发现跑着就先 halt 再继续 —— 只在这条"缓存说停着"的路径上多读一次 dmstatus。
+   */
+  async _ensureHalted(what){
+    let live = true;
+    try { live = await this._pollHalted(); } catch { return; }   // 读不到就按缓存继续（别把调试卡死）
+    if (live) return;
+    this._log(`${what}：目标其实在跑（dmstatus 说没停）→ 先「暂停」再继续`, 'warn');
+    await this.halt();
   }
 
   // ---------------------------------------------------------------- 内存（SBA）

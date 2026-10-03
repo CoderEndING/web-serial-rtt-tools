@@ -112,7 +112,7 @@ export function summaryTable(r){
     sp.j1kHz == null ? '—' : (Math.min(...j1.v) >= sp.j1kHz ? 'PASS' : 'FAIL'));
   push('J-Scope 3 变量 @2µs', two(j3), `均 ${S(j3.avg, 1)} kHz`, sp.j3kHz != null ? `≥ ${S(sp.j3kHz)} kHz` : '—',
     sp.j3kHz == null ? '—' : (Math.min(...j3.v) >= sp.j3kHz ? 'PASS' : 'FAIL'));
-  push('50 kHz 档丢样本（探针跳拍 ≤ 100 ppm · USB = 0）', two(j50probePpm),
+  push('低速率档丢样本（探针跳拍 ≤ 100 ppm · USB = 0）', two(j50probePpm),
     `探针跳拍 ${j50.v.reduce((a, b) => a + b, 0)} / ${j50samp} 样本 · USB ${j50usb.v.reduce((a, b) => a + b, 0)} 个`,
     '≤ 100 ppm', (j50probePpm.v.every(x => x <= 100) && j50usb.v.every(x => x === 0)) ? 'PASS' : 'FAIL');
 

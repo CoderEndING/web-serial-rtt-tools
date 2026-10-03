@@ -249,6 +249,17 @@ export class Rtt {
     const e = (dir === 'up' ? this.up : this.down)[ch];
     if (!e || !e.sName) return '';
     const k = `${dir}${ch}`;
+    /**
+     * 后端声明"这个名字读不得"就直接跳过（RISC-V 的 `RiscvMem.skipNames`）：
+     * 1.2 s 超时只是**保护**，不是解药 —— 超时后那笔 SBA 事务还挂着，会把
+     * `sbcs.sbbusyerror` 置成 sticky（写 1 才清），之后每个环读都直接失败，
+     * 整条 Viewer 白连（真机现场见 make hw-campaign-hpm）。
+     * ARM 那条路（AHB-AP 读 flash 没问题）不设这个标志，照旧读名字。
+     */
+    if (this.mem?.skipNames){
+      this._names.set(k, '');
+      return '';
+    }
     if (!this._names.has(k)){
       let nm = '';
       try {

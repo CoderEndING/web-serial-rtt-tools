@@ -56,7 +56,8 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
  *
  * 下表来自 2026-10 那次 `--record` 全口径跑（2 轮 + 交替 5 遍）+ 一次判决跑的实测：
  *   烧 flood 8.8~10.5 s · 烧 scope 8.4~10.3 s · RTT Viewer 63.5~77.3 KB/s · 转发 1.376~1.377 MB/s ·
- *   存盘一致性 99.6~100% · J-Scope 1 变量 257~259 kHz / 3 变量 40.8 kHz · 50 kHz 档零丢
+ *   存盘一致性 99.6~100% · J-Scope 1 变量 257~259 kHz / 3 变量 40.8 kHz · 低速率档零丢
+ *   （1 变量 @20µs = 50.00 kHz 零跳拍；3 变量上限只有 ~41 kHz，所以那一档按 30 µs 跑 —— 见 scopeRun 调用处的注释）
  * 速率类取均值 × 0.8（更严）；**耗时类按"实测最坏值 + 15% 余量"**：
  *   把 8.5 s × 0.8 当线是要它比最坏情况还快 20%，那不是能力、是宿主的抖动
  *   （同一份固件同一根线，实测 8.4~10.5 s，慢的那次多半是宿主调度/JTAG 批次被挤）；
@@ -72,7 +73,7 @@ const SPEC = {
   recordBytesRatio: 0.98,// 存盘字节 / 同窗口收数（实测 99.6~100%）
   j1kHz: 206.6,          // J-Scope 1 变量：实测均 258.3 kHz × 80%
   j3kHz: 32.6,           // J-Scope 3 变量：实测均 40.8 kHz × 80%
-  j50k: true,            // 50 kHz 档必须零丢样本
+  j50k: true,            // 低速率档（1 变量 @20µs = 50 kHz · 3 变量 @30µs）必须零丢样本
 };
 
 const WD = setTimeout(() => { console.log('!! 看门狗超时（25 分钟），退出'); process.exit(9); }, 25 * 60 * 1000);
@@ -269,6 +270,13 @@ const dump = () => { try { fs.writeFileSync('tmp/hpm-campaign-result.json', JSON
 
 /** 开跑前校准：芯片 = HPM6800EVK、后端 webusb、**目标类型 = RISC-V**、SWD 时钟清 0 */
 async function preflight(){
+  /**
+   * 🚨 先把测试页拉到前台（2026-10 现场踩到）：窗口被遮住/最小化时
+   *    `document.hidden === true`，浏览器会把**短延时钳到 ≥1 s**、把 File System Access
+   *    的写盘降到几十 KB/s —— 转发/存盘那一相会积压到把渲染进程顶住（现象是 CDP
+   *    `Runtime.evaluate` 直接超时、页面像死了）。bringToFront 是零成本的保险。
+   */
+  try { await cdp.send('Page.bringToFront'); } catch {}
   const st = await cdp.evalJson(`(()=>{
     document.querySelector('.tab[data-tab="flash"]').click();
     const c = document.getElementById('f-chip'); const chipBefore = c.value;
@@ -289,9 +297,11 @@ async function preflight(){
     const ra = document.getElementById('r-addr'); if (ra) ra.value = '';
     return { chipBefore, chip: c.value, chipText: c.options[c.selectedIndex]?.textContent || '',
              backend: b.value, targetBefore: tBefore, target: t.value,
+             vis: document.visibilityState, hidden: document.hidden, focus: document.hasFocus(),
              scBefore, sc: sc ? sc.value : null, clockBefore: kBefore, clock: k ? k.value : null };
   })()`);
-  console.log(`   前置：芯片 ${st.chipBefore || '(空)'} → ${st.chip}（${st.chipText}）· 后端 ${st.backend}`);
+  console.log(`   前置：芯片 ${st.chipBefore || '(空)'} → ${st.chip}（${st.chipText}）· 后端 ${st.backend}`
+    + ` · 页面 ${st.hidden ? '后台/被遮住 ⚠（短延时会被钳到 1 s、写盘会降速）' : '前台 ✓'}（${st.vis}，focus=${st.focus}）`);
   console.log(`         目标类型：桥 ${st.targetBefore} → ${st.target} · 波形页 ${st.scBefore} → ${st.sc} · SWD 时钟 ${st.clockBefore || '(空)'} → ${st.clock === '' ? '(空/0，JTAG 下正确)' : st.clock}`);
   if (st.chip !== CHIP) throw new Error(`芯片下拉里没有 ${CHIP}`);
   if (st.target !== 'riscv') throw new Error('探针目标类型没能设成 RISC-V —— HPM 上这一步不能少');
@@ -398,22 +408,104 @@ async function rttViewerRiscv(secs, cbAddr){
     })()`);
   await nap(400);
   console.log(`   [RTT Viewer] RISC-V 通路：控制块 0x${cbAddr.toString(16)}（ELF 的 _SEGGER_RTT）`);
+  /**
+   * 连之前先把可能残留的会话拆干净：上一次读（比如 board-check 的「读 IDCODE」、
+   * 上一步烧录、或者上一轮的 J-Scope 采样）都可能还挂着**在飞的 USB 传输**，
+   * 直接连的话第一笔 transferIn 会撞 "device state is in progress" / 超时，页面的自愈
+   * 要花好几秒 —— 那几秒正好落在计时窗口里，会被判成 0 KB/s（实测踩到两次：
+   * 第一次是 board-check 之后，第二次是上一轮 J-Scope 采样之后）。
+   * `disconnect()` 是幂等的，而且它内部会把"上次会话超时"这个状态记下来，
+   * 下一次认领前**先复位 USB 端口并清队列**（页面日志里能看到那两行）。
+   */
+  const preClean = async () => {
+    /* 采样器那边也要停干净：它的 transport 在 0x83 上一直有在飞的 bulk 读，
+     * 不静下来，RTT Viewer 这次的 WebUSB 会话就会被"设备状态在变"顶掉。 */
+    try { await cdp.eval(`(async()=>{ const s=window.__tools.scope;
+        try{ if (s.running) await s.stop('清理'); }catch(e){}
+        try{ await s.transport?.stop?.(); }catch(e){} })()`); } catch {}
+    try { await cdp.eval(`window.__tools.rtt.probe?.recover?.()`); } catch {}
+    try { await cdp.eval(`window.__tools.rtt.disconnect()`); } catch {}
+    await nap(400);
+  };
+  await preClean();
+  /**
+   * 等**第一次轮询真的跑完**再开始计时。
+   *
+   * RISC-V 这条路的一次轮询 = 读控制块 + 读整段环（十几条 DAP 命令）；"running 为真"
+   * 在首轮**开始**时就成立，不等它就会把启动开销算进 8 s 窗口（甚至 0 次轮询 → 0.0 KB/s）。
+   *
+   * 🚨 三级升级（2026-10 现场，每一级都真的踩到过）：
+   *   ① 状态栏报错、`polls` 卡在 1 → `probe.recover()`（清 SBA sticky + 复位 DM）；
+   *   ② 还不动 → `dm.resetRun()`（ndmreset；那条 sticky 只有系统复位才解得开的情形）；
+   *   ③ 报错就**抛**出去，让外层的"清场 + 重连"再走一遍（重连会复位 USB 端口 + 清队列，
+   *      这是"页面自己那套 dmiSpeedProbe 说链路偏慢"时的正解）。
+   * 只等不重连的话，第 2 轮就整轮报废（实测）。
+   */
+  const waitFirstPoll = async () => {
+    const t0 = Date.now();
+    const deadline = t0 + 25000;
+    let stage = 0;
+    for (;;){
+      const st = await cdp.evalJson(`({ polls: window.__tools.rtt.stats.polls, bytes: window.__tools.rtt.stats.bytes,
+          err: document.getElementById('r-err').textContent,
+          slow: !!window.__tools.rtt.probe?.health?.slow, health: window.__tools.rtt.probe?.health || null })`);
+      if (st.polls >= 1 && st.bytes > 0) return st;
+      if (st.slow){
+        throw new Error(`链路偏慢（health=${JSON.stringify(st.health)}）—— 需要重开 USB 会话`);
+      }
+      if (stage === 0 && st.err && st.polls <= 1){
+        stage = 1;
+        console.log(`   [RTT Viewer] 首轮卡住（${st.err}）→ 清 SBA 错误 + 复位 DM`);
+        try { await cdp.eval(`window.__tools.rtt.probe?.recover?.()`); } catch {}
+      } else if (stage === 1 && Date.now() - t0 > 6000){
+        stage = 2;
+        console.log('   [RTT Viewer] 还不动 → 系统复位（ndmreset）自愈后再等');
+        try { await cdp.eval(`window.__tools.rtt.probe?.dm?.resetRun?.()`); } catch {}
+      }
+      if (Date.now() > deadline){
+        throw new Error(`RTT Viewer（RISC-V）首轮没跑起来：polls=${st.polls} bytes=${st.bytes} 状态栏=${st.err || '—'}`);
+      }
+      await nap(400);
+    }
+  };
   let lastErr = '';
   for (let attempt = 1; attempt <= 3; attempt++){
     await cdp.eval(`document.getElementById('r-usb-connect').click()`, true);
-    try { await cdp.waitFor(`window.__tools.rtt.rtt`, attempt === 1 ? 25000 : 15000, 'RTT 控制块定位'); lastErr = ''; break; }
-    catch (e){
+    try {
+      await cdp.waitFor(`window.__tools.rtt.rtt`, attempt === 1 ? 25000 : 15000, 'RTT 控制块定位');
+      /**
+       * 🚨 "连上了但没开始轮询"也要算**连接失败**并重走整个连接流程（含上面的清场）。
+       *    实测：上一轮 J-Scope 采样留下的在飞 USB 传输会让这一轮 rtt.rtt 定位成功、
+       *    但轮询循环起不来（running 一直是 false）—— 这时候光等没用，必须断开重来
+       *    （disconnect 会顺手复位 USB 端口 + 清队列）。
+       */
+      await cdp.waitFor(`window.__tools.rtt.running`, 8000, 'RTT 轮询在跑');
+      const st = await waitFirstPoll();
+      console.log(`   [RTT Viewer] 首轮完成（polls=${st.polls} bytes=${st.bytes}）`);
+      lastErr = '';
+      break;
+    } catch (e){
       const st = await cdp.evalJson(`({ probe: !!window.__tools.rtt.probe, kind: window.__tools.rtt.probe?.isRiscv,
+          running: !!window.__tools.rtt.running, polls: window.__tools.rtt.stats?.polls,
+          health: window.__tools.rtt.probe?.health || null,
           err: document.getElementById('r-err').textContent, addr: document.getElementById('r-addr').value,
           target: document.getElementById('r-target').value })`);
-      lastErr = `${e.message}（probe=${st.probe} riscv=${st.kind} 目标类型=${st.target} 地址格=${st.addr || '(空)'} 状态栏=${st.err || '—'}）`;
-      console.log(`   [RTT Viewer] 第 ${attempt} 次没连上，等 2 s 重试：${lastErr}`);
-      try { await cdp.eval(`window.__tools.rtt.disconnect()`); } catch {}
-      await nap(2000);
+      lastErr = `${e.message}（probe=${st.probe} riscv=${st.kind} running=${st.running} polls=${st.polls} 目标类型=${st.target} 地址格=${st.addr || '(空)'} 状态栏=${st.err || '—'}）`;
+      console.log(`   [RTT Viewer] 第 ${attempt} 次没连上，清场后重试：${lastErr}`);
+      await preClean();
+      await nap(1500);
     }
   }
   if (lastErr) throw new Error('RTT Viewer（RISC-V）连不上（试了 3 次）：' + lastErr);
-  await cdp.waitFor(`window.__tools.rtt.running`, 8000, 'RTT 轮询在跑');
+  /**
+   * 🚨 还要等**第一次轮询真的跑完**再开始计时。
+   *    RISC-V 这条路的一次轮询 = 读控制块 + 读整段环（十几条 DAP 命令），冷启动时
+   *    还可能夹着 USB 端口复位 / DM 复位（见 riscv-mem.js 的注释）。实测首轮偶发要
+   *    2~8 s，而"running 为真"在首轮**开始**时就成立了 —— 不等它就会把启动开销
+   *    算进 8 s 窗口（甚至 0 次轮询 → 判决 0.0 KB/s）。
+   *    期间如果状态栏报了错、或者排空超过 6 s 还没动，就用页面自己的
+   *    `probe.recover()`（清 SBA 错误 + 复位 DM）救一次，再接着等。
+   */
   const a = await cdp.evalJson(`({ b: window.__tools.rtt.stats.bytes, p: window.__tools.rtt.stats.polls, t: performance.now() })`);
   console.log(`   [RTT Viewer] 量速率 ${secs}s…（JTAG TCK 档 ${await cdp.evalJson(`document.getElementById('r-usb-clock')?.value`)}）`);
   await nap(secs * 1000);
@@ -488,6 +580,28 @@ async function rttForward(){
   const st0 = await cdp.evalJson(`({ cb: window.__tools.hid.last?.cbAddr, mhz: window.__tools.hid.last?.swdMhz,
       state: document.getElementById('h-state').textContent.slice(0, 90) })`);
   console.log(`   [转发] 探针报：控制块 0x${Number(st0.cb || 0).toString(16)} · 状态「${st0.state}」`);
+
+  /**
+   * 🚨 开 CDC 口**之前**先用「丢弃模式」把积压抽干。
+   *
+   * HPM 的 flood 靶子环很大（8 MB），而上一格 RTT Viewer 走 SBA 只有 ~70 KB/s ——
+   * 到这一格环里已经攒满了。桥一起来就把这几 MB 以 ~6.5 MB/s 往 CDC 里灌
+   * （2026-10 实测：探针侧 6.460 MB/s vs 页面 1.392 MB/s，差值全被 Windows 串口
+   * 驱动的缓冲吃掉/丢掉），而页面在这个突发里要按 6.5 MB/s 处理数据 —— 实测会把
+   * 渲染进程顶住：CDP `Runtime.evaluate` 直接超时、页面看着像死了（整轮编排报废）。
+   *
+   * 探针自带丢弃模式（HID 0x31 action 7 的 flags bit0：照常从目标环搬到 stage，
+   * 但**不写 CDC**）—— 用它把积压扔掉，再切回正常模式量**稳态**速率（spec 要的就是稳态；
+   * 积压是这台基准自己的编排造出来的，不该算进"转发速率"）。
+   */
+  console.log('   [转发] 丢弃模式抽干积压（HPM 环 8 MB，直接开会把页面顶住）…');
+  const drainedA = await cdp.evalJson(`window.__tools.hid.last?.moved || 0`);
+  await cdp.eval(`window.__tools.hid.dev.configure({ discard: true })`);
+  await nap(4000);
+  await cdp.eval(`window.__tools.hid.dev.configure({ discard: false })`);
+  await nap(600);
+  const drainedB = await cdp.evalJson(`window.__tools.hid.last?.moved || 0`);
+  console.log(`   [转发] 丢掉 ${((drainedB - drainedA) / 1048576).toFixed(2)} MB 积压（丢弃模式 4 s；之后量的是稳态）`);
 
   // 页面 CDC 口（已授权 → 直接连）
   await cdp.eval(`window.__tools.stream.refreshPorts()`).catch(() => {});
@@ -702,7 +816,18 @@ try {
     rec.j1 = await scopeRun({ idxs: picks.one, periodUs: 2, secs: SCOPE_SECS, label: '1 变量 @2µs', specKey: 'j1kHz' });
     rec.j3 = await scopeRun({ idxs: picks.three, periodUs: 2, secs: SCOPE_SECS, label: '3 变量 @2µs', specKey: 'j3kHz' });
     rec.j50k1 = await scopeRun({ idxs: picks.one, periodUs: 20, secs: SCOPE_SECS, label: '1 变量 @20µs' });
-    rec.j50k3 = await scopeRun({ idxs: picks.three, periodUs: 20, secs: SCOPE_SECS, label: '3 变量 @20µs' });
+    /**
+     * 3 变量那只用 **30 µs**（= 33 kHz），不是 20 µs。
+     *
+     * 🚨 原因（2026-10 真机实测，别改回去）：HPM 这条 RISC-V/SBA 通路上，
+     *    3 个相邻成员合成 **1 个 span / 12 B** 的读循环实测 **~24.3 µs**（@2µs 名义跑出
+     *    40.64 kHz、@20µs 名义跑出 41.13 kHz，两处一致 ⇒ 就是能力上限 ~41 kHz）。
+     *    20 µs 的周期**低于**这个上限，探针只能每拍跳一次（3 s 里丢 26182 拍），
+     *    那是"请求超过了能力"，不是丢包/回归 —— 而 USB 丢样本与 seq 缺口都是 0。
+     *    要判"低速率档不许跳拍"，就得挑设备**跑得住**的周期：30 µs 有 ~20% 余量。
+     *    （F103 那边 3 变量 @20µs 能跑（60 MHz 档 3 span 也有 ~60 kHz 能力），所以那边不用改。）
+     */
+    rec.j50k3 = await scopeRun({ idxs: picks.three, periodUs: 30, secs: SCOPE_SECS, label: '3 变量 @30µs' });
     report.cycles.push(rec);
     dump();
   }
@@ -733,7 +858,8 @@ for (const r of report.cycles){
     + ` → 存盘 ${(r.fwd.record.fileBytes / 1048576).toFixed(2)} MB/${r.fwd.record.seconds}s`
     + `（一致性 ${(r.fwd.record.ratio * 100).toFixed(1)}%）→ 烧 scope ${(r.flashScope.ms / 1000).toFixed(1)}s`);
   console.log(`        J-Scope：1 变量 ${(r.j1.rateHz / 1000).toFixed(2)} kHz · 3 变量 ${(r.j3.rateHz / 1000).toFixed(2)} kHz`
-    + ` · 50kHz 档丢样本 探针 ${r.j50k1.lostProbe + r.j50k3.lostProbe}/USB ${r.j50k1.lostUsb + r.j50k3.lostUsb}`);
+    + ` · 低速率档丢样本 探针 ${r.j50k1.lostProbe + r.j50k3.lostProbe}/USB ${r.j50k1.lostUsb + r.j50k3.lostUsb}`
+    + `（1 变量@20µs ${(r.j50k1.rateHz / 1000).toFixed(2)} kHz · 3 变量@30µs ${(r.j50k3.rateHz / 1000).toFixed(2)} kHz）`);
 }
 if (report.alt.length){
   const f = report.alt.map(a => a.floodMs / 1000), s = report.alt.map(a => a.scopeMs / 1000);

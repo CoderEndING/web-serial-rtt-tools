@@ -291,6 +291,14 @@ export class DebugSession {
     if (this._bpAt(pc) !== undefined){
       this._log(`PC 停在断点 0x${pc.toString(16)} 上：先单步跨过它再继续`, 'dim');
       await this.step();
+      /**
+       * 🚨 跨过断点之后**目标可能已经在跑**了（RISC-V 上单步的收尾会放开核，2026-10 真机：
+       *    `make full_flow_6800evk` 的 test-dbg-riscv 连挂 4 个断点后就在这一步炸 —— 下面那次
+       *    `readReg` 撞上"抽象命令要先停住目标"，整轮套件中断）。
+       *    语义上这时"继续"**已经达成**（它就在跑），所以直接返回 true，不要再读寄存器。
+       *    ARM 那条路单步后仍然halted（C_STEP 或断点单步都会停回来），走不到这个分支。
+       */
+      if (!this.halted){ return true; }
     }
     const pcRun = align2(await this.readReg(this.arch.PC));   // 起步地址：用来确认"真的跑起来了"
     await this.run();

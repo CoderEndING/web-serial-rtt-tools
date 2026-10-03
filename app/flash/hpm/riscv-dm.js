@@ -510,19 +510,41 @@ export class RiscvTransport {
 
   /** 读一个 hart 寄存器（x0..x31 = 0x1000+n、dpc = 0x7b1）*/
   async readReg(regno){
-    const { command } = abstractCommand({ regno, write: false, aarsize: 2 });
-    await this.dmiWrite(DM.COMMAND, command);
-    await this._waitAbstract();
-    return await this.dmiRead(DM.DATA0);          // 通用寄存器、dpc、CSR 都从 data0 取
+    return this._abstractRetry(async () => {
+      const { command } = abstractCommand({ regno, write: false, aarsize: 2 });
+      await this.dmiWrite(DM.COMMAND, command);
+      await this._waitAbstract();
+      return await this.dmiRead(DM.DATA0);          // 通用寄存器、dpc、CSR 都从 data0 取
+    }, `读寄存器 0x${regno.toString(16)}`);
   }
 
   /** 写一个 hart 寄存器；返回写下去的 32 位值 */
   async writeReg(regno, value){
-    await this.dmiWrite(DM.DATA0, value >>> 0);
-    const { command } = abstractCommand({ regno, write: true, aarsize: 2 });
-    await this.dmiWrite(DM.COMMAND, command);
-    await this._waitAbstract();
+    await this._abstractRetry(async () => {
+      await this.dmiWrite(DM.DATA0, value >>> 0);
+      const { command } = abstractCommand({ regno, write: true, aarsize: 2 });
+      await this.dmiWrite(DM.COMMAND, command);
+      await this._waitAbstract();
+    }, `写寄存器 0x${regno.toString(16)}`);
     return value >>> 0;
+  }
+
+  /**
+   * 🚨 `abstractcs.cmderr` 是**写 1 才清**的 sticky 位（规范 §3.14）：一条抽象命令失败之后，
+   *    **之后每一条抽象命令都会立刻报同一个 cmderr** —— 真机现场（2026-10，make full_flow_6800evk）：
+   *    编 4 个断点的过程中有一条失败 → 紧跟着读 PC（`cont()` 的第一步）就报
+   *    `抽象命令出错（cmderr=3，abstractcs=0x220305）`，整个 RISC-V 调试压力套件当场中断，
+   *    而"真凶"那条早就不见了。这里统一兜住：失败 → 清 cmderr（写 0x700）→ 重试一次，
+   *    仍然失败才把错误抛出去（重试对读/写/幂等的 progbuf 都是安全的）。
+   */
+  async _abstractRetry(fn, what){
+    try { return await fn(); }
+    catch (e){
+      if (!/cmderr|抽象命令/.test(e?.message || '')) throw e;
+      try { await this.dmiWrite(DM.ABSTRACTCS, 0x700); } catch {}
+      this.log(`抽象命令失败（${what}）：${e.message} → 清 cmderr 后重试一次`);
+      return await fn();
+    }
   }
 
   async _waitAbstract(timeoutMs = 2000){
