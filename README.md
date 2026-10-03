@@ -177,21 +177,22 @@ RTT 转发 · J-Scope 波形 · SPI/QSPI 桥 · SPI/QSPI 屏（含**局部刷新
 
 ## 实测状态
 
-### 现在（2026-10-02）
+### 现在（2026-10-03）
 
 **页面自测**（大部分不需要硬件；CDP 类先 `make page-prep` 起 8899 服务 + 9333 浏览器）：
 
 | 套件 | 结果 |
 |---|---|
-| `make test-dbg` 调试器逻辑层（含拿假目标真跑一遍「连接→读寄存器→写内存→下断点→继续→命中→单步→复位」） | **307/307** |
-| `make test-dbg-page` 调试器真页面（CDP + 假目标） | **141/141** |
-| `make test-spi` / `test-read` / `test-dsl` / `test-flash` SPI 桥与屏的逻辑层 | **90 / 54 / 124 / 66** |
+| `make test-dbg` 调试器逻辑层（含拿假目标真跑一遍「连接→读寄存器→写内存→下断点→继续→命中→单步→复位」） | **321/321** |
+| `make test-dbg-page` 调试器真页面（CDP + 假目标） | **142/142** |
+| `make test-spi` / `test-read` / `test-dsl` / `test-flash` SPI 桥与屏的逻辑层 | **90 / 54 / 126 / 66** |
 | `make test-spi-regs` SPI 寄存器面板与定时采集（档位→帧、假器件端到端、loop/as 采集、DSL 语法） | **97** |
 | `make test-spi-page` SPI/QSPI 桥 + 屏 两页真页面（CDP + 假探针） | **167 + 179** |
-| `make test-i2c` / `test-i2c-dsl` / `test-i2c-reg` USB→I2C 逻辑层（协议+假器件 / 命令表与脚本 / 寄存器面板与长写分片） | **170 / 251 / 76** |
+| `make test-i2c` / `test-i2c-dsl` / `test-i2c-reg` USB→I2C 逻辑层（协议+假器件 / 命令表与脚本 / 寄存器面板与长写分片） | **178 / 265 / 76** |
 | `make test-scope` / `test-dwarf` J-Scope 协议 / DWARF 解析 | **127 / 78** |
 | `make test-rtt` / `test-hid` RTT 协议 / akaLinkPro HID 协议 | **45 / 55** |
-| `make test-gen` / `test-gen-page` 工程生成对账（与 Python 工具逐字节）+ 真页面（含三 tab 与左栏联动） | **55 / 78** |
+| `make test-gen` / `test-gen-page` 工程生成对账（与 Python 工具逐字节）+ 真页面（含三 tab 与左栏联动） | **55 / 81** |
+| `make test-scenery` 屏页风景照片素材（结构 + sha256 对账 + 页面解码器真解一遍） | **15/15** |
 | `make test-ui` 整页 UI 步进自测 | **19/19** |
 | `make check` 语法/引用体检 + 上面这些的合集入口 | 全绿 |
 
@@ -722,8 +723,8 @@ rtt-bridge-kit/
 页面上「读计划」那行会直接告诉你当前选择的 span 数与预计上限。
 原理、协议、速率模型、踩坑记录都在 [`docs/scope-page.md`](docs/scope-page.md)。
 
-自测：`make test-scope`（引擎层 124 项，含 8 通道 × 10000 样本逐点对账）+
-`make test-dwarf`（ELF/DWARF 65 项）+ `make test-scope-page`（真页面 CDP 88 项）。
+自测：`make test-scope`（引擎层 127 项，含 8 通道 × 10000 样本逐点对账）+
+`make test-dwarf`（ELF/DWARF 78 项）+ `make test-scope-page`（真页面 CDP 95 项）。
 
 **目标类型（SWD/ARM ↔ RISC-V/JTAG）**：探针的目标类型是**全局且粘性**的（HID `0x31` action 10），
 波形页和 RTT 转发页都能切。页面显示的是**探针回报的生效后端**（DEF 的 `flags bit6` / 状态字 0 的 `bit1`），
@@ -806,10 +807,10 @@ rtt-bridge-kit/
 
 明确**不做**（与"简单"冲突的无底洞）：反汇编、局部变量/表达式求值、**调用栈回溯**、RTOS 感知、
 多核、软件断点、指针跟踪（`*p`）。
-自测：`make test-dbg`（纯 Node，**240 项**：寄存器位域 / FPB 编码 / 行号表 / Thumb BL-BLX 编解码 /
+自测：`make test-dbg`（纯 Node，**321 项**：寄存器位域 / FPB 编码 / 行号表 / Thumb BL-BLX 编解码 /
 断点目标解析 / 结构体树 / 命令解析 + 拿假目标真跑一遍「连接→读寄存器→写内存→下断点→继续→命中→
 源码级单步（跳过/进入/跳出）→运行到光标→复位」，含"`C_STEP` 不生效时自动改走断点单步"）、
-`make test-dbg-page`（CDP 真页面，**140 项**，含结构体树展开/快捷键/双击运行到光标）、
+`make test-dbg-page`（CDP 真页面，**142 项**，含结构体树展开/快捷键/双击运行到光标）、
 `make test-dbg-hw`（真探针冒烟；**前提是探针没被别的浏览器/页签占着**，否则会明确提示无法认领接口）。
 
 ## 支持的调试后端
@@ -838,7 +839,7 @@ HPM 那条路的要点：探针切 SWD+JTAG 输出模式 → `DAP_Connect(JTAG)`
 为什么能"一份 blob 通吃 HPM 全系"：所有 HPM 系列的 ROM API 表地址都是 `0x2001FF00`，
 差异只在运行时参数（`flash_base` / `xpi_base` / `option0/1`）。
 
-自测：`make test-hpm`（60 项，**纯离线**：把真实代码跑在模拟 TAP+DTM+Debug Module+SBA+XPI flash 上，
+自测：`make test-hpm`（94 项，**纯离线**：把真实代码跑在模拟 TAP+DTM+Debug Module+SBA+XPI flash 上，
 包括"擦→写→校验"端到端与 NOR 的按位与语义）；重建算法：`make hpm-algo`。
 设计、证据链、以及**真机 bring-up 的 6 步检查表**见 [`docs/hpm-riscv-flash.md`](docs/hpm-riscv-flash.md)。
 
@@ -876,6 +877,9 @@ bridge/
 tools/
   selftest/             自测：Node 协议测试 / 工程生成对账 / HID 协议 / 页面端到端(CDP) / 桥端到端 / 浏览器真机(CDP) / LA 参考流量
     spi-read.test.mjs   **屏的回读**（读寄存器 / 读 GRAM → 预览 + BMP）：读计划、解码、BMP、假探针 GRAM 往返（`make test-read`）
+    i2c-registers.test.mjs  **I2C 寄存器面板**：128 B 读回的分组/diff/ASCII、长写分片（页写回卷与 tWR 用假 EEPROM 钉死；`make test-i2c-reg`）
+    spi-regs.test.mjs   **SPI 寄存器面板与定时采集**：器件档位（读/写 opcode、地址相位、dummy、自增、MB）→ 帧、假器件端到端、`loop`/`as` 采集（`make test-spi-regs`）
+    scenery-samples.test.mjs  屏页**风景照片素材**：目录结构 + manifest 的 sha256 逐个对账 + 页面 parseBMP 真解一遍（`make test-scenery`）
     dbg-core.test.mjs   **调试器页的逻辑层**：寄存器位域 / FPB 断点编码 / 命令解析 / 符号表 + 拿假目标真跑一遍调试动作（`make test-dbg`）
     dbg-page.test.mjs   **调试器页的真页面自测**（CDP + 页面里的假目标，不需要硬件；`make test-dbg-page`）
     hw-campaign.mjs     **真机场景验收**（烧录+Viewer+转发+10s存盘+J-Scope+交替烧录计时，带判决，`make hw-campaign`）
@@ -888,7 +892,9 @@ tools/
   la/                   逻辑分析仪：kingst_la.py（KingstVIS Socket API 单文件工具）+ SWD 流量发生器
   dev/                  extract-algo.py（从 pyOCD 抽 flash 算法，别手抄 base64）、help.ps1、
                         make-40pin-figure.mjs（生成 README 开头那张 **J3 40pin 引脚定义图**）、
-                        make-anim-samples.py（造屏页动画/视频示例素材，`make samples-anim`）
+                        make-anim-samples.py（造屏页动画/视频示例素材，`make samples-anim`）、
+                        make-scenery-samples.py（造风景照片素材：Commons 原图 → 裁剪/缩放到两套
+                        屏几何，写 manifest 与署名表，`make samples-scenery`）
   target-firmware/          **靶子固件总索引见 tools/target-firmware/README.md**；
                             每个目录根上的 `fw.elf` 是**编好的产物（入库）**，用户不必装工具链
     stm32f103/          STM32F103 测试固件（UART + RTT，含 SEGGER RTT 源码）
@@ -923,6 +929,10 @@ samples/
   test_images/          **BMP 测试图样**：37 张一套，`./` 是 24bpp、`bpp16/` 是**同名同尺寸的
                         16bpp(RGB565)** 对照（各留一张异格式当反例）；240×296 为主，另有
                         16×16 / 41×20 / 64×64 / 120×40 边界；见 samples/test_images/README.md
+    scenery/            **风景照片素材**（刷屏看画质用）：4 类（花朵绿树 / 人像 / 蓝天白云 / 大海）
+                        × 2 张 × 两套几何（axs15352 = 240×296、st77916 = 360×360）= 16 个 24bpp
+                        BMP；`manifest.json` 记作者 / 许可 / 来源页 / sha256，`make samples-scenery`
+                        重造、`make test-scenery` 守结构；见 samples/test_images/scenery/README.md
 ```
 
 ## 自测（不需要硬件也能跑一部分）
