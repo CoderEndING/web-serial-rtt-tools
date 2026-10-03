@@ -196,10 +196,11 @@ function parseProgram(buf, start, { addrSize = 4, compDir = '', lineStr = new Ui
    *    所以 v4 要手工在头上补一个 compDir，v5 直接用它的第 0 条。
    * 文件表两边都是 **1 起**（0 号位留空，状态机的 file 寄存器初值就是 1）。
    */
-  let dirs, files = [{ name: '', dir: 0 }];
+  let dirs, files;
   if (version <= 4){
     dirs = [compDir];
     for (;;){ const s = rd.cstr(); if (!s) break; dirs.push(s); }
+    files = [{ name: '', dir: 0 }];                            // v4：0 号位留空（索引 1 起）
     for (;;){
       const name = rd.cstr();
       if (!name) break;
@@ -214,11 +215,25 @@ function parseProgram(buf, start, { addrSize = 4, compDir = '', lineStr = new Ui
     if (!dirs.length) dirs = [compDir];
     const fileFmtCount = rd.u8();
     const fileFmts = readFormats(rd, fileFmtCount);
-    for (const e of readV5Entries(rd, fileFmts, rd.uleb(), lineStr, str)) files.push({ name: e.path || '', dir: e.dir | 0 });
+    /**
+     * 🚨 v5 的文件表是 **0 起**（第 0 条就是 CU 的主源文件），**绝不能像 v4 那样补一个空位**。
+     *    2026-10 用 HPM6800EVK 的靶子固件（DWARF 5 + 101 个源文件）压出来的：
+     *    补了空位之后每个文件都往后错一位 —— `engine.c` 的代码被报成 `engine.h`
+     *    （行号反而是对的，所以"看着像对、停错了文件"最难查）。
+     *    证据：`readelf --debug-dump=rawline` 里那条 `Set File Name to entry 2`，
+     *    表里第 2 项（0 起）就是 engine.c。
+     */
+    files = readV5Entries(rd, fileFmts, rd.uleb(), lineStr, str).map(e => ({ name: e.path || '', dir: e.dir | 0 }));
   }
 
   // ---- 行号状态机 ----
-  let addr = 0, opIndex = 0, file = 1, line = 1, column = 0;
+  /**
+   * `file` 寄存器初值按规范就是 **1**（v4/v5 都是）。
+   * v5 的表虽然是 0 起，但**有的 CU 会在 0 号位放一个空条目**（主源文件落在 1 号位）——
+   * 初值写 0 就会把这种 CU 的第一段序列整体指到"空文件"上（实测：riscv_dwarf5 fixture）。
+   */
+  const FILE0 = 1;
+  let addr = 0, opIndex = 0, file = FILE0, line = 1, column = 0;
   let isStmt = !!defaultIsStmt, prologueEnd = false, epilogueBegin = false;
   let isa = 0, discriminator = 0, basicBlock = false;
   /**
@@ -239,7 +254,7 @@ function parseProgram(buf, start, { addrSize = 4, compDir = '', lineStr = new Ui
   });
   const resetFlags = () => { basicBlock = false; prologueEnd = false; epilogueBegin = false; discriminator = 0; };
   const resetAll = () => {
-    addr = 0; opIndex = 0; file = 1; line = 1; column = 0;
+    addr = 0; opIndex = 0; file = FILE0; line = 1; column = 0;
     isStmt = !!defaultIsStmt; basicBlock = false; prologueEnd = false; epilogueBegin = false; isa = 0; discriminator = 0;
     addressSet = false;
   };

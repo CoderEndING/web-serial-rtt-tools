@@ -186,24 +186,30 @@ console.log('== 3. 连接模拟目标 + 寄存器表（SWD 时钟 10 MHz）==');
 // ==================================================================== 4
 console.log('== 4. 单步 / 继续 / 暂停（真按钮）==');
 {
-  await ev(`document.getElementById('d-step').click(); await new Promise(r=>setTimeout(r,300));`);
+  /**
+   * 🚨 这里等 600 ms（原来是 300 ms）：动作本身只要几毫秒，但**机器被别的重活占着**时
+   *    点击 → 事件 → `exclusive()` 排队这条链可能被拖过 300 ms，于是本组 5 条断言会**成片**
+   *    假红（2026-10 实测：后台跑着真机压测时一次红 5 条，同一份代码重跑就 142/142）。
+   *    600 ms 仍然足够抓住"点了没反应"（那种是真的一直不动）。
+   */
+  await ev(`document.getElementById('d-step').click(); await new Promise(r=>setTimeout(r,600));`);
   const r = await ev('return window.__tools.dbg.summary();');
   ok(r.pc === 0x08000102, '点「单步」走了一条指令（PC +2）', '0x' + r.pc.toString(16));
   ok(r.halted === true, '单步后仍是停止状态');
 
   const cont = await ev(`
     document.getElementById('d-cont').click();
-    await new Promise(r=>setTimeout(r, 300));
+    await new Promise(r=>setTimeout(r, 600));
     const d = window.__tools.dbg;
     return { sum: d.summary(), livePc: await d.session.readReg('PC') };`);
   ok(cont.sum.halted === false, '点「继续」之后目标在跑');
   ok(cont.livePc !== 0x08000102, '目标真的在往前走（直接读 PC 看）', '0x' + cont.livePc.toString(16));
 
-  await sleep(300);
+  await sleep(600);
   const stillRunning = await ev('return !window.__tools.dbg.session.halted;');
   ok(stillRunning, '没有断点时它会一直跑（观察循环不会误判成"已停止"）');
 
-  await ev(`document.getElementById('d-halt').click(); await new Promise(r=>setTimeout(r,300));`);
+  await ev(`document.getElementById('d-halt').click(); await new Promise(r=>setTimeout(r,600));`);
   const st = await ev('return { h: window.__tools.dbg.session.halted, flag: document.getElementById("d-state").textContent };');
   ok(st.h && st.flag === '已停止', '点「暂停」能停住', JSON.stringify(st));
 }

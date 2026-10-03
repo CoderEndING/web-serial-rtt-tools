@@ -23,6 +23,7 @@ import { toast } from '../ui/toast.js';
 import { store } from '../core/store.js';
 import { waitMs } from '../core/pace.js';
 import { DebugSession, DEFAULT_CLOCK_KHZ } from './session.js';
+import { RiscvDebugSession } from './riscv.js';
 import { runCmd } from './cmd.js';
 import { SymTab } from './symbols.js';
 import { WatchList, resolveWatch, formatWatchValue, treeRows, summarizeTree, TREE_LIMITS } from './watch.js';
@@ -60,11 +61,16 @@ export class DbgView {
     this.dockTab = 'regs';                 // 右侧面板当前 tab（regs / mem / var / rtt）
   }
 
+  /** 把 session 的日志接到命令行（换后端时会换 session 对象，所以要能重复调用）*/
+  _bindSessionLog(){
+    this.session.log = (t, c) => this._out(t, c);
+  }
+
   // ================================================================ 初始化
 
   init(){
     const s = this.session;
-    s.log = (t, c) => this._out(t, c);
+    this._bindSessionLog();
     s.sym = null;
 
     // ---- 侧栏 ----
@@ -326,14 +332,39 @@ export class DbgView {
     });
   }
 
+  /**
+   * 后端换了就**换 session 对象**（ARM/Cortex-M 与 RISC-V 的硬件访问完全不同，
+   * 但源码级那一层是同一套 —— `RiscvDebugSession` 继承 `DebugSession` 只换低层）。
+   * 换之前先把旧连接断干净，别让两个后端抢同一支探针。
+   * @returns {boolean} 是否真的换了对象
+   */
+  _ensureSession(riscv){
+    if (riscv === (this.session instanceof RiscvDebugSession)) return false;
+    if (this.session?.connected){ try { this.session.disconnect(); } catch {} }
+    this.session = riscv ? new RiscvDebugSession() : new DebugSession();
+    this._bindSessionLog();
+    this.session.sym = this.sym || null;
+    return true;
+  }
+
   _syncBackend(){
-    const mock = ($('d-backend')?.value || 'webusb') === 'mock';
+    const v = $('d-backend')?.value || 'webusb';
+    const mock = v === 'mock';
+    const riscv = v === 'riscv';
+    this._ensureSession(riscv);
     const clk = $('d-clock');
-    if (clk) clk.disabled = mock;
+    if (clk){
+      clk.disabled = mock;
+      // RISC-V 那条路的时钟是 **JTAG TCK**（DAP_SWJ_Clock），名字要说清楚
+      const lab = clk.previousElementSibling;
+      if (lab && /时钟/.test(lab.textContent || '')) lab.textContent = riscv ? 'JTAG 时钟' : 'SWD 时钟';
+    }
     const hint = $('d-elf-info');
     if (hint && !this.sym) hint.textContent = mock
       ? '模拟目标也有自己的内存/寄存器，可以配合载入 .elf 练手（断点、单步、p 变量都能跑）。'
-      : '载入 .elf 后可用符号名下断点、`p 变量` 看数值、PC 显示函数名与源码行。符号列表在右边「变量」标签里。';
+      : (riscv
+        ? 'RISC-V/JTAG：走探针的 JTAG 引擎（HPM 等）。载入目标 .elf 后一样能按符号/文件:行下断点、`p 变量`、结构体树。'
+        : '载入 .elf 后可用符号名下断点、`p 变量` 看数值、PC 显示函数名与源码行。符号列表在右边「变量」标签里。');
   }
 
   _syncButtons(connected, halted){
@@ -362,10 +393,18 @@ export class DbgView {
   // ================================================================ 连接
 
   async connect(){
-    const mock = ($('d-backend')?.value || 'webusb') === 'mock';
+    const backend = $('d-backend')?.value || 'webusb';
+    const mock = backend === 'mock';
+    const riscv = backend === 'riscv';
+    /**
+     * 换后端 = 换一个 session 对象（ARM/Cortex-M 与 RISC-V 的硬件访问完全不同，
+     * 但源码级那一层是同一套 —— `RiscvDebugSession` 继承 `DebugSession` 只换低层）。
+     * 正常路径上 `_syncBackend()` 已经换过了，这里再兜一次（幂等）。
+     */
+    this._ensureSession(riscv);
     const clockKhz = Number($('d-clock')?.value) || DEFAULT_CLOCK_KHZ;
     this._out('', 'dim');
-    this._out(`──── 连接（${mock ? '模拟目标' : 'WebUSB'}${mock ? '' : ` · ${clockKhz} kHz`}）────`, 'dim');
+    this._out(`──── 连接（${mock ? '模拟目标' : riscv ? 'RISC-V/JTAG' : 'WebUSB'}${mock ? '' : ` · ${clockKhz} kHz`}）────`, 'dim');
     if (this.clockMigrated){ this._out('（SWD 时钟默认值已从 1 MHz 改为 10 MHz —— 真机实测 PPB/内存都正常；不想要就在上面改回去）', 'dim'); this.clockMigrated = false; }
     try {
       await this.session.connect({ mock, clockKhz, bus: this.bus });

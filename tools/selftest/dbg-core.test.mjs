@@ -1108,5 +1108,59 @@ console.log('== 22. nextAddrsOf：分支/返回指令的"落点"（断点单步�
   ok(r.addrs[0] !== P + 4, 'bl 的落点不是 pc+4（旧兜底就是这么错的）');
 }
 
+// ==================================================================== 23
+console.log('== 23. ≥0x80000000 的地址：断点表比对不能踩"有符号掩码"的坑（HPM6800EVK 真机定因）==');
+{
+  /**
+   * 现场（HPM6800EVK，代码在 0x80005xxx）：
+   *   `_bpAt()` 早先写的是 `const a = (addr >>> 0) & 0xfffffffe` —— RHS 是**有符号** int32（负数），
+   *   而左边是 `((b & ~1) >>> 0)`（无符号）→ 0x8000xxxx 的地址**永远匹配不上**。
+   *   后果不是"小毛病"：`_withBpCleared()` 不摘触发器 → 单步原地不动；
+   *   `cont()` 不跨过断点 → 一放就跑回同一个断点（"4 个断点只有 1 个会命中"）。
+   *   所以这里把"高地址必须能对上"钉死。
+   */
+  const s = new S.DebugSession();
+  s.log = () => {};
+  await s.connect({ mock: true });
+  s._programFpb = async () => {};                       // 只验断点表逻辑，不碰硬件
+  s.caps = { numCode: 8, rev: 2, raw: 0 };             // rev2：不限制地址范围
+
+  s.bps = [0x80005ae8, 0x80006094];
+  ok(s._bpAt(0x80005ae8) !== undefined, '_bpAt 认 0x80005ae8（有符号掩码会永远匹配不上）');
+  ok(s._bpAt(0x80005ae9) !== undefined, '_bpAt 忽略最低位（半字对齐）');
+  ok(s._bpAt(0x80005aea) === undefined, '_bpAt 不把相邻地址算成命中');
+  ok(s._bpAt(0x80006094) !== undefined, '_bpAt 认第二个高地址断点（多断点的地基）');
+
+  let inside = null;
+  await s._withBpCleared(0x80005ae8, async () => { inside = s.bps.slice(); });
+  ok(inside && inside.length === 1 && inside[0] === 0x80006094,
+    '_withBpCleared 在跑之前真的把那个地址摘掉了（单步/继续都要靠它）', JSON.stringify(inside));
+  ok(s.bps.length === 2 && s.bps[0] === 0x80005ae8, '跑完把断点原样装回来');
+
+  s.bps = [];
+  await s.bpAdd(0x80005ae8);
+  ok(s.bps.length === 1 && s.bps[0] === 0x80005ae8, 'bpAdd 存的是**无符号**地址（不然后面每次比对都要出岔子）');
+  const dup = await s.bpAdd(0x80005ae8);
+  ok(dup.warn && s.bps.length === 1, '同一地址重复下断点会被认出来（不占第二个比较器）');
+  ok(await s.bpDel(0x80005ae8) === true && s.bps.length === 0, 'bpDel 能删掉高地址断点（有符号掩码会删不掉）');
+  ok(await s.bpDel(0x80005ae8) === false, '删不存在的断点回 false（命令层据此说"没有这个断点"）');
+
+  // RISC-V 侧同一套逻辑（触发器）：bpAdd/bpDel 与 _bpAt 共用基类实现
+  const RV = await import(url('dbg/riscv.js'));
+  const rv = new RV.RiscvDebugSession();
+  rv.log = () => {};
+  rv.caps = { numCode: 8, rev: 2, raw: 8 };
+  rv._programBps = async () => {};                     // 触发器写入需要真硬件，这里只验表逻辑
+  await rv.bpAdd(0x8000578c, 'engine_linear');
+  await rv.bpAdd(0x80005ae8, 'engine_dispatch');
+  ok(rv.bps.length === 2 && rv._bpAt(0x80005ae8) !== undefined, 'RISC-V：两个高地址触发器都能对上');
+  ok(rv.bpNotes.get(0x80005ae8) === 'engine_dispatch', '断点备注按无符号地址存（bpList 才显示得出来）');
+  const list = rv.bpList();
+  ok(list.length === 2 && list[1].addr === 0x80005ae8 && list[1].note === 'engine_dispatch',
+    'bpList 里高地址显示正常（不是负数、备注也在）', JSON.stringify(list));
+  ok(await rv.bpDel(0x80005ae8) === true && rv.bps.length === 1 && rv.bps[0] === 0x8000578c,
+    'RISC-V：删掉第二个断点后表里只剩第一个');
+}
+
 console.log(`\n== 汇总：${pass} 通过 / ${fail} 失败 ==`);
 process.exit(fail ? 1 : 0);

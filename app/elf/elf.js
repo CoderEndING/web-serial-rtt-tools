@@ -12,7 +12,7 @@
  */
 import { u32le, latin1 } from '../core/bin.js';
 
-const SHT_SYMTAB = 2, SHT_STRTAB = 3, SHT_NOBITS = 8;
+const SHT_SYMTAB = 2, SHT_STRTAB = 3, SHT_NOBITS = 8, SHT_PROGBITS = 1;
 
 export class Elf {
   /** @param {ArrayBuffer|Uint8Array} buf 整个 .elf 文件 */
@@ -78,6 +78,33 @@ export class Elf {
     const s = this.section(name);
     if (!s || s.type === SHT_NOBITS) return new Uint8Array(0);
     return this.b.subarray(s.off, Math.min(s.off + s.size, this.b.length));
+  }
+
+  /**
+   * 按**运行地址**取文件里的字节（找包含该地址的 PROGBITS 段）。
+   *
+   * 用途：指令取指（`si` 解调用目标、断点单步算落点）与"flash 只读数据读不到"的兜底 ——
+   * 见 `app/dbg/session.js` 的 `_codeBytes()`：HPM 这颗芯片上 **SBA 读 XIP 窗口（0x8000_0000）
+   * 会失败/挂住**，而调试器要读的恰恰就是那儿的代码与 const。
+   * 载入的 ELF 与板上跑的固件是同一份（行号/符号本来就依赖这一点），所以从这里取字节是对的。
+   *
+   * @param {object} [opts] `ro:true` = **只认只读段**（不含 SHF_WRITE）。
+   *   `.text`/`.rodata` 在 flash 里运行期不会变，文件里那份是权威的；
+   *   而 `.data`/`.bss` 在 RAM 里会被程序改写，**绝不能**拿文件内容冒充"目标当前内存"。
+   * @returns {Uint8Array|null} 跨段/越界/段是 NOBITS 时返回 null（不拼凑、不猜）
+   */
+  bytesAt(addr, len, { ro = false } = {}){
+    const a = addr >>> 0;
+    for (const s of this.sections()){
+      if (s.type !== SHT_PROGBITS || !s.size || !s.addr) continue;
+      if (ro && (s.flags & 1)) continue;                       // SHF_WRITE → 会变，不能兜底
+      const start = s.addr >>> 0, end = (start + s.size) >>> 0;
+      if (a < start || a + len > end) continue;
+      const off = (s.off + (a - start)) >>> 0;
+      if (off + len > this.b.length) return null;
+      return this.b.subarray(off, off + len);
+    }
+    return null;
   }
 
   /** 段名 → 原始字节（不存在的段返回空）*/

@@ -29,7 +29,7 @@ FW_DIR   = tools/target-firmware/stm32f103
 LA       = tools/la/kingst_la.py
 
 .DEFAULT_GOAL := help
-.PHONY: help serve serve-dev serve-stop browser open page-prep test test-ui test-gen test-gen-page gen-embed samples-anim test-hid test-dwarf test-scope test-scope-page test-scope-render test-spi test-read test-spi-page test-hw test-record test-bridge test-bridge-gate test-hpm test-image test-all test-dbg test-dbg-page test-dbg-hw test-dbg-stress test-idcode test-dsl test-flash flash-timing hw-campaign hw-campaign-hpm campaign-summary \
+.PHONY: help serve serve-dev serve-stop browser open page-prep test test-ui test-gen test-gen-page gen-embed samples-anim test-hid test-dwarf test-scope test-scope-page test-scope-render test-spi test-read test-spi-page test-hw test-record test-bridge test-bridge-gate test-hpm test-image test-all test-dbg test-dbg-page test-dbg-hw test-dbg-stress test-dbg-riscv test-idcode test-dsl test-flash flash-timing hw-campaign hw-campaign-hpm campaign-summary \
         bridge bridge-stop fw-build fw-flash fw-restore fw-h7-build fw-h7-flash \
         algo-check flash-plan la-info la-capture git-status git-log check clean spi-hw spi-flow i2c-hw spi-partial-hw dbg-step-hw
 
@@ -131,6 +131,16 @@ dbg-step-hw: page-prep
 #   生成 gdb 对照：node tmp/probe-free.mjs --blank && node tmp/dbg-gdb-oracle.mjs
 test-dbg-stress: page-prep
 	$(NODE) tools/selftest/dbg-hw-stress.mjs $(ARGS)
+
+# 调试器 **RISC-V 真机验收**（HPM6800EVK 靶子 + akaLinkPro 的 JTAG 通路，约 53 项断言）：
+#   断点（文件:行 / 符号 / static / 多断点轮转）/ 代码同步 / 单步 n·si·fin（RV32 解码 + dcsr.step）/
+#   复位重跑（复位会清掉 hart 的触发器 → 必须重新下发）/ 结构体树与位域（含 flash 里的 const）/
+#   40 轮"停—走—停" 与触发器泄漏 / 有 tmp/rv-gdb-oracle.json 时与 gdb 逐地址比对。
+#   前置：板子上跑着 tools/target-firmware/hpm6800evk_dbgstress/fw.elf（页面里烧，或
+#        node tmp/rv-flash-and-smoke.mjs --flash 那条路），且探针没被别的程序占着。
+#   生成 gdb 对照：node tmp/probe-free.mjs --blank && node tmp/rv-gdb-oracle.mjs
+test-dbg-riscv: page-prep
+	$(NODE) tools/selftest/dbg-hw-riscv.mjs $(ARGS)
 
 # 目标身份解码（「读 IDCODE」按钮）：DP IDCODE / CPUID / STM32 DBGMCU DEV_ID → 型号
 test-idcode:
@@ -397,6 +407,8 @@ check:
 	$(NODE) --check app/dbg/session.js
 	$(NODE) --check app/dbg/mock.js
 	$(NODE) --check app/dbg/thumb.js
+	$(NODE) --check app/dbg/rv.js
+	$(NODE) --check app/dbg/riscv.js
 	$(NODE) --check app/dbg/watch.js
 	$(NODE) --check app/dbg/view.js
 	$(NODE) --check app/i2c/protocol.js

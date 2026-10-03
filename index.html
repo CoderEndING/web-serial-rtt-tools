@@ -686,13 +686,14 @@
       <fieldset>
         <legend>连接</legend>
         <label class="row"><span>后端</span>
-          <select id="d-backend" title="WebUSB：与 RTT/烧录共用同一支探针，零安装。模拟目标：内置的假 Cortex-M（有寄存器/内存/FPB 断点），不需要硬件，用来试界面。">
-            <option value="webusb">WebUSB · 零安装（默认）</option>
+          <select id="d-backend" title="WebUSB：与 RTT/烧录共用同一支探针，零安装。模拟目标：内置的假 Cortex-M（有寄存器/内存/FPB 断点），不需要硬件，用来试界面。RISC-V/JTAG：走探针的 JTAG 引擎调 RISC-V 目标（HPM 等），硬件断点用核里的触发器（tselect/tdata）。">
+            <option value="webusb">WebUSB · SWD/ARM（默认）</option>
+            <option value="riscv">WebUSB · RISC-V/JTAG（HPM 等）</option>
             <option value="mock">模拟目标（不需要硬件）</option>
           </select>
         </label>
         <label class="row"><span>SWD 时钟</span>
-          <select id="d-clock" title="SWD 时钟。2026-10 真机实测（akaLinkPro + STM32F103ZE）：10 / 20 / 30 MHz 下寄存器（PPB）、FPB、内存全都正确，内存读比 1 MHz 快 3~4 倍 —— 所以默认 10 MHz。若换了探针固件发现寄存器读回 0/0xFFFFFFFF，连接时会自动退回 1 MHz 并在日志里说明原因（历史上这颗固件高时钟读 PPB 会回 0）。">
+          <select id="d-clock" title="SWD 时钟。2026-10 真机实测（akaLinkPro + STM32F103ZE）：10 / 20 / 30 MHz 下寄存器（PPB）、FPB、内存全都正确，内存读比 1 MHz 快 3~4 倍 —— 所以默认 10 MHz。若换了探针固件发现寄存器读回 0/0xFFFFFFFF，连接时会自动退回 1 MHz 并在日志里说明原因（历史上这颗固件高时钟读 PPB 会回 0）。切到 RISC-V/JTAG 后这一格是 JTAG TCK。">
             <option value="10000">10000（10 MHz，默认）</option>
             <option value="20000">20000（20 MHz，实测最快）</option>
             <option value="5000">5000（5 MHz）</option>

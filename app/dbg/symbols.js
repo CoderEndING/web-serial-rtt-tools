@@ -143,6 +143,7 @@ export class SymTab {
     this.versions = parts.versions || [];
     this.lines = parts.lines || null;      // 行号表（源码行显示用；没有 DWARF 行号时为 null）
     this.dwarf = parts.dwarf || null;      // DWARF 句柄（类型树查询用；没有 DWARF 时为 null）
+    this.elf = parts.elf || null;          // 原始 ELF（`codeBytes()` 取指令字节用）
   }
 
   /** @param {ArrayBuffer|Uint8Array} buf .elf 文件内容 */
@@ -188,7 +189,16 @@ export class SymTab {
     } catch (e){
       note = (note ? note + '；' : '') + `行号表解析失败（${e?.message || e}）`;
     }
-    return new SymTab({ all, funcs, objs, vars, source, note, ram, versions, lines, dwarf });
+    return new SymTab({ all, funcs, objs, vars, source, note, ram, versions, lines, dwarf, elf });
+  }
+
+  /**
+   * 按运行地址取**文件里那份只读字节**（`.text` / `.rodata` 等，不含可写段）。
+   * 两处用：① 指令取指；② flash 只读数据读不到时的兜底（见 `session._codeBytes()` 与
+   * `RiscvDebugSession.memRead()` 的注释）。拿不到就返回 null（不猜）。
+   */
+  codeBytes(addr, len = 2){
+    try { return this.elf?.bytesAt?.(addr >>> 0, len >>> 0, { ro: true }) || null; } catch { return null; }
   }
 
   get size(){ return this.all.length; }
@@ -252,7 +262,13 @@ export class SymTab {
 
   /** 地址落在哪个函数里（PC 落点显示）：返回 {name, addr, off, exact} */
   funcAt(addr){
-    addr = (addr >>> 0) & ~1;                 // Thumb 地址（LR 可能带 bit0=1）
+    /**
+     * 🚨 `& ~1` 在 JS 里是**有符号**32 位运算：0x8000578c 会变成负数，
+     *    于是下面 `f.addr > addr` 对**每一个**函数都成立 → 循环第一次就 break → 返回 null。
+     *    ARM 的 0x08xxxxxx 碰不到这一档，**RISC-V 的 XIP flash 代码（0x8000xxxx）必中**：
+     *    现象是 PC 落点、断点列表、`bl` 里的函数名全变成裸地址（2026-10 HPM6800EVK 压测抓到）。
+     */
+    addr = ((addr >>> 0) & ~1) >>> 0;
     let best = null;
     for (const f of this.funcs){
       if (f.addr > addr) break;

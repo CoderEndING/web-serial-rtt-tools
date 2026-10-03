@@ -98,11 +98,18 @@ export class RiscvTransport {
      *    `haltreq` 无效（用户现场日志正是 `dmstatus=0x0（version=0）`）。
      *    规范里 **dmcontrol 即使 DM 未激活也仍然可写**，所以这里多叫几次；还不行就
      *    TAP 复位 + `dtmcs.dmihardreset`（bit17）把 DTM 整个复位后再叫 —— 都失败才抛。
+     *
+     * 🚨 2026-10 又补一条：**version 不是 0 也可能是垃圾**。一次 SBA 读超时（读 XIP 窗口那类）
+     *    之后实测读回 `dmstatus=0x67adb267`（version=7）—— 那不是"醒着的 DM"，
+     *    而是 DMI 在回一堆无意义的数据；放任不管的话后续每个寄存器读都是乱的。
+     *    这颗 DM 的 version 实测恒为 2，所以判据收紧成"低 4 位必须等于 2"。
      */
-    if (!this.lastDmstatus){
+    const versionOk = (v) => ((v >>> 0) & 0xf) === 2;
+    if (!versionOk(this.lastDmstatus)){
+      this.log(` ⚠ dmstatus=0x${this.lastDmstatus.toString(16)} 不像是真的（version 应为 2）→ 叫醒 DM`);
       this.lastDmstatus = await this._dmWakeRecover();
-      if (!this.lastDmstatus){
-        throw new Error('调试模块不应答：dmstatus 一直读回 0（DM 停在未激活态，叫不醒）——' +
+      if (!versionOk(this.lastDmstatus)){
+        throw new Error('调试模块不应答：dmstatus 一直读回 0 或垃圾（DM 停在未激活态 / DMI 被打乱）——' +
           '把**探针 USB 和板子电源一起拔掉 10 秒**再插（只拔板子电源不够：探针 5V 还在供电）');
       }
     }
@@ -342,6 +349,24 @@ export class RiscvTransport {
     } catch (e){
       throw new Error(`ndmreset 没能放开（${e.message}）——目标可能停在复位态：` +
         '把探针 USB 和板子电源一起拔掉 10 秒再插');
+    }
+    /**
+     * 🚨 **放开之后要复验**（2026-10 压测现场）：写成功 ≠ 落地。这一笔要是被链路抖掉，
+     *    ndmreset 就是"电平式按住不放" —— 整芯片停在复位态，DMI 从此读回常量、
+     *    应用不启动，只能**连探针 USB 一起拔**才能 POR 回来（只拔板子电源不算）。
+     *    所以这里回读 dmcontrol 确认 ndmreset 位已经清掉，没清掉就再放几次。
+     */
+    for (let i = 0; i < 3; i++){
+      let dmc = null;
+      try { dmc = (await this.dmiRead(DM.DMCONTROL)) >>> 0; } catch { dmc = null; }
+      if (dmc != null && !(dmc & (DMCONTROL.ndmreset >>> 0))){
+        if (i) this.log(` ndmreset 复验通过（第 ${i + 1} 次写入才落地）`);
+        break;
+      }
+      this.log(` ⚠ dmcontrol 回读 0x${(dmc ?? 0).toString(16)}：ndmreset 还没放开，再写一次`);
+      try { await this.dmiWrite(DM.DMCONTROL, this._ctl(hart, DMCONTROL.haltreq)); }
+      catch { /* 下一次回读会再判断 */ }
+      await new Promise(r => setTimeout(r, 20));
     }
     return await this.waitHalted(timeoutMs);
   }

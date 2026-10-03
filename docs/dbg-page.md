@@ -354,6 +354,89 @@ hexdump 里手输一个不存在的地址（例：H7 的 DTCM 末尾外 `0x20020
 | 行号表里的**内联函数** | `at()` 只做"地址 → 行"，不做 `DW_TAG_inlined_subroutine` 展开；`b <内联函数名>` 会明确报"认不出" |
 | 单步跨过内联收尾的落点 | 与 gdb 口径不同（见 §9 末尾）：gdb 按"行号变化"停，我们按"地址序下一条语句" |
 | `fin` 走慢路径时的开销 | 本函数剩余指令逐条单步（上限 400 条）；正常函数几毫秒，函数很大时会有可感知的等待（日志会说明走了多少条） |
-| RISC-V/JTAG 的运行控制 | 那条路的 halt/step 走 DM 的 `dmcontrol`（`app/flash/hpm/riscv-dm.js` 已有），
-但寄存器组要经 progbuf 搬，v1 没做；本页只做了 SWD/ARM |
 | 桥 + OpenOCD/J-Link 的 GDB RSP 兜底 | 计划中（覆盖 OpenOCD 支持的全部芯片，断点免费） |
+
+## 11. 2026-10：RISC-V / JTAG 后端（HPM6800EVK 靶子 + gdb 对照）
+
+同一页、同一套界面，多了一个后端：**`#d-backend` = 「WebUSB · RISC-V/JTAG（HPM 等）」**。
+它跟 ARM 那条路复用**全部**上层（ELF/DWARF、行号表、`文件:行` 断点、源码级单步、结构体树、
+监视窗口、命令行），只换"跟硬件打交道的那一层"：`app/dbg/riscv.js`（会话）+
+`app/dbg/rv.js`（RV32 指令解码，与 `thumb.js` 同形）。
+
+差异都在硬件语义上，记在这里备查：
+
+| 动作 | ARM（SWD/FPB） | RISC-V（JTAG/触发器） |
+|---|---|---|
+| 断点 | FPB 比较器（rev1 ≤ `0x20000000`；rev2 不限） | **触发器** `tselect/tdata1/tdata2`（mcontrol，8 个）；地址不限 |
+| 单步 | `DHCSR.C_STEP`（本机这颗探针不执行 → 兜底"断点单步"） | **`dcsr.step`** 硬件真单步（要临时摘掉起点上的触发器） |
+| 停/跑 | `DHCSR` + `AIRCR` 软复位 | `dmcontrol.haltreq/resumereq` + `ndmreset` |
+| 读内存 | AHB-AP（任意地址） | SBA（**flash/XIP 窗口除外**，见下） |
+| 寄存器 | DCRSR/DCRDR | 抽象命令（**要求 hart 停住**，否则 `cmderr=4`） |
+
+### 11.1 压测抓出来的 8 个真缺陷（都已修，回归钉在自测里）
+
+`s` 的编号与 `tools/target-firmware/hpm6800evk_dbgstress/README.md` 那张表一致。
+
+1. **`_bpAt()` 的地址掩码是有符号的** —— `(addr >>> 0) & 0xfffffffe` 得到**负的** int32，
+   而比较的另一边是无符号的 `>>> 0` 结果，于是 **`0x8000_0000` 以上的地址永远匹配不上**。
+   后果不是小毛病：`_withBpCleared()` 以为"这个地址上没有断点"，
+   **不摘触发器** → 单步原地不动；`cont()` 不先跨过断点 → 一放就跑回同一个断点
+   （现场表现："4 个断点只有 1 个会命中"、"点了单步没反应"）。
+   ARM 上只要代码放在 `0x9000_0000`（外部 XIP flash）会踩同一个坑。
+   → 统一走 `fmt.js` 的 `align2()`。
+2. **`si` 会去读"ARM 的 AHB-AP"**：共享代码里 `_readHalfword()` 直接用了 `this.probe.readMem`，
+   而 RISC-V 后端上 `this.probe` 是**同一颗探针的 JTAG 实例**，链路上根本没有 AP → FAULT
+   （现场报 `SWD FAULT（传输 0/1 条，地址 0x4）`），异常被吞掉后"就当没读到"→ 退化成指令级单步。
+   → 改走 `_codeBytes()`（后端自己的读 + ELF 兜底）。
+3. **`resumereq` 之后 DM 会"慢半拍"**：写下去的一小段时间里 `dmstatus` 仍报 halted。
+   谁在这窗口里读一次状态，就会得到**陈旧读数**——单步表现为"按了没反应"，
+   继续表现为"一放就跑回原地"（因为我们在核还没动时就把触发器装回去、把 `dcsr.step` 清掉了）。
+   → 新增 `_waitResumed(pc0)`：**先确认真的跑起来了**（running 位 / 不报 halted / PC 变了），再等它停。
+4. **`reset halt` 之后断点全失效**：触发器是 **hart 自己的 CSR，hart 一复位就没了**，
+   而页面上的断点表还留着 → 界面"看起来有断点"，硬件里一个都没有。
+   → `resetHalt()/resetRun()` 之后**重新下发**（`resetRun` 要在"按住复位"时下发，放开就跑）。
+5. **`c.jal` 认不出来**：`callEndingAt()` 的判据写成了**整字相等**（`hw === 0x2001`），
+   而 C.JAL 除了固定位还带 11 位立即数 —— 于是**只有"跳到偏移 0"才认得出**。
+   现场 `engine_deep_l4` 用 `c.jal` 调 `deep_l5`，`fin` 因此判定"ra 不是本帧返回地址"，
+   改走"一步步走完本函数"的慢路径（400 条还没走出去）。
+   → 判据改掩码 `(hw & 0xe003) === 0x2001`。
+6. **flash（XIP）窗口不能走 SBA**：`0x8000_0000` 段用 SBA 读会**超时 5.3 s，并把 DM 打乱**
+   （事后 `dmstatus` 读回 `0x67adb267`，version=7 的垃圾；USB 还得复位端口）。
+   而代码与 `const` 都住在那儿。
+   → 该窗口直接用**载入的 ELF 里的只读段**（`.text`/`.rodata`；可写段不兜底），
+   并在命令行里**写明**"这份值来自 ELF，不是从目标实时读回来的"。指令取指同样优先用 ELF。
+7. **`dm.init()`（DM 复位）会把核放开跑** —— 调试会话里"原来停着"的话，
+   重新初始化之后必须再停一次，否则后续抽象命令全是 `cmderr=4`。
+   → `memRead()` 的"复位 DM 重试"路径里已处理。
+8. **偶发连不上探针**（`响应回显 0x3 ≠ 命令 0x0`）：上一个会话在 IN 端点里留下的陈旧响应包。
+   → `connect()` 里"关句柄 → 等一下 → 重开"，最多 3 次。
+
+### 11.2 与 riscv gdb 的对照结果（同 ELF、同探针、同一颗核）
+
+生成基线：`node tmp/probe-free.mjs --blank && node tmp/rv-gdb-oracle.mjs`
+（OpenOCD 0.12 + `hpm_sdk/boards/openocd` 的 `probes/cmsis_dap.cfg` + `soc/hpm6880.cfg`
++ `riscv32-unknown-elf-gdb`；**不要** source 板级 cfg，它要 HPM 定制的 hpm_xpi 烧录驱动）。
+
+| 比什么 | 结果 |
+|---|---|
+| `engine_linear` 内**指令级**单步 19 步落点（我们 `s` ↔ gdb `stepi`） | **逐地址完全一致** |
+| `b engine.c:22` / `b model.c:123` 落点 | 与 gdb 的**行号表地址**一致（`0x8000578c` / `0x80006094`） |
+| 位域排布（word/spare/bias… 逐字段） | gdb 独立核对 = 页面假设 |
+| 靶子 trap 计数 `g_trap_count` | 0（整轮压测没有触发任何异常） |
+
+两条**口径说明**（不是缺陷）：
+
+* gdb 的 `break 文件:行` 会**跳过函数序言**落到第一条语句上（`engine.c:22` → `0x80005794`），
+  页面按用户点的那一行 / DWARF 行号表的记录地址（→ `0x8000578c`）。对照取后者，
+  前者的值在 oracle 的 `bpAddrPrologue` 里另存着。
+* gdb 的 `next` 在这块板上会**卡在第 29 行那个调用上**：跳过调用需要在返回地址插临时断点，
+  而代码在 flash 里、软件断点写不进去。所以基线用 `stepi`（指令级），两边都干净。
+
+### 11.3 复现入口
+
+```powershell
+node tmp\probe-free.mjs --blank        # 探针必须先放开（WebUSB 认领会挡住 openocd/gdb）
+node tools\selftest\dbg-hw-riscv.mjs   # 57 项（等价 make test-dbg-riscv）
+node tmp\rv-gdb-oracle.mjs             # 生成 tmp/rv-gdb-oracle.json 后再跑上面那条 → 60 项
+```
+

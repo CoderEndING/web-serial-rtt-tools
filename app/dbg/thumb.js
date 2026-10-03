@@ -79,6 +79,36 @@ export function encodeCall(from, to, { blx = false } = {}){
 function sext(v, bits){ const m = 1 << (bits - 1); return ((v & ((1 << bits) - 1)) ^ m) - m; }
 
 /**
+ * 架构描述子（ARM/Cortex-M 这份；RISC-V 那份在 rv.js 里的 RV_ARCH，同形）。
+ * `session.js` 通过 `this.arch` 分流"按架构不同"的那几处：寄存器名 / 指令长度 /
+ * 调用解码 / 落点计算 / 返回地址校验。加新架构只要再写一个同形的对象。
+ */
+export const ARM_ARCH = {
+  name: 'arm',
+  LR: 'LR', SP: 'SP', PC: 'PC',
+  insnLen: thumbLen,
+  decodeCall,
+  nextAddrsOf,
+  /** "不像返回地址"的判据：0 / 全 1 / 0xFFFFFFFx（EXC_RETURN，核在异常里）*/
+  retLooksValid: v => v !== 0 && v !== 0xffffffff && (v >>> 28) !== 0xf,
+  retBadMsg: v => `LR = 0x${(v >>> 0).toString(16)} 不是返回地址（0xFFFFFFFx 是 EXC_RETURN：核在异常处理里，`
+    + '或者已经是最外层调用）—— 没法"跳出"',
+  /**
+   * 地址 `R` 处**刚刚执行完的那条指令**是不是"调用 F"的调用（把目标算出来）。
+   * 这就是 ARM 的签名：函数的返回地址前面那条指令必然是"调用这个函数"。
+   */
+  async callEndingAt(readBytes, R){
+    const r = (R >>> 0) & 0xfffffffe;
+    const b = await readBytes((r - 4) >>> 0, 4).catch(() => null);
+    if (!b || b.length < 4) return null;
+    const hw = o => (b[o] | (b[o + 1] << 8)) & 0xffff;
+    const c32 = decodeCall(hw(0), hw(2), (r - 4) >>> 0);
+    if (c32 && c32.kind === 'bl') return c32.target;
+    return null;                                  // 16 位间接调用（blx Rn）静态算不出目标
+  },
+};
+
+/**
  * **这条指令执行完之后 PC 可能在哪** —— 「断点单步」的地基。
  *
  * 🚨 为什么必须有它（2026-10 真机压测定因）：这颗探针/内核**不执行 C_STEP**
