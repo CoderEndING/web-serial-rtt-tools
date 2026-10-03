@@ -440,6 +440,23 @@ console.log('== 8. 右列 tab 化 + 左栏联动（2026-10 重构）==');
   ok(/点击复制/.test(params.openocdRoot?.title || ''), '长路径那一行带"点击复制"提示（值不被侧栏宽度截断）');
   ok(/^\[工程\]/.test(params.text), `「复制全部」的文本以分组标题开头（${JSON.stringify(params.text.slice(0, 24))}）`);
 
+  /**
+   * 🚨 参数表要**真的能往下滚**（用户 2026-10 现场："下面显示不全，还没有滑条可以往下拖"）：
+   * 表格比容器高时必须 `overflow-y:auto/scroll` 且 `scrollHeight > clientHeight`，
+   * 并且容器高度不能超过它所在的 dockpage（否则会被 `.gendock{overflow:hidden}` 裁掉）。
+   */
+  const scroll = await evaluate(`(()=>{
+    const w = document.getElementById('g-params-wrap');
+    const page = w.closest('.dockpage');
+    const cs = getComputedStyle(w);
+    return { overflowY: cs.overflowY, scrollH: w.scrollHeight, clientH: w.clientHeight,
+             wrapBottom: Math.round(w.getBoundingClientRect().bottom),
+             pageBottom: Math.round(page.getBoundingClientRect().bottom) };})()`);
+  ok(['auto', 'scroll'].includes(scroll.overflowY), `参数表的滚动区是 auto/scroll（实际 ${scroll.overflowY}）`);
+  ok(scroll.scrollH > scroll.clientH, `内容比容器高（${scroll.scrollH} > ${scroll.clientH}）—— 所以必须有滚动条`);
+  ok(scroll.wrapBottom <= scroll.pageBottom + 2,
+     `滚动区没有溢出 dockpage（底 ${scroll.wrapBottom} ≤ ${scroll.pageBottom}）—— 溢出的部分会被裁掉且拖不到`);
+
   // 「本地桥」tab：7 个文件各有预览；关掉开关就只剩提示
   const kit = await evaluate(`(async()=>{
     document.querySelector('#g-dock-tabs button[data-dock="bridge"]').click();

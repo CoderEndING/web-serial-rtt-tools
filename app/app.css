@@ -204,6 +204,12 @@ dialog form{margin-top:16px;text-align:right}
 #tab-gen .dockpage>p.hint{margin:0;flex:none}
 #g-files,#g-kit-files{flex-wrap:wrap;border-radius:6px}
 #g-dock-pill{color:var(--fg2)}
+/* 🚨 `.scroll` 是**按页写的**（`#tab-spi .scroll` / `#tab-i2c .scroll` / `#tab-panel .scroll`），
+   本页原来没有这条 → 「调试参数」的表格撑高后被 `.gendock{overflow:hidden}` 裁掉、**连滚动条都没有**
+   （用户 2026-10 现场："下面显示不全，还没有滑条"）。这里补上本页的滚动区规则：
+   吃满剩余高度 + 自己滚（`min-height:0` 是关键，flex 子项默认 min-height:auto 会顶破父容器）。 */
+#tab-gen .dockpage>.scroll{flex:1 1 auto;min-height:0;max-height:none;overflow:auto;
+  border:1px solid var(--line);border-radius:8px;margin-top:0}
 /* 预览：代码别折行（横向滚），并吃掉剩余高度 */
 #g-preview,#g-kit-preview{white-space:pre;overflow:auto;flex:1 1 auto;min-height:0}
 .fixlist{margin:4px 0 0;padding-left:18px}
