@@ -428,9 +428,19 @@ export function parseRsp(bytes){
  * （bulk 是可靠传输，不会丢字节；真丢字节时 magic 校验会把它暴露出来，别静默吞掉。）
  */
 export class RspStream {
-  constructor(){ this.buf = new Uint8Array(0); this.errors = 0; }
+  constructor(){
+    this.buf = new Uint8Array(0);
+    this.errors = 0;
+    /** 流错位（magic/长度不对）时**丢掉整个缓冲**的次数与原因 —— 见 push() 里的 🚨 */
+    this.desyncPending = null;
+  }
   get pending(){ return this.buf.length; }
   reset(){ this.buf = new Uint8Array(0); }
+  /**
+   * 取走"刚才发生了一次流错位"这件事（取完清零）。调用方拿它写一条能对上号的日志。
+   * @returns {{why:string, dropped:number}|null}
+   */
+  takeDesync(){ const d = this.desyncPending; this.desyncPending = null; return d; }
   /** @returns {Uint8Array[]} 切出来的完整应答包 */
   push(bytes){
     const b = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
@@ -440,9 +450,25 @@ export class RspStream {
     let off = 0;
     while (merged.length - off >= RSP_HDR){
       const dv = new DataView(merged.buffer, merged.byteOffset + off, merged.byteLength - off);
-      if (dv.getUint16(0, true) !== MAGIC){ this.errors++; off = merged.length; break; }
+      /**
+       * 🚨 坏 magic / 坏长度时只能**丢掉整个缓冲**（分不清边界，继续切只会切出垃圾）。
+       *    代价是：**同一块里排在后面的正常应答也一起丢了**，于是那些请求各自等满超时。
+       *    所以这里除了计数，还要把"错位"这件事记下来给上层写日志 ——
+       *    否则用户看到的是一串"应答超时"，根因（流错位）完全看不出来（2026-10 代码审查）。
+       */
+      const mg = dv.getUint16(0, true);
+      if (mg !== MAGIC){
+        this.errors++;
+        this.desyncPending = { why: `magic 读到 0x${mg.toString(16).padStart(4, '0')}（应为 0x${MAGIC.toString(16).padStart(4, '0')}）`,
+                               dropped: merged.length - off };
+        off = merged.length; break;
+      }
       const total = RSP_HDR + dv.getUint16(6, true);
-      if (total > PKT){ this.errors++; off = merged.length; break; }
+      if (total > PKT){
+        this.errors++;
+        this.desyncPending = { why: `包长字段 ${total} 超过一个包的上限 ${PKT}`, dropped: merged.length - off };
+        off = merged.length; break;
+      }
       if (merged.length - off < total) break;               // 半包：等下一块
       out.push(merged.subarray(off, off + total));
       off += total;

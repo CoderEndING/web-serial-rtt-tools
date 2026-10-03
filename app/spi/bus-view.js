@@ -16,7 +16,7 @@
  *   · **`refreshButtons()` 是唯一的可用性中枢**，tab 化之后也不能改成"只更新可见 tab"：
  *     隐藏 tab 里的按钮同样得是对的，切过去要立刻能用。
  */
-import { $, setStatus, appendLogLine } from '../ui/dom.js';
+import { $, setStatus, appendLogLine, esc } from '../ui/dom.js';
 import { yieldTask, waitMs } from '../core/pace.js';
 import { store } from '../core/store.js';
 import * as P from './protocol.js';
@@ -29,8 +29,7 @@ import { AcqView } from './acq-view.js';
 /** 右列 tab 的 id（与 HTML 的 data-dock 一一对应）*/
 const DOCK_IDS = ['cmd', 'reg', 'dsl', 'live', 'flash', 'loop'];
 
-/** HTML 转义（DSL 的错误表要原样显示用户写的那行）*/
-const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+/** HTML 转义见 `ui/dom.js` 的 `esc`（DSL 的错误表要原样显示用户写的那行）*/
 /** 十六进制转储（每行 16 B，带偏移）*/
 function hexDump(bytes, max = 256){
   const b = bytes instanceof Uint8Array ? bytes.subarray(0, max) : new Uint8Array(0);
@@ -840,7 +839,26 @@ export class SpiBusView {
   // ==================================================================== SPI / NOR Flash
 
   flMode(){ return FL.READ_MODES.find(m => m.v === (+$('sp-fl-mode').value || 0)) || FL.READ_MODES[0]; }
-  flAddr(){ return Number($('sp-fl-addr').value) >>> 0; }
+  /**
+   * 「地址」格 → 数字。**严格解析，非法直接抛**（绝不悄悄变成 0）。
+   *
+   * 🚨 老实现是 `Number(v) >>> 0`，配着"帧里地址固定 3 字节"这两件事会咬人（2026-10 代码审查）：
+   *     · 空串 / `abc` → 0（`NaN >>> 0`）；`4096.7` → 4096；`-1` → 0xFFFFFFFF；
+   *     · ≥16 MB 的地址在线上回绕到低地址。
+   *    擦除 / 编程 / 测速都直接吃这个值 —— 手一抖就把 0 号扇区（通常是启动代码）擦了。
+   */
+  flAddr(){
+    const raw = String($('sp-fl-addr').value ?? '').trim();
+    if (!raw) throw new Error('Flash 地址是空的：填 0x000000 ~ 0xFFFFFF（帧里地址固定 3 字节）');
+    const m = /^(?:0[xX])?([0-9a-fA-F]+)$/.exec(raw);
+    if (!m) throw new Error(`Flash 地址「${raw}」不是十六进制数（例：0x000000 / 800000）`);
+    const v = parseInt(m[1], 16);
+    if (v > FL.ADDR_MAX){
+      throw new Error(`Flash 地址 0x${v.toString(16).toUpperCase()} 超过 3 字节上限 ` +
+        `0x${FL.ADDR_MAX.toString(16).toUpperCase()} —— 帧里地址只有 3 字节，再大会回绕到低地址（会擦错地方）`);
+    }
+    return v;
+  }
   flDummy(){ return Math.max(0, Math.min(4, +$('sp-fl-dummy').value || 0)); }
 
   flOut(text, kind = ''){

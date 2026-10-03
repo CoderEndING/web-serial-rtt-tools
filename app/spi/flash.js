@@ -61,6 +61,12 @@ export const ERASE_MODES = [
 
 export const PAGE_SIZE = 256;         // 编程粒度（页写不能跨页回绕）
 export const SECTOR_SIZE = 4096;
+/**
+ * 线上地址**固定 3 字节**（见 `readFrame`/`writeFrame` 的 `addrLen: 3`）—— 超过它的地址在线上
+ * 会**静默回绕到低地址**，于是"擦 0x1000000"实际擦的是 0x000000（通常是启动代码）。
+ * 页面侧要求所有地址输入都卡在这个上限内（`bus-view.flAddr()`）。
+ */
+export const ADDR_MAX = 0xffffff;
 
 // ============================================================================
 // JEDEC ID 解析

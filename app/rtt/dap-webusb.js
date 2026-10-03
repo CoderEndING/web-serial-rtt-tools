@@ -26,17 +26,20 @@ const X_APnDP = 0x01, X_RnW = 0x02, X_ADDR = 0x0c;
 const AP_CSW = 0x00, AP_TAR = 0x04, AP_DRW = 0x0c;
 const DP_IDCODE = 0x00, DP_CTRL_STAT = 0x04, DP_SELECT = 0x08, DP_RDBUFF = 0x0c;
 /**
- * DP CTRL/STAT 的上电值 = **两个请求位**：CDBGPWRUPREQ(bit31) | CSYSPWRUPREQ(bit30)。
- * 🚨 按 ADIv5：**28/29 是只读 ACK（CSYSPWRUPACK / CDBGPWRUPACK），30/31 才是请求位**。
- *    本文件早期把这四个位写反了，于是值是 0x70000000 —— 给两个只读 ACK 位写 1、
- *    又**没置 bit31 的调试上电请求**。实测后果（STM32H7B0 + MicroLink/akaLinkPro）：
- *      · H7 的 DP 直接回 FAULT → 页面报「SWD FAULT（…地址 0x4）」，连接彻底失败；
- *        （这也正是早先误判"MicroLink 写不了 H7 的 DP 寄存器"的原因 —— 其实是页面写错了位）
- *      · F1 的 DP 恰好容忍写只读位，所以 F103 一直"能用"，掩盖了这个 bug；
- *      · ACK 位恰好已是 1 时又"碰巧能连上" → 就是那句"RTT 总是连不上、偶尔也能连上"。
- *    正确值 0xC0000000（见 tools/target-firmware/stm32h7b0_rtt_speed/RESULTS.md 的排查记录）。
+ * DP CTRL/STAT 的位排法（ADIv5，**别按名字猜位号**）：
+ *   · bit28 CDBGPWRUPREQ ／ bit29 CDBGPWRUPACK   ← 调试域（REQ 主机写 / ACK 目标置，只读）
+ *   · bit30 CSYSPWRUPREQ ／ bit31 CSYSPWRUPACK   ← 系统域（同上）
+ *   即 **28/30 是请求位、29/31 是只读应答位**。上电请求值 = `0x50000000`（见 `_powerUpDP`）。
+ *
+ * 🚨 这里的三段注释曾经互相矛盾（2026-10 代码审查把那批旧注释清掉了），踩过的两个坑记在这：
+ *   ① 早期把 REQ/ACK 写反过（用过 0x70000000 / 0xC0000000 = 给只读位写 1、又漏了请求位）
+ *      → STM32H7B0 的 DP 直接回 FAULT，页面报「SWD FAULT（…地址 0x4）」；F1 恰好容忍，
+ *      所以 F103 一直"能用"，把这个 bug 掩盖了很久（见 stm32h7b0_rtt_speed/RESULTS.md）。
+ *   ② 判"上电了没有"现在用的是 `st & 0x30000000`（= bit29|bit28）—— **这个掩码是错的**
+ *      （拿"我们自己刚写下去的请求位"当应答）。正确掩码是 `0xA0000000`（bit31|bit29）。
+ *      改它属于"会动到探针 bring-up"的改动，必须逐块板子真机验（F103 / H743 / H7B0），
+ *      所以**本段只统一注释、不动掩码**：留待有板子时单独改（见 `_powerUpDP` 的说明）。
  */
-const DP_PWRUP = 0xc0000000;
 const SWJ_nRESET = 1 << 7;
 const ACK = { 1: 'OK', 2: 'WAIT', 4: 'FAULT', 7: 'NO ACK' };
 const reqByte = (ap, rnw, addr) => (ap ? X_APnDP : 0) | (rnw ? X_RnW : 0) | (addr & X_ADDR);
@@ -790,15 +793,12 @@ export class WebUsbDapProbe {
   /**
    * 给调试口上电：写 DP CTRL/STAT 的 **CDBGPWRUPREQ(bit28) | CSYSPWRUPREQ(bit29)**。
    *
-   * 🚨 **两个请求位都要置**。历史上这里写的是 `0x50000000` —— 只有 CDBGPWRUPREQ(bit28)
-   *    加上只读的 CDBGPWRUPACK(bit30)，**漏了 CSYSPWRUPREQ(bit29)**：
-   *      · STM32F1（Cortex-M3）容忍这一点（AP 照样能访问），所以一直没暴露，只是
-   *        CTRL/STAT 的 bit31（CSYSPWRUPACK）永远读不到 —— 那条"DP 电源应答位没起来"的
-   *        警告就是它；
+   * 🚨 **两个请求位都要置**（bit28 CDBGPWRUPREQ | bit30 CSYSPWRUPREQ = `0x50000000`）。
+   *    历史上这里记错过位号、写出过 0x70000000 / 0xC0000000（给只读 ACK 位写 1、漏请求位）：
+   *      · STM32F1（Cortex-M3）容忍错误写法，所以一直没暴露；
    *      · **STM32H7B0（Cortex-M7）不容忍**：系统电源没请求 → AP 访问直接 FAULT，
-   *        表现和"SWD 连不上"一模一样（实测：H7 上电写 `0x50000000` → `SWD FAULT（地址 0x4）`）。
-   *    现在写成 `0x70000000` = CDBGPWRUPREQ | CSYSPWRUPREQ | 那个只读 ACK 位（写 1 无害），
-   *    两块板子都通过。
+   *        表现和"SWD 连不上"一模一样（实测：H7 上电写错值 → `SWD FAULT（地址 0x4）`）。
+   *    下面那两个字面量（`0x50000022` / `0x50000000`）就是正确值，别再"顺手优化"。
    *
    * 🚨 **千万别先写 0「掉电」再上电**（6bba430 加过这一步，直接把 RTT 连接搞挂）：
    *    本机 MicroLink(CherryUSB) + STM32F103 实测，掉电写之后那个上电写会稳定返回
@@ -815,8 +815,11 @@ export class WebUsbDapProbe {
      *      = **0x50000022** —— 关键就是最后两位 sticky 清除位：
      *      **带着 sticky 的 DP 会拒绝写**，所以"先 ABORT 清、再写 0x50000000"那条路是死路
      *      （页面实测：写 CTRL/STAT 恒 FAULT）；OpenOCD 是**一笔写里同时请求上电 + 清 sticky**。
-     *   ② 轮询 CTRL/STAT 等 PWRUPACK（本机 H7B0 上这两位可能一直是 0，所以**只当参考**，
-     *      不通过也继续 —— OpenOCD 能跑通就证明 AP 可用性与这两位不必绑定）。
+     *   ② 轮询 CTRL/STAT 等 PWRUPACK（应答位是 **bit31 CSYSPWRUPACK / bit29 CDBGPWRUPACK**；
+     *      本机 H7B0 上这两位可能一直是 0，所以**只当参考**，不通过也继续 ——
+     *      OpenOCD 能跑通就证明 AP 可用性与这两位不必绑定）。
+     *      ⚠️ 下面的判定掩码 `0x30000000` 是**错的**（bit29|bit28：把请求位当应答）——
+     *      正确应为 `0xA0000000`。改它要动探针 bring-up，必须逐块板子真机验，故暂留（见文件头 ②）。
      *   ③ 再写一次 `0x50000000`（撤掉 sticky 清除位，保留电源请求）——与 OpenOCD 一致。
      */
     for (let i = 0; i < attempts; i++){

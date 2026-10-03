@@ -212,14 +212,24 @@ console.log('== 6. ELF 符号解析 ==');
   }
 }
 
-console.log('== 7. HEX 解析 ==');
+console.log('== 7. HEX 解析（分隔符 = 字节边界）==');
 {
   ok(bytesToHex(parseHex('01 03 0A').bytes) === '01 03 0A', '空格分隔');
   ok(bytesToHex(parseHex('01030a').bytes) === '01 03 0A', '连写 6 位数字自动两两分组');
   ok(bytesToHex(parseHex('0x01,0x03').bytes) === '01 03', '0x 前缀 + 逗号');
   ok(parseHex('01 0G').error !== null, '非法字符报错');
-  ok(parseHex('01 3').error !== null, '奇数位报错');
-  ok(parseHex('01-03').bytes.length === 2, '连字符分隔');
+  /* 🚨 口径变更（2026-10 代码审查）：**分隔符 = 字节边界**。
+     老实现是"删掉所有非十六进制字符、再两位一组切"，还用 `pending` 把上一段的零头带到下一段 ——
+     于是「0x1,0x2」（用户明确写了两个字节）被拼成 0x12、「1 2」也变成 0x12。
+     现在只有**完全没分隔符的连续串**才两位一组拆，奇数位只对那种串报错。 */
+  ok(parseHex('01030').error !== null, '连续串奇数位报错');
+  ok(bytesToHex(parseHex('01-03').bytes) === '01 03', '连字符分隔');
+  ok(bytesToHex(parseHex('0x1,0x2').bytes) === '01 02', '「0x1,0x2」是两个字节 01 02（不是 0x12）');
+  ok(bytesToHex(parseHex('1 2').bytes) === '01 02', '「1 2」是两个字节 01 02');
+  ok(bytesToHex(parseHex('A 5 F 0').bytes) === '0A 05 0F 00', '「A 5 F 0」是四个字节 0A 05 0F 00');
+  ok(bytesToHex(parseHex('0x01 0x2 0x03').bytes) === '01 02 03', '「0x01 0x2 0x03」= 01 02 03（老代码报奇数位）');
+  ok(bytesToHex(parseHex('01 3').bytes) === '01 03', '「01 3」= 01 03（一位数字当一位）');
+  ok(bytesToHex(parseHex('0x0103').bytes) === '01 03', '带 0x 的连续串仍然两位一组');
 }
 
 console.log('== 8. 内存访问锁：外部并发调用必须排队（审查：可重入快路径让互斥失效）==');

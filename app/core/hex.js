@@ -1,28 +1,33 @@
 /**
  * HEX / 文本 / 字节 互转。
- * 解析规则（宽松，容错比严格重要）：
- *   "01 03 0A" / "0103 0A" / "0x01,0x03" / "01-03" / "01\n03" 都能解析成 [01,03,0A]
- *   奇数个十六进制数字、或出现非法字符 → 返回错误说明，由界面提示。
+ *
+ * `parseHex` 的分词规则（**按分隔符判断，不靠猜**）：
+ *   · 用空格 / 逗号 / 分号 / 冒号 / 下划线 / 连字符 / 竖线 / 换行 **或 `0x` 前缀**隔开的每一段
+ *     就是**一个字节**，写一位也当它是一位（`1` = `01`）——
+ *     `"0x1,0x2"` → `[01 02]`、`"A 5 F 0"` → `[A5 F0 00...]` 四个字节；
+ *   · **没有分隔符的连续串**才两位一组拆：`"01030a"` → `[01 03 0A]`、`"0x0103"` → `[01 03]`；
+ *   · 非法字符、或连续串是奇数位 → 返回错误说明，由界面提示。
+ *
+ * 🚨 老实现是"把所有非十六进制字符删掉、再两位一组切"，中间还用一个 `pending` 把**上一段的
+ *    零头带到下一段** —— 于是 `"0x1,0x2"`（用户明确写了两个字节）被拼成 0x12 一个字节、
+ *    `"1 2"` 也变成 0x12、`"0x01 0x2 0x03"` 直接报"位数是奇数"。
+ *    已经写了分隔符还被悄悄改变语义，是最难查的一类（串口助手/RTT 下行都走这里，
+ *    2026-10 代码审查抓到）。现在的规则与它一致：**分隔符 = 字节边界**。
  */
 
 const HEXCH = /^[0-9a-fA-F]+$/;
 
 /** @returns {{bytes:Uint8Array, error:string|null}} */
 export function parseHex(text){
-  let s = String(text || '');
-  // 去掉 0x / 0X 前缀与常见分隔符
-  s = s.replace(/0[xX]/g, ' ').replace(/[,;:_\-\t\r\n|]/g, ' ');
+  const s = String(text || '').replace(/0[xX]/g, ' ').replace(/[,;:_\-\t\r\n|]/g, ' ');
   const toks = s.split(/\s+/).filter(Boolean);
   const out = [];
-  let pending = '';
   for (const t of toks){
     if (!HEXCH.test(t)) return { bytes: new Uint8Array(0), error: `HEX 里有非法字符："${t}"` };
-    let v = pending + t;
-    pending = '';
-    if (v.length % 2) { pending = v.slice(-1); v = v.slice(0, -1); }
-    for (let i = 0; i < v.length; i += 2) out.push(parseInt(v.substr(i, 2), 16));
+    if (t.length <= 2){ out.push(parseInt(t, 16)); continue; }        // 有分隔符 → 这一整段就是一个字节
+    if (t.length % 2) return { bytes: new Uint8Array(0), error: `HEX 位数是奇数："${t}"` };
+    for (let i = 0; i < t.length; i += 2) out.push(parseInt(t.substr(i, 2), 16));
   }
-  if (pending) return { bytes: new Uint8Array(0), error: `HEX 位数是奇数："${pending}"` };
   return { bytes: Uint8Array.from(out), error: null };
 }
 

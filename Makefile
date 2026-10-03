@@ -472,70 +472,9 @@ git-log:
 	git log --oneline -15
 
 check:
-	$(NODE) --check app/rtt/dap-webusb.js
-	$(NODE) --check app/core/pace.js
-	$(NODE) --check app/rtt/view.js
-	$(NODE) --check app/flash/view.js
-	$(NODE) --check app/flash/runner.js
-	$(NODE) --check app/gen/templates.js
-	$(NODE) --check app/gen/fixes.js
-	$(NODE) --check app/gen/model.js
-	$(NODE) --check app/gen/view.js
-	$(NODE) --check app/gen/zip.js
-	$(NODE) --check app/hid/probe.js
-	$(NODE) --check app/hid/mock.js
-	$(NODE) --check app/hid/view.js
-	$(NODE) --check app/elf/elf.js
-	$(NODE) --check app/elf/dwarf.js
-	$(NODE) --check app/scope/protocol.js
-	$(NODE) --check app/scope/store.js
-	$(NODE) --check app/scope/mock.js
-	$(NODE) --check app/scope/render.js
-	$(NODE) --check app/scope/transport.js
-	$(NODE) --check app/scope/view.js
-	$(NODE) --check app/spi/protocol.js
-	$(NODE) --check app/spi/mock.js
-	$(NODE) --check app/spi/transport.js
-	$(NODE) --check app/spi/session.js
-	$(NODE) --check app/spi/bus-view.js
-	$(NODE) --check app/spi/panel-view.js
-	$(NODE) --check app/spi/panel-code.js
-	$(NODE) --check app/spi/panels-data.js
-	$(NODE) --check app/spi/image.js
-	$(NODE) --check app/spi/frames-dsl.js
-	$(NODE) --check app/spi/flash.js
-	$(NODE) --check app/spi/regs.js
-	$(NODE) --check app/spi/reg-view.js
-	$(NODE) --check app/spi/runner.js
-	$(NODE) --check app/spi/acq-view.js
-	$(NODE) --check app/ui/reg-grid.js
-	$(NODE) --check app/ui/spark.js
-	$(NODE) --check app/core/bytes.js
-	$(NODE) --check app/core/expr.js
-	$(NODE) --check app/dbg/fmt.js
-	$(NODE) --check app/dbg/regs.js
-	$(NODE) --check app/dbg/bp.js
-	$(NODE) --check app/dbg/symbols.js
-	$(NODE) --check app/dbg/cmd.js
-	$(NODE) --check app/dbg/session.js
-	$(NODE) --check app/dbg/mock.js
-	$(NODE) --check app/dbg/thumb.js
-	$(NODE) --check app/dbg/rv.js
-	$(NODE) --check app/dbg/riscv.js
-	$(NODE) --check app/dbg/watch.js
-	$(NODE) --check app/dbg/view.js
-	$(NODE) --check app/i2c/protocol.js
-	$(NODE) --check app/i2c/mock.js
-	$(NODE) --check app/i2c/expr.js
-	$(NODE) --check app/i2c/dsl.js
-	$(NODE) --check app/i2c/session.js
-	$(NODE) --check app/i2c/runner.js
-	$(NODE) --check app/i2c/presets.js
-	$(NODE) --check app/i2c/view.js
-	$(NODE) --check app/main.js
-	$(NODE) --check bridge/rtt-bridge.mjs
+	$(NODE) tools/dev/check-syntax.mjs
 	$(NODE) tools/dev/check-liquid.mjs
-	pwsh -NoProfile -Command "Write-Host '语法检查通过'"
+	pwsh -NoProfile -Command "Write-Host 'syntax + liquid check ok'"
 
 clean:
 	pwsh -NoProfile -Command "Remove-Item -Recurse -Force -ErrorAction SilentlyContinue tmp/*.csv, tmp/*.bin, tools/la/__pycache__"

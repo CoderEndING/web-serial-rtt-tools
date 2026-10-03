@@ -12,7 +12,7 @@
  * 采样是**一次性窗口**（线性缓冲，满了就停）：容量 = 名义速率 × 时长 × 1.25。
  * 满了之后新样本计入 `overrun` 并显示在"丢样本"里 —— 绝不静默丢。
  */
-import { $, setStatus, seg } from '../ui/dom.js';
+import { $, setStatus, seg, esc } from '../ui/dom.js';
 import { store } from '../core/store.js';
 import { AkaLinkHid } from '../hid/probe.js';
 import { Elf } from '../elf/elf.js';
@@ -480,8 +480,10 @@ export class ScopeView {
       const row = document.createElement('label');
       row.className = 'vrow' + (sel ? ' sel' : '') + (!sel && this.selected.length >= MAX_VARS ? ' dis' : '');
       row.innerHTML = `<input type="checkbox" ${sel ? 'checked' : ''} ${!sel && this.selected.length >= MAX_VARS ? 'disabled' : ''}>` +
-        `<span class="nm" title="${v.name}">${v.name}</span>` +
-        `<span class="ty">${v.scalar || v.typeName || '?'}</span>` +
+        /* 🚨 变量名与类型名都来自**载入的 ELF**（外部输入）——拼进 innerHTML 前必须转义，
+         *    否则一个名字里带 `<img onerror=…>` 的符号就能在这页执行脚本（2026-10 代码审查）。 */
+        `<span class="nm" title="${esc(v.name)}">${esc(v.name)}</span>` +
+        `<span class="ty">${esc(v.scalar || v.typeName || '?')}</span>` +
         `<span class="ad">0x${v.addr.toString(16)}</span>`;
       row.querySelector('input').addEventListener('change', e => this.toggleVar(v, e.target.checked));
       box.appendChild(row);
@@ -1382,7 +1384,7 @@ export class ScopeView {
     const tip = ct ? ` title="t=${ct.text}（相对采集起点）· 样本 #${ct.index}"` : '';
     box.innerHTML = rows.map(r =>
       `<span class="lrow${r.visible ? '' : ' off'}" data-k="${r.index}"${tip}>` +
-      `<i class="dot" style="background:${r.color}"></i>${r.name}` +
+      `<i class="dot" style="background:${r.color}"></i>${esc(r.name)}` +
       `<span class="lv">${fmtVal(r.value)}${ct ? ' @' + ct.text : ''}</span></span>`).join('');
     for (const el of box.querySelectorAll('.lrow')){
       el.addEventListener('click', () => {
