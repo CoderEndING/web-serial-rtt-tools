@@ -29,7 +29,7 @@ FW_DIR   = tools/target-firmware/stm32f103
 LA       = tools/la/kingst_la.py
 
 .DEFAULT_GOAL := help
-.PHONY: help serve serve-dev serve-stop browser open page-prep idcode board-check-f103ze board-check-h743 board-check-6800evk test test-ui test-gen test-gen-page gen-embed samples-anim test-hid test-dwarf test-scope test-scope-page test-scope-render test-spi test-read test-spi-page test-hw test-record test-bridge test-bridge-gate test-hpm test-image test-all test-dbg test-dbg-page test-dbg-hw test-dbg-stress test-dbg-stress-f103ze flash-dbgstress-f103ze flash-dbgstress-h743 flash-dbgstress-6800evk test-dbg-riscv test-idcode test-dsl test-flash flash-timing hw-campaign hw-campaign-h743 hw-campaign-hpm hw-campaign-riscv campaign-summary full_flow_f103ze full_flow_h743 full_flow_6800evk \
+.PHONY: help serve serve-dev serve-stop browser open page-prep spi-flash-hw idcode board-check-f103ze board-check-h743 board-check-6800evk test test-ui test-gen test-gen-page gen-embed samples-anim test-hid test-dwarf test-scope test-scope-page test-scope-render test-spi test-read test-spi-page test-hw test-record test-bridge test-bridge-gate test-hpm test-image test-all test-dbg test-dbg-page test-dbg-hw test-dbg-stress test-dbg-stress-f103ze flash-dbgstress-f103ze flash-dbgstress-h743 flash-dbgstress-6800evk test-dbg-riscv test-idcode test-dsl test-flash flash-timing hw-campaign hw-campaign-h743 hw-campaign-hpm hw-campaign-riscv campaign-summary full_flow_f103ze full_flow_h743 full_flow_6800evk \
         bridge bridge-stop fw-build fw-flash fw-restore fw-h7-build fw-h7-flash \
         algo-check flash-plan la-info la-capture git-status git-log check clean spi-hw spi-flow i2c-hw spi-partial-hw dbg-step-hw
 
@@ -284,6 +284,17 @@ spi-partial-hw: page-prep
 #   打开 web -> 连接探针 -> 初始化屏 -> 发图 x3 -> 再次初始化屏 -> 发图 x3
 spi-flow: page-prep
 	$(NODE) tools/selftest/spi-hw-flow.mjs $(ARGS)
+
+# 「SPI/NOR Flash 测试」卡的**真机回归**（真探针 + 外接 NOR，本机 = W25Q64）：
+#   认 ID（EF 40 17）→ 先把第 2 个扇区写成 0x00 → 跑「写测速」（擦 N 扇区 → 写 → 回读）
+#   → 独立回读逐字节对账 → 擦除后必须全 0xFF。
+# 钉的是代码审查 #2：老擦除序列"先单独擦一次 + 循环里又从 addr 擦 + 每条之间不等 BUSY"
+# → 只有扇区 0 真被擦，回读不一致，而日志把它归因成「页间等 tPP 太短」，方向完全错。
+#   make spi-flash-hw                            # 默认擦 0x7F0000 起 8 KB（flash 末尾，破坏性）
+#   make spi-flash-hw ARGS="--addr=0x7E0000 --kb=16"
+#   make spi-flash-hw ARGS="--id=EF 40 18"       # 换器件（W25Q128）
+spi-flash-hw: page-prep
+	$(NODE) tools/selftest/spi-flash-hw.mjs $(ARGS)
 
 # USB→I2C 页的真机冒烟（真探针 + 真 I2C 器件）：扫描 → PINTEST → 读写 → 定时读
 #   make i2c-hw                       # 默认 AT24C02@0x50，只读 + 一次页写回读（会还原）

@@ -1079,13 +1079,19 @@ export class SpiBusView {
   }
 
   flWriteData(){
-    let bytes = parseHexBytes($('sp-fl-data').value);
-    if (!bytes.length){
+    /* 🚨 「留空 → 用 256 B 递增图案」这个兜底**只能**在用户真的什么都没填时生效。
+     *    老写法是 `parseHexBytes(...)` 之后再判 `!bytes.length`，而那时的解析器会把非法字符
+     *    删光 —— 于是框里填了一堆乱码（`zzz`）也会落进这个分支，**把 256 B 图案写进 flash**
+     *    （2026-10 代码审查）。解析器现在对非法字符直接抛错，这里判空只看原始文本。 */
+    const raw = String($('sp-fl-data').value ?? '').trim();
+    if (!raw){
       const n = 256;
-      bytes = new Uint8Array(n);
+      const bytes = new Uint8Array(n);
       for (let i = 0; i < n; i++) bytes[i] = i & 0xff;
       this.session.log('i', '写数据留空 → 用 256 B 递增图案', this.tag);
+      return bytes;
     }
+    const bytes = parseHexBytes(raw);          // 非法字符在这里抛错，不会静默变成空
     if (bytes.length > 4096) throw new Error('一次最多写 4 KB（收到 ' + fmtBytes(bytes.length) + '）');
     return bytes;
   }
@@ -1147,13 +1153,21 @@ export class SpiBusView {
       for (let i = 0; i < n; i++) data[i] = (i * 31 + 7) & 0xff;
       s.log('i', `写测速：先擦 0x${addr.toString(16)} 起 ${kb} KB`, this.tag);
       const tErase0 = performance.now();
-      await s.sendFrames(FL.eraseItems(addr, { opcode: FL.OP.SE }), { tag: this.tag, quiet: true });
-      for (let off = 0; off < n; off += FL.SECTOR_SIZE){
-        await s.sendFrames(FL.eraseItems(addr + off, { opcode: FL.OP.SE }), { tag: this.tag, quiet: true });
+      /* 🚨 擦除序列有两个坑（2026-10 代码审查，两个都会让"已经擦干净了"变成假的）：
+       *   ① 老代码先单独擦一次 addr，循环里又从 addr+0 擦一遍 —— 第一条就让器件忙起来，
+       *      后面几条**在 BUSY 期间全被忽略**（NOR 忙时只认 RDSR 之类的读命令），
+       *      于是只有扇区 0 真被擦了，后面几个扇区还是旧数据 → 回读不一致，
+       *      而日志会把它归因成「tPP 太短」，方向完全错；
+       *   ② 每条 SE 之间不等 BUSY。扇区擦除要几十~几百 ms，连发等于白发。
+       *   现在：按扇区走（一直到 `addr+n-1` 所在的扇区，起始地址不对齐时也不会漏最后一个），
+       *   并且**每条之后都等 BUSY 清**再发下一条。 */
+      const lastSec = FL.sectorOf(addr + n - 1);
+      for (let a = FL.sectorOf(addr); a <= lastSec; a += FL.SECTOR_SIZE){
+        await s.sendFrames(FL.eraseItems(a, { opcode: FL.OP.SE }), { tag: this.tag, quiet: true });
+        const w = await this.flWaitReady(20000);
+        if (!w.ok) throw new Error(`擦除扇区 0x${a.toString(16)} 等 BUSY 超时（器件一直忙？）`);
       }
-      const w0 = await this.flWaitReady(20000);
       const tErase = performance.now() - tErase0;
-      if (!w0.ok) throw new Error('擦除等 BUSY 超时');
       const t0 = performance.now();
       const r = await s.sendFrames(FL.programItems(addr, data, { pageDelayMs: tpp }), { tag: this.tag, quiet: true });
       const bad = r.rsps.filter(x => x && x.status !== P.ST.OK).length;
