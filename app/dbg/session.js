@@ -378,6 +378,11 @@ export class DebugSession {
     if (!this.halted) throw new Error('目标在运行 —— 先「暂停」再单步');
     const pc = align2(await this.readReg('PC'));
     this.lastStepMode = null;
+    /**
+     * 这一步到底成没成，如实上报（2026-10 审查报告 §低危 那条：老代码只回 `lastStepMode`，
+     * 调用方**分不出**"用哪种方式单步的"和"这一步压根没执行"）。
+     */
+    this.lastStepOk = null;
     await this._withBpCleared(pc, async () => {
       /**
        * 🚨 `_cStepWorks` 是**粘性记忆**：这颗探针/内核不执行 C_STEP（DHCSR 写进去 C_STEP、
@@ -386,7 +391,7 @@ export class DebugSession {
        *    「单步跳出」要走上百条指令时就变成"卡死"。失败一次之后直接走断点单步（~15 ms/步）。
        */
       if (this._cStepWorks !== false){
-        if (await this._stepByDhcsr(pc)){ this._cStepWorks = true; this.lastStepMode = 'dhcsr'; return; }
+        if (await this._stepByDhcsr(pc)){ this._cStepWorks = true; this.lastStepMode = 'dhcsr'; this.lastStepOk = true; return; }
         const wasOk = this._cStepWorks === true;
         this._cStepWorks = false;
         this._log((wasOk ? 'C_STEP 没让目标前进（这次；可能刚复位或重连过）'
@@ -394,7 +399,8 @@ export class DebugSession {
           + ' —— 改用「断点单步」，后面每一步都走这条路，不再重复试探', 'warn');
       }
       this.lastStepMode = 'breakpoint';
-      await this._stepByBreakpoint(pc);
+      this.lastStepOk = await this._stepByBreakpoint(pc);
+      if (!this.lastStepOk) this._log('这一步**没执行**（断点单步：落点算不出来 / 比较器不够 / 2 s 没停到落点）', 'err');
     });
     await this.refresh();
     await this.refreshRegs();
@@ -403,24 +409,64 @@ export class DebugSession {
 
   /** C_STEP 主路径。@returns {Promise<boolean>} PC 是否**真的**前进了 */
   async _stepByDhcsr(pc){
-    try { await this.probe._dhcsr(DBGKEY | C_DEBUGEN | C_HALT | C_STEP | C_MASKINTS); }
-    catch (e){ this._log('写 C_STEP 失败：' + (e?.message || e), 'warn'); return false; }
-    let sawRun = false;
-    for (let i = 0; i < 400; i++){
-      let v;
-      try { v = await this.probe._readWord(DHCSR); }
-      catch (e){ this._log('读 DHCSR 失败：' + (e?.message || e), 'warn'); return false; }
-      const h = ((v >>> 17) & 1) === 1;
-      if (!h) sawRun = true;
-      else if (sawRun) break;
-      /* 「根本没跑起来」不用等满 400 轮：C_STEP 生效的话 S_HALT 在前几轮就该掉下去。
-         这一步在坏组合上会白等 400 次 USB 往返（每次 ~0.3 ms + 1 ms 延时）。 */
-      if (!sawRun && i >= 60) break;
-      await waitMs(1);
+    let moved = false;
+    try {
+      try { await this.probe._dhcsr(DBGKEY | C_DEBUGEN | C_HALT | C_STEP | C_MASKINTS); }
+      catch (e){ this._log('写 C_STEP 失败：' + (e?.message || e), 'warn'); return false; }
+      let sawRun = false;
+      for (let i = 0; i < 400; i++){
+        let v;
+        try { v = await this.probe._readWord(DHCSR); }
+        catch (e){ this._log('读 DHCSR 失败：' + (e?.message || e), 'warn'); return false; }
+        const h = ((v >>> 17) & 1) === 1;
+        if (!h) sawRun = true;
+        else if (sawRun) break;
+        /* 「根本没跑起来」不用等满 400 轮：C_STEP 生效的话 S_HALT 在前几轮就该掉下去。
+           这一步在坏组合上会白等 400 次 USB 往返（每次 ~0.3 ms + 1 ms 延时）。 */
+        if (!sawRun && i >= 60) break;
+        await waitMs(1);
+      }
+      /* 判据用 PC，不用 S_HALT —— S_HALT 位本身也可能读滞后/读脏（本仓有过先例） */
+      try { moved = align2(await this.readReg('PC')) !== pc; }
+      catch { moved = false; }
+      return moved;
+    } finally {
+      /**
+       * 🚨 **无论成败都要把单步位收干净**（2026-10-03 F103 真机定因，本文件最贵的一条）。
+       *
+       * 上面那笔写的是 `C_HALT|C_STEP|C_MASKINTS`，而这颗探针/内核**不执行 C_STEP**
+       * （见 step() 的说明）—— 于是 `C_MASKINTS` 就留在 DHCSR 里了。麻烦在于：
+       *   · 恢复运行写的是 `C_HALT=0` 的值，其中的 `MASKINTS=0` **不生效**
+       *     （该位只在核**已经停住**时可写）→ 核带着"中断屏蔽"一直跑下去；
+       *   · 症状极具误导性：**SysTick 不再触发**（`g_ticks` 冻住）而主循环照跑（`g_loops` 照涨），
+       *     于是**任何下在中断里的断点永远不可能命中**。压测里表现成"ISR 断点等满 4 s 超时、
+       *     核停在随机位置"；而套件的 `alive()` 只看 ticks/loops 任一在动就判"活着"，把真因盖住；
+       *   · 更糟的是 `_cStepWorks` 是粘性记忆（只试一次 C_STEP）：**一次粘上，整个会话都坏**
+       *     （实测就是这么连坏 6 轮压测的）。
+       *
+       * 实测（2026-10-03，F103ZE + akaLinkPro）：坏状态 `DHCSR=0x1010009`（MASKINTS=1 / C_HALT=0）
+       * → 写一次 `0xA05F0003` 回到 `0x30003` → 恢复运行 Δticks 立即恢复、ISR 断点 406 ms 命中。
+       */
+      await this._clearStepResidue();
     }
-    /* 判据用 PC，不用 S_HALT —— S_HALT 位本身也可能读滞后/读脏（本仓有过先例） */
-    try { return align2(await this.readReg('PC')) !== pc; }
-    catch { return false; }
+  }
+
+  /**
+   * 清掉单步残留的 `C_MASKINTS`（DHCSR bit3）。只在真的置位时才动手。
+   *
+   * 🚨 清它的姿势**必须是"先确保停住、再写 C_HALT=1 且 MASKINTS=0"**：直接写"运行"的值
+   *    （`0xA05F0001`）里的 MASKINTS=0 **不生效** —— 该位只在核已经停住时可写。
+   *    所以这里写一次 halt（把核停下 + 顺手清位），恢复运行交给调用方（`run()`）。
+   */
+  async _clearStepResidue(){
+    if (typeof this.probe?._dhcsr !== 'function') return false;      // RISC-V/JTAG 后端没有这一位
+    try {
+      const v = (await this.probe._readWord(DHCSR)) >>> 0;
+      if (((v >>> 3) & 1) !== 1) return false;
+      await this.probe._dhcsr(DBGKEY | C_DEBUGEN | C_HALT);
+      this._log('已清掉单步残留的 C_MASKINTS —— 不清的话中断再也进不来（中断里的断点永远不会命中）', 'dim');
+      return true;
+    } catch { return false; }
   }
 
   /**

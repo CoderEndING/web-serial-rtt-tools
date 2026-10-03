@@ -1162,6 +1162,7 @@ export class WebUsbDapProbe {
    * 为此中断整个烧录流程不划算 —— 真正的判据交给调用方（如 flashloader 的 isHalted 轮询）。
    */
   async run(){
+    await this._clearMaskintsIfSet();        // 单步残留会让中断再也进不来（见该函数说明）
     for (let i = 0; i < 3; i++){
       await this._dhcsr(0xA05F0001);                       // C_DEBUGEN=1, C_HALT=0
       const v = await this._readWord(0xE000EDF0);
@@ -1169,6 +1170,32 @@ export class WebUsbDapProbe {
       await waitMs(10);                                    // 真实 10 ms（后台节流会把 sleep(10) 钳成 1 s）
     }
     console.warn('[dap] 让目标运行的回读一直显示 C_HALT=1（可能是读滞后）——继续，不中断流程');
+  }
+
+  /**
+   * 起跑前清掉**单步残留**的 `C_MASKINTS`（DHCSR bit3）—— 只在真的置位时才动手。
+   *
+   * 🚨 为什么值得单独设一道闸（2026-10-03 F103ZE 真机定因）：
+   *    `DebugSession._stepByDhcsr()` 写的是 `C_HALT|C_STEP|C_MASKINTS`，而这颗探针/内核
+   *    **不执行 C_STEP**；那一位就留在 DHCSR 里，而它**只在核已经停住时可写** ——
+   *    之后写"运行"的值（`0xA05F0001`，里面 MASKINTS=0）**清不掉它**。
+   *    后果：核带着"中断屏蔽"一直跑 —— SysTick 不再触发（`g_ticks` 冻住）、主循环照跑
+   *    （`g_loops` 照涨），于是**任何下在中断里的断点永远不可能命中**，而"目标看起来活着"。
+   *    实测：坏状态 DHCSR=0x1010009 → 这里写一次 0xA05F0003 即回到 0x30003 →
+   *    下一次运行 Δticks 立即恢复（4142）、中断里的断点 406 ms 命中。
+   *    正常路径只多一次 DHCSR 读（~0.3 ms），不动状态。
+   *
+   * @returns {Promise<boolean>} 是否真的清了一次
+   */
+  async _clearMaskintsIfSet(){
+    if (this._locked) return false;      // 锁里被调用：不再发起内存访问（readMem 会等锁 → 自锁死）
+    try {
+      const v = (await this._readWord(0xE000EDF0)) >>> 0;
+      if (((v >>> 3) & 1) !== 1) return false;
+      await this._dhcsr(0xA05F0003);                        // C_HALT=1 + MASKINTS=0：此刻核停着 → 该位可写
+      this._note('清掉遗留的 C_MASKINTS（单步残留）—— 不清的话中断再也进不来，中断里的断点永远不会命中');
+      return true;
+    } catch { return false; }
   }
   async halt(){
     for (let i = 0; i < 3; i++){
