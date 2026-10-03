@@ -320,12 +320,12 @@ export class Rtt {
     };
     data = await readSpan();
 
-    // 错位读防护：高速下 SWD 偶发把别的地址内容读回来，最明显的指纹是数据里混进了
-    // 控制块签名 "SEGGER RTT"（真实日志里极少出现这个字符串）。整段丢弃、**不推进 RdOff**
-    // —— 下一轮会原样重读，数据不丢；若时钟太高持续出错，表现为 corrupt 一直涨，提示降时钟。
-    if (Rtt._looksCorrupt(data)){
+    // 错位读防护：高速下 SWD 偶发把别的地址内容读回来，最明显的指纹是**整个控制块**被读回来
+    // （见 `_looksCorrupt` 的判据）。整段丢弃、**不推进 RdOff** —— 下一轮会原样重读，数据不丢；
+    // 若时钟太高持续出错，表现为 corrupt 一直涨，提示降时钟。
+    if (this._looksCorrupt(data)){
       const retry = await readSpan();                          // 先立即重读一次（同样两段逻辑）
-      if (Rtt._looksCorrupt(retry)){
+      if (this._looksCorrupt(retry)){
         return { ...empty, backlog: n, corrupt: true };         // 没读走任何东西 → 积压照旧
       }
       data = retry;
@@ -348,9 +348,28 @@ export class Rtt {
     return { bytes: data, lost, full, high, level, wr: e.wr, rd: e.rd, backlog: n - readNow };
   }
 
-  /** 错位读指纹：数据里混进了控制块签名（重读一次能救回来就救，救不回就整轮丢弃重读） */
-  static _looksCorrupt(data){
-    return latin1(data).includes(CB_ID);
+  /**
+   * 错位读指纹：**整个控制块被读回来了**，而不是"数据里出现了这几个字"。
+   *
+   * 🚨 老判据是 `data.includes('SEGGER RTT')`（2026-10 代码审查抓到，后果是致命的）：
+   *    目标自己 `printf("SEGGER RTT ready")` 时，每一轮重读都得到同样的内容 → 整段丢弃、
+   *    **RdOff 永不推进 → 这条通道永久卡死**（一条日志都出不来），上层还会误报成
+   *    「SWD 链路不稳定，把时钟调低」，把排查方向带偏。
+   *
+   * 现在的判据是"签名后面紧跟**本控制块的两个通道数字段**"（MaxUp @+16、MaxDown @+20）——
+   * 这才是"把控制块读回来了"的指纹：目标打印的那串字后面不可能是这两个数。
+   * 签名落在读取窗口末尾、来不及核对字段时**当正常数据放行**：宁可漏一次防护，
+   * 也不能再把通道卡死（真错位读还有"重读一次"那道防线兜着）。
+   */
+  _looksCorrupt(data){
+    const s = latin1(data);
+    const first = s.indexOf(CB_ID);
+    if (first < 0) return false;
+    for (let i = first; i >= 0; i = s.indexOf(CB_ID, i + 1)){
+      if (i + 24 > data.length) continue;                       // 字段不全 → 无法确认，放过
+      if (u32le(data, i + 16) === this.maxUp && u32le(data, i + 20) === this.maxDown) return true;
+    }
+    return false;
   }
 
   totalLost(ch){ return this._lost.get(ch) || 0; }
