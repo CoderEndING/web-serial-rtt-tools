@@ -25,7 +25,9 @@
  * 这是"和 MDK/gdb 一个水平"这句话的硬证据。
  */
 import { Cdp, sleep, DEV_RE } from '../../tmp/cdp-lib.mjs';
-import { writeFileSync, existsSync, readFileSync } from 'node:fs';
+import { writeFileSync, existsSync, readFileSync, readdirSync } from 'node:fs';
+import { dirname, relative, resolve, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const argv = process.argv.slice(2);
 const arg = (k, d = null) => { const h = argv.find(a => a.startsWith('--' + k + '=')); return h ? h.split('=').slice(1).join('=') : (argv.includes('--' + k) ? true : d); };
@@ -34,6 +36,15 @@ const APP = 'http://127.0.0.1:8899/index.html';
 const ELF = String(arg('elf', '/tools/target-firmware/stm32h743_dbgstress/build/fw.elf'));
 const SRCDIR = String(arg('src', 'E:\\web-serial-rtt-tools\\tools\\target-firmware\\stm32h743_dbgstress\\src'));
 const SRC_ENGINE = String(arg('engine-c', SRCDIR + '\\engine.c'));
+/**
+ * 页面侧拿源码只能走**静态服务**（8899 的根 = 仓库根），所以把磁盘路径换算成 URL 路径。
+ * 为什么要这么绕：见下面"源码目录"那段的 🚨。
+ */
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
+const SRC_REL = relative(ROOT, resolve(SRCDIR));
+if (SRC_REL.startsWith('..')) throw new Error('--src 必须指向仓库里的目录（页面是通过 8899 静态服务取源码的）：' + SRCDIR);
+const SRC_HTTP = '/' + SRC_REL.split(sep).join('/');
+const SRC_NAMES = readdirSync(resolve(SRCDIR)).filter(f => /\.(c|h)$/i.test(f)).sort();
 const ORACLE = String(arg('oracle', 'tmp/gdb-oracle.json'));
 const JSON_OUT = String(arg('out', 'tmp/dbg-stress-page.json'));
 setTimeout(() => { console.error('[WATCHDOG] 25 分钟'); process.exit(9); }, 1500000);
@@ -128,13 +139,22 @@ await cdp.eval(`
   };
   return true;`);
 
-// 源码目录用**真文件**喂进去（CDP 给 <input webkitdirectory> 设文件，等价于用户点"选择源码目录"）
-{
-  const doc = await cdp.send('DOM.getDocument', { depth: -1 });
-  const node = await cdp.send('DOM.querySelector', { nodeId: doc.root.nodeId, selector: '#d-src-dir' });
-  await cdp.send('DOM.setFileInputFiles', { nodeId: node.nodeId, files: [SRCDIR] });
-  await sleep(500);
-}
+/**
+ * 源码目录用**真文件**喂进去 —— 但**不能**用 `DOM.setFileInputFiles`。
+ *
+ * 🚨 2026-10 查实（Chrome 153）：那条 CDP 命令对 `webkitdirectory` 的 input **静默无效** ——
+ *    命令不报错，可 `input.files.length` 恒为 0、`change` 事件也不触发，于是 `d.src` 永远是空的。
+ *    对照实验（都是同一个命令、同一个存在的文件）：
+ *      · `#d-elf-file`（普通 file input）      → 读回 `files.length = 1` ✔
+ *      · `#d-src-dir`（webkitdirectory input） → 读回 `files.length = 0` ✘（传目录 / 传文件列表都一样）
+ *    后果就是 `make test-dbg-stress` **稳定**报「源码目录已喂进页面（真文件）：还没选源码目录」，
+ *    而且这跟被测代码无关（页面侧选择目录那条路是好的，只有自动化喂不进去）。
+ *
+ * 现在改成：在**页面里** fetch 这些 .c/.h（它们就在静态服务的根下）、造 `File` 对象，交给
+ * `_indexSrcFiles()`。页面侧的索引、ELF 绝对路径的后缀匹配、读源码全都走同一条路
+ * （`indexFileList()` 对没有 `webkitRelativePath` 的 File 走 `f.name` 分支，反查照样命中）。
+ * 喂源码这一步放进下面那次求值里（跟载入 ELF 一起，少一次往返）。
+ */
 
 sec('== 0. 前置：ELF + 源码目录 + 连接探针 ==');
 const elfInfo = await cdp.json(`(async () => {
@@ -142,6 +162,14 @@ const elfInfo = await cdp.json(`(async () => {
     const r = await fetch(${JSON.stringify(ELF)} + '?t=' + Date.now());
     const st = d.loadElfBuffer(await r.arrayBuffer(), 'fw.elf');
     if (!st) return { err: document.getElementById('d-out').textContent.slice(-300) };
+    // 源码：页面里取真文件（见上面 🚨 —— webkitdirectory 的 input 喂不进去）
+    const files = [];
+    for (const n of ${JSON.stringify(SRC_NAMES)}){
+      const rr = await fetch(${JSON.stringify(SRC_HTTP)} + '/' + n + '?t=' + Date.now());
+      if (!rr.ok) return { err: '源码 ' + n + ' 取不到：HTTP ' + rr.status + '（' + ${JSON.stringify(SRC_HTTP)} + '，检查 --src 是否在仓库里）' };
+      files.push(new File([await rr.text()], n));
+    }
+    await d._indexSrcFiles(files);
     return { summary: st.summary(), lines: st.lines ? st.lines.summary() : null, src: d.src.summary(), srcReady: d.src.ready };
   })()`);
 if (elfInfo.err) throw new Error('ELF 载入失败：' + elfInfo.err);

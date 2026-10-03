@@ -1,5 +1,5 @@
 /**
- * 语法体检：把 `app/**\/*.js` 与 `bridge/*.mjs` **全部**过一遍 `node --check`。
+ * 语法体检：把 `app/**\/*.js`、`bridge/*.mjs` 与 `tools/**\/*.{js,mjs}` **全部**过一遍 `node --check`。
  *
  * 为什么要有这个脚本（2026-10 代码审查）：
  *   `make check` 原来是一份**手写的白名单**（62 条 `node --check app/xxx.js`）。手写的清单
@@ -25,29 +25,25 @@ import { dirname, join, relative, sep } from 'node:path';
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..', '..');
 
-/** 递归收集某个目录下的 .js（app/ 用）*/
-function collectJs(dir, out = []){
+/** 递归收集某个目录下的 .js / .mjs */
+function collect(dir, out = [], exts = ['.js']){
+  if (!statSync(dir, { throwIfNoEntry: false })?.isDirectory()) return out;
   for (const name of readdirSync(dir)){
     const p = join(dir, name);
     const st = statSync(p);
-    if (st.isDirectory()) collectJs(p, out);
-    else if (name.endsWith('.js')) out.push(p);
-  }
-  return out;
-}
-
-/** bridge/*.mjs */
-function collectMjs(dir, out = []){
-  if (!statSync(dir, { throwIfNoEntry: false })?.isDirectory()) return out;
-  for (const name of readdirSync(dir)){
-    if (name.endsWith('.mjs')) out.push(join(dir, name));
+    if (st.isDirectory()) collect(p, out, exts);
+    else if (exts.some(e => name.endsWith(e))) out.push(p);
   }
   return out;
 }
 
 const files = [
-  ...collectJs(join(root, 'app')),
-  ...collectMjs(join(root, 'bridge')),
+  ...collect(join(root, 'app'), [], ['.js']),
+  ...collect(join(root, 'bridge'), [], ['.mjs']),
+  /** `tools/` 也一起查：套件脚本自己语法错的时候，`make test-*` 的报错会很难读
+   *  （2026-10 就踩过一次：真机套件的"源码目录"断言红了，查半天才发现是**喂源码的方式**
+   *  在这个 Chrome 上失效，而不是被测页面坏了 —— 套件本身也该被体检）。 */
+  ...collect(join(root, 'tools'), [], ['.js', '.mjs']),
 ].sort();
 
 if (!files.length){
@@ -70,4 +66,4 @@ if (failed.length){
   for (const { f, msg } of failed) console.error(`  · ${rel(f)}\n      ${msg}`);
   process.exit(1);
 }
-console.log(`✅ 语法检查通过：${files.length} 个模块（app/ 全部 + bridge/*.mjs，自动遍历，不用维护白名单）`);
+console.log(`✅ 语法检查通过：${files.length} 个模块（app/ + bridge/ + tools/ 全部，自动遍历，不用维护白名单）`);
