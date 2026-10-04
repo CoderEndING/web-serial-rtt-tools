@@ -1,3 +1,4 @@
+import { usbDeviceInUse } from './usb-device.js';
 /**
  * 跨标签页的「探针占用」协调（BroadcastChannel）。
  *
@@ -48,7 +49,7 @@ export async function closeProbeUsbDevices(vid = PROBE_VID){
   let n = 0;
   try {
     for (const d of await navigator.usb.getDevices()){
-      if (d.vendorId !== vid) continue;
+      if (d.vendorId !== vid || usbDeviceInUse(d)) continue;
       try { await d.close(); n++; } catch { /* 已经关了/设备不在了，都无所谓 */ }
     }
   } catch { /* 枚举不到就当没有 */ }

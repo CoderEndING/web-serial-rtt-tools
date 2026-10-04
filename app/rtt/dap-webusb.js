@@ -9,6 +9,7 @@
  *   · DAP_ResetTarget 响应 = [回显, DAP_OK, 执行标志]
  */
 import { u32le, u32leBytes } from '../core/bin.js';
+import { UsbLease } from '../core/usb-device.js';
 /**
  * 等待原语（见 core/pace.js 的整段说明）：
  * 🚨 轮询间隔**不能用 setTimeout** —— 页面不可见时浏览器把短延时钳到 ≥1 s，
@@ -73,7 +74,12 @@ export async function withTimeout(p, ms, what){
 }
 
 /** USB 端口复位（清挂起传输）；成功返回 true */
-async function resetDevice(device){
+async function resetDevice(device, lease){
+  if (lease){
+    await lease.reset();
+    dirty.delete(device);
+    return true;
+  }
   if (!device || !device.opened) return false;
   try {
     await withTimeout(device.reset(), 3000, 'USB 端口复位');
@@ -162,8 +168,13 @@ export class WebUsbDapProbe {
   static async open(device, opts = {}){
     const p = new WebUsbDapProbe();
     p.device = device;
-    await p._setup(opts);
-    return p;
+    try { await p._setup(opts); return p; }
+    catch (e){
+      try { await p._usb?.close({ dirty: dirty.has(p.device) }); } catch (cleanup){
+        e.message += `；USB 清理未完成：${cleanup.message}`;
+      }
+      throw e;
+    }
   }
 
   /**
@@ -218,23 +229,24 @@ export class WebUsbDapProbe {
 
   /** USB 层：打开设备、找 bulk 端点、认领接口、清端点、同步清队列 */
   async _claim(){
-    const d = this.device;
+    this._usb ||= new UsbLease(this.device, 'dap');
+    const d = this.device = this._usb.device;
     // 🚨 上一次会话如果有过超时，USB 栈里可能还挂着传输 —— 会偷响应、甚至让
     //    getDevices()/open() 整条卡死。先做端口复位清掉（在 open 之前做最安全）。
     if (dirty.has(d)){
       console.warn('[dap] 这个探针上次有超时（挂起传输），先复位 USB 端口再认领');
       this._note('上次会话有超时（可能还挂着传输）→ 先复位 USB 端口再认领');
-      try { if (!d.opened) await withTimeout(d.open(), 5000, 'USB 打开'); } catch {}
-      await resetDevice(d);
+      await this._usb.open();
+      await resetDevice(d, this._usb);
     }
-    if (!d.opened) await withTimeout(d.open(), 5000, 'USB 打开（卡住通常是探针被别的程序占着）');
-    if (d.configuration === null) await withTimeout(d.selectConfiguration(1), 5000, 'USB 选择配置');
+    await this._usb.open();
     let found = null;
     for (const iface of d.configuration.interfaces){
       for (const alt of iface.alternates){
         const bulk = (alt.endpoints || []).filter(e => e.type === 'bulk');
-        const epIn = bulk.find(e => e.direction === 'in');
-        const epOut = bulk.find(e => e.direction === 'out');
+        const ownProbe = d.vendorId === 0x0d28 && d.productId === 0x0204;
+        const epIn = bulk.find(e => e.direction === 'in' && (!ownProbe || e.endpointNumber === 1));
+        const epOut = bulk.find(e => e.direction === 'out' && (!ownProbe || e.endpointNumber === 2));
         if (epIn && epOut){ found = { iface, alt, epIn, epOut }; break; }
       }
       if (found) break;
@@ -246,7 +258,7 @@ export class WebUsbDapProbe {
     /** 初始值先按端点 mps（512，`DAP_Info(0xff)` 之后仍按 512 钳，见上面那条注释） */
     this.pkt = Math.min(found.epIn.packetSize || 64, 512);
     try {
-      await withTimeout(d.claimInterface(this.iface), 5000, 'USB 认领接口');
+      await withTimeout(this._usb.claim(this.iface, [this.epIn | 0x80, this.epOut]), 5000, 'USB 认领接口');
     } catch (e){
       /**
        * 🚨 认领失败基本只有一个原因：**接口还被上一次会话占着**（同源另一个页签、被刷掉的旧文档、
@@ -262,9 +274,9 @@ export class WebUsbDapProbe {
       let ok = false, lastMsg = e.message;
       for (let i = 1; i <= 3 && !ok; i++){
         this._note(`认领接口失败（${lastMsg}）→ 复位端口后第 ${i}/3 次重试…`);
-        await resetDevice(d);
+        await resetDevice(d, this._usb);
         await sleep(300 * i);
-        try { await withTimeout(d.claimInterface(this.iface), 5000, 'USB 认领接口（重试）'); ok = true; }
+        try { await withTimeout(this._usb.claim(this.iface, [this.epIn | 0x80, this.epOut]), 5000, 'USB 认领接口（重试）'); ok = true; }
         catch (e2){ lastMsg = e2.message; }
       }
       if (ok){
@@ -362,7 +374,7 @@ export class WebUsbDapProbe {
       console.warn('[dap] 短包探测失败：' + e.message);
       if (/响应回显/.test(e.message)){
         console.info('[dap] 是陈旧响应包（不是固件不认短包）→ 清队列后按短包重试');
-        try { await resetDevice(this.device); } catch {}
+        try { await resetDevice(this.device, this._usb); } catch {}
         await sleep(200);
         await this._claim();                       // clearHalt + resync，把陈旧包吃掉
         try {
@@ -374,7 +386,7 @@ export class WebUsbDapProbe {
         }
       }
     }
-    try { await resetDevice(this.device); } catch {}
+    try { await resetDevice(this.device, this._usb); } catch {}
     await sleep(250);
     await this._claim();
     const f = await tryOne('pad', 2000);
@@ -458,7 +470,7 @@ export class WebUsbDapProbe {
     try {
       console.warn(`[dap] ${what} 超时 → 自动复位 USB 端口并清队列`);
       this._note(`${what} 超时 → 自动复位 USB 端口并清队列（第 ${this.recoveries} 次）`);
-      await resetDevice(this.device);
+      await resetDevice(this.device, this._usb);
       if (this._closing){ this._recovering = false; return; }
       await sleep(150);
       if (this._closing){ this._recovering = false; return; }
@@ -1329,7 +1341,8 @@ export class WebUsbDapProbe {
    *  `targetInit: false` 用于"马上就换时钟档重试"的场合：只重开会话，不按旧时钟再协商一遍。
    *  （这里原来忽略入参，调用方传了 `{negotiate:false}` 等于白传 —— 代码审查抓到的。）*/
   async reopen({ targetInit = true } = {}){
-    try { await this.device.releaseInterface(this.iface); } catch {}
+    if (this._usb) await this._usb.release(this.iface);
+    else await this.device.releaseInterface(this.iface);
     this._ready = false;
     await sleep(120);
     await this._claim();
@@ -1341,11 +1354,15 @@ export class WebUsbDapProbe {
     this._closing = true;
     if (this._lockChain) await this._lockChain;
     try { await this._ctrl(CMD.Disconnect); } catch {}
-    try { await this.device.releaseInterface(this.iface); } catch {}
-    // 🚨 有过超时的会话必须先做端口复位：挂起的 bulk 传输不会随 close() 消失，
-    //    留着它下一次会话（甚至烧录器的 getDevices()）就会被卡住。
-    if (dirty.has(this.device)) await resetDevice(this.device);
-    try { await this.device.close(); } catch {}
+    if (this._usb){
+      await this._usb.close({ dirty: dirty.has(this.device) });
+      dirty.delete(this.device);
+    } else {
+      // Standalone adapters constructed without _claim retain legacy cleanup.
+      try { await this.device.releaseInterface(this.iface); } catch {}
+      if (dirty.has(this.device)) await resetDevice(this.device);
+      await this.device.close();
+    }
     this._unwatchUsb();
     this._ready = false;
   }
@@ -1367,7 +1384,7 @@ export class WebUsbDapProbe {
       if (e.device !== dev) return;
       // close() 返回 Promise：设备已经掉线时它会**异步 reject**（NotFoundError），
       // 光靠同步 try/catch 拦不住，会在控制台留下未捕获错误 —— 必须接住。
-      try { dev.close()?.catch?.(() => {}); } catch { /* 设备可能已经不在了 */ }
+      try { (this._usb ? this._usb.close() : dev.close())?.catch?.(() => {}); } catch { /* 设备可能已经不在了 */ }
       this._ready = false;
       this._note('探针掉线（被复位/拔插）→ 已关闭本页签的句柄，接口认领随之释放');
     };
