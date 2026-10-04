@@ -101,6 +101,8 @@ export class DbgView {
     on('d-reset-halt', 'click', () => this._act('复位并停住', async () => { await s.resetHalt(); await this.refreshAll(); }));
     on('d-reset-run', 'click', () => this._act('复位并运行', async () => { await s.resetRun(); this._startWatch(); }));
     on('d-reg-refresh', 'click', () => this._act('刷新寄存器', () => s.refreshRegs().then(() => this.renderRegs())));
+    on('d-wp-add', 'click', () => this.runLine(`wp ${$('d-wp-addr').value.trim()} ${$('d-wp-mode').value} ${$('d-wp-size').value}`));
+    on('d-wp-clear', 'click', () => this.runLine('wpd all'));
     on('d-bp-clear', 'click', () => this._act('清空断点', async () => { await s.bpClear(); this.renderBps(); this.renderSource(); }));
     on('d-rtt-locate', 'click', () => this.rttStart());
     on('d-rtt-stop', 'click', () => this.rttStop());
@@ -386,7 +388,7 @@ export class DbgView {
     const cont = $('d-cont');
     if (cont) cont.disabled = !c || !h;
     for (const id of ['d-connect']) { const el = $(id); if (el) el.disabled = c; }
-    for (const id of ['d-disconnect', 'd-reset-halt', 'd-reset-run', 'd-rtt-locate']){ const el = $(id); if (el) el.disabled = !c; }
+    for (const id of ['d-disconnect', 'd-reset-halt', 'd-reset-run', 'd-rtt-locate', 'd-wp-add', 'd-wp-clear']){ const el = $(id); if (el) el.disabled = !c; }
     setFlag($('d-state'), !c ? '未连接' : (h ? '已停止' : '运行中'), !c ? null : (h ? 'warn' : 'on'));
   }
 
@@ -593,7 +595,21 @@ export class DbgView {
     });
   }
 
+  renderDwt(){
+    const box=$('d-wp-list'); if(!box) return;
+    box.textContent='';
+    for(const item of this.session.dwt.items){
+      const row=document.createElement('div'); row.className='bprow';
+      const text=document.createElement('span'); text.className='mono';
+      text.textContent=`#${item.slot+1} ${hex32(item.addr)} ${item.size} B ${item.mode}`;
+      const del=document.createElement('button'); del.textContent='×'; del.title='删除数据观察点';
+      del.addEventListener('click',()=>this.runLine(`wpd ${item.slot+1}`)); row.append(text,del); box.append(row);
+    }
+    if(!this.session.dwt.items.length) box.textContent='尚无数据观察点';
+  }
+
   renderBps(){
+    this.renderDwt();
     const box = $('d-bp-list');
     if (!box) return;
     box.textContent = '';
@@ -915,6 +931,8 @@ export class DbgView {
           const atBp = this.session.bps.some(b => (b & 0xfffffffe) === (pc & 0xfffffffe));
           const loc = this.sym?.locText?.(pc & 0xfffffffe) || '';
           const tail = `${loc ? ' ' + loc : ''}${f ? ' (' + f.name + '+0x' + f.off.toString(16) + ')' : ''}`;
+          const dwtReason=await this.session.dwt.haltReason().catch(()=>null);
+          if(dwtReason) this._out('⏹ '+dwtReason,'ok');
           this._out(atBp ? `⏹ 命中断点 @ ${hex32(pc)}${tail}` : `⏹ 目标已停止 @ ${hex32(pc)}${tail}`, atBp ? 'ok' : 'warn');
           await this._followPc();
           await this.afterStop();

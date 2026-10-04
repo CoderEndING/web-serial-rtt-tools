@@ -74,6 +74,8 @@ export class MockTarget {
   get connected(){ return true; }
   async connect(){
     this.ppb.clear();
+    this.ppb.set(0xe000ed00,0x410fc231);
+    this.ppb.set(0xe0001000,4<<28);
     this._resetCore(false);
     this.dhcsr = 0xa05f0003;                   // 连上时是"停住"状态（真机 DAP_ResetTarget 之后多半如此）
     return true;
@@ -321,6 +323,9 @@ export class MockTarget {
       if ((this.execCount & 0xff) === 0){                        // 心跳变量
         this._put32(this.ram, 0, this.execCount >>> 0);
         this._put32(this.ram, 4, (pc + 0x20000000) >>> 0);
+        if (this._cpuAccess(RAM,4,'w') || this._cpuAccess(RAM+4,4,'w')) {
+          this.regs[RI.PC]=(pc+2)>>>0; return;
+        }
       }
       if ((this.execCount & 0x7ff) === 0) this._pushRtt(`[dbg] tick ${this.execCount >> 11} @0x${pc.toString(16)}\r\n`);
       if (this._bpHit(pc)) return;
@@ -373,6 +378,21 @@ export class MockTarget {
       }
       this.regs[RI.PC] = next;
     }
+  }
+
+  /** CPU access only: debugger SWD reads/writes must not fire data watchpoints. */
+  _cpuAccess(addr,size,mode){
+    if (!(this.ppb.get(0xe000edfc)&0x01000000)) return false;
+    let hit=false;
+    for(let slot=0;slot<4;slot++){
+      const f=0xe0001028+16*slot, fn=(this.ppb.get(f)||0)&15;
+      if(fn!==7 && fn!==(mode==='r'?5:6)) continue;
+      const base=this.ppb.get(0xe0001020+16*slot)>>>0;
+      const length=2**((this.ppb.get(0xe0001024+16*slot)||0)&31);
+      if(addr<base+length && addr+size>base){ this.ppb.set(f,fn|0x01000000); hit=true; }
+    }
+    if(hit){ this.dfsr|=4; this.dhcsr|=3; this.running=false; }
+    return hit;
   }
 
   /** 取指地址是否命中已使能的比较器（用**真编码/解码**，见 bp.js） */

@@ -735,6 +735,17 @@
         <div class="row btnrow"><button id="d-bp-clear">清空断点</button></div>
         <p class="hint" id="d-bp-cap">—</p>
       </fieldset>
+      <fieldset>
+        <legend>数据观察点（DWT）</legend>
+        <input id="d-wp-addr" placeholder="变量名 / 0x20000000" aria-label="观察地址或变量">
+        <div class="row btnrow">
+          <select id="d-wp-mode" aria-label="观察访问类型"><option value="w">写入</option><option value="r">读取</option><option value="rw">读写</option></select>
+          <select id="d-wp-size" aria-label="观察字节范围"><option>1</option><option>2</option><option selected>4</option><option>8</option><option>16</option><option>32</option><option>64</option></select>
+          <button id="d-wp-add">添加</button><button id="d-wp-clear">清空</button>
+        </div>
+        <div id="d-wp-list" class="bplist"></div>
+        <p class="hint">M3/M4/M7 数据访问时停止；范围须对齐。原有变量监视保持独立。</p>
+      </fieldset>
     </aside>
 
     <section class="main">

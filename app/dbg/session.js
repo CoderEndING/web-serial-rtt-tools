@@ -23,6 +23,7 @@ import { waitMs, sleep } from '../core/pace.js';
 import { CFBP_SEL, CORE_REGS, SPECIAL_REGS, cfbpGet, cfbpSet, isCfbpSub, regInfo } from './regs.js';
 import { FPB, FP_CTRL_KEY, canBreak, compAddr, decodeFpCtrl, planComparators } from './bp.js';
 import { align2, hex32, u32leBytes } from './fmt.js';
+import { DwtWatchpoints } from './dwt.js';
 import { thumbLen, decodeCall, nextAddrsOf, ARM_ARCH } from './thumb.js';
 
 // Cortex-M 的调试寄存器（PPB）
@@ -86,6 +87,7 @@ export class DebugSession {
     this._cfbp = 0;
     this._opChain = Promise.resolve();     // 串行化用的队列（见 exclusive/tryExclusive）
     this._opBusy = false;
+    this.dwt = new DwtWatchpoints(this);
   }
 
   get connected(){ return !!this.probe; }
@@ -233,6 +235,10 @@ export class DebugSession {
 
   async disconnect(){
     const p = this.probe;
+    if (p && this.dwt.items.length) {
+      try { await this.dwt.clear(); } catch (e) { this._log('清理 DWT 失败：'+e.message,'warn'); }
+    }
+    this.dwt = new DwtWatchpoints(this);
     this.probe = null;
     this.halted = false; this.regs = []; this._prev = null;
     this.bps = [];
@@ -878,11 +884,13 @@ export class DebugSession {
     await this.probe.halt();
     await this.refresh();
     await this.refreshRegs();
+    await this.dwt.rearm();
     return '软件复位（AIRCR.SYSRESETREQ）+ 停住';
   }
 
   async resetRun(){
     await this._resetCore();
+    await this.dwt.rearm();
     await this.run();
     return '软件复位（AIRCR.SYSRESETREQ）+ 运行';
   }

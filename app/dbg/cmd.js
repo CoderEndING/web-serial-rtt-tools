@@ -83,6 +83,8 @@ const HELP = [
   '  b <地址|符号|文件:行> 加硬件断点（例：b main / b main.c:192 / b +5 / b 0x08000123）',
   '  bd <编号|地址|符号|文件:行|all>   删断点（编号见 bl）',
   '  bl                    列出断点（带源码位置）',
+  '  wp <地址|符号> [r|w|rw] [字节数]  DWT 数据观察点（默认写入、4字节）',
+  '  wpl / wpd <编号|all>  列出 / 删除 DWT 观察点（不影响 w 变量监视）',
   '  w <变量>              加进「监视」窗口（停止时自动刷新；也支持 符号+偏移 / 0x地址）',
   '  wl                    列出监视项与当前值',
   '  wd <编号|名字|all>    删监视项',
@@ -384,6 +386,23 @@ async function runCmdInner(p, session, opts = {}){
       lines.push(L(`共 ${list.length} 个 / 硬件上限 ${cap} 个（FPB rev${S.caps?.rev ?? '?'}）—— 源码行上点行号也能下/删`, 'dim'));
       if (cap && list.length >= cap) lines.push(L('⚠ 比较器已用完：源码级单步（n / si / fin）需要临时占一个 —— 先删掉一个再单步', 'warn'));
       return { lines };
+    }
+
+    case 'wp': {
+      need(); if (!args.length || args.length>3) throw new Error('用法：wp <地址|符号> [r|w|rw] [字节数]');
+      const size=args[2] == null ? 4 : parseNum(args[2]);
+      const item=await S.dwt.add(parseNum(args[0]) ?? addrOf(args[0],{session:S}).addr,size,args[1]||'w');
+      return {lines:[L(`DWT #${item.slot+1} ${hex32(item.addr)} ${item.size} B ${item.mode}（数据访问时停止）`,'ok')]};
+    }
+    case 'wpl': {
+      need(); await S.dwt.init();
+      for (const x of S.dwt.items) lines.push(L(`#${x.slot+1} ${hex32(x.addr)} ${x.size} B ${x.mode}`));
+      lines.push(L(`${S.dwt.items.length} 个观察点；硬件 ${S.dwt.capacity} 个槽位`,'dim')); return {lines};
+    }
+    case 'wpd': {
+      need(); if(args.length!==1) throw new Error('用法：wpd <编号|all>');
+      if(args[0]==='all') await S.dwt.clear(); else await S.dwt.remove(parseNum(args[0].replace(/^#/,'')));
+      return {lines:[L('DWT 观察点已删除','ok')]};
     }
 
     case 'info': {
