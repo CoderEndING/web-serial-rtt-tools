@@ -19,6 +19,7 @@ import { AkaLinkHid } from '../hid/probe.js';
 import * as P from './protocol.js';
 import { WebUsbSpiTransport, MockSpiTransport } from './transport.js';
 import { MockSpiProbe } from './mock.js';
+import { runProbeOperation } from '../core/probe-manager.js';
 
 const POLL_MS = 1000;          // 状态/计数器轮询间隔（观察量，1 s 够）
 const RING_MAX = 400;          // 日志 ring（切页时全量重放用）
@@ -95,8 +96,17 @@ export class SpiSession {
   // ==================================================================== 连接
 
   async connectHid(interactive){
+    if (this._hidConnectPromise) return await this._hidConnectPromise;
+    if (this._teardownPromise) return false;
+    this._hidConnectPromise = runProbeOperation(this, 'spi', () => this._connectHidNow(interactive), { reason: 'SPI/QSPI 要连接探针' });
+    try { return await this._hidConnectPromise; }
+    catch (e){ this.log('e', e.message); return false; }
+    finally { this._hidConnectPromise = null; }
+  }
+
+  async _connectHidNow(interactive){
     try {
-      if (this.usingMock) await this.setMock(false);
+      if (this.usingMock){ await this._teardownNow(); this.usingMock = false; this.mockProbe = null; }
       this.hid = this.hid || new AkaLinkHid();
       if (interactive) await this.hid.request(); else await this.hid.reconnect();
       this.log('g', `HID 已连接：${this.hid.label || 'akaLinkPro'}`);
@@ -121,6 +131,16 @@ export class SpiSession {
    *   · `false` —— 只用已授权设备（不弹框，没有就报错）。
    */
   async connectUsb(interactive = null, opts = {}){
+    if (this._usbConnectPromise) return await this._usbConnectPromise;
+    if (this._teardownPromise) return false;
+    if (this.transport) return true;
+    this._usbConnectPromise = runProbeOperation(this, 'spi', () => this._connectUsbNow(interactive, opts), { reason: 'SPI/QSPI 要使用数据端点' });
+    try { return await this._usbConnectPromise; }
+    catch (e){ this.log('e', e.message); return false; }
+    finally { this._usbConnectPromise = null; }
+  }
+
+  async _connectUsbNow(interactive = null, opts = {}){
     try {
       let t;
       const devs = await WebUsbSpiTransport.authorized();
@@ -192,6 +212,18 @@ export class SpiSession {
   }
 
   async teardown(){
+    this.probeManager?.cancel('spi');
+    if (this._teardownPromise) return await this._teardownPromise;
+    this._teardownPromise = (async () => {
+      await Promise.allSettled([this._hidConnectPromise, this._usbConnectPromise].filter(Boolean));
+      await this._teardownNow();
+      this.probeManager?.forget('spi');
+    })();
+    try { return await this._teardownPromise; }
+    finally { this._teardownPromise = null; }
+  }
+
+  async _teardownNow(){
     if (this.pollTimer){ clearInterval(this.pollTimer); this.pollTimer = null; }   // 会话没了就别空转（重连时 ensurePoll 会再拉起）
     try { this.matcher.abortAll('会话结束'); } catch { /* 忽略 */ }
     if (this.transport){ try { await this.transport.close(); } catch { /* 忽略 */ } this.transport = null; }
@@ -479,4 +511,3 @@ export function parseHexBytes(s){
   }
   return Uint8Array.from(out);
 }
-
