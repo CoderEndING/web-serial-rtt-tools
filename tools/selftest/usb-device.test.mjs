@@ -53,3 +53,8 @@ const replugged={...unplugged,opened:false};const newHandle=new UsbLease(replugg
 assert.equal(newHandle.device,replugged,'same serial after unplug must use the new native device handle');
 await newHandle.open();await newHandle.claim(0,[0x81]);await newHandle.close();
 console.log('usb-device: physical unplug invalidates canonical handle before same-serial reconnect PASS');
+const twiceDevice={...device,opened:false};const closed=new UsbLease(twiceDevice,'closed'),remaining=new UsbLease(twiceDevice,'remaining');
+await closed.open();await closed.claim(0,[0x81]);await remaining.open();await remaining.claim(5,[0x8b]);
+await closed.close();const count=events.filter(e=>e==='close').length;await closed.close();await new UsbLease(twiceDevice,'unused').close();
+assert.ok(twiceDevice.opened);assert.equal(events.filter(e=>e==='close').length,count,'duplicate/unused close cannot close a live peer');await remaining.close();
+console.log('usb-device: duplicate and unacquired close are harmless to remaining peers PASS');

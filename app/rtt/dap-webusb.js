@@ -1352,6 +1352,13 @@ export class WebUsbDapProbe {
   }
 
   async disconnect(){
+    if (this._disconnectPromise) return await this._disconnectPromise;
+    if (this._disconnected) return;
+    this._disconnectPromise = this._disconnectNow();
+    try { await this._disconnectPromise; this._disconnected = true; }
+    finally { this._disconnectPromise = null; }
+  }
+  async _disconnectNow(){
     this._closing = true;
     if (this._lockChain) await this._lockChain;
     try { await this._ctrl(CMD.Disconnect); } catch {}

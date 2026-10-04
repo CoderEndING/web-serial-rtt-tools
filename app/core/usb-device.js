@@ -26,7 +26,7 @@ export class UsbLease {
   _run(fn){
     const e = this.entry;
     const p = e.chain.then(() => {
-      if (e.unsettled) throw new Error('上一次 USB 生命周期操作仍未退出，请等待或拔插探针');
+      if (e.unsettled && !e.disconnected) throw new Error('上一次 USB 生命周期操作仍未退出，请等待或拔插探针');
       return fn();
     });
     e.chain = p.catch(() => {});
@@ -120,6 +120,7 @@ export class UsbLease {
         this.claims.clear(); this.entry.clients.delete(this); this.entry.interfaces.clear();
         return;
       }
+      if (!this.entry.clients.has(this)) return;
       if (dirty || this.entry.fault) await this._reset(); // Failure retains the lease and native requests.
       for (const iface of [...this.claims.keys()]) await this._release(iface);
       if (this.entry.clients.size <= 1) await this._io(() => this.device.close());

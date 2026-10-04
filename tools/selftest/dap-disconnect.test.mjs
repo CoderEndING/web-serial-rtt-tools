@@ -7,3 +7,4 @@ const disconnect=p.disconnect();assert.equal(p._closing,true);await new Promise(
 await assert.rejects(ctrl.call(p,5),/正在断开/);release();await disconnect;assert.deepEqual(events,['disconnect','release','close']);
 p._onXferTimeout=WebUsbDapProbe.prototype._onXferTimeout;await p._onXferTimeout('old');assert.equal(p._recovering,undefined,'late timeout cannot reopen a closed session');
 console.log('dap-disconnect: drains memory lock, rejects late traffic, late timeout cannot recover closed session PASS');
+await p.disconnect();assert.deepEqual(events,['disconnect','release','close'],'repeated DAP disconnect cannot send a late engine STOP');
