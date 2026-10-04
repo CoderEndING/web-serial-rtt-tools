@@ -669,6 +669,7 @@ export class ScopeView {
       mock: this.usingMock, reason: 'J-Scope 要开始采样',
       resources: this._captureCdcOff ? ['cdc-port'] : [],
       rejectResources: ['cdc-port'],
+      conflictMessage: 'CDC 串口正在使用：请先关闭串口，或取消 JScope 的暂停 CDC 选项',
     });
     try { return await this._startPromise; }
     catch (e){ this.setStatusText(e.message, 'err'); return false; }

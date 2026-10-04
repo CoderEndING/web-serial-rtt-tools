@@ -15,9 +15,9 @@ export class ProbeManager {
     this.locks = locks;
   }
 
-  register(owner, { resources, release, active = () => false, protected: guarded = () => false }){
+  register(owner, { resources, release, label = owner, active = () => false, protected: guarded = () => false }){
     if (this.clients.has(owner)) throw new Error(`重复的探针使用者：${owner}`);
-    this.clients.set(owner, { resources: new Set(resources), release, active, guarded });
+    this.clients.set(owner, { resources: new Set(resources), release, label, active, guarded });
   }
 
   _enqueue(fn){
@@ -43,13 +43,13 @@ export class ProbeManager {
       if (this.failures.has(id) && this._conflicts(resources, this._resources(id, c)) && !(id === owner && recovery))
         throw new Error(`探针释放尚未确认（${id}）：${this.failures.get(id).message}；请重连原功能并停止`);
       if (id !== owner && this._conflicts(resources, this._resources(id, c)) && c.guarded())
-        throw new Error(`${id === 'flash' ? '烧录器' : id}正在使用探针，请等待完成`);
+        throw new Error(`${c.label}正在使用探针，请等待完成`);
     }
   }
 
   /** Serialize acquisition AND setup: a later feature cannot close a half-open session. */
   async run(owner, fn, { reason = '另一个功能要使用探针', policy = 'handoff', recovery = false,
-    resources: extra = [], rejectResources = [] } = {}){
+    resources: extra = [], rejectResources = [], conflictMessage = null } = {}){
     const client = this.clients.get(owner);
     if (!client) throw new Error(`未登记的探针使用者：${owner}`);
     const resources = new Set([...this._resources(owner, client), ...extra]);
@@ -73,7 +73,7 @@ export class ProbeManager {
             const conflicts = [...this.clients].filter(([id, c]) => id !== owner &&
               (this.leases.has(id) || c.active()) && this._conflicts(resources, this._resources(id, c)));
             if (conflicts.some(([id, c]) => rejectResources.some(r => this._resources(id, c).has(r))))
-              throw new Error('CDC 串口正在使用：请先关闭串口，或取消 JScope 的暂停 CDC 选项');
+              throw new Error(conflictMessage || `共享资源正在被 ${conflicts.map(([, c]) => c.label).join('、')} 使用，请先停止对应功能`);
             if (policy === 'reject' && conflicts.length) throw new Error('共享资源正在使用中，请先停止对应功能');
             for (const [id, c] of conflicts){
               try { await c.release(reason); }

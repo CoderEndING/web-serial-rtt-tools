@@ -3,10 +3,9 @@
  * 串口助手与终端共用同一个串口会话（一个 COM 口只能被一个程序打开，
  * 两个标签是同一路数据的两种看法）；RTT 是独立的调试器会话。
  */
-import { createProbeManager } from './core/probe-users.js';
+import { installProbeManager } from './core/probe-users.js';
 import { initTabs } from './ui/tabs.js';
 import { SerialSession } from './serial/session.js';
-import { setUsbResetGuard } from './core/usb-device.js';
 import { Assistant } from './serial/assistant.js';
 import { TerminalView } from './serial/terminal.js';
 import { RttView } from './rtt/view.js';
@@ -50,11 +49,7 @@ const i2c = new I2cView();
 // Install ownership before init(): automatic reconnect/start paths use the same manager.
 const probeBus = new ProbeBus('page');
 const tools = { session, assistant, terminal, rtt, flash, gen, hid, stream, scope, spi, panel, dbg, i2c, spiSession, probeBus, summary, errors };
-const probeManager = createProbeManager(tools, { bus: probeBus });
-setUsbResetGuard((kind, device) => probeManager.assertUsbResetAllowed(kind, device));
-tools.probeManager = probeManager;
-for (const client of [dbg, flash, rtt, scope, hid, spiSession, i2c.session, session]) client.probeManager = probeManager;
-for (const view of [dbg, flash, rtt, scope, hid, i2c]) view.bus = probeBus;
+const probeManager = installProbeManager(tools, { bus: probeBus });
 window.__tools = tools;
 
 assistant.init();

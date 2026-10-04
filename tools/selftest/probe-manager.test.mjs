@@ -20,7 +20,7 @@ const rejected = assert.rejects(cancelled, ProbeCancelled);
 m.cancel('scope'); held2.resolve(); await c; await rejected;
 await assert.rejects(m.run('scope', () => assert.fail(), { policy: 'reject' }), /共享资源/);
 let busy = true;
-m.register('flash', { resources: ['engine', 'usb'], active: () => busy, protected: () => busy, release: () => assert.fail() });
+m.register('flash', { label: '烧录器', resources: ['engine', 'usb'], active: () => busy, protected: () => busy, release: () => assert.fail() });
 await assert.rejects(m.run('scope', () => assert.fail()), /烧录器/);
 await assert.rejects(m.releaseOthers(null), /烧录器/);
 busy = false;

@@ -62,6 +62,7 @@ export class SerialSession extends Bus {
         recovery: true,
         resources: opts.owner === 'rtt' ? [] : ['cdc-mode'],
         rejectResources: ['cdc-port'],
+        conflictMessage: 'CDC 当前被采样暂停：请先停止采样，或取消 JScope 的暂停 CDC 选项',
       }) : setup();
     try { return await this._openTask; }
     finally {
