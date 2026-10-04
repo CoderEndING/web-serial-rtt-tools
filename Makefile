@@ -133,6 +133,7 @@ test-dbg-features:
 	$(NODE) tools/selftest/dbg-dwt.test.mjs
 	$(NODE) tools/selftest/dbg-backtrace.test.mjs
 	$(NODE) tools/selftest/dbg-watch-bt-ui.test.mjs
+	$(NODE) tools/selftest/dbg-svd.test.mjs
 
 # 调试器页的真页面自测（CDP，不需要硬件；用的是页面里的假目标）
 test-dbg-page: page-prep

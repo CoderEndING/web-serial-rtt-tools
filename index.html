@@ -804,6 +804,7 @@
               <button data-dock="regs" class="on">寄存器</button>
               <button data-dock="mem">内存</button>
               <button data-dock="var">变量</button>
+              <button data-dock="svd">SVD</button>
               <button data-dock="rtt">RTT</button>
             </span>
           </legend>
@@ -846,6 +847,23 @@
               <button id="d-watch-clear" class="mini">清空</button>
               <label class="chk"><input type="checkbox" id="d-watch-live"> 运行中也刷新</label>
             </div>
+          </div>
+
+          <div class="dockpage" data-dock="svd">
+            <div class="toolrow nw svdtools">
+              <button id="d-svd-default" class="mini">内置 F103</button>
+              <button id="d-svd-pick" class="mini">选择 .svd…</button>
+              <input id="d-svd-file" type="file" accept=".svd,.xml,application/xml,text/xml" hidden>
+              <span id="d-svd-info" class="hint">尚未载入 SVD</span>
+            </div>
+            <div class="toolrow nw">
+              <span>外设</span><select id="d-svd-periph" class="mono"><option value="">—</option></select>
+              <span>寄存器</span><select id="d-svd-reg" class="mono"><option value="">—</option></select>
+              <button id="d-svd-read" class="mini">读取</button>
+            </div>
+            <div id="d-svd-reg-info" class="hint mono">载入 SVD 后选择外设和寄存器；读取会使用当前调试会话的 SWD 内存读。</div>
+            <div id="d-svd-value" class="svdvalue mono">—</div>
+            <div id="d-svd-fields" class="svdfields"><div class="hint">（寄存器位域会显示在这里）</div></div>
           </div>
 
           <div class="dockpage" data-dock="rtt">

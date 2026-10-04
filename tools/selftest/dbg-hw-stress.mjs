@@ -147,7 +147,9 @@ await cdp.eval(`
       const r = await d.runLine(line);
       let rows = [...el.children].slice(n0).map(c => c.textContent.trim());
       if (rows.length && rows[0].startsWith('>')) rows = rows.slice(1);      // 第一行是命令回显
-      return { out: rows, err: r?.error || null, text: rows.join('\\n') };
+      // 保留命令的结构化结果（bt/backtrace 等命令会把解析后的对象放在这里），
+      // 同时继续提供旧的文字输出字段给已有断言使用。
+      return { ...r, out: rows, err: r?.error || null, text: rows.join('\\n') };
     },
     snap(){
       const cur = document.querySelector('#d-src .srcrow.cur');
@@ -910,7 +912,68 @@ sec('== 5. 内存 / 监视：结构体树、位域、复合路径 ==');
 }
 
 // ==================================================================== 6
-sec('== 6. 压力：连续 60 次「停 — 走 — 停」+ 比较器泄漏 ==');
+sec('== 6. 调试辅助：bt / bt scan + DWT 数据观察点 ==');
+{
+  /**
+   * 这一节专门把今天新增的两项调试能力放进真机压力套件：
+   *   · bt / bt scan：停在真实调用链里，验证命令不会因为没有 EHABI 展开表而抛出未捕获异常，
+   *     scan 至少能返回当前帧/候选帧；带 exidx 的 ELF 则继续由纯逻辑套件覆盖逐层展开。
+   *   · wp：把 g_stage 的 CPU 写访问交给 Cortex-M3 DWT，继续运行后必须由 DWT 停下，
+   *     而不是靠 FPB 断点或页面轮询“碰巧”停住；随后清理硬件槽，确认不会留给下一轮。
+   */
+  const bt = await cdp.json(`(async () => {
+      const S = window.__S, d = window.__tools.dbg;
+      await d.session.bpClear();
+      await S.cmd('b deep_l5');
+      const hit = await S.go(5000);
+      const plain = await S.cmd('bt 8');
+      const scan = await S.cmd('bt scan 8');
+      const frames = plain.backtrace?.frames || [];
+      const scanFrames = scan.backtrace?.frames || [];
+      const err = [plain.err, scan.err].filter(Boolean);
+      const names = frames.map(f => d.sym?.funcAt?.(f.lookup ?? f.pc)?.name || f.name || '?');
+      const scanNames = scanFrames.map(f => d.sym?.funcAt?.(f.lookup ?? f.pc)?.name || f.name || '?');
+      await d.session.bpClear();
+      return { hit, plain: { n: frames.length, names, reason: plain.backtrace?.reason || '', err },
+               scan: { n: scanFrames.length, names: scanNames, reason: scan.backtrace?.reason || '', err: scan.err || null } };
+    })()`);
+  log('   bt：' + JSON.stringify(bt.plain));
+  log('   bt scan：' + JSON.stringify(bt.scan));
+  ok(bt.hit.halted && bt.plain.n >= 1 && bt.plain.names[0] === 'deep_l5',
+    `bt 在真实停点返回当前帧（${bt.plain.names.join(' → ') || '—'}）`, JSON.stringify(bt));
+  ok(bt.plain.err.length === 0 && !bt.scan.err && bt.scan.n >= 1,
+    `bt scan 返回至少一个候选帧（${bt.scan.n} 个；${bt.scan.reason || '无附加原因'}）`, JSON.stringify(bt));
+
+  const dwt = await cdp.json(`(async () => {
+      const S = window.__S, d = window.__tools.dbg;
+      await d.session.bpClear();
+      await S.cmd('wp g_stage w 4');
+      const listed = await S.cmd('wpl');
+      const item = d.session.dwt.items[0] || null;
+      const before = { items: d.session.dwt.items.length, capacity: d.session.dwt.capacity,
+                       addr: item?.addr ?? null, mode: item?.mode ?? null, size: item?.size ?? null };
+      const hit = await S.go(5000);
+      const reason = await d.session.dwt.haltReason().catch(() => null);
+      const pc = d.session.pc >>> 0;
+      const stage = d.sym.find('g_stage');
+      const afterHit = { halted: hit.halted, pc, name: hit.name, reason,
+                         dwtStatus: [...document.querySelectorAll('#d-out .ok')].slice(-4).map(x => x.textContent).join(' | '),
+                         stageAddr: stage?.addr ?? null };
+      await S.cmd('wpd all');
+      const cleared = { items: d.session.dwt.items.length, capacity: d.session.dwt.capacity };
+      await d.session.bpClear();
+      return { before, listed: listed.text, afterHit, cleared };
+    })()`);
+  log('   DWT：' + JSON.stringify(dwt));
+  ok(dwt.before.items === 1 && dwt.before.addr === dwt.afterHit.stageAddr && dwt.before.mode === 'w' && dwt.before.size === 4,
+    `wp g_stage 写观察点已编程（${hex(dwt.before.addr)}，${dwt.before.size} B，${dwt.before.mode}）`, JSON.stringify(dwt));
+  ok(dwt.afterHit.halted && /DWT 数据访问命中/.test(String(dwt.afterHit.reason || dwt.afterHit.dwtStatus)),
+    `CPU 写 g_stage 由 DWT 停住（PC=${hex(dwt.afterHit.pc)}）`, JSON.stringify(dwt));
+  ok(dwt.cleared.items === 0, 'wpd all 清理后 DWT 槽位归零', JSON.stringify(dwt.cleared));
+}
+
+// ==================================================================== 7
+sec('== 7. 压力：连续 60 次「停 — 走 — 停」+ 比较器泄漏 ==');
 {
   const stress = await cdp.json(`(async () => {
       const S = window.__S, d = window.__tools.dbg;
@@ -941,8 +1004,8 @@ sec('== 6. 压力：连续 60 次「停 — 走 — 停」+ 比较器泄漏 ==')
   ok(stress.clean.used === 0, `压完清空断点，硬件比较器回到 0（峰值多占 ${stress.maxExtra}）`);
 }
 
-// ==================================================================== 7
-sec('== 7. 收尾 + 与 gdb 对照 ==');
+// ==================================================================== 8
+sec('== 8. 收尾 + 与 gdb 对照 ==');
 {
   const errs = await cdp.eval('return window.__tools.errors || [];');
   ok(Array.isArray(errs) && errs.length === 0, '整轮没有一个页面未捕获错误', JSON.stringify(errs).slice(0, 300));

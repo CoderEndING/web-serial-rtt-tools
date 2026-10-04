@@ -32,6 +32,7 @@ assert.equal(completeLine('wp variable w 6').value,'wp variable w 64');
 assert.equal(completeLine('wpd #3',{wps:[{slot:2}]}).value,'wpd #3');
 assert.equal(completeLine('bt s').value,'bt scan');
 const html=readFileSync(new URL('../../index.html',import.meta.url),'utf8');
-for(const id of ['d-wp-addr','d-wp-mode','d-wp-size','d-wp-add','d-wp-clear','d-wp-list','d-bt','d-bt-scan','d-bt-list','d-bt-status'])
+for(const id of ['d-wp-addr','d-wp-mode','d-wp-size','d-wp-add','d-wp-clear','d-wp-list','d-bt','d-bt-scan','d-bt-list','d-bt-status',
+  'd-svd-default','d-svd-pick','d-svd-file','d-svd-periph','d-svd-reg','d-svd-read','d-svd-reg-info','d-svd-value','d-svd-fields'])
   assert.equal(html.split('id="'+id+'"').length-1,1,id+' appears once');
 console.log('dbg-watch-bt-ui: stable watch IDs, frame source navigation, safe text, stale state, button states, completions, HTML IDs PASS');
