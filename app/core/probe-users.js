@@ -96,7 +96,10 @@ export function installProbeManager(t, { features = PROBE_FEATURES, ...options }
     const client = feature.client(t);
     if (client) client.probeManager = manager;
     const view = feature.view ? feature.view(t) : client;
-    if (view) view.bus = options.bus || null;
+    if (view){
+      view.probeManager = manager;
+      view.bus = options.bus || null;
+    }
   }
   setUsbResetGuard((kind, device) => manager.assertUsbResetAllowed(kind, device));
   return manager;

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { installProbeManager, PROBE_FEATURES } from '../../app/core/probe-users.js';
 import { UsbLease, setUsbResetGuard } from '../../app/core/usb-device.js';
+import { runProbeOperation } from '../../app/core/probe-manager.js';
 
 // Add a feature through one descriptor: injection, conflict policy and reset ownership
 // must work without adding its ID to main.js or to a reset-kind allowlist.
@@ -8,11 +9,11 @@ const events = [], bus = { supported: false };
 const tools = {
   dbg: { session: { connected: false } },
   spiSession: {}, i2c: { session: {} }, session: {},
-  sensor: { running: false, busy: false }, analyzer: { running: false },
+  sensor: { running: false, busy: false }, sensorView: {}, analyzer: { running: false },
 };
 const features = [...PROBE_FEATURES, {
   id: 'sensor', label: '传感采集器', usbKind: 'sensor',
-  client: t => t.sensor, resources: ['sensor-pins', 'sensor-stream'],
+  client: t => t.sensor, view: t => t.sensorView, resources: ['sensor-pins', 'sensor-stream'],
   active: t => t.sensor.running, guarded: t => t.sensor.busy,
   release: async t => { events.push('sensor:stop'); t.sensor.running = false; },
 }, {
@@ -27,9 +28,10 @@ assert.equal(tools.spiSession.probeManager, m);
 assert.equal(tools.i2c.session.probeManager, m);
 assert.equal(tools.i2c.bus, bus);
 assert.equal(tools.sensor.probeManager, m);
-assert.equal(tools.sensor.bus, bus);
+assert.equal(tools.sensorView.probeManager, m);
+assert.equal(tools.sensorView.bus, bus);
 
-await m.run('sensor', async () => { tools.sensor.running = true; });
+await runProbeOperation(tools.sensorView, 'sensor', async () => { tools.sensor.running = true; });
 const device = { opened: false, async open(){ this.opened = true; },
   configuration: {}, async reset(){ events.push('USB:reset'); },
   async close(){ this.opened = false; } };
