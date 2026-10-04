@@ -23,12 +23,15 @@
  */
 import { EP_NUM, PKT, BATCH_MAX, batchPacks } from './protocol.js';
 import { yieldTask, sleep } from '../core/pace.js';
+import { UsbLease } from '../core/usb-device.js';
 
 const VID = 0x0d28;
 
 export class WebUsbSpiTransport {
   constructor(device, opts = {}){
-    this.device = device;
+    this._usb = new UsbLease(device, 'spi');
+    this.device = this._usb.device;
+    this._pending = new Set();
     this.chunkBytes = opts.chunkBytes ?? 4096;
     this.inFlight = opts.inFlight ?? 4;        // IN 读（收应答）
     this.outInFlight = opts.outInFlight ?? 8;  // OUT 写（发帧）—— 刷屏吞吐的关键，见 sendPacks。
@@ -70,9 +73,16 @@ export class WebUsbSpiTransport {
 
   /** 找到并认领带 EP11 双向 bulk 的 vendor 接口 */
   async open(){
+    try { return await this._open(); }
+    catch (e){
+      try { await this._usb.close({ dirty: this.dirty }); }
+      catch (cleanup){ e.message += `；USB 清理未完成：${cleanup.message}`; }
+      throw e;
+    }
+  }
+  async _open(){
     const d = this.device;
-    if (!d.opened) await d.open();
-    if (d.configuration === null) await d.selectConfiguration(1);
+    await this._usb.open();
 
     let found = null, seen = [];
     for (const iface of d.configuration.interfaces){
@@ -94,11 +104,11 @@ export class WebUsbSpiTransport {
     this.epIn = found.epIn.endpointNumber;      // 不带方向位的编号（0x8B → 11）
     this.epOut = found.epOut.endpointNumber;    // 同上（0x0B → 11）
     this.claimed = false;
-    try { await d.claimInterface(this.iface); this.claimed = true; }
+    try { await this._usb.claim(this.iface, [this.epIn | 0x80, this.epOut]); this.claimed = true; }
     catch (e){
       // 先端口复位再试一次（"Unable to claim interface" 十有八九是残留占用，不是接线）
       let ok = false;
-      try { await d.reset(); await sleep(250); await d.claimInterface(this.iface); ok = true; this.claimed = true; }
+      try { await this._usb.reset(); await sleep(250); await this._usb.claim(this.iface, [this.epIn | 0x80, this.epOut]); ok = true; this.claimed = true; }
       catch { /* 落到下面报错 */ }
       if (!ok){
         throw new Error(`认领 USB 接口失败：${e.message}\n` +
@@ -120,12 +130,23 @@ export class WebUsbSpiTransport {
    */
   async start(onRsp, onError){
     if (this.running) return;
+    if (this.dirty){
+      await this._usb.reset();
+      await this.open();
+      this.dirty = false;
+    }
     this.running = true;
     this.gen++;                                   // 新一轮代号：上一轮没收干净的 worker 靠它作废
     this._fatal = null;
     this.onError = typeof onError === 'function' ? onError : null;
     const g = this.gen;
-    this.workers = Array.from({ length: this.inFlight }, () => this._readWorker(onRsp, g));
+    this.workers = Array.from({ length: this.inFlight }, () => this._track(this._readWorker(onRsp, g)));
+  }
+
+  _track(p){
+    this._pending.add(p);
+    p.then(() => this._pending.delete(p), () => this._pending.delete(p));
+    return p;
   }
 
   /** 数据面出事 → 停掉整条流并把原因交给页面（只报一次）*/
@@ -155,7 +176,8 @@ export class WebUsbSpiTransport {
       if (r.status === 'ok' && r.data?.byteLength){
         stalls = 0;
         this.reads++; this.readBytes += r.data.byteLength;
-        onRsp(new Uint8Array(r.data.buffer, r.data.byteOffset, r.data.byteLength));
+        try { onRsp(new Uint8Array(r.data.buffer, r.data.byteOffset, r.data.byteLength)); }
+        catch (e){ this._fail('数据解析失败：' + e.message); break; }
       } else if (r.status !== 'ok'){
         this.errors++; this.lastError = r.status;
         if (r.status === 'stall'){
@@ -192,7 +214,7 @@ export class WebUsbSpiTransport {
       timer = setTimeout(() => { this.dirty = true; rej(new Error(`写超时（${timeoutMs} ms）—— 桥没使能？OUT 环满？`)); }, timeoutMs);
     });
     try {
-      const r = await Promise.race([this.device.transferOut(this.epOut, data), timeout]);
+      const r = await Promise.race([this._track(Promise.resolve().then(() => this.device.transferOut(this.epOut, data))), timeout]);
       if (r.status !== 'ok'){ this.errors++; this.lastError = r.status; throw new Error(`transferOut 状态 ${r.status}`); }
       this.writes++; this.writeBytes += r.bytesWritten ?? data.length;
       return r.bytesWritten ?? data.length;
@@ -242,19 +264,20 @@ export class WebUsbSpiTransport {
   /** 停止收流：等在飞的读全部回来（最多 800 ms），**不要**让它们挂在那儿 */
   async stop(){
     this.gen++;                    // 代号一变，超时残留在飞的那条读回来后就自行作废
-    if (!this.running){ this.workers = []; this.stalledInFlight = 0; return; }
     this.running = false;
     let settled = 0;
-    const all = this.workers.map(p => p.then(() => { settled++; }, () => { settled++; }));
+    const all = [...this._pending].map(p => p.then(() => { settled++; }, () => { settled++; }));
     await Promise.race([Promise.allSettled(all), sleep(800)]);
     this.workers = [];
     /** 800 ms 还没回来的在飞读有几笔（WebUSB 取消不掉，只能如实记账）*/
     this.stalledInFlight = Math.max(0, all.length - settled);
+    if (this.stalledInFlight) this.dirty = true;
   }
 
   async close(){
     await this.stop();
-    try { if (this.device?.opened) await this.device.close(); } catch { /* 忽略 */ }
+    await this._usb.close({ dirty: this.dirty });
+    this.dirty = false;
   }
 }
 

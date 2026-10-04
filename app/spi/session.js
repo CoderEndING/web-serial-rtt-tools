@@ -226,7 +226,10 @@ export class SpiSession {
   async _teardownNow(){
     if (this.pollTimer){ clearInterval(this.pollTimer); this.pollTimer = null; }   // 会话没了就别空转（重连时 ensurePoll 会再拉起）
     try { this.matcher.abortAll('会话结束'); } catch { /* 忽略 */ }
-    if (this.transport){ try { await this.transport.close(); } catch { /* 忽略 */ } this.transport = null; }
+    if (this.transport){
+      try { await this.transport.close(); this.transport = null; }
+      catch (e){ this.probeManager?.fail('spi', e); throw e; }
+    }
     if (this.hid && !this.usingMock){ try { await this.hid.close(); } catch { /* 忽略 */ } }
     this.hid = null;
     this.stream?.reset();

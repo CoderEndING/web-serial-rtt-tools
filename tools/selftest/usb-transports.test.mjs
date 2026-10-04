@@ -37,3 +37,19 @@ const { VendorEpTransport } = await import('../../app/scope/transport.js');
  await spi.close();await scope.close();assert.ok(events.includes('reset'));assert.equal(events.at(-1),'close');
 }
 console.log('usb-transports: Scope clean close preserves SPI; dirty close retains lease until exclusive recovery PASS');
+const { WebUsbSpiTransport } = await import('../../app/spi/transport.js');
+{
+ const {device,events}=fakeUsb();const scope=new VendorEpTransport(device);await scope.open();
+ const spi=new WebUsbSpiTransport(device);await spi.open();await spi.close();
+ assert.ok(device.opened);assert.ok(events.includes('release:5'));assert.ok(!events.includes('close'));
+ await scope.close();
+}
+{
+ const {device,events}=fakeUsb();const scope=new VendorEpTransport(device);await scope.open();
+ const spi=new WebUsbSpiTransport(device,{outTimeoutMs:5});await spi.open();
+ let finish;device.transferOut=()=>new Promise(r=>finish=()=>r({status:'ok',bytesWritten:1}));
+ await assert.rejects(spi.sendRaw(Uint8Array.of(1)),/写超时/);
+ await assert.rejects(spi.close(),/先断开 scope/);assert.ok(!events.includes('reset'));assert.equal(spi.stalledInFlight,1);
+ finish();await new Promise(r=>setImmediate(r));await scope.close();await spi.close();assert.ok(events.includes('reset'));
+}
+console.log('usb-transports: SPI clean close preserves Scope; timed-out native OUT is tracked and cannot reset Scope PASS');
