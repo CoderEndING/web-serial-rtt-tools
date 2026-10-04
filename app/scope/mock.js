@@ -129,7 +129,7 @@ export class MockScopeProbe {
     const running = this.running ? 1 : 0;
     // 状态字 0：bit0 运行中 / bit1 **生效后端是 RISC-V** / bit8-15 span 数 / bit16 SWD 已就绪 / bit24-31 变量数
     // （RISC-V 模式下探针不上报 SWD 时钟，bit16 也置 0 —— 与真固件一致）
-    dv.setUint32(3, running | 4 | (this.riscv ? 2 : 0) | (this.nspans << 8) |
+    dv.setUint32(3, running | 4 | 8 | (this.riscv ? 2 : 0) | (this.nspans << 8) |
                     ((this.riscv ? 0 : 1) << 16) | (this.vars.length << 24), true);
     dv.setUint32(7, this.riscv ? 0 : Math.round(this.swdMhz * 1e6), true);
     dv.setUint32(11, this.produced >>> 0, true);

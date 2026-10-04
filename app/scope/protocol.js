@@ -367,7 +367,7 @@ export const ACT_NAME = { 0: '停止', 1: '启动', 2: '查状态', 3: '设 SWD 
  *    所以界面显示一律用**生效值**：DEF 的 `flags bit6` 或状态字 0 的 `bit1`。
  */
 export const SCOPE_FLAG = { ALLOW_60M: 0x01, DISCARD: 0x02, TRIGGER: 0x04, NO_YIELD: 0x08,
-                            DELAY0: 0x10, CDC_OFF: 0x20, RISCV: 0x40 };
+                            DELAY0: 0x10, CDC_OFF: 0x20, RISCV: 0x40, FAST_BATCH: 0x80 };
 
 /** 后端（生效值）。JTAG 下 action 3 / flags bit4 / swdHz / blob+clock_delay 都无意义。 */
 export const BACKEND = { SWD: 'swd', RISCV: 'riscv' };
@@ -463,6 +463,7 @@ export function parseScopeStatus(bytes){
   return {
     running: !!(w0 & 1),
     supportsTicks: !!(w0 & 4),
+    supportsBatch: !!(w0 & 8),
     riscv: !!(w0 & 2),               // **生效**后端：bit1 = 这次会话真的在走 RISC-V/JTAG
     nspans: (w0 >>> 8) & 0xff,       // 探针自己算出来的 span 数（与本地计划对账用）
     swdReady: !!(w0 & (1 << 16)),

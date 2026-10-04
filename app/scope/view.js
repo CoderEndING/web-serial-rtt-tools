@@ -716,6 +716,7 @@ export class ScopeView {
        */
       const flags = (clockKhz >= 60000 ? P.SCOPE_FLAG.ALLOW_60M : 0)
         | ($('sc-cdcoff')?.checked ? P.SCOPE_FLAG.CDC_OFF : 0)
+        | ($('sc-batch')?.checked ? P.SCOPE_FLAG.FAST_BATCH : 0)
         | (this.targetRiscv ? P.SCOPE_FLAG.RISCV : 0);
       if (clockKhz > 0 && this.backend !== P.BACKEND.RISCV) await this.hidXfer(P.HID_CMD, P.clockData(clockKhz * 1000));
       /**
@@ -1029,6 +1030,7 @@ export class ScopeView {
       const riscv = this.uiBackend() === P.BACKEND.RISCV;      // 选中的是 JTAG 就别发 SWD 时钟档（探针会忽略）
       const flags = (clockKhz >= 60000 ? P.SCOPE_FLAG.ALLOW_60M : 0)
         | ($('sc-cdcoff')?.checked ? P.SCOPE_FLAG.CDC_OFF : 0)
+        | ($('sc-batch')?.checked ? P.SCOPE_FLAG.FAST_BATCH : 0)
         | (this.targetRiscv ? P.SCOPE_FLAG.RISCV : 0);
       // JTAG 下 action 3（SWD 时钟）无效，别发
       if (clockKhz > 0 && !riscv) await this.hidXfer(P.HID_CMD, P.clockData(clockKhz * 1000));
@@ -1089,10 +1091,11 @@ export class ScopeView {
 
   async configureScope(opts){
     const data = P.configData(opts);
-    if (data[0] === P.ACT.CONFIG_TICKS){
+    if (data[0] === P.ACT.CONFIG_TICKS || (data[5] & P.SCOPE_FLAG.FAST_BATCH)){
       const res = await this.hidXfer(P.HID_CMD, Uint8Array.of(P.ACT.STATUS));
       const st = P.parseScopeStatus(res.subarray(3));
-      if (!st.supportsTicks) throw new Error('当前探针固件不支持小数周期，请升级固件，或使用整数 µs 周期');
+      if (data[0] === P.ACT.CONFIG_TICKS && !st.supportsTicks) throw new Error('当前探针固件不支持小数周期，请升级固件，或使用整数 µs 周期');
+      if (!st.supportsBatch) data[5] &= ~P.SCOPE_FLAG.FAST_BATCH;
     }
     return await this.hidXfer(P.HID_CMD, data);
   }

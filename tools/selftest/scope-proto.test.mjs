@@ -510,7 +510,7 @@ console.log('== 7. tick 周期与 v1/v2 时间轴兼容 ==');
     const probe = new M.MockScopeProbe();
     const res = await probe.xfer(P.HID_CMD, cfg);
     const status = P.parseScopeStatus(res.subarray(3));
-    ok(status.supportsTicks && status.periodUs === us, '假探针配置回报真实小数周期');
+    ok(status.supportsTicks && status.supportsBatch && status.periodUs === us, '假探针配置回报真实小数周期');
     probe.start(); probe.poll(0);
     const packets = [...probe.poll(1000), ...probe.flush()].map(P.parsePacket);
     const def = packets.find(p => p.kind === P.KIND.DEF);
