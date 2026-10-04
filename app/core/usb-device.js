@@ -5,10 +5,10 @@ let resetGuard = null;
 export function setUsbResetGuard(fn){ resetGuard = fn; }
 function entryFor(device){
   let e = byDevice.get(device);
-  if (e) return e;
+  if (e && !e.disconnected) return e;
   // No serial number means no safe way to merge two distinct device objects.
   const key = device.serialNumber ? `${device.vendorId}:${device.productId}:${device.serialNumber}` : null;
-  e = (key && bySerial.get(key)) || { device, clients: new Set(), interfaces: new Map(), chain: Promise.resolve() };
+  e = (key && bySerial.get(key)) || { key, device, clients: new Set(), interfaces: new Map(), chain: Promise.resolve() };
   byDevice.set(device, e);
   if (key) bySerial.set(key, e);
   return e;
@@ -47,6 +47,18 @@ export class UsbLease {
   }
   async _open(){
     const d = this.device;
+    if (this.entry.disconnected) throw new Error('USB 设备已拔出，请重新选择探针');
+    if (!this.entry.off && globalThis.navigator?.usb?.addEventListener){
+      const e = this.entry;
+      e.off = event => {
+        if (event.device !== e.device && byDevice.get(event.device) !== e) return;
+        e.disconnected = true;
+        if (e.key && bySerial.get(e.key) === e) bySerial.delete(e.key);
+        try { globalThis.navigator.usb.removeEventListener('disconnect', e.off); } catch {}
+        try { e.device.close()?.catch?.(() => {}); } catch {}
+      };
+      globalThis.navigator.usb.addEventListener('disconnect', e.off);
+    }
     const others = [...this.entry.clients].filter(c => c !== this);
     // Failed setup may have no caller left to retry cleanup. Recover only after all
     // live peers have released; abandoned native requests still require a reset.
@@ -104,6 +116,10 @@ export class UsbLease {
   reset(){ return this._run(() => this._reset()); }
   close({ dirty = false } = {}){
     return this._run(async () => {
+      if (this.entry.disconnected){
+        this.claims.clear(); this.entry.clients.delete(this); this.entry.interfaces.clear();
+        return;
+      }
       if (dirty || this.entry.fault) await this._reset(); // Failure retains the lease and native requests.
       for (const iface of [...this.claims.keys()]) await this._release(iface);
       if (this.entry.clients.size <= 1) await this._io(() => this.device.close());

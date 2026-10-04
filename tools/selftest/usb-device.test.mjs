@@ -45,3 +45,11 @@ await assert.rejects(new UsbLease(abandonedDevice,'another').reset(),/先断开 
 await live.close();const next=new UsbLease(abandonedDevice,'next');await next.open();await next.claim(0,[0x81]);await next.close();
 assert.ok(!usbDeviceInUse(abandonedDevice),'exclusive recovery retires abandoned setup leases');
 console.log('usb-device: failed setup retains requests, later exclusive reconnect recovers abandoned handles PASS');
+const listeners=new Set();Object.defineProperty(globalThis,'navigator',{value:{usb:{addEventListener:(_n,fn)=>listeners.add(fn),removeEventListener:(_n,fn)=>listeners.delete(fn)}},configurable:true});
+const unplugged={...device,opened:false,vendorId:0xd28,productId:0x204,serialNumber:'replug-test'};
+const oldHandle=new UsbLease(unplugged,'old');await oldHandle.open();await oldHandle.claim(0,[0x81]);
+for(const listener of [...listeners])listener({device:unplugged});await oldHandle.close();
+const replugged={...unplugged,opened:false};const newHandle=new UsbLease(replugged,'new');
+assert.equal(newHandle.device,replugged,'same serial after unplug must use the new native device handle');
+await newHandle.open();await newHandle.claim(0,[0x81]);await newHandle.close();
+console.log('usb-device: physical unplug invalidates canonical handle before same-serial reconnect PASS');
