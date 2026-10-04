@@ -96,10 +96,9 @@ def check(name, a):
     else:
         if not (load <= st < end):
             # 不是错误：pyOCD 各算法的 static_base 语义不统一 —— H7/H7B0/L0/L4/F4/F7 指在 blob 内，
-            # 而 F1/F0 指向 blob **之后**的一块独立静态区。本工程的烧录器根本不用这个字段
-            # （擦/写/编程入口都是显式地址），所以只提示。
+            # 而 F1/F0 指向 blob **之后**的一块独立静态区。执行器会把它装进 R9。静态区可以合法位于 blob 之后，所以只提示。
             warn.append(f'static_base=0x{st:08X} 在 blob（0x{load:08X}..0x{end - 1:08X}）之外'
-                        f' —— 部分算法（F1/F0）就是这样，本工程不用该字段，可忽略')
+                        f' —— 部分算法（F1/F0）就是这样，执行器通过 R9 使用此地址')
         for i, b in enumerate(bufs):
             if b < end:
                 bad.append(f'page_buffers[{i}]=0x{b:08X} 落在 blob 内（会被算法自己的代码/数据盖掉）')

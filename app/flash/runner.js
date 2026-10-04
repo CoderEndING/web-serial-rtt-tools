@@ -63,6 +63,7 @@ export class FlashRunner {
      *    核心**永远不 halt**，主机只能超时报「flashloader 执行超时」（本机实测踩到）。
      */
     await p.regWrite(14, (this.algo.load_address | 1) >>> 0);   // LR → blob 开头的 BKPT
+    await p.regWrite(9, this.algo.static_base >>> 0); // pyOCD algorithm ABI: static data base
     await p.regWrite(13, this.algo.begin_stack);     // SP
     for (const n of Object.keys(args)) await p.regWrite(Number(n), args[n] >>> 0);   // r0-r2 等参数
     await p.regWrite(15, entry >>> 0);               // PC 最后写（写它就会跳过去执行）
