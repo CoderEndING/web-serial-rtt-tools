@@ -2,15 +2,16 @@
 
 页面现在使用一个 `ProbeManager` 管理探针资源。连接、启动、交接、模式切换进入控制队列；RTT/J-Scope/SPI 的连续数据收发不进入该队列。
 
-## 三层职责
+## 职责分层
 
 | 层 | 代码 | 负责的事情 |
 |---|---|---|
 | 资源所有权 | `app/core/probe-manager.js` | 串行完成申请和初始化，释放冲突使用者，取消排队请求，保护不可抢占操作，保留停止失败的占用 |
-| 功能声明与清理 | `app/core/probe-users.js` | 声明资源关系，调用完整会话的停止/关闭；视图不再承担应用内的交接顺序 |
+| 功能声明与清理 | `app/core/probe-users.js` | `PROBE_FEATURES` 集中声明资源、关闭适配、注入对象、USB 复位身份和显示名称；视图不再承担应用内的交接顺序 |
 | HID 命令通道 | `app/hid/probe.js` | 同一 HIDDevice 的请求/响应共享队列，多个客户端共享句柄生命周期；跨标签页用 Web Locks 保护命令往返 |
+| USB 生命周期 | `app/core/usb-device.js` | 共享设备、接口、端点的占用，保护整设备复位，保留未退出的 native 操作 |
 
-`app/main.js` 在各功能 `init()` 之前建立并注入管理器，自动连接入口同样受管理。`window.__tools.probeManager.summary()` 可查看持有者、排队请求和释放失败原因。
+`app/main.js` 在各功能 `init()` 之前调用 `installProbeManager()`，依据功能表完成注册、管理器/总线注入与复位保护安装，自动连接入口同样受管理。`window.__tools.probeManager.summary()` 可查看持有者、排队请求和释放失败原因。
 
 调试器内部的 `exclusive/tryExclusive`、RTT 内存事务锁、各会话的启动/停止状态及代次检查继续保留。它们负责功能内部操作和迟到结果，资源仲裁器负责功能之间的所有权。
 
@@ -22,15 +23,15 @@
 | RTT Viewer | 目标访问引擎、调试引脚、RTT 环、DAP bulk 接口 | 连接/扫描至断开 |
 | J-Scope | 目标访问引擎、调试引脚、Scope bulk 接口、采样流 | 连接至释放探针；停止采样后保留连接 |
 | RTT→CDC | 目标访问引擎、调试引脚、RTT 环、CDC 模式 | START 发出后至确认 STOP；固件尚在排队也保留所有权 |
-| SPI/QSPI 与点屏 | SPI bulk 接口、SPI 引脚及可能重叠的调试/I2C 引脚 | 两个页面共用一个 SpiSession；长时间忙操作拒绝抢占 |
+| SPI/QSPI 与点屏 | SPI bulk 接口、SPI 引脚、可能重叠的 I2C 辅助引脚 | 两个页面共用一个 SpiSession；长时间忙操作拒绝抢占 |
 | I2C | 固定 I2C 引脚 | 连接至断开；自动 ENABLE 包含在连接初始化里 |
-| 烧录/读身份 | 上述资源全集 | 准备至最终清理；烧录期间不可抢占 |
+| 烧录/读身份 | 目标访问引擎、调试引脚、RTT 环、DAP bulk、CDC 模式 | 准备至最终清理；操作期间不可抢占；独立 SPI/I2C 可以保留 |
 
-资源表针对当前 HPM5301EVKLite 的引脚布局：I2C PA28/PA29 与默认 SWD 引脚独立。SPI 辅助引脚可选择 PA28/PA29，且部分选项在其他板级构建上可能占用调试引脚，所以 SPI 的引脚关系保守处理。更换板级引脚布局时必须同步更新声明，不能沿用这个共存结论。
+资源表针对当前 HPM5301EVKLite 的引脚布局：I2C PA28/PA29 与默认 SWD 引脚独立，SPI2 PB10..15 与默认调试 PA04..08 独立。SPI 辅助引脚可选择 PA28/PA29，因此目前 SPI/I2C 保守互斥。更换板级引脚布局时必须同步更新声明，不能沿用这个共存结论；尚未实现按当前配置动态认领具体引脚。
 
 **不同 bulk EP 现在可以在同一个 USBDevice 上共存。** 共享层按设备、接口和端点分别登记引用：关闭 DAP、Scope 或 SPI 只释放自己的接口，最后一个使用者退出时才关闭设备。整设备 `reset` 仍是全局操作；有其它使用者、未收尾的 native 请求或旧固件不支持收尾命令时，复位会被拒绝并保留故障占用。
 
-SPI EP11 停止收流时先发送 `DRAIN`，让固件为每个挂起的 IN 请求发一个短应答，再确认所有 native 读已结束；随后发送 `ENABLE 0` 释放桥的引脚。旧固件没有 `DRAIN` 能力标志时，网页不会假装完成，仍按故障路径保留占用并提示更新固件。I2C 断开也会先确认 `ENABLE 0`，避免只关闭 HID 句柄却继续占用 PA28/PA29。
+SPI EP11 停止收流时先发送 `DRAIN`，让固件为每个挂起的 IN 请求发一个短应答，再确认所有 native 读已结束；随后确认 `ENABLE 0`，关闭桥的执行后才交还主机资源占用。该操作不代表固件将所有 GPIO 自动恢复为高阻，下一功能仍需配置自己的引脚。旧固件没有 `DRAIN` 能力标志时，网页不会假装完成，仍按故障路径保留占用并提示更新固件。I2C 断开也会先确认 `ENABLE 0`，避免只关闭 HID 句柄却让桥继续执行。
 
 串口助手、终端和 RTT→CDC 接收视图继续共用原有 `SerialSession`，不对串口数据逐包加锁。J-Scope 的 `CDC_OFF` 仍是显式采样选项，会暂停固件 CDC 服务，不能把这种配置影响解释为仲裁器开销。
 
@@ -47,6 +48,29 @@ await runProbeOperation(this, 'scope', () => this._startOnce(generation), {
 `run()` 返回初始化函数的结果；传给函数的 lease 提供所有者、取消信号和 `assert()`。所有权在初始化后继续保留，直到实际会话释放。不要从初始化函数里再次调用同一个管理器排队：内部自动连接走不重复申请的私有方法。
 
 释放失败会登记故障并继续阻止冲突申请。原功能可恢复连接，再执行并确认 STOP；成功后清除故障。重复释放共享同一清理 Promise，避免另一个功能在 USB 关闭尚未完成时开始认领。
+
+烧录与读身份共用 `_withProbeOwnership()` / `_closeProbe()`。关闭失败时保留原探针句柄和故障占用，禁止其它目标访问功能接手；再次点击烧录或读身份会先重试旧句柄关闭，成功才开始新操作。原操作和清理同时失败时保留两份错误。故障恢复不会要求独立 I2C 停止。
+
+## 冗余清理与新增功能
+
+视图的兼容交接通过 `prepareProbeHandoff()` 共用一条路径：无管理器的独立演示先释放本页使用者，再请求跨页交接；完整应用已经在 `run()` 内仲裁，该适配不会再次清场。RTT Viewer 和烧录视图中重复访问其它功能并停桥的代码已移除。直接使用底层 DebugSession 的兼容入口仍保留；它的硬件初始化也不能用主机资源登记替代。
+
+新增业务会话和视图之后，将实例加入 `tools`，在 `PROBE_FEATURES` 增加一份描述：
+
+```js
+{
+  id: 'logic', label: '逻辑分析仪',
+  client: t => t.logicSession, view: t => t.logic,
+  usbKind: 'logic', resources: ['logic-pins', 'logic-stream'],
+  active: t => !!t.logicSession?.connected,
+  release: t => t.logicSession.close(),
+  guarded: t => !!t.logicSession?.busy,
+}
+```
+
+`usbKind` 应与该传输创建 `UsbLease` 时的 owner 相同；复用 DAP 的功能填 `dap`。注册、注入、复位保护都从这份描述生成，核心仲裁算法不需要增加功能 ID 分支。入口用 `runProbeOperation()`，关闭成功后 `forget()`，失败用 `fail()` 保留占用；STOP 前取消排队启动并等待本会话正在执行的初始化完成。共享硬件应声明相同资源名，独立硬件声明不同资源名。专用冲突提示由调用方的 `conflictMessage` 提供，通用仲裁层不再包含 CDC 或烧录器的业务分支。
+
+调试器内部事务锁、I2C 事务队列和代次检查分别保护多命令事务与迟到结果，不属于重复的跨功能仲裁。高速数据面继续由各传输实现，不添加统一逐包锁或通用会话基类。当前仍不支持完整多探针资源池。
 
 ## 跨页面与 HID
 
@@ -71,15 +95,18 @@ HID 的被动型号/状态查询也必须经过命令锁，否则另一个标签
 ```sh
 make test-probe
 make test-stability test-dbg-features
+make test
 ```
 
-新增测试覆盖资源冲突与共存、并发初始化、排队取消、重复释放、停止失败、烧录保护、跨标签页同时申请、共享 HID 响应与句柄、停滞写请求、固件 START 排队期间的所有权。SPI/I2C/RTT/J-Scope 协议及传输回归继续通过。
+新增测试覆盖资源冲突与共存、并发初始化、排队取消、重复释放、停止失败、烧录保护、跨标签页同时申请、共享 HID 响应与句柄、停滞写请求、固件 START 排队期间的所有权。功能声明扩展、ProbeBus、USB 生命周期/传输、CDC 模式和 SPI teardown 均已纳入 `test-probe`，通过 `test-stability` 自动进入 `make test`。SPI/I2C/RTT/J-Scope 协议及传输回归继续通过。
 
-本轮结果：资源交接、EP11 收尾、CDC、调试器/RTT 关闭失败恢复等离线回归通过；JavaScript 语法检查覆盖 216 个模块。固件 RTT STOP、SPI DRAIN、TARGET guard、scope 生产代码主机测试及 HSS 测试通过。
+本轮结果：资源交接、EP11 收尾、CDC、调试器/RTT/烧录/读身份关闭失败恢复、新功能声明扩展等离线回归通过；JavaScript 语法检查覆盖 217 个模块。固件 RTT STOP、SPI DRAIN、TARGET guard 主机测试再次通过；此前 scope 生产代码主机测试及 HSS 测试通过。
+
+`make test` 在当前环境通过；`rtt.test.mjs` 中依赖外部 ESP-IDF 本地路径的 ELF 子用例因文件不存在而跳过，其余离线用例执行。217 个模块语法检查和 54 个 Markdown 的 Liquid 检查通过。尚未连接 F103CB 进行硬件验收，未据此宣称实测吞吐或长期稳定性通过。
 
 原有 `dbg-core.test.mjs` 错误依赖本地 `build-noncache/fw.elf`。现已改用仓库提交的 `tools/target-firmware/stm32h743_scope/fw.elf`，验证 184 条 H743 行号记录，调试核心测试 321 通过、0 失败。该用例检查 DWARF 序列，与 D-cache/MPU 构建变体无关。此次没有设备和完整固件 SDK；固件使用提取生产代码的 GCC 主机测试验证 STOP 状态转换，不能替代完整编译和上板测试。
 
-高速 bulk 读取、RTT DAP 内存读取、采样存储和 SPI 数据传输文件在此次重构中保持原样。仲裁在控制边界执行，没有逐样本/逐 bulk 包的全局锁。HID 控制命令新增排队和跨页面锁的开销，启动/切换延迟可能变化；同时进行其他固件任务也可能占用 CPU/USB 带宽，速率仍须实测。
+此次收尾未修改高速 bulk 读取、RTT DAP 内存读取、采样存储和 SPI 数据传输逻辑。仲裁在控制边界执行，没有逐样本/逐 bulk 包的全局锁。HID 控制命令排队和跨页面锁的开销可能影响启动/切换延迟；同时进行其他固件任务也可能占用 CPU/USB 带宽，速率仍须实测。
 
 回家后固定同一目标、固件、时钟、变量、周期和采集时长，对比：
 

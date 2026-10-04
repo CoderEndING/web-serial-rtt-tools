@@ -514,9 +514,15 @@ clean:
 .PHONY: test-stability test-probe
 test-probe:
 	$(NODE) tools/selftest/probe-manager.test.mjs
+	$(NODE) tools/selftest/probe-feature-registry.test.mjs
 	$(NODE) tools/selftest/hid-channel.test.mjs
+	$(NODE) tools/selftest/probe-bus.test.mjs
 	$(NODE) tools/selftest/probe-cross-tab.test.mjs
 	$(NODE) tools/selftest/probe-integration.test.mjs
+	$(NODE) tools/selftest/usb-device.test.mjs
+	$(NODE) tools/selftest/usb-transports.test.mjs
+	$(NODE) tools/selftest/cdc-mode.test.mjs
+	$(NODE) tools/selftest/spi-teardown.test.mjs
 
 test-stability: test-probe
 	$(NODE) tools/selftest/flash-lifecycle.test.mjs
