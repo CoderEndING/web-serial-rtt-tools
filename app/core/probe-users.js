@@ -108,3 +108,10 @@ export async function releaseLocalProbeUsers(keep, why = '另一个功能要使�
   if (!t) return;
   return await (t.probeManager || createProbeManager(t)).releaseOthers(keep, why);
 }
+
+/** Standalone views share one fallback handoff; managed views already acquired in run(). */
+export async function prepareProbeHandoff(view, owner, why){
+  if (view.probeManager) return;
+  await releaseLocalProbeUsers(owner, why);
+  if (view.bus?.supported) return await view.bus.requestRelease({ why });
+}

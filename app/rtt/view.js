@@ -3,7 +3,7 @@
  * 后端四种：WebUSB-CMSIS-DAP（零安装）/ 本地桥+OpenOCD / 本地桥+J-Link(ch0) / 内置模拟目标。
  * 显示三种：终端(ANSI，xterm) / 文本 / HEX —— 三种共用同一份 raw 记录，切换时重放，不丢历史。
  */
-import { releaseLocalProbeUsers } from '../core/probe-users.js';
+import { prepareProbeHandoff } from '../core/probe-users.js';
 import { runProbeOperation } from '../core/probe-manager.js';
 import { $, seg, setFlag, setStatus, mhzLabel, ensureSelectOption } from '../ui/dom.js';
 import { toast } from '../ui/toast.js';
@@ -374,26 +374,11 @@ export class RttView {
 
   async _connectProbe(g, b = $('r-backend').value){
     try {
-      if (b !== 'mock' && !this.probeManager){
-        await releaseLocalProbeUsers('rtt', 'RTT Viewer 要使用探针');
-        if (this.bus?.supported) await this.bus.requestRelease({ why: 'RTT Viewer 要使用探针' });
+      if (b !== 'mock'){
+        await prepareProbeHandoff(this, 'rtt', 'RTT Viewer 要使用探针');
         if (g !== this._sessionGen) return;
       }
       if (b === 'webusb'){
-        /**
-         * 🚨 先把同页「RTT 转发」的探针桥停掉（2026-10 用户现场：转发页一打开就显示"已连接"，
-         *    用户不确定它会不会影响 RTT Viewer）。
-         *    桥是**探针侧**在搬 RTT 上行缓冲，和本页读的是**同一个 RTT 环** —— 两个读者会互相抢
-         *    数据（谁快谁拿走）。实测：桥跑着时 Viewer 仍能拿到 486~549 KB/s（探针固件会在 DAP
-         *    活动时给 DAP 让路），但抢是双向的，先停更干净 —— 与烧录页 `_clearProbeUsers` 同一个规矩。
-         */
-        const fw = !this.probeManager && window.__tools?.hid;
-        if (fw?.last?.running){
-          try {
-            await fw.stop();
-            toast('已停掉「RTT 转发」的探针桥（它和本页读同一个 RTT 环，两个读者会互相抢数据）', 'warn', 7000);
-          } catch (e){ /* 停不掉也继续连，最多就是两边抢数据 */ }
-        }
         const clockKhz = Number(store.get('rtt.clockKhz', 0)) || 0;
         if ($('r-target').value === 'riscv'){
           /**

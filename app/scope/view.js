@@ -12,7 +12,7 @@
  * 采样是**一次性窗口**（线性缓冲，满了就停）：容量 = 名义速率 × 时长 × 1.25。
  * 满了之后新样本计入 `overrun` 并显示在"丢样本"里 —— 绝不静默丢。
  */
-import { releaseLocalProbeUsers } from '../core/probe-users.js';
+import { releaseLocalProbeUsers, prepareProbeHandoff } from '../core/probe-users.js';
 import { runProbeOperation } from '../core/probe-manager.js';
 import { waitMs } from '../core/pace.js';
 import { $, setStatus, seg, esc } from '../ui/dom.js';
@@ -389,10 +389,7 @@ export class ScopeView {
   async _connectUsbNow(request = true){
     if (this.usingMock){ this.setStatusText('假探针模式下不需要数据端点', 'warn'); return; }
     try {
-      if (!this.probeManager){
-        await releaseLocalProbeUsers('scope', 'J-Scope 要使用数据端点');
-        if (this.bus?.supported) await this.bus.requestRelease({ why: 'J-Scope 要使用数据端点' });
-      }
+      await prepareProbeHandoff(this, 'scope', 'J-Scope 要使用数据端点');
       // 先关掉可能残留的旧对象（否则新的一次 claim 会被自己上一把占着而失败）
       if (this.transport){ await this.transport.close(); this.transport = null; }
       /**

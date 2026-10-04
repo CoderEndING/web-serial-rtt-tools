@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import {DebugSession} from '../../app/dbg/session.js';
 import {DbgView} from '../../app/dbg/view.js';
 import {FlashView} from '../../app/flash/view.js';
+import {prepareProbeHandoff} from '../../app/core/probe-users.js';
 const gate=()=>{let resolve;const promise=new Promise(r=>resolve=r);return {promise,resolve};};
 const tick=()=>new Promise(r=>setImmediate(r));
 globalThis.document={getElementById:()=>null};
@@ -16,3 +17,15 @@ let closed=0;Object.defineProperty(globalThis,'navigator',{value:{usb:{getDevice
 globalThis.window={__tools:{dbg:{session:{connected:true},disconnect:async()=>events.push('debug-release')}}};events.length=0;
 const f=Object.create(FlashView.prototype);f._log=()=>{};assert.equal(await f._clearProbeUsers('fw.bin'),true);assert.equal(closed,1);
 console.log('probe-handoff: debugger cancels queue, drains action before close; flash releases debugger before USB cleanup PASS');
+
+events.length=0;
+globalThis.window.__tools={hid:{last:{running:true},stop:async()=>events.push('STOP')}};
+const fallback={bus:{supported:true,requestRelease:async()=>{events.push('remote');return {acked:1};}}};
+assert.deepEqual(await prepareProbeHandoff(fallback,'dbg','debug'),{acked:1});
+assert.deepEqual(events,['STOP','remote']);
+globalThis.window.__tools.hid.stop=async()=>{throw new Error('STOP failed');};
+await assert.rejects(prepareProbeHandoff(fallback,'dbg','debug'),/STOP failed/);
+assert.deepEqual(events,['STOP','remote'],'failed local STOP never proceeds to remote acquisition');
+await prepareProbeHandoff({...fallback,probeManager:{}},'dbg','debug');
+assert.deepEqual(events,['STOP','remote'],'managed setup never repeats standalone handoff');
+console.log('probe-handoff: shared standalone path drains local users once; failed STOP blocks acquisition; managed path is a no-op PASS');

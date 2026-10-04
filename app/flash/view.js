@@ -14,7 +14,7 @@
  *
  * 与 RTT Viewer 复用同一个探针：同一时刻只能有一个占用，开烧前会把在跑的 RTT 会话断开。
  */
-import { releaseLocalProbeUsers } from '../core/probe-users.js';
+import { prepareProbeHandoff } from '../core/probe-users.js';
 import { runProbeOperation } from '../core/probe-manager.js';
 import { $, setStatus } from '../ui/dom.js';
 import { toast } from '../ui/toast.js';
@@ -135,26 +135,10 @@ export class FlashView {
     $('f-custom-speed-row').hidden = !custom;
   }
   // ================= 烧录 =================
-  /**
-   * 抢探针之前的**清场**。探针物理上只有一套调试引擎，谁先占着谁赢 —— 但"赢"的代价
-   * 常常是另一方报错或者两边都慢十倍，所以这里把已知的占用者都请走：
-   *   ① 本页签的 RTT 会话（先问一句，用户点了才算）；
-   *   ② 本页签的 J-Scope 会话（停采样 + 关数据端点；它一直占着 0x83 那条数据链路）；
-   *   ③ 本页签的「RTT 转发」探针桥（每 2 s 轮询目标内存）；
-   *   ④ **别的页签**：广播一句"让出探针"（见 core/probe-bus.js）——
-   *      这是唯一能跨标签页协调的手段。没有它时，另一个页签正连着探针会让这次烧录
-   *      直接死在 `Unable to claim interface`（2026-10 真机复现，reset 也救不回来）。
-   * @returns {Promise<boolean>} false = 用户点了"取消"
-   */
+  /** Managed acquisition already released conflicts; standalone views use the same adapters. */
   async _clearProbeUsers(name){
-    const rtt = window.__tools?.rtt;
-    if (!this.probeManager && rtt && (rtt.probe || rtt.bridge)){
-      if (!confirm('RTT 会话正占用探针，烧录需要先断开它。继续吗？')) return false;
-      await rtt.disconnect();
-    }
-    await releaseLocalProbeUsers('flash', '烧录器要使用探针');
-    if (!this.probeManager && this.bus?.supported){
-      const r = await this.bus.requestRelease({ why: `烧录 ${name || ''}`.trim() });
+    const r = await prepareProbeHandoff(this, 'flash', `烧录器要使用探针 ${name || ''}`.trim());
+    if (r){
       if (r.asked) this._log(`跨页签协调：请 ${r.asked} 个其他页签让出探针，${r.acked} 个确认（等了 ${r.ms} ms）`
         + (r.ghosts ? `；其中 ${r.ghosts} 个已经不在（关掉的页签/被浏览器冻结），以后不再等它们` : ''));
       else this._log('跨页签协调：没有其他页签在用探针');

@@ -18,7 +18,7 @@
  *   ④ 命令行是**主窗口**：上面的寄存器/内存/源码都能折叠，把高度让给它。
  */
 
-import { releaseLocalProbeUsers } from '../core/probe-users.js';
+import { prepareProbeHandoff } from '../core/probe-users.js';
 import { runProbeOperation } from '../core/probe-manager.js';
 import { $, setFlag, appendLogLine, ensureSelectOption } from '../ui/dom.js';
 import { toast } from '../ui/toast.js';
@@ -428,10 +428,10 @@ export class DbgView {
     this._out(`──── 连接（${mock ? '模拟目标' : riscv ? 'RISC-V/JTAG' : 'WebUSB'}${mock ? '' : ` · ${clockKhz} kHz`}）────`, 'dim');
     if (this.clockMigrated){ this._out('（SWD 时钟默认值已从 1 MHz 改为 10 MHz —— 真机实测 PPB/内存都正常；不想要就在上面改回去）', 'dim'); this.clockMigrated = false; }
     try {
-      if (!mock && !this.probeManager) await releaseLocalProbeUsers('dbg', '调试器要使用探针');
+      if (!mock) await prepareProbeHandoff(this, 'dbg', '调试器要使用探针');
       if (this._disconnecting || generation !== this._connectionGen) return false;
       this._connectionTask = this.session.exclusive(() => this.session.connect({
-        mock, clockKhz, bus: this.probeManager ? null : this.bus, stopBridge: !this.probeManager,
+        mock, clockKhz, bus: null, stopBridge: false,
       }));
       await this._connectionTask;
       if (this._disconnecting || generation !== this._connectionGen) return false;
