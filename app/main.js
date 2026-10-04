@@ -145,6 +145,9 @@ document.body.appendChild(box);
 
 // 烧录器抢探针前会通过它请别的页签让位（见上面的 probeBus）
 flash.bus = probeBus;
+rtt.bus = probeBus;
+scope.bus = probeBus;
+hid.bus = probeBus;
 // 调试器同理：连之前先请别的页签放掉探针（跨页签协调是必需的，不是锦上添花）
 dbg.bus = probeBus;
 // USB→I2C 桥同理：连接前先请别的页签让位（HID 一个探针只能被一个页签占着）

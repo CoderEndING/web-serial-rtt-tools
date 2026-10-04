@@ -1,0 +1,10 @@
+import assert from 'node:assert/strict';
+import {releaseLocalProbeUsers} from '../../app/core/probe-users.js';
+const events=[];globalThis.__tools={flash:{busy:true}};
+await assert.rejects(releaseLocalProbeUsers('scope'),/烧录器/);
+await releaseLocalProbeUsers('flash');
+globalThis.__tools={dbg:{session:{connected:true},disconnect:async()=>events.push('debug')},rtt:{probe:{},disconnect:async()=>events.push('viewer')},scope:{running:true,releaseProbe:async()=>events.push('scope')},hid:{last:{running:true},stop:async()=>events.push('bridge')}};
+await releaseLocalProbeUsers('hid');assert.deepEqual(events,['debug','viewer','scope'],'bridge startup releases competing readers first');
+events.length=0;await releaseLocalProbeUsers('scope');assert.deepEqual(events,['debug','viewer','bridge']);
+events.length=0;globalThis.__tools.hid.stop=async()=>{throw new Error('STOP not complete');};await assert.rejects(releaseLocalProbeUsers('flash'),/STOP not complete/);
+delete globalThis.__tools;console.log('probe-users: busy flash rejects takeover; same-page target readers stop; failed STOP aborts handoff PASS');

@@ -3,6 +3,7 @@
  * 后端四种：WebUSB-CMSIS-DAP（零安装）/ 本地桥+OpenOCD / 本地桥+J-Link(ch0) / 内置模拟目标。
  * 显示三种：终端(ANSI，xterm) / 文本 / HEX —— 三种共用同一份 raw 记录，切换时重放，不丢历史。
  */
+import { releaseLocalProbeUsers } from '../core/probe-users.js';
 import { $, seg, setFlag, setStatus, mhzLabel, ensureSelectOption } from '../ui/dom.js';
 import { toast } from '../ui/toast.js';
 import { store } from '../core/store.js';
@@ -368,6 +369,11 @@ export class RttView {
   async _connectProbe(g){
     const b = $('r-backend').value;
     try {
+      if (b !== 'mock'){
+        await releaseLocalProbeUsers('rtt', 'RTT Viewer 要使用探针');
+        if (this.bus?.supported) await this.bus.requestRelease({ why: 'RTT Viewer 要使用探针' });
+        if (g !== this._sessionGen) return;
+      }
       if (b === 'webusb'){
         /**
          * 🚨 先把同页「RTT 转发」的探针桥停掉（2026-10 用户现场：转发页一打开就显示"已连接"，

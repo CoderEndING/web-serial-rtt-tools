@@ -8,6 +8,7 @@
  * 流程：连接探针(HID) → 填 RTT 地址（手填，或载入 ELF 自动解析 _SEGGER_RTT）→ 启动转发
  *      → 回到「串口助手」打开这颗探针的 CDC 口（同一个 VCOM）就能看到 RTT 数据。
  */
+import { releaseLocalProbeUsers } from '../core/probe-users.js';
 import { $, setStatus, debounce } from '../ui/dom.js';
 import { toast } from '../ui/toast.js';
 import { store } from '../core/store.js';
@@ -268,6 +269,11 @@ export class RttCdcView {
 
   async _startBridgeNow(auto, g){
     try {
+      if (!this.mock){
+        await releaseLocalProbeUsers('hid', 'RTT 转发要使用探针');
+        if (this.bus?.supported) await this.bus.requestRelease({ why: 'RTT 转发要使用探针' });
+        if (g !== this._engineGen) return;
+      }
       if (!await this._ensure() || g !== this._engineGen) return;
       const p = this.params();
       if (!auto && (p.clockHz || this.isRiscv) && !this.mock) await this.dev.configure({ clockHz: p.clockHz });

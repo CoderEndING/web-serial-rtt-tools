@@ -18,6 +18,7 @@
  *   ④ 命令行是**主窗口**：上面的寄存器/内存/源码都能折叠，把高度让给它。
  */
 
+import { releaseLocalProbeUsers } from '../core/probe-users.js';
 import { $, setFlag, appendLogLine, ensureSelectOption } from '../ui/dom.js';
 import { toast } from '../ui/toast.js';
 import { store } from '../core/store.js';
@@ -415,15 +416,17 @@ export class DbgView {
      * 正常路径上 `_syncBackend()` 已经换过了，这里再兜一次（幂等）。
      */
     await this._ensureSession(riscv);
+    const generation = this._connectionGen = (this._connectionGen || 0) + 1;
     const clockKhz = Number($('d-clock')?.value) || DEFAULT_CLOCK_KHZ;
     this._out('', 'dim');
     this._out(`──── 连接（${mock ? '模拟目标' : riscv ? 'RISC-V/JTAG' : 'WebUSB'}${mock ? '' : ` · ${clockKhz} kHz`}）────`, 'dim');
     if (this.clockMigrated){ this._out('（SWD 时钟默认值已从 1 MHz 改为 10 MHz —— 真机实测 PPB/内存都正常；不想要就在上面改回去）', 'dim'); this.clockMigrated = false; }
     try {
-      if (this._disconnecting) return false;
+      if (!mock) await releaseLocalProbeUsers('dbg', '调试器要使用探针');
+      if (this._disconnecting || generation !== this._connectionGen) return false;
       this._connectionTask = this.session.exclusive(() => this.session.connect({ mock, clockKhz, bus: this.bus }));
       await this._connectionTask;
-      if (this._disconnecting) return false;
+      if (this._disconnecting || generation !== this._connectionGen) return false;
     } catch (e){
       this._out('✗ 连接失败：' + (e?.message || e), 'err');
       toast('连接失败：' + (e?.message || e), 'err', 7000);
@@ -449,6 +452,7 @@ export class DbgView {
   }
 
   async disconnect(){
+    this._connectionGen = (this._connectionGen || 0) + 1;
     if (this._disconnectPromise) return await this._disconnectPromise;
     this._disconnecting = true;
     this.cancelFlag = true;

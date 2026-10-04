@@ -14,6 +14,7 @@
  *
  * 与 RTT Viewer 复用同一个探针：同一时刻只能有一个占用，开烧前会把在跑的 RTT 会话断开。
  */
+import { releaseLocalProbeUsers } from '../core/probe-users.js';
 import { $, setStatus } from '../ui/dom.js';
 import { toast } from '../ui/toast.js';
 import { store } from '../core/store.js';
@@ -150,23 +151,7 @@ export class FlashView {
       if (!confirm('RTT 会话正占用探针，烧录需要先断开它。继续吗？')) return false;
       await rtt.disconnect();
     }
-    const dbg = window.__tools?.dbg;
-    if (dbg?.session?.connected){
-      await dbg.disconnect();
-      this._log('已让调试器停止操作并释放探针');
-    }
-    const sc = window.__tools?.scope;
-    if (sc && (sc.running || sc.transport || (sc.hid && sc.hid !== sc.mockProbe))){
-      try {
-        await sc.releaseProbe('烧录器要占用探针');
-        this._log('已让 J-Scope 让出探针（停采样 + 关数据端点）');
-      } catch (e){ this._log('J-Scope 让出探针失败（继续试）：' + (e?.message || e)); }
-    }
-    const fw = window.__tools?.hid;
-    if (fw?.last?.running || fw?._starting){
-      try { await fw.stop(); this._log('已停掉「RTT 转发」的探针桥（它一直在轮询目标内存）'); }
-      catch (e){ throw new Error('无法停止 RTT 转发：' + (e?.message || e)); }
-    }
+    await releaseLocalProbeUsers('flash', '烧录器要使用探针');
     if (this.bus?.supported){
       const r = await this.bus.requestRelease({ why: `烧录 ${name || ''}`.trim() });
       if (r.asked) this._log(`跨页签协调：请 ${r.asked} 个其他页签让出探针，${r.acked} 个确认（等了 ${r.ms} ms）`

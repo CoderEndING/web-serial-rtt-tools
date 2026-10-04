@@ -12,6 +12,7 @@
  * 采样是**一次性窗口**（线性缓冲，满了就停）：容量 = 名义速率 × 时长 × 1.25。
  * 满了之后新样本计入 `overrun` 并显示在"丢样本"里 —— 绝不静默丢。
  */
+import { releaseLocalProbeUsers } from '../core/probe-users.js';
 import { waitMs } from '../core/pace.js';
 import { $, setStatus, seg, esc } from '../ui/dom.js';
 import { store } from '../core/store.js';
@@ -367,6 +368,8 @@ export class ScopeView {
   async connectUsb(request = true){
     if (this.usingMock){ this.setStatusText('假探针模式下不需要数据端点', 'warn'); return; }
     try {
+      await releaseLocalProbeUsers('scope', 'J-Scope 要使用数据端点');
+      if (this.bus?.supported) await this.bus.requestRelease({ why: 'J-Scope 要使用数据端点' });
       // 先关掉可能残留的旧对象（否则新的一次 claim 会被自己上一把占着而失败）
       if (this.transport){ const old = this.transport; this.transport = null; try { await old.close(); } catch {} }
       /**
@@ -647,6 +650,11 @@ export class ScopeView {
      */
     const vars = [...pick].sort((a, b) => a.addr - b.addr);
     if (!vars.length){ this.setStatusText('先选变量（或用假探针自带的通道）', 'warn'); return; }
+    if (!this.usingMock){
+      try { await releaseLocalProbeUsers('scope', 'J-Scope 要开始采样'); }
+      catch (e) { this.setStatusText(e.message, 'err'); return; }
+      if (!this._captureAlive(g)) return;
+    }
     /**
      * 🚨 **没连上就自动连一次，别甩一句"探针没连上"**（2026-10 用户现场）：
      *    烧录页/RTT 页的探针会话**不会带给波形页**（每页各连各的），而且烧录会重设 USB 端口，
