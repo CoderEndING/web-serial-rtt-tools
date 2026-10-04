@@ -12,6 +12,7 @@
  */
 import { withTimeout } from '../rtt/dap-webusb.js';
 import { MockScopeProbe } from './mock.js';
+import { UsbLease } from '../core/usb-device.js';
 
 /** 探针上那个空闲的 bulk IN 端点（SWO 端点，SWO_STREAM=0 所以没人用）*/
 export const EP_SCOPE = 0x83;
@@ -23,7 +24,8 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 export class VendorEpTransport {
   constructor(device, opts = {}){
-    this.device = device;
+    this._usb = new UsbLease(device, 'scope');
+    this.device = device = this._usb.device;
     this.ep = EP_SCOPE;
     this.iface = 0;
     this.chunkBytes = opts.chunkBytes ?? 4096;   // 一次 transferIn 想收多少（会被短包提前结束）
@@ -64,9 +66,16 @@ export class VendorEpTransport {
 
   /** 打开设备、找到带 0x83 的那个接口并认领 */
   async open(){
+    try { return await this._open(); }
+    catch (e){
+      try { await this._usb.close({ dirty: dirtyDevices.has(this.device) }); }
+      catch (cleanup){ e.message += `；USB 清理未完成：${cleanup.message}`; }
+      throw e;
+    }
+  }
+  async _open(){
     const d = this.device;
-    if (!d.opened) await d.open();
-    if (d.configuration === null) await d.selectConfiguration(1);
+    await this._usb.open();
     let found = null;
     for (const iface of d.configuration.interfaces){
       for (const alt of iface.alternates){
@@ -94,7 +103,7 @@ export class VendorEpTransport {
     this.ep = found.ep.endpointNumber;         // 注意：不带方向位的编号（0x83 → 3）
     this.epAddr = this.ep | 0x80;              // 描述符里的地址，只用于显示/排障
     this.claimed = false;
-    try { await d.claimInterface(this.iface); this.claimed = true; }
+    try { await this._usb.claim(this.iface, [this.epAddr]); this.claimed = true; }
     catch (e){
       /**
        * 🚨 **先端口复位再试一次**（2026-10 用户现场反复遇到）：
@@ -105,9 +114,9 @@ export class VendorEpTransport {
        */
       let ok = false;
       try {
-        await d.reset();
+        await this._usb.reset();
         await sleep(250);
-        await d.claimInterface(this.iface);
+        await this._usb.claim(this.iface, [this.epAddr]);
         ok = true; this.claimed = true;
         console.warn('[scope] 认领接口失败 → 端口复位后重试成功');
       } catch { /* 落到下面报错 */ }
@@ -136,8 +145,7 @@ export class VendorEpTransport {
     if (!dirtyDevices.has(this.device)) return;
     // Generation checks cannot cancel native USB reads. Reset must retire them
     // before a new capture is allowed to submit any requests.
-    await withTimeout(this.device.reset(), 3000, '清理残留采样 USB 请求');
-    await withTimeout(this.device.close(), 3000, '关闭旧采样 USB 连接');
+    await this._usb.reset();
     await withTimeout(Promise.allSettled([...this._pendingWorkers]), 1500, '等待旧采样读退出');
     await withTimeout(this.open(), 5000, '重新连接采样数据端点');
     dirtyDevices.delete(this.device);
@@ -267,11 +275,10 @@ export class VendorEpTransport {
 
   async close(){
     await this.stop();
-    if (dirtyDevices.has(this.device)){
-      try { await withTimeout(this.device.reset(), 3000, '清理残留采样 USB 请求'); } catch { /* next open must retry */ }
-    }
-    try { if (this.device?.opened) await this.device.close(); } catch { /* 忽略 */ }
+    await this._usb.close({ dirty: dirtyDevices.has(this.device) });
+    dirtyDevices.delete(this.device);
   }
+
 }
 
 /** 假传输：包源是 MockScopeProbe 的 poll()，时间用 performance.now()

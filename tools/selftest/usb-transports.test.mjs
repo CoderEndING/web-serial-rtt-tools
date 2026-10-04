@@ -22,3 +22,18 @@ assert.ok(device.opened);assert.ok(!events.includes('reset'));assert.ok(!events.
 assert.equal(await closeProbeUsbDevices(),0,'legacy cleanup cannot close a live independent endpoint');
 await spi.close();assert.equal(events.at(-1),'close');
 console.log('usb-transports: DAP disconnect/legacy cleanup preserve independent SPI interface PASS');
+const { VendorEpTransport } = await import('../../app/scope/transport.js');
+{
+ const {device,events}=fakeUsb();const spi=new UsbLease(device,'spi');await spi.open();await spi.claim(5,[0x8b,11]);
+ const scope=new VendorEpTransport(device);await scope.open();await scope.close();
+ assert.ok(device.opened);assert.ok(!events.includes('close'));assert.ok(!events.includes('reset'));assert.ok(events.includes('release:0'));
+ await spi.close();
+}
+{
+ const {device,events}=fakeUsb();const spi=new UsbLease(device,'spi');await spi.open();await spi.claim(5,[0x8b,11]);
+ const scope=new VendorEpTransport(device);await scope.open();
+ device.transferIn=()=>new Promise(()=>{});await scope.start(()=>{});await scope.stop();
+ await assert.rejects(scope.close(),/先断开 spi/);assert.ok(!events.includes('reset'),'dirty scope cannot reset a live SPI stream');
+ await spi.close();await scope.close();assert.ok(events.includes('reset'));assert.equal(events.at(-1),'close');
+}
+console.log('usb-transports: Scope clean close preserves SPI; dirty close retains lease until exclusive recovery PASS');

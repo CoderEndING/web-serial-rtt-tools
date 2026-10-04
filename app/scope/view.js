@@ -394,7 +394,7 @@ export class ScopeView {
         if (this.bus?.supported) await this.bus.requestRelease({ why: 'J-Scope 要使用数据端点' });
       }
       // 先关掉可能残留的旧对象（否则新的一次 claim 会被自己上一把占着而失败）
-      if (this.transport){ const old = this.transport; this.transport = null; try { await old.close(); } catch {} }
+      if (this.transport){ await this.transport.close(); this.transport = null; }
       /**
        * 🚨 和「连接探针」同一条原则：**先用已授权的设备直连**（不弹框），
        *    只有浏览器里还没有授权记录时才弹选择框。用户点一次就该成。
@@ -445,7 +445,10 @@ export class ScopeView {
     try { await this.stop(reason); } catch (e) { failure = e; }
     await Promise.allSettled([this._hidConnectPromise, this._usbConnectPromise].filter(Boolean));
     const t = this.transport;
-    if (t){ this.transport = null; try { await t.close(); } catch { /* 忽略 */ } }
+    if (t){
+      try { await t.close(); this.transport = null; }
+      catch (e){ failure ||= e; this.probeManager?.fail('scope', e); }
+    }
     const h = this.hid;
     if (h && h !== this.mockProbe){ this.hid = null; try { await h.close(); } catch { /* 忽略 */ } }
     if (this.hid === null){
