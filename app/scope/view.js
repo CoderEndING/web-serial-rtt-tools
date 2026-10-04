@@ -12,6 +12,7 @@
  * 采样是**一次性窗口**（线性缓冲，满了就停）：容量 = 名义速率 × 时长 × 1.25。
  * 满了之后新样本计入 `overrun` 并显示在"丢样本"里 —— 绝不静默丢。
  */
+import { waitMs } from '../core/pace.js';
 import { $, setStatus, seg, esc } from '../ui/dom.js';
 import { store } from '../core/store.js';
 import { AkaLinkHid } from '../hid/probe.js';
@@ -405,7 +406,8 @@ export class ScopeView {
    * 让出之后本页回到"未连接"状态，用户再点「连接探针」就能重新拿回来（不会自锁）。
    */
   async releaseProbe(reason = '别的页签要占用探针'){
-    if (this.running){ try { await this.stop(reason); } catch { /* 忽略 */ } }
+    this._releasing = true;
+    try { await this.stop(reason); } catch { /* 忽略 */ }
     const t = this.transport;
     if (t){ this.transport = null; try { await t.close(); } catch { /* 忽略 */ } }
     const h = this.hid;
@@ -414,6 +416,7 @@ export class ScopeView {
       const info = $('sc-info'); if (info) info.textContent = '未连接（已让出探针：' + reason + '）';
     }
     const ui = $('sc-usbinfo'); if (ui) ui.textContent = '未连接数据端点';
+    this._releasing = false;
     this.setStatusText('已让出探针（' + reason + '）—— 需要时点「连接探针 / 数据端点」重新占用', 'warn');
     this.syncButtons();
     return true;
@@ -611,6 +614,29 @@ export class ScopeView {
 
   // ================================================================= 采样
   async start(){
+    if (this.running || this._startPromise || this._stopPromise || this._releasing) return;
+    const g = this._captureGen = (this._captureGen || 0) + 1;
+    this._starting = true;
+    this.syncButtons();
+    this._startPromise = this._startOnce(g);
+    try { return await this._startPromise; }
+    finally {
+      if (g === this._captureGen && !this.running){
+        this._capturing = false; this._stopWatchdog();
+        await this._stopData();
+      }
+      this._starting = false; this._startPromise = null; this.syncButtons();
+    }
+  }
+
+  _captureAlive(g){ return g === this._captureGen && !this._stopPromise && !this._releasing; }
+
+  async _stopData(){
+    try { if (this.hid) await this.hidXfer(P.HID_CMD, P.flagsData(P.ACT.STOP)); } catch {}
+    try { await this.transport?.stop(); } catch {}
+  }
+
+  async _startOnce(g){
     const pick = (this.selected.length ? this.selected : (this.usingMock ? this.mockVars() : []));
     /**
      * 🚨 **必须按地址排序后再建缓冲**：固件把变量按**地址顺序**紧排在帧里（协议规定），
@@ -634,6 +660,7 @@ export class ScopeView {
       if (!this.transport){
         try { await this.connectUsb(false); } catch (e){ /* 下面统一报错 */ }
       }
+      if (!this._captureAlive(g)) return;
       if (!this.hid || !this.transport){
         this.setStatusText(!this.hid
           ? '探针没连上：点左边「连接探针」授权一次（烧录/别的页面用过的探针要在这里重连一下）'
@@ -653,6 +680,7 @@ export class ScopeView {
     if (!this.transport || !this.hid){ this.setStatusText(this.usingMock ? '假探针还没准备好' : '先连探针 + 数据端点', 'warn'); return; }
     if (this.isReal() && !this.transport?.device){ this.setStatusText('真机模式要先点「连接数据端点…」', 'warn'); return; }
 
+    if (!this._captureAlive(g)) return;
     const periodUs = this.periodUs();
     const nominalHz = 1e6 / periodUs;
     /**
@@ -725,11 +753,13 @@ export class ScopeView {
        *    不看它的话，被拒之后固件已经**把变量表清空了**，紧接着的 START 会回 -3 →
        *    页面显示"变量表为空（先在左侧选 1~8 个变量）"，而用户明明选了变量，方向全错。
        */
+      if (!this._captureAlive(g)) return;
       const cfgRes = await this.configureScope({ periodUs, flags, vars });
+      if (!this._captureAlive(g)) return;
+      if (!cfgRes || cfgRes.length < 3) throw new Error('采样配置响应不完整');
       const cfgRc = this.signed(cfgRes?.[2]);
       if (cfgRc < 0 && cfgRc !== P.START_PENDING){
         this._capturing = false;
-        await this.transport.stop().catch(() => {});
         this.setStatusText('采样配置被拒：' + P.scopeRcText(cfgRc), 'err');
         return;
       }
@@ -741,7 +771,8 @@ export class ScopeView {
        *    早就被丢掉**，于是"等 DEF 当起跑线"的守卫永远等不到、新采集一个样本都没有。
        *    现在先 start() 读起来（顺便把上一轮的残留吃掉），再发 START。
        */
-      await this.transport.start(chunk => this.onChunk(chunk), e => this._onDataPlaneDead(e));
+      await this.transport.start(chunk => { if (this._captureAlive(g)) this.onChunk(chunk); }, e => { if (this._captureAlive(g)) this._onDataPlaneDead(e); });
+      if (!this._captureAlive(g)) return;
       this._startWatchdog();          // 采集中途断流的兜底（见 _onDataPlaneDead 的说明）
       this._awaitDefSince = performance.now();
       /**
@@ -755,18 +786,23 @@ export class ScopeView {
 
       let rc = P.START_PENDING;
       await this.hidXfer(P.HID_CMD, P.flagsData(P.ACT.START));
+      if (!this._captureAlive(g)) return;
       for (let i = 0; i < 20 && rc === P.START_PENDING; i++){    // -100 = 排队中，轮询等结果
-        await sleep(120);
+        await waitMs(120);
+        if (!this._captureAlive(g)) return;
         const res = await this.hidXfer(P.HID_CMD, P.flagsData(P.ACT.STATUS));
-        rc = this.signed(res?.[2]);
+        if (!this._captureAlive(g)) return;
+        if (!res || res.length < 3) throw new Error('采样状态响应不完整');
+        rc = this.signed(res[2]);
         this._absorbeStatusBackend(res);        // 状态字 0 bit1 = 生效后端（丢弃模式没有 DEF，就靠它）
       }
       if (rc < 0 && rc !== P.START_PENDING){
         this._capturing = false;
-        await this.transport.stop().catch(() => {});
         this.setStatusText('探针启动失败：' + P.scopeRcText(rc), 'err');
         return;
       }
+      if (rc === P.START_PENDING) throw new Error('探针启动超时（仍在排队）');
+      if (!this._captureAlive(g)) return;
       this.running = true;
       this.follow = true;
       this.state = '采样中';
@@ -780,8 +816,8 @@ export class ScopeView {
         (this.trigger.mode !== TRIG.NONE ? '（触发已布防）' : '') + tooFast + wireNote + capNote,
       (tooFast || wireNote || capNote) ? 'warn' : 'ok');
     } catch (e){
+      if (!this._captureAlive(g)) return;
       this.running = false;
-      try { await this.transport?.stop(); } catch { /* 忽略 */ }
       this.setStatusText('启动失败：' + (e?.message || e), 'err');
     }
     this.syncButtons();
@@ -825,14 +861,22 @@ export class ScopeView {
   }
 
   async stop(reason){
+    if (this._stopPromise) return await this._stopPromise;
+    this._captureGen = (this._captureGen || 0) + 1;
+    this._stopPromise = this._stopOnce(reason);
+    try { return await this._stopPromise; }
+    finally { this._stopPromise = null; this.syncButtons(); }
+  }
+
+  async _stopOnce(reason){
     this._stopWatchdog();
-    if (!this.running && !this.transport?.running) return;
+    if (!this.running && !this._starting && !this.transport?.running) return;
     this.running = false;
     this._capturing = false;                 // DATA 分支据此停止入缓冲（见那里的说明）
     // 先给个即时反馈：后面两个 await（排空 + HID STOP）要几十毫秒，这期间界面上不该还写着"采样中"
     this.setStatusText('正在停止…', '');
-    try { await this.transport.stop(); } catch { /* 忽略 */ }
-    try { await this.hidXfer(P.HID_CMD, P.flagsData(P.ACT.STOP)); } catch { /* 忽略 */ }
+    if (this._startPromise) await this._startPromise.catch(() => {});
+    await this._stopData();
     const st = this.store;
     const spanUs = st?.count > 1 ? st.timeAt(st.count - 1) - st.timeAt(0) : 0;
     const why = reason || this._stopReason;
@@ -1011,7 +1055,7 @@ export class ScopeView {
    *  🚨 老代码只在状态文字里写"缓冲已满：采样自动停止"，**其实根本没停** ——
    *     用户实测 3 s 的采集跑了 20 多秒，多出来的帧全记成 overrun（界面显示"缺口 1924246"）。*/
   _autoStop(reason){
-    if (!this.running || this._stopReason) return;
+    if ((!this.running && !this._capturing) || this._stopReason) return;
     this._stopReason = reason;
     this.stop().catch(() => {});
   }
@@ -1375,8 +1419,8 @@ export class ScopeView {
   }
 
   syncButtons(){
-    $('sc-start').disabled = this.running;
-    $('sc-stop').disabled = !this.running;
+    $('sc-start').disabled = !!(this.running || this._starting || this._stopPromise || this._releasing);
+    $('sc-stop').disabled = !!this._stopPromise || (!this.running && !this._starting);
   }
 
   _loop(){
