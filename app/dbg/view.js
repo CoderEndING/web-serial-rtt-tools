@@ -69,9 +69,8 @@ export class DbgView {
   // ================================================================ 初始化
 
   init(){
-    const s = this.session;
     this._bindSessionLog();
-    s.sym = null;
+    this.session.sym = null;
 
     // ---- 侧栏 ----
     const be = $('d-backend');
@@ -98,14 +97,14 @@ export class DbgView {
     on('d-disconnect', 'click', () => this.disconnect());
     on('d-elf-pick', 'click', () => $('d-elf-file')?.click());
     on('d-elf-file', 'change', e => this._loadElfFile(e.target.files?.[0]));
-    on('d-reset-halt', 'click', () => this._act('复位并停住', async () => { await s.resetHalt(); await this.refreshAll(); }));
-    on('d-reset-run', 'click', () => this._act('复位并运行', async () => { await s.resetRun(); this._startWatch(); }));
-    on('d-reg-refresh', 'click', () => this._act('刷新寄存器', () => s.refreshRegs().then(() => this.renderRegs())));
+    on('d-reset-halt', 'click', () => this._act('复位并停住', async () => { await this.session.resetHalt(); await this.refreshAll(); }));
+    on('d-reset-run', 'click', () => this._act('复位并运行', async () => { await this.session.resetRun(); this._startWatch(); }));
+    on('d-reg-refresh', 'click', () => this._act('刷新寄存器', () => this.session.refreshRegs().then(() => this.renderRegs())));
     on('d-bt', 'click', () => this.runLine('bt'));
     on('d-bt-scan', 'click', () => this.runLine('bt scan'));
     on('d-wp-add', 'click', () => this.runLine(`wp ${$('d-wp-addr').value.trim()} ${$('d-wp-mode').value} ${$('d-wp-size').value}`));
     on('d-wp-clear', 'click', () => this.runLine('wpd all'));
-    on('d-bp-clear', 'click', () => this._act('清空断点', async () => { await s.bpClear(); this.renderBps(); this.renderSource(); }));
+    on('d-bp-clear', 'click', () => this._act('清空断点', async () => { await this.session.bpClear(); this.renderBps(); this.renderSource(); }));
     on('d-rtt-locate', 'click', () => this.rttStart());
     on('d-rtt-stop', 'click', () => this.rttStop());
     const rttChk = $('d-rtt-on');
@@ -191,9 +190,9 @@ export class DbgView {
     this._initWorkbench();
 
     // ---- 主区按钮 ----
-    on('d-halt', 'click', () => this._act('暂停', async () => { await s.halt(); this.renderRegs(); this.renderMem(); await this.afterStop(); }));
-    on('d-cont', 'click', () => this._act('继续', async () => { await s.cont(); this._startWatch(); }));
-    on('d-step', 'click', () => this._act('单步', async () => { await s.step(); this.renderRegs(); this.renderMem(); await this.afterStop(); }));
+    on('d-halt', 'click', () => this._act('暂停', async () => { await this.session.halt(); this.renderRegs(); this.renderMem(); await this.afterStop(); }));
+    on('d-cont', 'click', () => this._act('继续', async () => { await this.session.cont(); this._startWatch(); }));
+    on('d-step', 'click', () => this._act('单步', async () => { await this.session.step(); this.renderRegs(); this.renderMem(); await this.afterStop(); }));
     // ---- 源码级单步（2026-10）：跳过 / 进入 / 跳出（对应 MDK-Ozone 的 F10 / F11 / Shift+F11）----
     on('d-step-over', 'click', () => this.stepOver());
     on('d-step-into', 'click', () => this.stepInto());
@@ -342,20 +341,21 @@ export class DbgView {
    * 换之前先把旧连接断干净，别让两个后端抢同一支探针。
    * @returns {boolean} 是否真的换了对象
    */
-  _ensureSession(riscv){
+  async _ensureSession(riscv){
     if (riscv === (this.session instanceof RiscvDebugSession)) return false;
-    if (this.session?.connected){ try { this.session.disconnect(); } catch {} }
+    if (this.session?.connected) await this.disconnect();
+    if (riscv === (this.session instanceof RiscvDebugSession)) return false;
     this.session = riscv ? new RiscvDebugSession() : new DebugSession();
     this._bindSessionLog();
     this.session.sym = this.sym || null;
     return true;
   }
 
-  _syncBackend(){
+  async _syncBackend(){
     const v = $('d-backend')?.value || 'webusb';
     const mock = v === 'mock';
     const riscv = v === 'riscv';
-    this._ensureSession(riscv);
+    await this._ensureSession(riscv);
     const clk = $('d-clock');
     if (clk){
       clk.disabled = mock;
@@ -399,6 +399,13 @@ export class DbgView {
   // ================================================================ 连接
 
   async connect(){
+    if (this._connecting || this._disconnecting) return false;
+    this._connecting = true;
+    try { return await this._connectNow(); }
+    finally { this._connecting = false; this._connectionTask = null; }
+  }
+
+  async _connectNow(){
     const backend = $('d-backend')?.value || 'webusb';
     const mock = backend === 'mock';
     const riscv = backend === 'riscv';
@@ -407,13 +414,16 @@ export class DbgView {
      * 但源码级那一层是同一套 —— `RiscvDebugSession` 继承 `DebugSession` 只换低层）。
      * 正常路径上 `_syncBackend()` 已经换过了，这里再兜一次（幂等）。
      */
-    this._ensureSession(riscv);
+    await this._ensureSession(riscv);
     const clockKhz = Number($('d-clock')?.value) || DEFAULT_CLOCK_KHZ;
     this._out('', 'dim');
     this._out(`──── 连接（${mock ? '模拟目标' : riscv ? 'RISC-V/JTAG' : 'WebUSB'}${mock ? '' : ` · ${clockKhz} kHz`}）────`, 'dim');
     if (this.clockMigrated){ this._out('（SWD 时钟默认值已从 1 MHz 改为 10 MHz —— 真机实测 PPB/内存都正常；不想要就在上面改回去）', 'dim'); this.clockMigrated = false; }
     try {
-      await this.session.connect({ mock, clockKhz, bus: this.bus });
+      if (this._disconnecting) return false;
+      this._connectionTask = this.session.exclusive(() => this.session.connect({ mock, clockKhz, bus: this.bus }));
+      await this._connectionTask;
+      if (this._disconnecting) return false;
     } catch (e){
       this._out('✗ 连接失败：' + (e?.message || e), 'err');
       toast('连接失败：' + (e?.message || e), 'err', 7000);
@@ -451,6 +461,7 @@ export class DbgView {
   async _disconnectNow(){
     this._stopWatch();
     this.rttStop();
+    if (this._connectionTask) await this._connectionTask.catch(() => {});
     await this.session.exclusive(() => this.session.disconnect());
     // 符号表**故意留着**：断开往往只是为了让别的页签用探针，重连后还得接着看变量
     this.mem = new Uint8Array(0);
@@ -463,7 +474,7 @@ export class DbgView {
 
   /** 一次用户动作的统一包装：忙碌标记 + **独占 SWD** + 错误回显（别让异常静默消失） */
   async _act(name, fn){
-    if (this._disconnecting) return false;
+    if (this._disconnecting || this._connecting) return false;
     if (this.session.busy){ this._out(`（正在忙，先等上一个动作跑完）`, 'warn'); return false; }
     this._invalidateBacktrace();
     this.session.busy = true;
@@ -678,7 +689,7 @@ export class DbgView {
   // ================================================================ 内存
 
   async readMem(opts = {}){
-    if (this._disconnecting) return false;
+    if (this._disconnecting || this._connecting) return false;
     return await this.session.exclusive(() => this._disconnecting ? false : this._readMemLocked(opts));
   }
 
@@ -897,7 +908,7 @@ export class DbgView {
   async runLine(text){
     const line = String(text || '').trim();
     if (!line) return { lines: [] };
-    if (this._disconnecting) return { cancelled: true, lines: [] };
+    if (this._disconnecting || this._connecting) return { cancelled: true, lines: [] };
     if(!/^(bt|backtrace)(\s|$)/i.test(line)) this._invalidateBacktrace();
     this._out('> ' + line, 'cmd');
     if (line !== this.hist[this.hist.length - 1]) this.hist.push(line);
@@ -1141,7 +1152,7 @@ export class DbgView {
 
   /** 把监视项的值读回来（停止时自动调；运行中看「运行中也刷新」开关） */
   async refreshWatch(opts = {}){
-    if (this._disconnecting) return 0;
+    if (this._disconnecting || this._connecting) return 0;
     return await this.session.exclusive(() => this._disconnecting ? 0 : this._refreshWatchLocked(opts));
   }
 

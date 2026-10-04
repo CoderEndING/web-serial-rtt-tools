@@ -1,0 +1,13 @@
+import assert from 'node:assert/strict';
+import {DebugSession} from '../../app/dbg/session.js';
+import {RiscvDebugSession} from '../../app/dbg/riscv.js';
+import {DbgView} from '../../app/dbg/view.js';
+const gate=()=>{let resolve;const promise=new Promise(r=>resolve=r);return {promise,resolve};};
+const tick=()=>new Promise(r=>setImmediate(r));
+globalThis.document={getElementById:()=>null};
+const v=Object.create(DbgView.prototype),s=new DebugSession(),held=gate();let closed=false;
+s.probe={disconnect:async()=>{closed=true;}};Object.assign(v,{session:s,_stopWatch(){},rttStop(){},renderRegs(){},renderMem(){},renderBps(){},_syncButtons(){},_bindSessionLog(){}});
+const operation=s.exclusive(()=>held.promise),switching=v._ensureSession(true);await tick();assert.equal(v.session,s);assert.equal(closed,false);
+held.resolve();await Promise.all([operation,switching]);assert.equal(closed,true);assert.ok(v.session instanceof RiscvDebugSession);
+await v._ensureSession(false);assert.ok(v.session instanceof DebugSession);assert.ok(!(v.session instanceof RiscvDebugSession));
+console.log('dbg-backend-lifecycle: ARM/RISC-V switch waits for old actions and disconnect before replacing session PASS');
