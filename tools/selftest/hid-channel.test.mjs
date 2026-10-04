@@ -39,7 +39,27 @@ const blocked = device(), stalled = new AkaLinkHid();
 blocked.sendReport = () => new Promise(() => {});
 await stalled.open(blocked);
 await assert.rejects(stalled.xfer(0x31, undefined, 30), /没响应/, 'a stalled report write cannot hold the queue forever');
-const pendingWrite = stalled.xfer(0x31);
-const closeCheck = assert.rejects(pendingWrite, /关闭/);
-await tick(); await stalled.close(); await closeCheck;
+await assert.rejects(stalled.xfer(0x31), /未同步/);
+await stalled.close();
 console.log('hid-channel: timeout and close settle a response even while sendReport is stalled PASS');
+
+const lateDevice = device(), oldClient = new AkaLinkHid(), peer = new AkaLinkHid();
+await oldClient.open(lateDevice); await peer.open(lateDevice);
+await assert.rejects(oldClient.xfer(0x36, Uint8Array.of(4), 10), /没响应/);
+await assert.rejects(peer.xfer(0x36, Uint8Array.of(1, 0)), /未同步/);
+assert.deepEqual(lateDevice.sent, [0x36], 'no new same-command request can consume the old response');
+lateDevice.reply(0x36); // only the orphan consumes this reply; no caller receives it
+const recovered = peer.xfer(0x36, Uint8Array.of(1, 0)); await tick();
+assert.deepEqual(lateDevice.sent, [0x36, 0x36]); lateDevice.reply(0x36); await recovered;
+await oldClient.close(); await peer.close();
+
+const unsettled = device(), pendingNative = new AkaLinkHid(); let releaseWrite;
+unsettled.sendReport = () => new Promise(r => { releaseWrite = r; });
+await pendingNative.open(unsettled);
+await assert.rejects(pendingNative.xfer(0x31, undefined, 10), /没响应/);
+unsettled.reply(0x31);
+await assert.rejects(pendingNative.xfer(0x31), /未同步/, 'late reply alone cannot release an unsettled native write');
+releaseWrite(); await tick();
+unsettled.sendReport = async () => {};
+const fresh = pendingNative.xfer(0x31); await tick(); unsettled.reply(0x31); await fresh; await pendingNative.close();
+console.log('hid-channel: timed-out shared channel quarantines late replies until native write and reply settle PASS');

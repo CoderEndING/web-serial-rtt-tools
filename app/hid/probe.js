@@ -154,7 +154,13 @@ const hidChannels = new WeakMap();
 function channelFor(device){
   let channel = hidChannels.get(device);
   if (!channel){
-    channel = { clients: new Set(), chain: Promise.resolve() };
+    channel = { clients: new Set(), chain: Promise.resolve(), fault: null };
+    // One physical input event must be delivered only once, even if resolving it
+    // lets a queued client issue the next command before another listener runs.
+    channel.input = e => {
+      const client = [...channel.clients].find(c => c._pending) || channel.clients.values().next().value;
+      client?._handleInput(e);
+    };
     hidChannels.set(device, channel);
   }
   return channel;
@@ -173,7 +179,6 @@ export class AkaLinkHid {
     this._generation = 0;
     this._requests = new Set();
     this.onDisconnect = null;
-    this._onInput = this._handleInput.bind(this);
     this._onDisc = this._handleDisconnect.bind(this);
   }
 
@@ -241,7 +246,7 @@ export class AkaLinkHid {
       if (!device.opened) await device.open();
       this.device = device;
       channel.clients.add(this);
-      device.addEventListener('inputreport', this._onInput);
+      device.addEventListener('inputreport', channel.input);
       navigator.hid.addEventListener('disconnect', this._onDisc);
     });
   }
@@ -252,14 +257,15 @@ export class AkaLinkHid {
     for (const controller of this._requests) controller.abort();
     this.device = null;
     const pending = this._pending;
+    if (pending && !pending.replyReceived) channelFor(d).fault = pending;
     this._settle(pending);
     this._pending = null;
     pending?.reject(new Error('HID 会话已关闭'));
     if (!d) return;
-    try { d.removeEventListener('inputreport', this._onInput); } catch {}
     try { navigator.hid.removeEventListener('disconnect', this._onDisc); } catch {}
     const channel = channelFor(d);
     channel.clients.delete(this);
+    if (!channel.clients.size){ try { d.removeEventListener('inputreport', channel.input); } catch {} }
     await onChannel(channel, async () => {
       // Closing one view must not close the handle used by another view's command queue.
       try { if (!channel.clients.size && d.opened) await d.close(); } catch {}
@@ -267,12 +273,24 @@ export class AkaLinkHid {
   }
 
   _handleInput(e){
+    const res = new Uint8Array(e.data.buffer, e.data.byteOffset || 0, e.data.byteLength);
+    const channel = channelFor(this.device);
+    // The protocol has no wire request ID. With an unanswered request, send nothing
+    // else until its reply is consumed (or physical unplug ends that channel).
+    const orphan = channel.fault;
+    if (orphan){
+      if (res[1] === orphan.cmd){
+        orphan.replyReceived = true;
+        if (orphan.writeSettled) channel.fault = null;
+      }
+      return;
+    }
     const p = this._pending;
     if (!p) return;                       // 没人等就算了（比如上一次超时后才回来的包）
-    const res = new Uint8Array(e.data.buffer, e.data.byteOffset || 0, e.data.byteLength);
     // 迟到的旧响应：**丢掉继续等**（不要拿它去满足新请求 —— 真机上踩过：
     // info() 并发发了 3 条，结果后面那条 AUTOSTART 收到了型号回包，状态字全是垃圾）
     if (res[1] !== p.cmd) return;
+    p.replyReceived = true;
     this._pending = null;
     this._settle(p);                      // 清掉这条请求的超时定时器，再放行
     p.resolve(res);
@@ -292,6 +310,7 @@ export class AkaLinkHid {
     if (e.device !== this.device) return;
     // close() synchronously rejects the pending response and invalidates queued requests.
     this.close().catch(() => {});
+    channelFor(e.device).fault = null; // Unplug also ends any outstanding firmware response.
     this.onDisconnect?.();
   }
 
@@ -323,6 +342,8 @@ export class AkaLinkHid {
         const execute = async () => {
           if (this.device !== device || generation !== this._generation || !this.connected)
             throw new Error('HID 会话已关闭或替换');
+          if (channelFor(device).fault)
+            throw new Error('HID 通道未同步：请等待迟到响应，或拔插探针后重连');
           return await this._xferNow(cmd, data, timeout, generation);
         };
         // Passive status handles in another tab also use the same command channel.
@@ -343,21 +364,35 @@ export class AkaLinkHid {
   async _xferNow(cmd, data, timeout, generation){
     if (this._pending) throw new Error('上一条请求还没回来');
     const pkt = buildRequest(cmd, data);
+    const device = this.device, channel = channelFor(device);
     const once = async () => {
       let req = null;
       const wait = new Promise((resolve, reject) => {
         // 超时回调**按请求身份**（自增序号）匹配，不按 cmd：同一命令高频轮询时，
         // 按 cmd 匹配会让旧请求的残雷打掉新请求（见 _settle 的说明）
-        req = { cmd, resolve, reject, seq: ++this._reqSeq, timer: null };
+        req = { cmd, resolve, reject, seq: ++this._reqSeq, timer: null, replyReceived: false, writeSettled: false };
         this._pending = req;
         req.timer = setTimeout(() => {
-          if (this._pending === req){ this._pending = null; req.timer = null; reject(new Error(`探针 ${timeout}ms 没响应`)); }
+          if (this._pending === req){
+            this._pending = null; req.timer = null; channel.fault = req;
+            reject(new Error(`探针 ${timeout}ms 没响应，HID 通道未同步：请等待迟到响应，或拔插探针后重连`));
+          }
         }, timeout);
       });
       wait.catch(() => {}); // sendReport can fail before the response promise is awaited.
+      const write = Promise.resolve().then(() => {
+        if (generation !== this._generation) throw new Error('HID 会话已关闭');
+        return device.sendReport(1, pkt);
+      });
+      const settled = () => {
+        req.writeSettled = true;
+        if (channel.fault === req && req.replyReceived) channel.fault = null;
+      };
+      write.then(settled, settled);
       try {
-        await Promise.race([this.device.sendReport(1, pkt), wait]);
+        await Promise.race([write, wait]);
       } catch (e){
+        if (!req.replyReceived) channel.fault = req;
         this._settle(req);                  // 写失败：别把定时器留着
         if (this._pending === req) this._pending = null;
         req.reject(e);

@@ -161,7 +161,7 @@ console.log('== 7. xfer 超时定时器：旧请求的残雷不许打掉在飞�
   };
   // 不走 open()：它要 navigator.hid 的 disconnect 监听（Node 里没有）。这里只挂 inputreport。
   hid.device = fake;
-  fake.addEventListener('inputreport', hid._onInput);
+  fake.addEventListener('inputreport', e => hid._handleInput(e));
   const input = payload => { for (const fn of listeners.inputreport || []) fn({ device: fake, data: { buffer: payload.buffer } }); };
   const sleep = ms => new Promise(r => setTimeout(r, ms));
   const reply = Uint8Array.of(0, 0x32, 0, 0);          // payload[1] = cmd 0x32
@@ -182,7 +182,8 @@ console.log('== 7. xfer 超时定时器：旧请求的残雷不许打掉在飞�
   const r3 = hid.xfer(0x32, Uint8Array.of(0), 60).then(() => 'ok3', e => 'err3');
   const out3 = await r3;
   ok(out3 === 'err3', `真超时仍会报错（${out3}）`);
-  ok(hid._pending === null, '超时后 _pending 清空，下一条请求能正常发（不永久卡死）');
+  ok(hid._pending === null, '超时后 _pending 清空（通道等待迟到响应重新同步）');
+  input(reply); // Drain the timed-out command before sending another command with the same opcode.
   const r4 = hid.xfer(0x32, Uint8Array.of(0), 1000).then(() => 'ok4', e => 'err4:' + e.message);
   setTimeout(() => input(reply), 10);
   ok(await r4 === 'ok4', '超时之后还能继续正常请求');
