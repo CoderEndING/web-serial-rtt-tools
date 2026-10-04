@@ -42,8 +42,13 @@ export class ProbeManager {
     const ticket = { owner, controller: new AbortController(), phase: 'queued' };
     this.pending.add(ticket);
     const alive = () => { if (ticket.controller.signal.aborted) throw new ProbeCancelled(); };
+    let onAbort;
+    const cancelled = new Promise((_, reject) => {
+      onAbort = () => { if (ticket.phase !== 'setup') reject(new ProbeCancelled()); };
+      ticket.controller.signal.addEventListener('abort', onAbort, { once: true });
+    });
     try {
-      return await this._enqueue(async () => {
+      const task = this._enqueue(async () => {
         alive();
         ticket.phase = 'lock';
         const execute = async () => {
@@ -74,10 +79,16 @@ export class ProbeManager {
           return await this.locks.request('web-serial-rtt-tools/probe-control', { signal: ticket.controller.signal }, execute);
         return await execute();
       });
+      // A release callback can await a cancelled reconnect queued behind itself.
+      // Settle that caller immediately, while keeping the queue entry until its turn.
+      return await Promise.race([task, cancelled]);
     } catch (e){
       if (ticket.controller.signal.aborted && e.name === 'AbortError') throw new ProbeCancelled();
       throw e;
-    } finally { this.pending.delete(ticket); }
+    } finally {
+      ticket.controller.signal.removeEventListener('abort', onAbort);
+      this.pending.delete(ticket);
+    }
   }
 
   /** Cancel queued starts immediately; existing feature state machines drain starts already executing. */

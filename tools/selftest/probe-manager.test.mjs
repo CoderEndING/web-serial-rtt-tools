@@ -41,3 +41,16 @@ n.register('scope', { resources: ['engine'], release: async () => {}, active: ()
 const pending = n.run('scope', () => assert.fail()); const checked = assert.rejects(pending, ProbeCancelled);
 await tick(); await n.releaseOthers(null); await checked;
 console.log('probe-manager: cross-tab release cancels queued Web Lock acquisition PASS');
+
+const k = new ProbeManager({ locks: null });
+let reconnect, scopeActive = false;
+k.register('scope', { resources: ['engine'], active: () => scopeActive, release: async () => {
+  k.cancel('scope'); await reconnect.catch(() => {}); scopeActive = false;
+} });
+k.register('rtt', { resources: ['engine'], active: () => false, release: async () => {} });
+await k.run('scope', async () => { scopeActive = true; });
+const takeover = k.run('rtt', async () => {});
+reconnect = k.run('scope', () => assert.fail('cancelled reconnect must not start'));
+const cancelledReconnect = assert.rejects(reconnect, ProbeCancelled);
+await takeover; await cancelledReconnect;
+console.log('probe-manager: preemption drains cancelled reconnect without waiting for its own queue PASS');
