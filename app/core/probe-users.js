@@ -1,16 +1,16 @@
 import { ProbeManager } from './probe-manager.js';
 
-// Current bulk drivers close/reset the whole USBDevice, so separate bulk interfaces
-// still conflict on usb-device. I2C has fixed PA28/PA29 pins, independent of SWD/SPI.
+// Bulk endpoints are independent. Target accesses still share one SWD/JTAG engine.
+// SPI/I2C bridges exist only on EVKLite: SPI2 PB10..15, debug PA04..08.
+// SPI auxiliary pads may use I2C's PA28/29, so retain their pin exclusion.
 export const PROBE_RESOURCES = Object.freeze({
-  dbg: ['target-engine', 'debug-pins', 'usb-device'],
-  rtt: ['target-engine', 'debug-pins', 'rtt-ring', 'usb-device'],
-  scope: ['target-engine', 'debug-pins', 'usb-device', 'scope-stream'],
+  dbg: ['target-engine', 'debug-pins', 'dap-bulk'],
+  rtt: ['target-engine', 'debug-pins', 'rtt-ring', 'dap-bulk'],
+  scope: ['target-engine', 'debug-pins', 'scope-stream'],
   hid: ['target-engine', 'debug-pins', 'rtt-ring', 'cdc-mode'],
-  // Auxiliary SPI pads are configurable, including PA28/PA29 and alternate-board debug pins.
-  spi: ['usb-device', 'spi-pins', 'i2c-pins', 'debug-pins'],
+  spi: ['spi-bulk', 'spi-pins', 'i2c-pins'],
   i2c: ['i2c-pins'],
-  flash: ['target-engine', 'debug-pins', 'rtt-ring', 'usb-device', 'scope-stream', 'cdc-mode', 'spi-pins', 'i2c-pins'],
+  flash: ['target-engine', 'debug-pins', 'rtt-ring', 'dap-bulk', 'cdc-mode'],
 });
 
 /** Resource declarations and teardown adapters are the only place that knows other features. */
@@ -40,6 +40,16 @@ export function createProbeManager(t, { bus = null, locks } = {}){
     () => !t.spiSession?.usingMock && !!t.spiSession?.busy);
   register('i2c', () => !t.i2c?.session?.usingMock && !!t.i2c?.session?.connected,
     async () => { t.i2c?.runner?.stop(); await t.i2c.session.disconnect(); });
+  manager.assertUsbResetAllowed = (kind, device) => {
+    const own = { dap: ['dbg', 'rtt', 'flash'], scope: ['scope'], spi: ['spi'] }[kind] || [];
+    const peers = [...manager.clients].filter(([id, c]) => !own.includes(id) &&
+      (manager.leases.has(id) || c.active())).map(([id]) => id);
+    let info = {};
+    try { info = t.session?.port?.getInfo?.() || {}; } catch {}
+    if (t.session?.isOpen && info.usbVendorId === device.vendorId && info.usbProductId === device.productId)
+      peers.push('CDC 串口');
+    if (peers.length) throw new Error(`USB 整设备复位需要先断开 ${[...new Set(peers)].join('、')}`);
+  };
   return manager;
 }
 

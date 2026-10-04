@@ -72,11 +72,11 @@ held.resolve(); await control;
 
 const burning = gate(); flash._flashOnce = async () => { events.push('flash:write'); await burning.promise; };
 const burn = flash.flash();
-await tick(); assert.equal(scope.running, false); assert.equal(i2c.connected, false);
+await tick(); assert.equal(scope.running, false); assert.equal(i2c.connected, true, 'independent I2C stays connected during target flash');
 assert.equal(events.at(-1), 'flash:write');
 assert.equal(await dbg.connect(), false, 'flash reservation rejects competing acquisition');
 burning.resolve(); await burn; assert.equal(flash.busy, false);
-assert.deepEqual(manager.summary().owners, []);
+assert.deepEqual(manager.summary().owners, ['i2c']);
 
 await spi.connectHid(false);
 assert.deepEqual(manager.summary().owners, ['spi']);

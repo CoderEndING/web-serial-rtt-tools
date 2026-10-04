@@ -6,6 +6,7 @@
 import { createProbeManager } from './core/probe-users.js';
 import { initTabs } from './ui/tabs.js';
 import { SerialSession } from './serial/session.js';
+import { setUsbResetGuard } from './core/usb-device.js';
 import { Assistant } from './serial/assistant.js';
 import { TerminalView } from './serial/terminal.js';
 import { RttView } from './rtt/view.js';
@@ -50,6 +51,7 @@ const i2c = new I2cView();
 const probeBus = new ProbeBus('page');
 const tools = { session, assistant, terminal, rtt, flash, gen, hid, stream, scope, spi, panel, dbg, i2c, spiSession, probeBus, summary, errors };
 const probeManager = createProbeManager(tools, { bus: probeBus });
+setUsbResetGuard((kind, device) => probeManager.assertUsbResetAllowed(kind, device));
 tools.probeManager = probeManager;
 for (const client of [dbg, flash, rtt, scope, hid, spiSession, i2c.session]) client.probeManager = probeManager;
 for (const view of [dbg, flash, rtt, scope, hid, i2c]) view.bus = probeBus;
