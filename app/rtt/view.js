@@ -528,8 +528,14 @@ export class RttView {
     clearTimeout(this.timer); clearTimeout(this._idleTimer); clearTimeout(this._resetTimer);
     if (this._disconnectPromise) return await this._disconnectPromise;
     this._disconnectPromise = this._disconnectNow();
-    try { return await this._disconnectPromise; }
-    finally { this._disconnectPromise = null; this.probeManager?.forget('rtt'); }
+    try {
+      const result = await this._disconnectPromise;
+      this.probeManager?.forget('rtt');
+      return result;
+    } catch (e){
+      this.probeManager?.fail('rtt', e);
+      throw e;
+    } finally { this._disconnectPromise = null; }
   }
 
   async _disconnectNow(){
@@ -540,9 +546,17 @@ export class RttView {
       this._recordBtn();
       if (info) toast(`记录已停止并保存：${info.name}（${fBytes(info.bytes)}）`, 'ok', 6000);
     }
-    try { if (this.probe?.disconnect) await this.probe.disconnect(); } catch {}
-    try { this.bridge?.close(); } catch {}
-    this.probe = null; this.bridge = null; this.rtt = null; this.stream = false;
+    let failure = null;
+    if (this.probe?.disconnect){
+      try { await this.probe.disconnect(); this.probe = null; }
+      catch (e){ failure = e; }
+    }
+    if (this.bridge?.close){
+      try { this.bridge.close(); this.bridge = null; }
+      catch (e){ failure ||= e; }
+    }
+    if (failure) throw failure;
+    this.rtt = null; this.stream = false;
     this.suppManual = false;
     if (this.suppressed) this._setSuppressed(false);
     this._uiConnected(false);

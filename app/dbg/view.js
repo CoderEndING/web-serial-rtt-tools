@@ -467,10 +467,16 @@ export class DbgView {
     this.cancelFlag = true;
     this.queue = [];
     this._disconnectPromise = this._disconnectNow();
-    try { return await this._disconnectPromise; }
+    try {
+      const result = await this._disconnectPromise;
+      if (!preserveAcquisition) this.probeManager?.forget('dbg');
+      return result;
+    } catch (e){
+      this.probeManager?.fail('dbg', e);
+      throw e;
+    }
     finally {
       this._disconnectPromise = null; this._disconnecting = false;
-      if (!preserveAcquisition) this.probeManager?.forget('dbg');
     }
   }
 
