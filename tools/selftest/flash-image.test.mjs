@@ -145,5 +145,43 @@ console.log('== 4. HEX 完整性：校验和 / 长度 / 段重叠（2026-10 代�
   ok(s.length === 1 && s[0].data.length === 8, '相邻不重叠的两段照常合并成 8 B');
 }
 
+console.log('== 5. 损坏 ELF 必须在烧录前拒绝 ==');
+{
+  const rejects = (buf, label) => {
+    let message = '';
+    try { parseElfImage(buf); } catch (e){ message = e.message; }
+    ok(/ELF/.test(message), label, message);
+  };
+  rejects(buildElf().subarray(0, 30), '拒绝截断文件头');
+  for (const [field, value, label] of [
+    [42, 8, '拒绝过小程序头项'], [46, 8, '拒绝过小节表项'],
+  ]){
+    const b = buildElf(); new DataView(b.buffer).setUint16(field, value, true); rejects(b, label);
+  }
+  const table = buildElf();
+  rejects(table.subarray(0, table.length - 1), '拒绝截断节表，不忽略最后一节');
+  const section = buildElf(), sdv = new DataView(section.buffer);
+  sdv.setUint32(sdv.getUint32(32, true) + 2 * 40 + 20, section.length, true);
+  rejects(section, '有正常代码节时也拒绝损坏启动头');
+  const stripped = buildElf(), pdv = new DataView(stripped.buffer);
+  pdv.setUint32(32, 0, true); pdv.setUint32(52 + 16, stripped.length, true);
+  rejects(stripped, '没有节表时拒绝截断 PT_LOAD，不接受 slice 截短');
+  const address = buildElf(); new DataView(address.buffer).setUint32(52 + 12, 0xfffffffc, true);
+  rejects(address, '拒绝加载段跨 u32 边界');
+  const framed = new Uint8Array(table.length + 9); framed.set(table, 5);
+  ok(parseElfImage(framed.subarray(5, 5 + table.length)).length === 2, '带 byteOffset 的正常 ELF 保持正确');
+}
+// F103CB 的 -funwind-tables ELF 使用 ARM_EXIDX；它不是 PROGBITS，但必须加载。
+for (const [type, label] of [[0x70000001, 'ARM_EXIDX 展开表'], [14, 'INIT_ARRAY 初始化数组']]){
+  const elf = buildElf(), dv = new DataView(elf.buffer);
+  const section = dv.getUint32(32, true) + 2 * 40;
+  dv.setUint32(section + 4, type, true);
+  const segments = parseElfImage(elf);
+  ok(segments.some(s => s.addr === 0x80001000 && s.data[0] === 1 && s.data[3] === 0xfc), `${label} 保留文件内容`);
+  dv.setUint32(section + 20, elf.length, true);
+  let message = '';
+  try { parseElfImage(elf); } catch (e){ message = e.message; }
+  ok(/截断|越界/.test(message), `${label} 截断时拒绝烧录`);
+}
 console.log(`\n${fail ? '❌' : '✅'} flash-image.test: ${pass} 通过 / ${fail} 失败`);
 process.exit(fail ? 1 : 0);

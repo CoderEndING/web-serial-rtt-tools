@@ -53,6 +53,14 @@ function mergeSegs(segs){
  */
 export function parseElfImage(u8){
   if (!(u8[0] === 0x7f && u8[1] === 0x45 && u8[2] === 0x4c && u8[3] === 0x46)) throw new Error('不是 ELF 文件（\\x7fELF 魔数不对）');
+  const fileRange = (off, size, label) => {
+    if (off > u8.byteLength || size > u8.byteLength - off)
+      throw new Error(`ELF ${label}被截断或越界，不能烧录`);
+  };
+  const addressRange = (addr, size) => {
+    if (addr + size > 0x100000000) throw new Error('ELF 加载地址跨 u32 边界，不能烧录');
+  };
+  fileRange(0, 52, '文件头');
   const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
   if (dv.getUint8(4) !== 1) throw new Error('只支持 32 位 ELF（STM32 都是）');
   if (dv.getUint8(5) !== 1) throw new Error('只支持小端 ELF');
@@ -61,14 +69,21 @@ export function parseElfImage(u8){
   const phoff = dv.getUint32(28, true);
   const phentsize = dv.getUint16(42, true);
   const phnum = dv.getUint16(44, true);
+  if (phnum){
+    if (!phoff || phentsize < 32) throw new Error('ELF 程序头表格式无效');
+    fileRange(phoff, phnum * phentsize, '程序头表');
+  }
   const loads = [];
   for (let i = 0; i < phnum; i++){
     const o = phoff + i * phentsize;
     if (dv.getUint32(o, true) !== 1) continue;                 // PT_LOAD
     const filesz = dv.getUint32(o + 16, true);
     if (!filesz) continue;
-    loads.push({ off: dv.getUint32(o + 4, true), vaddr: dv.getUint32(o + 8, true),
-                 paddr: dv.getUint32(o + 12, true), filesz });
+    const load = { off: dv.getUint32(o + 4, true), vaddr: dv.getUint32(o + 8, true),
+                   paddr: dv.getUint32(o + 12, true), filesz };
+    fileRange(load.off, filesz, 'PT_LOAD 数据');
+    addressRange(load.vaddr, filesz); addressRange(load.paddr, filesz);
+    loads.push(load);
   }
   const lmaOf = (addr, size) => {
     for (const L of loads){
@@ -77,12 +92,14 @@ export function parseElfImage(u8){
     return addr >>> 0;                                          // 不在段里：当作本来就在 flash（.boot_header 就是这种）
   };
 
-  // 再走节表：SHF_ALLOC(0x2) + PROGBITS(1) 且有大小 → 要烧
+  // 所有有文件内容的 ALLOC 节都要烧，包括 ARM_EXIDX 和初始化数组。
   const shoff = dv.getUint32(32, true);
   const shentsize = dv.getUint16(46, true);
   const shnum = dv.getUint16(48, true);
   const segs = [];
   if (shoff && shnum){
+    if (shentsize < 40) throw new Error('ELF 节表格式无效');
+    fileRange(shoff, shnum * shentsize, '节表');
     for (let i = 0; i < shnum; i++){
       const o = shoff + i * shentsize;
       const type = dv.getUint32(o + 4, true);
@@ -90,8 +107,9 @@ export function parseElfImage(u8){
       const addr = dv.getUint32(o + 12, true);
       const off = dv.getUint32(o + 16, true);
       const size = dv.getUint32(o + 20, true);
-      if (type !== 1 || !(flags & 0x2) || !size) continue;       // 只要 PROGBITS + ALLOC + 有内容
-      if (off + size > u8.byteLength) continue;                  // 越界就跳过（坏文件别把内存撑爆）
+      if (type === 0 || type === 8 || !(flags & 0x2) || !size) continue; // 排除 NULL、NOBITS 和非 ALLOC
+      fileRange(off, size, '可加载节数据');
+      addressRange(addr, size);
       segs.push({ addr: lmaOf(addr, size), data: u8.slice(off, off + size) });
     }
   }
