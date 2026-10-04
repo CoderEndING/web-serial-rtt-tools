@@ -16,3 +16,14 @@ for(const fail of [false,true]){
  assert.equal(v.running,false);assert.equal(v.transport.running,false);assert.equal(v._capturing,false);
 }
 console.log('scope-lifecycle: double start, cancellation during CONFIG/STATUS, STOP before USB drain PASS');
+{
+ const v=Object.create(ScopeView.prototype);let drained=false;
+ Object.assign(v,{hid:{},transport:{stop:async()=>{drained=true;}},hidXfer:async()=>{throw new Error('HID unavailable');}});
+ await assert.rejects(v._stopData(),/无法确认采样已停止/);assert.equal(drained,true,'USB still drained when control stop fails');
+}
+{
+ const v=Object.create(ScopeView.prototype);let stopped=0;
+ Object.assign(v,{selected:[],usingMock:true,mockVars:()=>[],syncButtons(){},setStatusText(){},_stopWatchdog(){},_stopData:async()=>{stopped++;}});
+ await v.start();assert.equal(stopped,0,'invalid start cannot stop someone else\'s engine');
+}
+console.log('scope-lifecycle: STOP errors propagate while USB drains; rejected input does not send STOP PASS');

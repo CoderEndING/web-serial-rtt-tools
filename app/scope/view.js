@@ -109,7 +109,7 @@ export class ScopeView {
     $('sc-varclear').addEventListener('click', () => { this.selected = []; this.renderVars(); this.updatePlan(); });
     $('sc-search').addEventListener('input', () => this.renderVars());
     $('sc-start').addEventListener('click', () => this.start());
-    $('sc-stop').addEventListener('click', () => this.stop());
+    $('sc-stop').addEventListener('click', () => this.stop().catch(e => this.setStatusText(e.message, 'err')));
     $('sc-target').addEventListener('change', () => this.applyTargetType());
     /**
      * 装载时就把「目标类型」对齐到**全局那个开关**（HID 0x31 action 10，与 RTT Viewer 共用、且是**粘**的）：
@@ -410,7 +410,8 @@ export class ScopeView {
    */
   async releaseProbe(reason = '别的页签要占用探针'){
     this._releasing = true;
-    try { await this.stop(reason); } catch { /* 忽略 */ }
+    let failure;
+    try { await this.stop(reason); } catch (e) { failure = e; }
     const t = this.transport;
     if (t){ this.transport = null; try { await t.close(); } catch { /* 忽略 */ } }
     const h = this.hid;
@@ -420,6 +421,7 @@ export class ScopeView {
     }
     const ui = $('sc-usbinfo'); if (ui) ui.textContent = '未连接数据端点';
     this._releasing = false;
+    if (failure){ this.setStatusText(failure.message, 'err'); throw failure; }
     this.setStatusText('已让出探针（' + reason + '）—— 需要时点「连接探针 / 数据端点」重新占用', 'warn');
     this.syncButtons();
     return true;
@@ -620,13 +622,16 @@ export class ScopeView {
     if (this.running || this._startPromise || this._stopPromise || this._releasing) return;
     const g = this._captureGen = (this._captureGen || 0) + 1;
     this._starting = true;
+    this._startTouched = false;
     this.syncButtons();
     this._startPromise = this._startOnce(g);
     try { return await this._startPromise; }
     finally {
       if (g === this._captureGen && !this.running){
         this._capturing = false; this._stopWatchdog();
-        await this._stopData();
+        if (this._startTouched || this.transport?.running){
+          try { await this._stopData(); } catch (e) { this.setStatusText('采样收尾失败：' + e.message, 'err'); }
+        }
       }
       this._starting = false; this._startPromise = null; this.syncButtons();
     }
@@ -635,8 +640,11 @@ export class ScopeView {
   _captureAlive(g){ return g === this._captureGen && !this._stopPromise && !this._releasing; }
 
   async _stopData(){
-    try { if (this.hid) await this.hidXfer(P.HID_CMD, P.flagsData(P.ACT.STOP)); } catch {}
-    try { await this.transport?.stop(); } catch {}
+    let failure;
+    try { if (this.hid) await this.hidXfer(P.HID_CMD, P.flagsData(P.ACT.STOP)); }
+    catch (e) { failure = e; }
+    try { await this.transport?.stop(); } catch (e) { failure ||= e; }
+    if (failure) throw new Error('无法确认采样已停止：' + failure.message);
   }
 
   async _startOnce(g){
@@ -765,6 +773,7 @@ export class ScopeView {
        *    页面显示"变量表为空（先在左侧选 1~8 个变量）"，而用户明明选了变量，方向全错。
        */
       if (!this._captureAlive(g)) return;
+      this._startTouched = true;
       this._captureFlags = flags;
       const cfgRes = await this.configureScope({ periodUs, flags, vars });
       if (!this._captureAlive(g)) return;
@@ -785,6 +794,7 @@ export class ScopeView {
        */
       await this.transport.start(chunk => { if (this._captureAlive(g)) this.onChunk(chunk); }, e => { if (this._captureAlive(g)) this._onDataPlaneDead(e); });
       if (!this._captureAlive(g)) return;
+      if (!this.transport.running) throw new Error('数据端点未能启动');
       this._startWatchdog();          // 采集中途断流的兜底（见 _onDataPlaneDead 的说明）
       this._awaitDefSince = performance.now();
       /**
@@ -884,6 +894,7 @@ export class ScopeView {
     this._captureGen = (this._captureGen || 0) + 1;
     this._stopPromise = this._stopOnce(reason);
     try { return await this._stopPromise; }
+    catch (e) { this.setStatusText(e.message, 'err'); throw e; }
     finally { this._stopPromise = null; this.syncButtons(); }
   }
 
