@@ -198,7 +198,7 @@ export class DbgView {
     on('d-step-over', 'click', () => this.stepOver());
     on('d-step-into', 'click', () => this.stepInto());
     on('d-step-out', 'click', () => this.stepOut());
-    on('d-mem-read', 'click', () => this._act('读内存', () => this.readMem()));
+    on('d-mem-read', 'click', () => this._act('读内存', () => this._readMemLocked()));
     // 🚨 writeMemEdit() **自己**已经包了 _act —— 这里再包一层会让内层看到 busy=true 直接退出，
     //    现象是"点了写入、日志只说正在忙、内存一个字节都没改"（本仓自测抓到的）
     on('d-mem-write', 'click', () => this.writeMemEdit());
@@ -429,11 +429,10 @@ export class DbgView {
       if (clk){ ensureSelectOption(clk, String(nowKhz), nowKhz + ' kHz'); clk.value = String(nowKhz); store.set('dbg.clock', clk.value); }
       this._out(`（实际用的是 SWD ${nowKhz} kHz —— 上面那格已同步）`, 'warn');
     }
-    await this.refreshAll();
+    await this.session.exclusive(() => this.refreshAll());
     this._syncButtons(true);
     this.renderBps();
     this._out(`目标${this.session.halted ? '处于**停止**状态' : '**正在运行**'}`, 'dim');
-    if (this.session.halted) await this.afterStop();
     if ($('d-rtt-on')?.checked) this.rttStart().catch(() => {});
     else if (!this.session.halted) this._startWatch();
     return true;
@@ -478,7 +477,7 @@ export class DbgView {
     await this.session.refresh();
     if (this.session.halted) await this.session.refreshRegs();
     this.renderRegs();
-    await this.readMem({ silent: true });
+    await this._readMemLocked({ silent: true });
     this.renderBps();
     this._syncButtons(true);
     const cap = $('d-bp-cap');
@@ -492,7 +491,7 @@ export class DbgView {
   /** 目标停下来之后要刷新的东西：PC 落点、源码行、监视值（三处一起，别漏） */
   async afterStop(){
     this._updatePcStrip();
-    await this.refreshWatch();
+    await this._refreshWatchLocked();
     await this.renderSource();
   }
 
@@ -667,7 +666,11 @@ export class DbgView {
 
   // ================================================================ 内存
 
-  async readMem({ silent = false } = {}){
+  async readMem(opts = {}){
+    return await this.session.exclusive(() => this._readMemLocked(opts));
+  }
+
+  async _readMemLocked({ silent = false } = {}){
     const addr = parseNumSafe($('d-mem-addr')?.value) ?? 0;
     let len = parseNumSafe($('d-mem-len')?.value) ?? 128;
     if (len < 1) len = 1;
@@ -760,7 +763,7 @@ export class DbgView {
       const back = await this.session.memRead(addr, bytes.length);
       const same = back.length === bytes.length && back.every((b, i) => b === bytes[i]);
       this._out(`写 ${hex32(addr)} ← ${[...bytes].map(b => b.toString(16).padStart(2, '0')).join(' ')}${same ? '（回读一致）' : '（⚠ 回读不一致）'}`, same ? 'ok' : 'err');
-      await this.readMem({ silent: true });
+      await this._readMemLocked({ silent: true });
     });
   }
 
@@ -775,7 +778,7 @@ export class DbgView {
     if (ma) ma.value = hex32(base);
     store.set('dbg.memAddr', hex32(base));          // 跟着存的也要跟着走，否则刷新后又跳回老地址
     this._memEditAddr = null;
-    await this.readMem({ silent: true });
+    await this._readMemLocked({ silent: true });
   }
 
   // ================================================================ 命令行
@@ -890,7 +893,15 @@ export class DbgView {
     let res;
     try {
       // 命令也是"一整段独占 SWD"：观察循环 / RTT 泵随时可能在读，交错一次就读出垃圾
-      res = await this.session.exclusive(() => runCmd(line, this.session, { view: this, signal: () => this.cancelFlag }));
+      res = await this.session.exclusive(async () => {
+        const result = await runCmd(line, this.session, { view: this, signal: () => this.cancelFlag });
+        this.renderRegs(); this.renderBps(); this._syncButtons();
+        const changedMem = /^(md|mw|ms|x)$/.test(line.split(/\s+/)[0].toLowerCase());
+        if (changedMem) await this._readMemLocked({ silent: true });
+        if (this.session.halted) await this.afterStop();
+        else this._startWatch();
+        return result;
+      });
     } catch (e){
       if (e?.cancelled){ this._out('（已中断）', 'warn'); return { cancelled: true, lines: [] }; }
       this._out('✗ ' + (e?.message || e), 'err');
@@ -898,12 +909,6 @@ export class DbgView {
     }
     if (res.clear) this._clearOut();
     for (const l of res.lines || []) this._out(l.t, l.c || '');
-    // 命令可能改了状态（继续/单步/复位/断点），按结果刷新界面
-    this.renderRegs(); this.renderBps(); this._syncButtons();
-    const changedMem = /^(md|mw|ms|x)$/.test(line.split(/\s+/)[0].toLowerCase());
-    if (changedMem) await this.readMem({ silent: true });
-    if (this.session.halted) await this.afterStop();
-    else this._startWatch();
     return res;
   }
 
@@ -946,7 +951,7 @@ export class DbgView {
         if (r.skipped) continue;
         if (this.rtt && polls % 2 === 0) await this.session.tryExclusive(() => this._rttPump());
         // 「运行中也刷新」开关（默认关）：直接读 RAM，目标照跑
-        if ($('d-watch-live')?.checked && polls % 2 === 0) await this.session.tryExclusive(() => this.refreshWatch());
+        if ($('d-watch-live')?.checked && polls % 2 === 0) await this.session.tryExclusive(() => this._refreshWatchLocked());
       } catch (e){
         this._out('✗ 观察目标时出错（继续试）：' + (e?.message || e), 'err');
         await waitMs(600);
@@ -1098,7 +1103,7 @@ export class DbgView {
     const wi = $('d-watch-in');
     if (wi && wi.value.trim() === e) wi.value = '';
     // 立刻读一次值给用户看；正忙（观察循环/别的动作在跑）就跳过，反正停下时会自动刷
-    this.session.tryExclusive(() => this.refreshWatch({ force: true })).catch(() => {});
+    this.session.tryExclusive(() => this._refreshWatchLocked({ force: true })).catch(() => {});
     return { ok: true, index: r.index, item: r.item };
   }
 
@@ -1121,7 +1126,11 @@ export class DbgView {
   }
 
   /** 把监视项的值读回来（停止时自动调；运行中看「运行中也刷新」开关） */
-  async refreshWatch({ force = false } = {}){
+  async refreshWatch(opts = {}){
+    return await this.session.exclusive(() => this._refreshWatchLocked(opts));
+  }
+
+  async _refreshWatchLocked({ force = false } = {}){
     if (!this.watch.length) return 0;
     if (!this.session.connected){ this.renderWatch(); return 0; }
     if (this.watchBusy) return 0;
