@@ -9,6 +9,7 @@
  *      → 回到「串口助手」打开这颗探针的 CDC 口（同一个 VCOM）就能看到 RTT 数据。
  */
 import { releaseLocalProbeUsers } from '../core/probe-users.js';
+import { runProbeOperation } from '../core/probe-manager.js';
 import { $, setStatus, debounce } from '../ui/dom.js';
 import { toast } from '../ui/toast.js';
 import { store } from '../core/store.js';
@@ -262,14 +263,17 @@ export class RttCdcView {
     const g = this._engineGen = (this._engineGen || 0) + 1;
     this._starting = true;
     clearInterval(this._timer);
-    this._activeTask = this._startBridgeNow(auto, g);
+    this._activeTask = runProbeOperation(this, 'hid', () => this._startBridgeNow(auto, g), {
+      mock: !!this.mock, reason: 'RTT 转发要使用探针',
+    });
     try { return await this._activeTask; }
+    catch (e){ this.render({ error: e.message }); return false; }
     finally { this._activeTask = null; this._starting = false; }
   }
 
   async _startBridgeNow(auto, g){
     try {
-      if (!this.mock){
+      if (!this.mock && !this.probeManager){
         await releaseLocalProbeUsers('hid', 'RTT 转发要使用探针');
         if (this.bus?.supported) await this.bus.requestRelease({ why: 'RTT 转发要使用探针' });
         if (g !== this._engineGen) return;
@@ -292,11 +296,16 @@ export class RttCdcView {
   }
 
   async stop(){
+    this.probeManager?.cancel('hid');
     if (this._stopPromise) return await this._stopPromise;
     this._engineGen = (this._engineGen || 0) + 1;
     clearInterval(this._timer);
     this._stopPromise = this._stopBridgeNow();
-    try { return await this._stopPromise; }
+    try {
+      const result = await this._stopPromise;
+      this.probeManager?.forget('hid');
+      return result;
+    }
     finally { this._stopPromise = null; }
   }
 
