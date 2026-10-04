@@ -37,3 +37,11 @@ releaseOpen(); slowDevice.open = async () => { slowDevice.opened = true; }; awai
 await assert.rejects(peer.open(), /独占复位/);
 await slow.close(); await peer.open(); await peer.close();
 console.log('usb-device: native timeout retains ownership and prevents late lifecycle races PASS');
+const abandonedDevice={...device,opened:false};
+const live=new UsbLease(abandonedDevice,'live'),orphan=new UsbLease(abandonedDevice,'failed setup');
+await live.open();await live.claim(5,[0x8b]);await orphan.open();await orphan.claim(0,[0x81]);
+await assert.rejects(orphan.close({dirty:true}),/先断开 live/);orphan.abandon();
+await assert.rejects(new UsbLease(abandonedDevice,'another').reset(),/先断开 live/,'abandoned setup cannot authorize resetting a live peer');
+await live.close();const next=new UsbLease(abandonedDevice,'next');await next.open();await next.claim(0,[0x81]);await next.close();
+assert.ok(!usbDeviceInUse(abandonedDevice),'exclusive recovery retires abandoned setup leases');
+console.log('usb-device: failed setup retains requests, later exclusive reconnect recovers abandoned handles PASS');

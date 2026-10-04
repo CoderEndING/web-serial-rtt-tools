@@ -47,9 +47,17 @@ export class UsbLease {
   }
   async _open(){
     const d = this.device;
+    const others = [...this.entry.clients].filter(c => c !== this);
+    // Failed setup may have no caller left to retry cleanup. Recover only after all
+    // live peers have released; abandoned native requests still require a reset.
+    if (others.length && others.every(c => c.abandoned)){
+      if (!d.opened) await this._io(() => d.open());
+      await this._reset();
+    }
     if (this.entry.fault) throw new Error('USB 生命周期状态未确认，需要独占复位恢复');
     // Reserve before open, so cleanup cannot close a handle during setup.
     this.entry.clients.add(this);
+    this.abandoned = false;
     if (!d.opened) await this._io(() => d.open());
     if (d.configuration === null) await this._io(() => d.selectConfiguration(1));
   }
@@ -83,14 +91,16 @@ export class UsbLease {
   }
   release(iface){ return this._run(() => this._release(iface)); }
   async _reset(){
-    const others = [...this.entry.clients].filter(c => c !== this);
+    const others = [...this.entry.clients].filter(c => c !== this && !c.abandoned);
     if (others.length) throw new Error(`USB 整设备复位需要先断开 ${others.map(c => c.owner).join('、')}`);
     await resetGuard?.(this.owner, this.device);
     await this._io(() => this.device.reset());
     this.entry.fault = false;
     this.entry.interfaces.clear();
     this.claims.clear();
+    for (const c of this.entry.clients) if (c.abandoned){ c.claims.clear(); this.entry.clients.delete(c); }
   }
+  abandon(){ this.abandoned = true; }
   reset(){ return this._run(() => this._reset()); }
   close({ dirty = false } = {}){
     return this._run(async () => {

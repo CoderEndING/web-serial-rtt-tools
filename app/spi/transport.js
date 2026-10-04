@@ -76,7 +76,7 @@ export class WebUsbSpiTransport {
     try { return await this._open(); }
     catch (e){
       try { await this._usb.close({ dirty: this.dirty }); }
-      catch (cleanup){ e.message += `；USB 清理未完成：${cleanup.message}`; }
+      catch (cleanup){ this._usb.abandon(); e.message += `；USB 清理未完成：${cleanup.message}`; }
       throw e;
     }
   }

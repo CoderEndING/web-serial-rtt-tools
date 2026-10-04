@@ -171,6 +171,7 @@ export class WebUsbDapProbe {
     try { await p._setup(opts); return p; }
     catch (e){
       try { await p._usb?.close({ dirty: dirty.has(p.device) }); } catch (cleanup){
+        p._usb?.abandon();
         e.message += `；USB 清理未完成：${cleanup.message}`;
       }
       throw e;
