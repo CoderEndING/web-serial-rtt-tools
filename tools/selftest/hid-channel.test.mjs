@@ -1,0 +1,36 @@
+import assert from 'node:assert/strict';
+import { AkaLinkHid } from '../../app/hid/probe.js';
+const tick = () => new Promise(r => setImmediate(r));
+const devices = [];
+function device(){
+  const listeners = new Set(), sent = [];
+  const d = { opened: false, closes: 0, sent,
+    open: async () => { d.opened = true; },
+    close: async () => { d.opened = false; d.closes++; },
+    addEventListener: (_e, fn) => listeners.add(fn), removeEventListener: (_e, fn) => listeners.delete(fn),
+    sendReport: async (_id, bytes) => sent.push(bytes[1]),
+    reply: cmd => { for (const fn of listeners) fn({ device: d, data: new DataView(Uint8Array.of(0, cmd, 0).buffer) }); },
+  }; devices.push(d); return d;
+}
+Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { hid: { addEventListener(){}, removeEventListener(){} } } });
+const d = device(), a = new AkaLinkHid(), b = new AkaLinkHid();
+await Promise.all([a.open(d), b.open(d)]);
+const first = a.xfer(0x32), second = b.xfer(0x32);
+await tick(); assert.deepEqual(d.sent, [0x32], 'one command in flight across clients');
+d.reply(0x32); await first; await tick(); assert.deepEqual(d.sent, [0x32, 0x32]);
+d.reply(0x32); await second;
+await a.close(); assert.equal(d.closes, 0, 'other client retains the HID handle');
+const active = b.xfer(0x31); const rejected = assert.rejects(active, /关闭/);
+await tick(); await b.close(); await rejected; assert.equal(d.closes, 1);
+
+const d2 = device(), d3 = device(), c = new AkaLinkHid(), e = new AkaLinkHid();
+await c.open(d2); await e.open(d3);
+const x = c.xfer(0x10), y = e.xfer(0x10); await tick();
+assert.equal(d2.sent.length, 1); assert.equal(d3.sent.length, 1, 'different devices execute concurrently');
+d2.reply(0x10); d3.reply(0x10); await Promise.all([x, y]);
+const held = c.xfer(0x31), queued = c.xfer(0x32);
+const heldCheck = assert.rejects(held, /关闭/), queuedCheck = assert.rejects(queued, /关闭|替换/);
+await tick(); await c.close(); await Promise.all([heldCheck, queuedCheck]);
+assert.deepEqual(d2.sent, [0x10, 0x31], 'queued request cannot reclaim a closed session');
+await e.close();
+console.log('hid-channel: shared response queue, handle reference ownership, independent devices and close cancellation PASS');

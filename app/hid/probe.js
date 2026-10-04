@@ -148,11 +148,29 @@ export function ascii(bytes){
 // WebHID 客户端
 // ============================================================================
 
+// A physical HID command channel has one request/reply queue, shared by every feature.
+// Different devices have independent queues; bulk/CDC streams do not use this registry.
+const hidChannels = new WeakMap();
+function channelFor(device){
+  let channel = hidChannels.get(device);
+  if (!channel){
+    channel = { clients: new Set(), chain: Promise.resolve() };
+    hidChannels.set(device, channel);
+  }
+  return channel;
+}
+function onChannel(channel, fn){
+  const p = channel.chain.then(fn);
+  channel.chain = p.catch(() => {});
+  return p;
+}
+
 export class AkaLinkHid {
   constructor(){
     this.device = null;
     this._pending = null;
     this._reqSeq = 0;                    // 请求身份序号（超时回调按它匹配，不按 cmd —— 见 _settle）
+    this._generation = 0;
     this.onDisconnect = null;
     this._onInput = this._handleInput.bind(this);
     this._onDisc = this._handleDisconnect.bind(this);
@@ -217,26 +235,39 @@ export class AkaLinkHid {
 
   async open(device){
     if (this.device && this.device !== device) await this.close();
-    if (!device.opened) await device.open();
-    this.device = device;
-    device.addEventListener('inputreport', this._onInput);
-    navigator.hid.addEventListener('disconnect', this._onDisc);
+    const channel = channelFor(device);
+    await onChannel(channel, async () => {
+      if (!device.opened) await device.open();
+      this.device = device;
+      channel.clients.add(this);
+      device.addEventListener('inputreport', this._onInput);
+      navigator.hid.addEventListener('disconnect', this._onDisc);
+    });
   }
 
   async close(){
     const d = this.device;
+    this._generation++;
     this.device = null;
+    const pending = this._pending;
+    this._settle(pending);
     this._pending = null;
+    pending?.reject(new Error('HID 会话已关闭'));
     if (!d) return;
     try { d.removeEventListener('inputreport', this._onInput); } catch {}
     try { navigator.hid.removeEventListener('disconnect', this._onDisc); } catch {}
-    try { if (d.opened) await d.close(); } catch {}
+    const channel = channelFor(d);
+    channel.clients.delete(this);
+    await onChannel(channel, async () => {
+      // Closing one view must not close the handle used by another view's command queue.
+      try { if (!channel.clients.size && d.opened) await d.close(); } catch {}
+    });
   }
 
   _handleInput(e){
     const p = this._pending;
     if (!p) return;                       // 没人等就算了（比如上一次超时后才回来的包）
-    const res = new Uint8Array(e.data.buffer);
+    const res = new Uint8Array(e.data.buffer, e.data.byteOffset || 0, e.data.byteLength);
     // 迟到的旧响应：**丢掉继续等**（不要拿它去满足新请求 —— 真机上踩过：
     // info() 并发发了 3 条，结果后面那条 AUTOSTART 收到了型号回包，状态字全是垃圾）
     if (res[1] !== p.cmd) return;
@@ -257,8 +288,8 @@ export class AkaLinkHid {
 
   _handleDisconnect(e){
     if (e.device !== this.device) return;
-    this.device = null;
-    this._pending = null;
+    // close() synchronously rejects the pending response and invalidates queued requests.
+    this.close().catch(() => {});
     this.onDisconnect?.();
   }
 
@@ -279,11 +310,18 @@ export class AkaLinkHid {
     return d;
   }
 
-  /** 发一条请求并等回包；同一时刻只允许一条在飞。
-   *  写失败（多半是探针被复位/拔插过、句柄过期）时**自动重新取设备再重试一次**；
-   *  仍失败则抛出带操作建议的错误 —— 别让用户只看到一句 "Failed to write the report"。 */
+  /** 同一物理 HID 通道串行请求/响应。失效句柄交给显式重连恢复，避免请求在释放后重新认领。 */
   async xfer(cmd, data, timeout = 3000){
     if (!this.connected) throw new Error('探针没连上');
+    const device = this.device, generation = this._generation;
+    return await onChannel(channelFor(device), async () => {
+      if (this.device !== device || generation !== this._generation || !this.connected)
+        throw new Error('HID 会话已关闭或替换');
+      return await this._xferNow(cmd, data, timeout, generation);
+    });
+  }
+
+  async _xferNow(cmd, data, timeout, generation){
     if (this._pending) throw new Error('上一条请求还没回来');
     const pkt = buildRequest(cmd, data);
     const once = async () => {
@@ -297,11 +335,13 @@ export class AkaLinkHid {
           if (this._pending === req){ this._pending = null; req.timer = null; reject(new Error(`探针 ${timeout}ms 没响应`)); }
         }, timeout);
       });
+      wait.catch(() => {}); // sendReport can fail before the response promise is awaited.
       try {
         await this.device.sendReport(1, pkt);
       } catch (e){
         this._settle(req);                  // 写失败：别把定时器留着
         if (this._pending === req) this._pending = null;
+        req.reject(e);
         throw e;
       }
       return await wait;
@@ -312,11 +352,13 @@ export class AkaLinkHid {
         res = await once();
       } catch (e){
         const msg = String(e?.message || e);
+        if (generation !== this._generation || !this.device) throw e;
         if (!/write the report|disconnect|not.*connected|NetworkError/i.test(msg)) throw e;
         this._pending = null;
         this.reconnects = (this.reconnects || 0) + 1;
-        await this._reacquire();                 // 探针重新枚举过：拿新句柄再试
-        res = await once();
+        // Opening through the same command queue here would deadlock. Retire this request;
+        // explicit reconnect performs recovery before later requests use the new handle.
+        throw new Error('HID 句柄失效，请点「重连」：' + msg);
       }
       return res;                                // res[1] 已保证 === cmd（见 _handleInput）
     } catch (e){
