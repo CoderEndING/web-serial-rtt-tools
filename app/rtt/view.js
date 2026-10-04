@@ -4,6 +4,7 @@
  * 显示三种：终端(ANSI，xterm) / 文本 / HEX —— 三种共用同一份 raw 记录，切换时重放，不丢历史。
  */
 import { releaseLocalProbeUsers } from '../core/probe-users.js';
+import { runProbeOperation } from '../core/probe-manager.js';
 import { $, seg, setFlag, setStatus, mhzLabel, ensureSelectOption } from '../ui/dom.js';
 import { toast } from '../ui/toast.js';
 import { store } from '../core/store.js';
@@ -356,20 +357,24 @@ export class RttView {
 
   // ================= 连接 =================
   async connectProbe(){
-    if (this._connectPromise || this._disconnectPromise) return;
+    if (this._connectPromise || this._disconnectPromise || this.probe || this.bridge) return;
     const g = this._sessionGen = (this._sessionGen || 0) + 1;
-    this._connectPromise = this._connectProbe(g);
+    const backend = $('r-backend')?.value || 'webusb';
+    this._probeMock = backend === 'mock';
+    this._connectPromise = runProbeOperation(this, 'rtt', () => this._connectProbe(g, backend), {
+      mock: this._probeMock, reason: 'RTT Viewer 要使用探针',
+    });
     try { return await this._connectPromise; }
+    catch (e){ this._err(e); return false; }
     finally {
       if (g !== this._sessionGen && (this.probe || this.bridge)) await this.disconnect();
       this._connectPromise = null;
     }
   }
 
-  async _connectProbe(g){
-    const b = $('r-backend').value;
+  async _connectProbe(g, b = $('r-backend').value){
     try {
-      if (b !== 'mock'){
+      if (b !== 'mock' && !this.probeManager){
         await releaseLocalProbeUsers('rtt', 'RTT Viewer 要使用探针');
         if (this.bus?.supported) await this.bus.requestRelease({ why: 'RTT Viewer 要使用探针' });
         if (g !== this._sessionGen) return;
@@ -382,7 +387,7 @@ export class RttView {
          *    数据（谁快谁拿走）。实测：桥跑着时 Viewer 仍能拿到 486~549 KB/s（探针固件会在 DAP
          *    活动时给 DAP 让路），但抢是双向的，先停更干净 —— 与烧录页 `_clearProbeUsers` 同一个规矩。
          */
-        const fw = window.__tools?.hid;
+        const fw = !this.probeManager && window.__tools?.hid;
         if (fw?.last?.running){
           try {
             await fw.stop();
@@ -517,13 +522,14 @@ export class RttView {
   }
 
   async disconnect(){
+    this.probeManager?.cancel('rtt');
     this._sessionGen = (this._sessionGen || 0) + 1;
     this.running = false;
     clearTimeout(this.timer); clearTimeout(this._idleTimer); clearTimeout(this._resetTimer);
     if (this._disconnectPromise) return await this._disconnectPromise;
     this._disconnectPromise = this._disconnectNow();
     try { return await this._disconnectPromise; }
-    finally { this._disconnectPromise = null; }
+    finally { this._disconnectPromise = null; this.probeManager?.forget('rtt'); }
   }
 
   async _disconnectNow(){
