@@ -66,7 +66,7 @@ export class RttCdcView {
     this._elfInput.addEventListener('change', () => this.loadElf());
     $('h-start').addEventListener('click', () => this.start());
     $('h-auto').addEventListener('click', () => this.autostart());
-    $('h-stop').addEventListener('click', () => this.stop());
+    $('h-stop').addEventListener('click', () => this.stop().catch(e => toast(e.message, 'err')));
     $('h-refresh').addEventListener('click', () => this.refresh());
     $('h-clock').addEventListener('change', debounce(() => this.applyClock(), 60));
 
@@ -253,38 +253,59 @@ export class RttCdcView {
     }
   }
 
-  async start(){
-    if (!await this._ensure()) return;
-    const p = this.params();
+  async start(){ return await this._startBridge(false); }
+  async autostart(){ return await this._startBridge(true); }
+
+  async _startBridge(auto){
+    if (this._starting || this._stopPromise) return;
+    const g = this._engineGen = (this._engineGen || 0) + 1;
+    this._starting = true;
+    clearInterval(this._timer);
+    this._activeTask = this._startBridgeNow(auto, g);
+    try { return await this._activeTask; }
+    finally { this._activeTask = null; this._starting = false; }
+  }
+
+  async _startBridgeNow(auto, g){
     try {
-      // RISC-V 下也要发这条（发的是 clock=0）：把探针里可能残留的 SWD 时钟/DMI delay 清掉
-      if ((p.clockHz || this.isRiscv) && !this.mock) await this.dev.configure({ clockHz: p.clockHz });
+      if (!await this._ensure() || g !== this._engineGen) return;
+      const p = this.params();
+      if (!auto && (p.clockHz || this.isRiscv) && !this.mock) await this.dev.configure({ clockHz: p.clockHz });
+      if (g !== this._engineGen) return;
       const before = this.last?.startRc ?? 0;
-      await this.dev.start(p);
+      const response = auto ? await this.dev.autostart() : await this.dev.start(p);
+      if (g !== this._engineGen) return;
+      if (response?.rc < 0 && response.rc !== START_PENDING) throw new Error(startRcText(response.rc));
       this.persist();
-      await this._settle(before);
+      await this._settle(before, 3000, g);
     } catch (e){
+      if (g !== this._engineGen) return;
       this.render({ error: e?.message || String(e) });
       toast('启动转发失败：' + (e?.message || e), 'err');
     }
   }
 
-  async autostart(){
-    if (!await this._ensure()) return;
-    try {
-      const before = this.last?.startRc ?? 0;
-      await this.dev.autostart();
-      await this._settle(before);
-    } catch (e){
-      this.render({ error: e?.message || String(e) });
-      toast('自动搜控制块失败：' + (e?.message || e), 'err');
-    }
+  async stop(){
+    if (this._stopPromise) return await this._stopPromise;
+    this._engineGen = (this._engineGen || 0) + 1;
+    clearInterval(this._timer);
+    this._stopPromise = this._stopBridgeNow();
+    try { return await this._stopPromise; }
+    finally { this._stopPromise = null; }
   }
 
-  async stop(){
+  async _stopBridgeNow(){
     try {
+      if (this._activeTask) await this._activeTask.catch(() => {});
       const r = await this.dev.stop();
+      if (r?.rc < 0 && r.rc !== START_PENDING) throw new Error(startRcText(r.rc));
       this.last = r.status;
+      const deadline = Date.now() + 3000;
+      while (this.last?.running){
+        if (Date.now() >= deadline) throw new Error('停止 RTT 转发超时（探针还在运行）');
+        await waitMs(40);
+        this.last = (await this.dev.status()).status;
+      }
       this._stall = 0; this._lastMoved = null;
       clearInterval(this._timer);
       this.render();
@@ -302,10 +323,12 @@ export class RttCdcView {
       }
     } catch (e){
       this.render({ error: e?.message || String(e) });
+      throw e;
     }
   }
 
   async refresh(){
+    if (this._starting || this._stopPromise || this.dev._pending) return;
     try {
       const r = await this.dev.status();
       this._noteProgress(r.status);
@@ -342,10 +365,12 @@ export class RttCdcView {
    * 启动是**排队**的（探针在主循环里做 SWD），所以这里轮询几次等结果：
    * 起来 / 返回码变了 / 超时，三种情况都会停。
    */
-  async _settle(prevRc, timeout = 3000){
+  async _settle(prevRc, timeout = 3000, generation){
     const t0 = Date.now();
     for (;;){
+      if (generation !== undefined && generation !== this._engineGen) return;
       const r = await this.dev.status();
+      if (generation !== undefined && generation !== this._engineGen) return;
       this._noteProgress(r.status);
       this.last = r.status;
       this.render();

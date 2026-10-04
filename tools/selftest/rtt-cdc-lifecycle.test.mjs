@@ -1,0 +1,11 @@
+import assert from 'node:assert/strict';
+import {RttCdcView} from '../../app/hid/view.js';
+const gate=()=>{let resolve;const promise=new Promise(r=>resolve=r);return {promise,resolve};};
+const tick=()=>new Promise(r=>setImmediate(r));
+globalThis.document={getElementById:()=>null};globalThis.window={};
+const wait=gate(),events=[];let starts=0,status=0;
+const v=Object.create(RttCdcView.prototype);Object.assign(v,{_ensure:()=>wait.promise,params:()=>({}),persist(){},render(){},dev:{stop:async()=>{events.push('stop');return {rc:0,status:{running:true}};},status:async()=>{status++;return {status:{running:false}};},start:async()=>{starts++;}}});
+const start=v.start();await v.start();const stop=v.stop();await tick();assert.deepEqual(events,[]);wait.resolve(true);await Promise.all([start,stop]);
+assert.equal(starts,0);assert.deepEqual(events,['stop']);assert.equal(status,1);assert.equal(v.last.running,false);
+v.dev.stop=async()=>{throw new Error('link failed');};await assert.rejects(v.stop(),/link failed/);assert.equal(v._stopPromise,null);
+console.log('rtt-cdc-lifecycle: stop cancels pending start, waits for firmware STOP completion, propagates failure PASS');

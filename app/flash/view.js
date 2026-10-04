@@ -163,9 +163,9 @@ export class FlashView {
       } catch (e){ this._log('J-Scope 让出探针失败（继续试）：' + (e?.message || e)); }
     }
     const fw = window.__tools?.hid;
-    if (fw?.last?.running){
+    if (fw?.last?.running || fw?._starting){
       try { await fw.stop(); this._log('已停掉「RTT 转发」的探针桥（它一直在轮询目标内存）'); }
-      catch (e){ this._log('停 RTT 转发失败（继续试）：' + (e?.message || e)); }
+      catch (e){ throw new Error('无法停止 RTT 转发：' + (e?.message || e)); }
     }
     if (this.bus?.supported){
       const r = await this.bus.requestRelease({ why: `烧录 ${name || ''}`.trim() });
