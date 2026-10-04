@@ -1093,7 +1093,10 @@ export class DbgView {
   /** 供页面自测和「内置 F103」按钮使用；用户选择的任意 .svd 也走同一入口。 */
   async loadBundledSvd(){
     try {
-      const r = await fetch('/app/dbg/svd/STM32F103xx.svd?t=' + Date.now(), { cache: 'no-store' });
+      // GitHub Pages 以仓库名作为站点前缀（/web-serial-rtt-tools/），不能从域名根目录取文件。
+      // 以当前 ES 模块为基准后，本地 127.0.0.1 和项目站点都会落到同一个 SVD 文件。
+      const url = new URL('./svd/STM32F103xx.svd?t=' + Date.now(), import.meta.url);
+      const r = await fetch(url, { cache: 'no-store' });
       if (!r.ok) throw new Error('HTTP ' + r.status);
       return this.loadSvdText(await r.text(), 'STM32F103xx.svd（内置）');
     } catch (e){
