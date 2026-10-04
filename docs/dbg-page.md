@@ -440,3 +440,6 @@ node tools\selftest\dbg-hw-riscv.mjs   # 57 项（等价 make test-dbg-riscv）
 node tmp\rv-gdb-oracle.mjs             # 生成 tmp/rv-gdb-oracle.json 后再跑上面那条 → 60 项
 ```
 
+
+
+DWT 数据观察点与 bt 调用栈的新增命令、支持范围和验收步骤见 [使用说明](debug-watch-backtrace.md)。

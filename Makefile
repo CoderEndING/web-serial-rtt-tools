@@ -125,8 +125,14 @@ test-i2c-page: page-prep
 
 # 调试器页的逻辑层（纯 Node）：寄存器位域 / FPB 断点编码 / 命令解析 / 符号表 +
 # 拿内置假目标真跑一遍「连接 → 读寄存器 → 写内存 → 下断点 → 继续 → 命中断点 → 单步 → 复位」
-test-dbg:
+test-dbg: test-dbg-features
 	$(NODE) tools/selftest/dbg-core.test.mjs
+
+.PHONY: test-dbg-features
+test-dbg-features:
+	$(NODE) tools/selftest/dbg-dwt.test.mjs
+	$(NODE) tools/selftest/dbg-backtrace.test.mjs
+	$(NODE) tools/selftest/dbg-watch-bt-ui.test.mjs
 
 # 调试器页的真页面自测（CDP，不需要硬件；用的是页面里的假目标）
 test-dbg-page: page-prep
