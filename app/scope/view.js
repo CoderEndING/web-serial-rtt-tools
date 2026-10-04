@@ -433,6 +433,13 @@ export class ScopeView {
    */
   async releaseProbe(reason = '别的页签要占用探针'){
     this.probeManager?.cancel('scope');
+    if (this._releasePromise) return await this._releasePromise;
+    this._releasePromise = this._releaseProbeNow(reason);
+    try { return await this._releasePromise; }
+    finally { this._releasePromise = null; }
+  }
+
+  async _releaseProbeNow(reason){
     this._releasing = true;
     let failure;
     try { await this.stop(reason); } catch (e) { failure = e; }

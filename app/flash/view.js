@@ -171,6 +171,7 @@ export class FlashView {
 
   async flash(){
     if (this.busy) return;
+    if (!this.file && !String($('f-path')?.value || '').trim()) return await this._flashOnce();
     // Reserve the whole lifecycle before preparation can yield.
     this.busy = true;
     $('f-flash').disabled = true;
