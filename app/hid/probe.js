@@ -171,6 +171,7 @@ export class AkaLinkHid {
     this._pending = null;
     this._reqSeq = 0;                    // 请求身份序号（超时回调按它匹配，不按 cmd —— 见 _settle）
     this._generation = 0;
+    this._requests = new Set();
     this.onDisconnect = null;
     this._onInput = this._handleInput.bind(this);
     this._onDisc = this._handleDisconnect.bind(this);
@@ -248,6 +249,7 @@ export class AkaLinkHid {
   async close(){
     const d = this.device;
     this._generation++;
+    for (const controller of this._requests) controller.abort();
     this.device = null;
     const pending = this._pending;
     this._settle(pending);
@@ -314,11 +316,28 @@ export class AkaLinkHid {
   async xfer(cmd, data, timeout = 3000){
     if (!this.connected) throw new Error('探针没连上');
     const device = this.device, generation = this._generation;
-    return await onChannel(channelFor(device), async () => {
-      if (this.device !== device || generation !== this._generation || !this.connected)
-        throw new Error('HID 会话已关闭或替换');
-      return await this._xferNow(cmd, data, timeout, generation);
-    });
+    const controller = new AbortController();
+    this._requests.add(controller);
+    try {
+      return await onChannel(channelFor(device), async () => {
+        const execute = async () => {
+          if (this.device !== device || generation !== this._generation || !this.connected)
+            throw new Error('HID 会话已关闭或替换');
+          return await this._xferNow(cmd, data, timeout, generation);
+        };
+        // Passive status handles in another tab also use the same command channel.
+        // WebHID exposes no stable per-device ID: absent a serial, coordinate this VID/PID conservatively.
+        const locks = globalThis.navigator?.locks;
+        if (locks?.request){
+          const key = `web-serial-rtt-tools/hid:${device.vendorId}:${device.productId}:${device.serialNumber || ''}`;
+          return await locks.request(key, { signal: controller.signal }, execute);
+        }
+        return await execute();
+      });
+    } catch (e){
+      if (controller.signal.aborted && e.name === 'AbortError') throw new Error('HID 会话已关闭');
+      throw e;
+    } finally { this._requests.delete(controller); }
   }
 
   async _xferNow(cmd, data, timeout, generation){
