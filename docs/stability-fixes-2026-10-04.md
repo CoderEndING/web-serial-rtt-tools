@@ -15,6 +15,7 @@
 - RTT 复位先排空读；USB 断开期间不接受新事务，不允许迟到超时重新打开连接。
 - RTT→CDC 的 STOP 等待探针完成；待启动流程可取消；后台状态查询避让用户动作。
 - J-Scope 启动、停止、让出探针有独立状态与代号，STOP 可以取消正在等待 STATUS 的 START。
+- 正常停止先取消读的重挂载，让生产者完成已提交读；不必每次启停都 reset USB。
 - 未退出的 native USB 读在重启前通过 reset/close 清理并等待结束；更换 transport 仍保留这笔账。
 - J-Scope 看门狗按每包样本数与周期计算，慢采样不会被固定 2.5 秒阈值误杀。
 - 网页禁止运行中切后端和采样中做标定；固件拒绝运行中全局后端切换，RTT action 10 返回 -7。
@@ -48,3 +49,12 @@ python script_test/test_scope_hss_test.py
 
 高速数据循环没有新增逐样本或逐包的异步等待；新增交接检查主要位于连接与启停路径。
 吞吐、USB reset 后 HID 重取、真实芯片 flashloader 行为仍需上板验证；离线测试不代替这些结果。
+
+## 本轮验证结果
+
+- `make test-stability`：15 组针对性回归全部通过。
+- 原有 RTT/HID、J-Scope 协议/传输/存储、烧录解析/HPM、DWT/bt、探针协调共 12 组检查：
+  11 组通过；`dbg-core` 为 318 通过 / 1 失败（缺少上述已有 ELF fixture）。
+- JavaScript 语法检查：205 个模块通过；Liquid 检查：53 个 Markdown 通过。
+- 算法表离线校验通过；固件 TARGET 拒绝、采样器主机测试、8 个测量脚本测试通过。
+- 当前环境没有设备和 HPM SDK，未执行真实 USB、上板吞吐或完整固件构建。

@@ -12,4 +12,4 @@
  * `main.js` 会把它显示在标题栏，并在加载后做一次自检：用 cache-buster 重新拉本文件，
  * 若里面的 BUILD 与内存里的不一致 → 说明页面是旧的，提示刷新。
  */
-export const BUILD = '2026-10-04 (RISC-V/JTAG 通路修复：不读 XIP 里的通道名 · 连接期 SBA 三级自愈 · 转发前抽干积压 · 抽象命令 cmderr 自愈 · 调试跨断点单步后不再打空；HPM6800EVK 全流程首次跑通；HSS 小数周期与吞吐优化，待上板；DWT 观察点 / bt 栈回溯)';
+export const BUILD = '2026-10-04 (RISC-V/JTAG 通路修复：不读 XIP 里的通道名 · 连接期 SBA 三级自愈 · 转发前抽干积压 · 抽象命令 cmderr 自愈 · 调试跨断点单步后不再打空；HPM6800EVK 全流程首次跑通；HSS 小数周期与吞吐优化，待上板；DWT 观察点 / bt 栈回溯；调试/烧录/RTT/J-Scope 会话稳定性修复)';
