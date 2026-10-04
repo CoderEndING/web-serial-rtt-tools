@@ -402,16 +402,17 @@ export class DbgView {
 
   async connect(){
     if (this._connecting || this._disconnecting) return false;
+    const generation = this._connectionGen = (this._connectionGen || 0) + 1;
     this._connecting = true;
     try {
-      return await runProbeOperation(this, 'dbg', () => this._connectNow(), {
+      return await runProbeOperation(this, 'dbg', () => this._connectNow(generation), {
         mock: $('d-backend')?.value === 'mock', reason: '调试器要使用探针',
       });
     } catch (e){ this._out('✗ 连接失败：' + e.message, 'err'); toast(e.message, 'err'); return false; }
     finally { this._connecting = false; this._connectionTask = null; }
   }
 
-  async _connectNow(){
+  async _connectNow(generation = this._connectionGen = (this._connectionGen || 0) + 1){
     const backend = $('d-backend')?.value || 'webusb';
     const mock = backend === 'mock';
     const riscv = backend === 'riscv';
@@ -421,7 +422,7 @@ export class DbgView {
      * 正常路径上 `_syncBackend()` 已经换过了，这里再兜一次（幂等）。
      */
     await this._ensureSession(riscv, { preserveAcquisition: true });
-    const generation = this._connectionGen = (this._connectionGen || 0) + 1;
+    if (this._disconnecting || generation !== this._connectionGen) return false;
     const clockKhz = Number($('d-clock')?.value) || DEFAULT_CLOCK_KHZ;
     this._out('', 'dim');
     this._out(`──── 连接（${mock ? '模拟目标' : riscv ? 'RISC-V/JTAG' : 'WebUSB'}${mock ? '' : ` · ${clockKhz} kHz`}）────`, 'dim');
@@ -460,7 +461,7 @@ export class DbgView {
 
   async disconnect({ preserveAcquisition = false } = {}){
     if (!preserveAcquisition) this.probeManager?.cancel('dbg');
-    this._connectionGen = (this._connectionGen || 0) + 1;
+    if (!preserveAcquisition) this._connectionGen = (this._connectionGen || 0) + 1;
     if (this._disconnectPromise) return await this._disconnectPromise;
     this._disconnecting = true;
     this.cancelFlag = true;
