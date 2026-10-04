@@ -3,6 +3,7 @@
  * 串口助手与终端共用同一个串口会话（一个 COM 口只能被一个程序打开，
  * 两个标签是同一路数据的两种看法）；RTT 是独立的调试器会话。
  */
+import { releaseLocalProbeUsers } from './core/probe-users.js';
 import { initTabs } from './ui/tabs.js';
 import { SerialSession } from './serial/session.js';
 import { Assistant } from './serial/assistant.js';
@@ -78,39 +79,9 @@ initTabs(name => {
  */
 const probeBus = new ProbeBus('page');
 probeBus.onRelease = async why => {
-  if (flash.busy) throw new Error('本页正在烧录或读取目标身份，完成后才能释放探针');
-  const done = [];
-  try {
-    if (rtt.probe || rtt.bridge){ await rtt.disconnect(); done.push('RTT 会话'); }
-  } catch { /* 让出失败也要继续让别的 */ }
-  try {
-    if (scope.running || scope.transport || (scope.hid && scope.hid !== scope.mockProbe)){
-      await scope.releaseProbe(why || '别的页签要占用探针');
-      done.push('J-Scope 会话');
-    }
-  } catch { /* 同上 */ }
-  try {
-    if (hid.last?.running){ await hid.stop(); done.push('RTT 转发（探针桥）'); }
-  } catch { /* 同上 */ }
-  try {
-    // SPI 桥：既占 HID（配置）又占 USB 接口（数据面），别的页签要用探针时必须两边都放掉
-    if (spiSession.connected || spiSession.dataReady){ await spiSession.teardown(); done.push('SPI 桥会话'); }
-  } catch { /* 同上 */ }
-  try {
-    // 调试器：占着探针（可能还在单步/轮询），让位时一并断开
-    if (dbg.session?.connected){ await dbg.disconnect(); done.push('调试会话'); }
-  } catch { /* 同上 */ }
-  try {
-    // USB→I2C 桥：占着 HID（而且可能正在跑 while(1) 定时读），让位时连会话一起停
-    if (i2c.runner?.running) i2c.runner.stop();
-    if (i2c.session?.connected){ await i2c.session.disconnect(); done.push('I2C 桥会话'); }
-  } catch { /* 同上 */ }
-  // 🚨 最后一步**必须**把本页签的探针 USB 句柄都关掉：视图那边可能早就"断开"了、
-  //    只是引用丢了没 close()，而浏览器仍然认为接口被这个页签占着 —— 不关的话
-  //    请求方那边怎么重试都认领不上（见 core/probe-bus.js 的 closeProbeUsbDevices）。
+  await releaseLocalProbeUsers(null, why || '另一个页签要使用探针');
   const closed = await closeProbeUsbDevices();
-  if (closed) done.push(`关闭 ${closed} 个残留 USB 句柄`);
-  if (done.length) console.info('[probe-bus] 已让出：' + done.join('、'));
+  if (closed) console.info(`[probe-bus] 已释放探针会话，关闭 ${closed} 个 USB 句柄`);
 };
 /** 让出的记录也让用户看得见（页签之间的事不该神神秘秘的） */
 probeBus.log = s => { try { toast(s, 'warn', 4000); } catch {} };

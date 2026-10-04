@@ -8,3 +8,6 @@ await releaseLocalProbeUsers('hid');assert.deepEqual(events,['debug','viewer','s
 events.length=0;await releaseLocalProbeUsers('scope');assert.deepEqual(events,['debug','viewer','bridge']);
 events.length=0;globalThis.__tools.hid.stop=async()=>{throw new Error('STOP not complete');};await assert.rejects(releaseLocalProbeUsers('flash'),/STOP not complete/);
 delete globalThis.__tools;console.log('probe-users: busy flash rejects takeover; same-page target readers stop; failed STOP aborts handoff PASS');
+globalThis.__tools={hid:{last:{running:false},dev:{connected:true},stop:()=>assert.fail('idle HID handle does not own the global bridge')}};
+await releaseLocalProbeUsers(null);delete globalThis.__tools;
+console.log('probe-users: passive HID connections cannot stop an engine owned by another page PASS');

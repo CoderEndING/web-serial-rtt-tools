@@ -13,7 +13,7 @@ export async function releaseLocalProbeUsers(keep, why = '另一个功能要使�
   if (keep !== 'scope' && sc && (sc.running || sc._starting || sc.transport || (sc.hid && sc.hid !== sc.mockProbe)))
     await sc.releaseProbe(why);
   const fw = t.hid;
-  if (keep !== 'hid' && fw && (fw.last?.running || fw._starting || (fw.dev?.connected && !fw.mock))) await fw.stop();
+  if (keep !== 'hid' && fw && (fw.last?.running || fw._starting)) await fw.stop();
   if (t.spiSession?.connected || t.spiSession?.dataReady) await t.spiSession.teardown();
   if (t.i2c?.runner?.running) t.i2c.runner.stop();
   if (t.i2c?.session?.connected) await t.i2c.session.disconnect();
