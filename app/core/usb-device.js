@@ -16,28 +16,38 @@ function entryFor(device){
 export function usbDeviceInUse(device){ return !!entryFor(device).clients.size; }
 
 export class UsbLease {
-  constructor(device, owner){
+  constructor(device, owner, { timeoutMs = 5000 } = {}){
     this.entry = entryFor(device);
     this.device = this.entry.device;
     this.owner = owner;
+    this.timeoutMs = timeoutMs;
     this.claims = new Map();
   }
   _run(fn){
     const e = this.entry;
-    const p = e.chain.then(fn);
+    const p = e.chain.then(() => {
+      if (e.unsettled) throw new Error('上一次 USB 生命周期操作仍未退出，请等待或拔插探针');
+      return fn();
+    });
     e.chain = p.catch(() => {});
     return p;
   }
   async _io(fn){
-    let timer;
+    let timer, timedOut = false;
+    const native = Promise.resolve().then(fn);
+    native.then(() => { if (timedOut) this.entry.unsettled = false; }, () => { if (timedOut) this.entry.unsettled = false; });
     try {
-      return await Promise.race([Promise.resolve().then(fn), new Promise((_, reject) => {
-        timer = setTimeout(() => reject(new Error('USB 生命周期操作超时，请断开其它功能后重试恢复')), 5000);
+      return await Promise.race([native, new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          timedOut = true; this.entry.unsettled = true; this.entry.fault = true;
+          reject(new Error('USB 生命周期操作超时，请断开其它功能后重试恢复'));
+        }, this.timeoutMs);
       })]);
     } finally { clearTimeout(timer); }
   }
   async _open(){
     const d = this.device;
+    if (this.entry.fault) throw new Error('USB 生命周期状态未确认，需要独占复位恢复');
     // Reserve before open, so cleanup cannot close a handle during setup.
     this.entry.clients.add(this);
     if (!d.opened) await this._io(() => d.open());
@@ -77,13 +87,14 @@ export class UsbLease {
     if (others.length) throw new Error(`USB 整设备复位需要先断开 ${others.map(c => c.owner).join('、')}`);
     await resetGuard?.(this.owner, this.device);
     await this._io(() => this.device.reset());
+    this.entry.fault = false;
     this.entry.interfaces.clear();
     this.claims.clear();
   }
   reset(){ return this._run(() => this._reset()); }
   close({ dirty = false } = {}){
     return this._run(async () => {
-      if (dirty) await this._reset(); // Failure retains the lease and native requests.
+      if (dirty || this.entry.fault) await this._reset(); // Failure retains the lease and native requests.
       for (const iface of [...this.claims.keys()]) await this._release(iface);
       if (this.entry.clients.size <= 1) await this._io(() => this.device.close());
       this.entry.clients.delete(this);

@@ -27,3 +27,13 @@ assert.equal(a.device, b.device); await a.open(); assert.ok(usbDeviceInUse(alias
 const noSerialA = new UsbLease({...device}, 'a'), noSerialB = new UsbLease({...device}, 'b');
 assert.notEqual(noSerialA.device, noSerialB.device);
 console.log('usb-device: shared lifecycle, endpoint exclusion, interface refs, guarded reset, alias identity PASS');
+// A timed-out native lifecycle operation must not later close a newly acquired peer.
+let releaseOpen;
+const slowDevice = {...device, opened:false, open:() => new Promise(r => { releaseOpen = () => {slowDevice.opened=true;r();}; })};
+const slow = new UsbLease(slowDevice, 'slow', {timeoutMs:5}), peer = new UsbLease(slowDevice, 'peer');
+await assert.rejects(slow.open(), /超时/);
+await assert.rejects(peer.open(), /仍未退出/);
+releaseOpen(); slowDevice.open = async () => { slowDevice.opened = true; }; await new Promise(r => setImmediate(r));
+await assert.rejects(peer.open(), /独占复位/);
+await slow.close(); await peer.open(); await peer.close();
+console.log('usb-device: native timeout retains ownership and prevents late lifecycle races PASS');
