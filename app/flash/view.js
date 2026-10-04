@@ -15,6 +15,7 @@
  * 与 RTT Viewer 复用同一个探针：同一时刻只能有一个占用，开烧前会把在跑的 RTT 会话断开。
  */
 import { releaseLocalProbeUsers } from '../core/probe-users.js';
+import { runProbeOperation } from '../core/probe-manager.js';
 import { $, setStatus } from '../ui/dom.js';
 import { toast } from '../ui/toast.js';
 import { store } from '../core/store.js';
@@ -147,12 +148,12 @@ export class FlashView {
    */
   async _clearProbeUsers(name){
     const rtt = window.__tools?.rtt;
-    if (rtt && (rtt.probe || rtt.bridge)){
+    if (!this.probeManager && rtt && (rtt.probe || rtt.bridge)){
       if (!confirm('RTT 会话正占用探针，烧录需要先断开它。继续吗？')) return false;
       await rtt.disconnect();
     }
     await releaseLocalProbeUsers('flash', '烧录器要使用探针');
-    if (this.bus?.supported){
+    if (!this.probeManager && this.bus?.supported){
       const r = await this.bus.requestRelease({ why: `烧录 ${name || ''}`.trim() });
       if (r.asked) this._log(`跨页签协调：请 ${r.asked} 个其他页签让出探针，${r.acked} 个确认（等了 ${r.ms} ms）`
         + (r.ghosts ? `；其中 ${r.ghosts} 个已经不在（关掉的页签/被浏览器冻结），以后不再等它们` : ''));
@@ -173,8 +174,8 @@ export class FlashView {
     // Reserve the whole lifecycle before preparation can yield.
     this.busy = true;
     $('f-flash').disabled = true;
-    try { return await this._flashOnce(); }
-    finally { this.busy = false; $('f-flash').disabled = false; }
+    try { return await runProbeOperation(this, 'flash', () => this._flashOnce(), { reason: '烧录器要使用探针' }); }
+    finally { this.busy = false; this.probeManager?.forget('flash'); $('f-flash').disabled = false; }
   }
 
   async _flashOnce(){
@@ -277,6 +278,14 @@ export class FlashView {
     if (this.busy){ this._err(new Error('正在忙（烧录 / 读身份）—— 等它跑完再点')); return; }
     this.busy = true;
     if ($('f-idcode')) $('f-idcode').disabled = true;
+    try { return await runProbeOperation(this, 'flash', () => this._readIdcodeOnce(), { reason: '读取目标身份' }); }
+    finally {
+      this.busy = false; this.probeManager?.forget('flash');
+      if ($('f-idcode')) $('f-idcode').disabled = false;
+    }
+  }
+
+  async _readIdcodeOnce(){
     const t0 = Date.now();
     try {
       if (!(await this._clearProbeUsers('读取目标身份'))) return;
@@ -289,8 +298,6 @@ export class FlashView {
     } finally {
       try { if (this.probe) await this.probe.disconnect(); } catch {}
       this.probe = null;
-      this.busy = false;
-      if ($('f-idcode')) $('f-idcode').disabled = false;
     }
   }
 
