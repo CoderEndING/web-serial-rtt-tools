@@ -19,6 +19,7 @@
  */
 
 import { releaseLocalProbeUsers } from '../core/probe-users.js';
+import { runProbeOperation } from '../core/probe-manager.js';
 import { $, setFlag, appendLogLine, ensureSelectOption } from '../ui/dom.js';
 import { toast } from '../ui/toast.js';
 import { store } from '../core/store.js';
@@ -342,9 +343,9 @@ export class DbgView {
    * 换之前先把旧连接断干净，别让两个后端抢同一支探针。
    * @returns {boolean} 是否真的换了对象
    */
-  async _ensureSession(riscv){
+  async _ensureSession(riscv, { preserveAcquisition = false } = {}){
     if (riscv === (this.session instanceof RiscvDebugSession)) return false;
-    if (this.session?.connected) await this.disconnect();
+    if (this.session?.connected) await this.disconnect({ preserveAcquisition });
     if (riscv === (this.session instanceof RiscvDebugSession)) return false;
     this.session = riscv ? new RiscvDebugSession() : new DebugSession();
     this._bindSessionLog();
@@ -402,7 +403,11 @@ export class DbgView {
   async connect(){
     if (this._connecting || this._disconnecting) return false;
     this._connecting = true;
-    try { return await this._connectNow(); }
+    try {
+      return await runProbeOperation(this, 'dbg', () => this._connectNow(), {
+        mock: $('d-backend')?.value === 'mock', reason: '调试器要使用探针',
+      });
+    } catch (e){ this._out('✗ 连接失败：' + e.message, 'err'); toast(e.message, 'err'); return false; }
     finally { this._connecting = false; this._connectionTask = null; }
   }
 
@@ -415,16 +420,18 @@ export class DbgView {
      * 但源码级那一层是同一套 —— `RiscvDebugSession` 继承 `DebugSession` 只换低层）。
      * 正常路径上 `_syncBackend()` 已经换过了，这里再兜一次（幂等）。
      */
-    await this._ensureSession(riscv);
+    await this._ensureSession(riscv, { preserveAcquisition: true });
     const generation = this._connectionGen = (this._connectionGen || 0) + 1;
     const clockKhz = Number($('d-clock')?.value) || DEFAULT_CLOCK_KHZ;
     this._out('', 'dim');
     this._out(`──── 连接（${mock ? '模拟目标' : riscv ? 'RISC-V/JTAG' : 'WebUSB'}${mock ? '' : ` · ${clockKhz} kHz`}）────`, 'dim');
     if (this.clockMigrated){ this._out('（SWD 时钟默认值已从 1 MHz 改为 10 MHz —— 真机实测 PPB/内存都正常；不想要就在上面改回去）', 'dim'); this.clockMigrated = false; }
     try {
-      if (!mock) await releaseLocalProbeUsers('dbg', '调试器要使用探针');
+      if (!mock && !this.probeManager) await releaseLocalProbeUsers('dbg', '调试器要使用探针');
       if (this._disconnecting || generation !== this._connectionGen) return false;
-      this._connectionTask = this.session.exclusive(() => this.session.connect({ mock, clockKhz, bus: this.bus }));
+      this._connectionTask = this.session.exclusive(() => this.session.connect({
+        mock, clockKhz, bus: this.probeManager ? null : this.bus, stopBridge: !this.probeManager,
+      }));
       await this._connectionTask;
       if (this._disconnecting || generation !== this._connectionGen) return false;
     } catch (e){
@@ -451,7 +458,8 @@ export class DbgView {
     return true;
   }
 
-  async disconnect(){
+  async disconnect({ preserveAcquisition = false } = {}){
+    if (!preserveAcquisition) this.probeManager?.cancel('dbg');
     this._connectionGen = (this._connectionGen || 0) + 1;
     if (this._disconnectPromise) return await this._disconnectPromise;
     this._disconnecting = true;
@@ -459,7 +467,10 @@ export class DbgView {
     this.queue = [];
     this._disconnectPromise = this._disconnectNow();
     try { return await this._disconnectPromise; }
-    finally { this._disconnectPromise = null; this._disconnecting = false; }
+    finally {
+      this._disconnectPromise = null; this._disconnecting = false;
+      if (!preserveAcquisition) this.probeManager?.forget('dbg');
+    }
   }
 
   async _disconnectNow(){
