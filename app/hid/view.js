@@ -55,6 +55,7 @@ export class RttCdcView {
     store.bind($('h-chan'), 'hid.chan');
     store.bind($('h-clock'), 'hid.clock');
     store.bind($('h-target'), 'hid.target');
+    this._targetRiscv = this.isRiscv;
     // 目标类型是**全局**的（粘性）：RISC-V/JTAG 下 SWD 时钟档无意义（探针忽略 action 7 的 Hz，
     // 只有 <256 的值会被当成 DMI 的 idle 周期数），所以直接置灰并说明
     $('h-target').addEventListener('change', () => this.applyTargetType());
@@ -183,6 +184,13 @@ export class RttCdcView {
    *    而同一块板同一个探针，用参考脚本 `hpm6800_rtt_loss.py`（clock 传 0）能跑 1.39 MB/s、rderr=0。
    */
   async applyTargetType(){
+    const scope = globalThis.__tools?.scope;
+    if (this.last?.running || this._starting || scope?.running || scope?._starting){
+      $('h-target').value = this._targetRiscv ? 'riscv' : 'swd';
+      store.set('hid.target', $('h-target').value);
+      toast('先停止 RTT 转发和采样，再切目标类型', 'warn');
+      return;
+    }
     const riscv = this.isRiscv;
     $('h-clock').disabled = riscv;
     $('h-clock').title = riscv
@@ -202,7 +210,9 @@ export class RttCdcView {
     }
     if (!this.dev.connected){ toast(`已记为 ${riscv ? 'RISC-V/JTAG' : 'SWD/ARM'}，连上探针后再切一次`, 'warn'); return; }
     try {
-      await this.dev.setTargetType(riscv);
+      const response = await this.dev.setTargetType(riscv);
+      if (response.rc < 0) throw new Error('探针忙：先停止 RTT 转发和采样');
+      this._targetRiscv = riscv;
       // 🚨 顺手把时钟字段清成 0（粘性状态里可能还留着上一次 SWD 的 45 MHz）
       if (riscv && !this.mock){
         try { await this.dev.configure({ clockHz: 0 }); } catch { /* 清不掉也不致命，start() 里还会再发一次 0 */ }

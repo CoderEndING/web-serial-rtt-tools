@@ -908,15 +908,22 @@ export class ScopeView {
   async applyTargetType(){
     const sel = $('sc-target');
     const riscv = sel.value === 'riscv';
+    if (this.running || this._starting || this._stopPromise || globalThis.__tools?.hid?.last?.running){
+      sel.value = this.targetRiscv ? 'riscv' : 'swd';
+      store.set('rtt.target', sel.value);
+      this.setStatusText('采样或 RTT 转发正在运行：先停止，再切目标类型', 'warn');
+      return;
+    }
     this.targetRiscv = riscv;
     this._askedAt = (globalThis.performance?.now?.() ?? Date.now());   // 见 uiBackend()：请求与生效的先后关系
     // 🚨 **先刷界面再谈连接**：这一格的意思就是"我要走哪条路"，与探针在不在线无关。
     //    老写法把刷新放在 hidXfer 之后，于是"没连探针时切下拉 → 界面一动不动"（用户实测踩到）。
     this._applyBackendUi();
     if (!this.hid){ this.setStatusText(`已记为「${P.backendName(riscv ? P.BACKEND.RISCV : P.BACKEND.SWD)}」，但探针没连上——连上后再切一次`, 'warn'); return; }
-    if (this.running){ this.setStatusText('采样中不能切目标类型：先停采样', 'warn'); }
     try {
-      await this.hidXfer(P.HID_CMD_RTT, P.targetTypeData(riscv));
+      const response = await this.hidXfer(P.HID_CMD_RTT, P.targetTypeData(riscv));
+      if (!response || response.length < 3 || this.signed(response[2]) < 0)
+        throw new Error('探针拒绝切换目标类型（先停止采样和 RTT 转发）');
       this.setStatusText(`已请求切到 ${P.backendName(riscv ? P.BACKEND.RISCV : P.BACKEND.SWD)}（HID 0x31 action 10）——`
         + ' 探针侧目标类型是粘的；下次采样时看「生效后端」是否跟上了', 'ok');
     } catch (e){
@@ -1077,6 +1084,7 @@ export class ScopeView {
    *  顺带读固件回报的 **实际装载了哪个 blob** 与 `clock_delay` —— 没有这个数就分不出
    *  "时钟命令被忽略" 和 "生效了但没差别"（他们的 README 里就是被这个坑咬过）。*/
   async bench(){
+    if (this.running || this._starting || this._stopPromise){ this.setStatusText('先停止采样，再做标定', 'warn'); return; }
     if (!this.hid){ this.setStatusText('先连探针', 'warn'); return; }
     try {
       const vars = (this.selected.length ? this.selected : (this.usingMock ? this.mockVars() : []));
@@ -1432,6 +1440,7 @@ export class ScopeView {
   syncButtons(){
     $('sc-start').disabled = !!(this.running || this._starting || this._stopPromise || this._releasing);
     $('sc-stop').disabled = !!this._stopPromise || (!this.running && !this._starting);
+    const target = $('sc-target'); if (target) target.disabled = !!(this.running || this._starting || this._stopPromise);
   }
 
   _loop(){
