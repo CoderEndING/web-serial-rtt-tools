@@ -15,7 +15,7 @@
 export const CMD_NAMES = [
   'h', 'help', 'c', 'cont', 's', 'step', 'n', 'next', 'si', 'fin', 'out', 'rc',
   'halt', 'reset', 'r', 'md', 'mw', 'ms',
-  'p', 'x', 'b', 'bd', 'bl', 'wp', 'wpl', 'wpd', 'info', 'sym', 'w', 'wl', 'wd', 'src', 'sl', 'cls',
+  'p', 'x', 'b', 'bd', 'bl', 'wp', 'wpl', 'wpd', 'bt', 'backtrace', 'info', 'sym', 'w', 'wl', 'wd', 'src', 'sl', 'cls',
 ];
 
 const SYM_CMDS = new Set(['wp', 'b', 'break', 'p', 'x', 'w', 'watch', 'md', 'mw', 'ms', 'sym', 'rc', 'runto']);

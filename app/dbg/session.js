@@ -23,6 +23,7 @@ import { waitMs, sleep } from '../core/pace.js';
 import { CFBP_SEL, CORE_REGS, SPECIAL_REGS, cfbpGet, cfbpSet, isCfbpSub, regInfo } from './regs.js';
 import { FPB, FP_CTRL_KEY, canBreak, compAddr, decodeFpCtrl, planComparators } from './bp.js';
 import { align2, hex32, u32leBytes } from './fmt.js';
+import { backtrace } from './backtrace.js';
 import { DwtWatchpoints } from './dwt.js';
 import { thumbLen, decodeCall, nextAddrsOf, ARM_ARCH } from './thumb.js';
 
@@ -946,6 +947,9 @@ export class DebugSession {
   }
 
   regList(){ return this.regs; }
+
+  /** Caller holds session.exclusive, just like command/register/memory operations. */
+  async backtrace(opts={}){ return await backtrace(this,opts); }
 
   // ------------------------------------------------------------ 内存
 

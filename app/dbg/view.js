@@ -101,6 +101,8 @@ export class DbgView {
     on('d-reset-halt', 'click', () => this._act('复位并停住', async () => { await s.resetHalt(); await this.refreshAll(); }));
     on('d-reset-run', 'click', () => this._act('复位并运行', async () => { await s.resetRun(); this._startWatch(); }));
     on('d-reg-refresh', 'click', () => this._act('刷新寄存器', () => s.refreshRegs().then(() => this.renderRegs())));
+    on('d-bt', 'click', () => this.runLine('bt'));
+    on('d-bt-scan', 'click', () => this.runLine('bt scan'));
     on('d-wp-add', 'click', () => this.runLine(`wp ${$('d-wp-addr').value.trim()} ${$('d-wp-mode').value} ${$('d-wp-size').value}`));
     on('d-wp-clear', 'click', () => this.runLine('wpd all'));
     on('d-bp-clear', 'click', () => this._act('清空断点', async () => { await s.bpClear(); this.renderBps(); this.renderSource(); }));
@@ -370,6 +372,7 @@ export class DbgView {
   }
 
   _syncButtons(connected, halted){
+    if(!this.session.connected || !this.session.halted || (this._btSnapshotValid && this.session.pc!==this._btSnapshotPc)) this._invalidateBacktrace();
     const c = connected ?? this.session.connected;
     const h = halted ?? this.session.halted;
     for (const id of ['d-cont', 'd-step', 'd-halt', 'd-mem-read']){
@@ -388,7 +391,8 @@ export class DbgView {
     const cont = $('d-cont');
     if (cont) cont.disabled = !c || !h;
     for (const id of ['d-connect']) { const el = $(id); if (el) el.disabled = c; }
-    for (const id of ['d-disconnect', 'd-reset-halt', 'd-reset-run', 'd-rtt-locate', 'd-wp-add', 'd-wp-clear']){ const el = $(id); if (el) el.disabled = !c; }
+    for (const id of ['d-disconnect', 'd-reset-halt', 'd-reset-run', 'd-rtt-locate', 'd-wp-add', 'd-wp-clear', 'd-bt', 'd-bt-scan']){ const el = $(id); if (el) el.disabled = !c; }
+    for(const id of ['d-bt','d-bt-scan']){ const el=$(id); if(el) el.disabled=!c||!h; }
     setFlag($('d-state'), !c ? '未连接' : (h ? '已停止' : '运行中'), !c ? null : (h ? 'warn' : 'on'));
   }
 
@@ -451,6 +455,7 @@ export class DbgView {
   /** 一次用户动作的统一包装：忙碌标记 + **独占 SWD** + 错误回显（别让异常静默消失） */
   async _act(name, fn){
     if (this.session.busy){ this._out(`（正在忙，先等上一个动作跑完）`, 'warn'); return false; }
+    this._invalidateBacktrace();
     this.session.busy = true;
     try {
       // 🚨 整段动作要独占 SWD：观察循环/ RTT 泵随时可能在读，交错一次就读出垃圾（真机实测 18%）
@@ -593,6 +598,29 @@ export class DbgView {
       this._out(`${name} ← ${hex32(v)}`, 'ok');
       if (name === 'PC') await this._followPc();
     });
+  }
+
+  _invalidateBacktrace(){
+    if(!this._btSnapshotValid) return;
+    this._btSnapshotValid=false;
+    const box=$('d-bt-list'); if(box) box.textContent='目标状态已变化，请重新回溯';
+    const status=$('d-bt-status'); if(status) status.textContent='';
+  }
+
+  presentBacktrace(result){
+    const box=$('d-bt-list'); if(!box) return;
+    box.textContent='';
+    this._btSnapshotPc=this.session.pc; this._btSnapshotValid=true;
+    for(const [i,frame] of result.frames.entries()){
+      const row=document.createElement('button'); row.className='mono';
+      const loc=frame.loc;
+      row.textContent=`#${i} ${frame.name||hex32(frame.pc)} [${frame.kind}]${loc?' '+loc.file+':'+loc.line:''}`;
+      row.title=`PC ${hex32(frame.pc)} · SP ${hex32(frame.sp)}`;
+      row.disabled=!loc;
+      row.addEventListener('click',()=>this.showSource(loc.file,loc.line));
+      const wrap=document.createElement('div'); wrap.className='bprow'; wrap.append(row); box.append(wrap);
+    }
+    const status=$('d-bt-status'); if(status) status.textContent=result.reason;
   }
 
   renderDwt(){
@@ -853,6 +881,7 @@ export class DbgView {
   async runLine(text){
     const line = String(text || '').trim();
     if (!line) return { lines: [] };
+    if(!/^(bt|backtrace)(\s|$)/i.test(line)) this._invalidateBacktrace();
     this._out('> ' + line, 'cmd');
     if (line !== this.hist[this.hist.length - 1]) this.hist.push(line);
     this.histIdx = -1;
@@ -893,6 +922,7 @@ export class DbgView {
    *    150 ms 的观察间隔变成 1 s，用户看到的是"点了继续半天不更新"。
    */
   _startWatch(){
+    this._invalidateBacktrace();
     if (this.watching) return;
     this.watching = true;
     this._watchLoop().catch(() => { this.watching = false; });
@@ -958,6 +988,7 @@ export class DbgView {
 
   /** 供自测直接喂 ArrayBuffer（页面里也能用 fetch 拿到 fixture） */
   loadElfBuffer(buf, name = '') {
+    this._invalidateBacktrace();
     try {
       const st = SymTab.fromBuffer(buf);
       this.sym = st;
