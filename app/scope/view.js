@@ -959,6 +959,17 @@ export class ScopeView {
    * ⚠️ 粘性 + "请求 ≠ 生效"：切完只记下**请求**，显示仍等探针回报（DEF flags bit6 / 状态字 0 bit1）。
    */
   async applyTargetType(){
+    if (this.probeManager && !this.usingMock && this.hid && !this.running && !this._starting && !this._stopPromise){
+      try {
+        return await runProbeOperation(this, 'scope', () => this._applyTargetTypeNow(), {
+          reason: 'J-Scope 要切换目标类型', policy: 'reject',
+        });
+      } catch (e){ this.setStatusText(e.message, 'err'); return false; }
+    }
+    return await this._applyTargetTypeNow();
+  }
+
+  async _applyTargetTypeNow(){
     const sel = $('sc-target');
     const riscv = sel.value === 'riscv';
     if (this.running || this._starting || this._stopPromise || globalThis.__tools?.hid?.last?.running){
@@ -1137,6 +1148,17 @@ export class ScopeView {
    *  顺带读固件回报的 **实际装载了哪个 blob** 与 `clock_delay` —— 没有这个数就分不出
    *  "时钟命令被忽略" 和 "生效了但没差别"（他们的 README 里就是被这个坑咬过）。*/
   async bench(){
+    if (this.probeManager && !this.usingMock && this.hid && !this.running && !this._starting && !this._stopPromise){
+      try {
+        return await runProbeOperation(this, 'scope', () => this._benchNow(), {
+          reason: 'J-Scope 要标定采样引擎', policy: 'reject',
+        });
+      } catch (e){ this.setStatusText(e.message, 'err'); return false; }
+    }
+    return await this._benchNow();
+  }
+
+  async _benchNow(){
     if (this.running || this._starting || this._stopPromise){ this.setStatusText('先停止采样，再做标定', 'warn'); return; }
     if (!this.hid){ this.setStatusText('先连探针', 'warn'); return; }
     try {

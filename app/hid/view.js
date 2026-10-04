@@ -169,9 +169,11 @@ export class RttCdcView {
     const { clockHz } = this.params();
     if (!this.dev.connected || !clockHz) return;
     try {
-      await this.dev.configure({ clockHz });
-      toast(`探针 SWD 时钟已设为 ${clockHz / 1e6} MHz`, 'ok');
-      await this.refresh();
+      await runProbeOperation(this, 'hid', async () => {
+        await this.dev.configure({ clockHz });
+        toast(`探针 SWD 时钟已设为 ${clockHz / 1e6} MHz`, 'ok');
+        await this.refresh();
+      }, { reason: 'RTT 转发要调整时钟', policy: 'reject' });
     } catch (e){ toast('调时钟失败：' + (e?.message || e), 'err'); }
   }
 
@@ -212,6 +214,7 @@ export class RttCdcView {
     }
     if (!this.dev.connected){ toast(`已记为 ${riscv ? 'RISC-V/JTAG' : 'SWD/ARM'}，连上探针后再切一次`, 'warn'); return; }
     try {
+      await runProbeOperation(this, 'hid', async () => {
       const response = await this.dev.setTargetType(riscv);
       if (response.rc < 0) throw new Error('探针忙：先停止 RTT 转发和采样');
       this._targetRiscv = riscv;
@@ -221,6 +224,7 @@ export class RttCdcView {
       }
       toast(`探针目标类型已切到 ${riscv ? 'RISC-V/JTAG' : 'SWD/ARM'}（粘性，采样器也跟着走）`, 'ok');
       await this.refresh();
+      }, { mock: !!this.mock, reason: 'RTT 转发要切换目标类型', policy: 'reject' });
     } catch (e){ toast('切目标类型失败：' + (e?.message || e), 'err'); }
   }
 
@@ -295,12 +299,12 @@ export class RttCdcView {
     }
   }
 
-  async stop(){
+  async stop({ fromManager = false } = {}){
     this.probeManager?.cancel('hid');
     if (this._stopPromise) return await this._stopPromise;
     this._engineGen = (this._engineGen || 0) + 1;
     clearInterval(this._timer);
-    this._stopPromise = this._stopBridgeNow();
+    this._stopPromise = this._stopBridgeNow(fromManager);
     try {
       const result = await this._stopPromise;
       this.probeManager?.forget('hid');
@@ -309,9 +313,22 @@ export class RttCdcView {
     finally { this._stopPromise = null; }
   }
 
-  async _stopBridgeNow(){
+  async _stopBridgeNow(fromManager){
     try {
       if (this._activeTask) await this._activeTask.catch(() => {});
+      if (this.probeManager && !this.probeManager.leases.has('hid') && !fromManager){
+        // A cancelled queued START has never owned the firmware engine.
+        if (!this.last?.running) return;
+        return await runProbeOperation(this, 'hid', () => this._sendStopNow(), {
+          reason: '停止探针侧 RTT 转发', policy: 'reject',
+        });
+      }
+      return await this._sendStopNow();
+    } catch (e){ this.render({ error: e.message }); throw e; }
+  }
+
+  async _sendStopNow(){
+    try {
       const r = await this.dev.stop();
       if (r?.rc < 0 && r.rc !== START_PENDING) throw new Error(startRcText(r.rc));
       this.last = r.status;
