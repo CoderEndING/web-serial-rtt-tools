@@ -439,9 +439,19 @@ export class DbgView {
   }
 
   async disconnect(){
+    if (this._disconnectPromise) return await this._disconnectPromise;
+    this._disconnecting = true;
+    this.cancelFlag = true;
+    this.queue = [];
+    this._disconnectPromise = this._disconnectNow();
+    try { return await this._disconnectPromise; }
+    finally { this._disconnectPromise = null; this._disconnecting = false; }
+  }
+
+  async _disconnectNow(){
     this._stopWatch();
     this.rttStop();
-    await this.session.disconnect();
+    await this.session.exclusive(() => this.session.disconnect());
     // 符号表**故意留着**：断开往往只是为了让别的页签用探针，重连后还得接着看变量
     this.mem = new Uint8Array(0);
     this.renderRegs(); this.renderMem(); this.renderBps();
@@ -453,6 +463,7 @@ export class DbgView {
 
   /** 一次用户动作的统一包装：忙碌标记 + **独占 SWD** + 错误回显（别让异常静默消失） */
   async _act(name, fn){
+    if (this._disconnecting) return false;
     if (this.session.busy){ this._out(`（正在忙，先等上一个动作跑完）`, 'warn'); return false; }
     this._invalidateBacktrace();
     this.session.busy = true;
@@ -667,7 +678,8 @@ export class DbgView {
   // ================================================================ 内存
 
   async readMem(opts = {}){
-    return await this.session.exclusive(() => this._readMemLocked(opts));
+    if (this._disconnecting) return false;
+    return await this.session.exclusive(() => this._disconnecting ? false : this._readMemLocked(opts));
   }
 
   async _readMemLocked({ silent = false } = {}){
@@ -885,6 +897,7 @@ export class DbgView {
   async runLine(text){
     const line = String(text || '').trim();
     if (!line) return { lines: [] };
+    if (this._disconnecting) return { cancelled: true, lines: [] };
     if(!/^(bt|backtrace)(\s|$)/i.test(line)) this._invalidateBacktrace();
     this._out('> ' + line, 'cmd');
     if (line !== this.hist[this.hist.length - 1]) this.hist.push(line);
@@ -894,6 +907,7 @@ export class DbgView {
     try {
       // 命令也是"一整段独占 SWD"：观察循环 / RTT 泵随时可能在读，交错一次就读出垃圾
       res = await this.session.exclusive(async () => {
+        if (this._disconnecting) throw Object.assign(new Error('已中断'), { cancelled: true });
         const result = await runCmd(line, this.session, { view: this, signal: () => this.cancelFlag });
         this.renderRegs(); this.renderBps(); this._syncButtons();
         const changedMem = /^(md|mw|ms|x)$/.test(line.split(/\s+/)[0].toLowerCase());
@@ -939,7 +953,7 @@ export class DbgView {
     let polls = 0;
     while (this.watching && this.session.connected && !this.session.halted){
       await waitMs(150);
-      if (this.cancelFlag) break;
+      if (this.cancelFlag || !this.watching || this._disconnecting) break;
       polls++;
       try {
         /**
@@ -1127,7 +1141,8 @@ export class DbgView {
 
   /** 把监视项的值读回来（停止时自动调；运行中看「运行中也刷新」开关） */
   async refreshWatch(opts = {}){
-    return await this.session.exclusive(() => this._refreshWatchLocked(opts));
+    if (this._disconnecting) return 0;
+    return await this.session.exclusive(() => this._disconnecting ? 0 : this._refreshWatchLocked(opts));
   }
 
   async _refreshWatchLocked({ force = false } = {}){

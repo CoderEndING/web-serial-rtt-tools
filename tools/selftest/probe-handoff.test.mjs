@@ -1,0 +1,18 @@
+import assert from 'node:assert/strict';
+import {DebugSession} from '../../app/dbg/session.js';
+import {DbgView} from '../../app/dbg/view.js';
+import {FlashView} from '../../app/flash/view.js';
+const gate=()=>{let resolve;const promise=new Promise(r=>resolve=r);return {promise,resolve};};
+const tick=()=>new Promise(r=>setImmediate(r));
+globalThis.document={getElementById:()=>null};
+const s=new DebugSession(),v=Object.create(DbgView.prototype),held=gate(),events=[];
+s.probe={disconnect:async()=>events.push('disconnect')};
+Object.assign(v,{session:s,queue:['step'],_stopWatch(){},rttStop(){},renderRegs(){},renderMem(){},renderBps(){},_syncButtons(){}});
+const operation=s.exclusive(async()=>{await held.promise;events.push('operation-end');});
+const disconnect=v.disconnect();await tick();assert.equal(v.cancelFlag,true);assert.deepEqual(v.queue,[]);assert.deepEqual(events,[]);
+assert.equal(await v._act('late',()=>assert.fail()),false);
+held.resolve();await Promise.all([operation,disconnect]);assert.deepEqual(events,['operation-end','disconnect']);assert.equal(s.connected,false);
+let closed=0;Object.defineProperty(globalThis,'navigator',{value:{usb:{getDevices:async()=>[{vendorId:0x0d28,close:async()=>{assert.deepEqual(events,['debug-release']);closed++;}}]}},configurable:true});
+globalThis.window={__tools:{dbg:{session:{connected:true},disconnect:async()=>events.push('debug-release')}}};events.length=0;
+const f=Object.create(FlashView.prototype);f._log=()=>{};assert.equal(await f._clearProbeUsers('fw.bin'),true);assert.equal(closed,1);
+console.log('probe-handoff: debugger cancels queue, drains action before close; flash releases debugger before USB cleanup PASS');

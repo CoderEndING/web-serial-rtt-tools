@@ -150,6 +150,11 @@ export class FlashView {
       if (!confirm('RTT 会话正占用探针，烧录需要先断开它。继续吗？')) return false;
       await rtt.disconnect();
     }
+    const dbg = window.__tools?.dbg;
+    if (dbg?.session?.connected){
+      await dbg.disconnect();
+      this._log('已让调试器停止操作并释放探针');
+    }
     const sc = window.__tools?.scope;
     if (sc && (sc.running || sc.transport || (sc.hid && sc.hid !== sc.mockProbe))){
       try {
@@ -289,6 +294,7 @@ export class FlashView {
     if ($('f-idcode')) $('f-idcode').disabled = true;
     const t0 = Date.now();
     try {
+      if (!(await this._clearProbeUsers('读取目标身份'))) return;
       const isRv = HPM_BOARDS.some(b => b.id === $('f-chip').value);
       this._log('');
       this._log(`──── 读目标身份（${isRv ? 'RISC-V/JTAG' : 'ARM/SWD'} · 零安装）────`);
@@ -296,10 +302,10 @@ export class FlashView {
       else await this._idcodeArm();
       this._log(`──── 读完（${Date.now() - t0} ms）────`);
     } finally {
-      this.busy = false;
-      if ($('f-idcode')) $('f-idcode').disabled = false;
       try { if (this.probe) await this.probe.disconnect(); } catch {}
       this.probe = null;
+      this.busy = false;
+      if ($('f-idcode')) $('f-idcode').disabled = false;
     }
   }
 
