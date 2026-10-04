@@ -1,4 +1,5 @@
 import { ProbeManager } from './probe-manager.js';
+import { CdcMode, isProbeCdcPort } from './cdc-mode.js';
 
 // Bulk endpoints are independent. Target accesses still share one SWD/JTAG engine.
 // SPI/I2C bridges exist only on EVKLite: SPI2 PB10..15, debug PA04..08.
@@ -10,6 +11,7 @@ export const PROBE_RESOURCES = Object.freeze({
   hid: ['target-engine', 'debug-pins', 'rtt-ring', 'cdc-mode'],
   spi: ['spi-bulk', 'spi-pins', 'i2c-pins'],
   i2c: ['i2c-pins'],
+  serial: ['cdc-port'],
   flash: ['target-engine', 'debug-pins', 'rtt-ring', 'dap-bulk', 'cdc-mode'],
 });
 
@@ -40,6 +42,9 @@ export function createProbeManager(t, { bus = null, locks } = {}){
     () => !t.spiSession?.usingMock && !!t.spiSession?.busy);
   register('i2c', () => !t.i2c?.session?.usingMock && !!t.i2c?.session?.connected,
     async () => { t.i2c?.runner?.stop(); await t.i2c.session.disconnect(); });
+  register('serial', () => !!t.session?.isOpen && isProbeCdcPort(t.session.port),
+    () => t.session?.close());
+  manager.cdcMode = new CdcMode(t, manager);
   manager.assertUsbResetAllowed = (kind, device) => {
     const own = { dap: ['dbg', 'rtt', 'flash'], scope: ['scope'], spi: ['spi'] }[kind] || [];
     const peers = [...manager.clients].filter(([id, c]) => !own.includes(id) &&

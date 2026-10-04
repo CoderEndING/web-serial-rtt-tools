@@ -53,7 +53,7 @@ const tools = { session, assistant, terminal, rtt, flash, gen, hid, stream, scop
 const probeManager = createProbeManager(tools, { bus: probeBus });
 setUsbResetGuard((kind, device) => probeManager.assertUsbResetAllowed(kind, device));
 tools.probeManager = probeManager;
-for (const client of [dbg, flash, rtt, scope, hid, spiSession, i2c.session]) client.probeManager = probeManager;
+for (const client of [dbg, flash, rtt, scope, hid, spiSession, i2c.session, session]) client.probeManager = probeManager;
 for (const view of [dbg, flash, rtt, scope, hid, i2c]) view.bus = probeBus;
 window.__tools = tools;
 

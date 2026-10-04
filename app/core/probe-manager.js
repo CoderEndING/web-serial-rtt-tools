@@ -27,21 +27,33 @@ export class ProbeManager {
   }
 
   _conflicts(a, b){ return [...a].some(r => b.has(r)); }
+  _resources(id, client = this.clients.get(id)){ return this.leases.get(id)?.resources || client.resources; }
+
+  /** Release optional resources after a confirmed STOP; adding resources requires run(). */
+  narrow(owner, extra = []){
+    const lease = this.leases.get(owner);
+    if (!lease) return;
+    const resources = new Set([...this.clients.get(owner).resources, ...extra]);
+    if ([...resources].some(r => !this._resources(owner).has(r))) throw new Error('新增资源需要重新仲裁');
+    this.leases.set(owner, { ...lease, resources });
+  }
 
   _checkProtected(owner, resources, recovery = false){
     for (const [id, c] of this.clients){
-      if (this.failures.has(id) && this._conflicts(resources, c.resources) && !(id === owner && recovery))
+      if (this.failures.has(id) && this._conflicts(resources, this._resources(id, c)) && !(id === owner && recovery))
         throw new Error(`探针释放尚未确认（${id}）：${this.failures.get(id).message}；请重连原功能并停止`);
-      if (id !== owner && this._conflicts(resources, c.resources) && c.guarded())
+      if (id !== owner && this._conflicts(resources, this._resources(id, c)) && c.guarded())
         throw new Error(`${id === 'flash' ? '烧录器' : id}正在使用探针，请等待完成`);
     }
   }
 
   /** Serialize acquisition AND setup: a later feature cannot close a half-open session. */
-  async run(owner, fn, { reason = '另一个功能要使用探针', policy = 'handoff', recovery = false } = {}){
+  async run(owner, fn, { reason = '另一个功能要使用探针', policy = 'handoff', recovery = false,
+    resources: extra = [], rejectResources = [] } = {}){
     const client = this.clients.get(owner);
     if (!client) throw new Error(`未登记的探针使用者：${owner}`);
-    this._checkProtected(owner, client.resources, recovery);
+    const resources = new Set([...this._resources(owner, client), ...extra]);
+    this._checkProtected(owner, resources, recovery);
     const ticket = { owner, controller: new AbortController(), phase: 'queued' };
     this.pending.add(ticket);
     const alive = () => { if (ticket.controller.signal.aborted) throw new ProbeCancelled(); };
@@ -57,9 +69,11 @@ export class ProbeManager {
         const execute = async () => {
           alive(); ticket.phase = 'setup'; this.current = ticket;
           try {
-            this._checkProtected(owner, client.resources, recovery);
+            this._checkProtected(owner, resources, recovery);
             const conflicts = [...this.clients].filter(([id, c]) => id !== owner &&
-              (this.leases.has(id) || c.active()) && this._conflicts(client.resources, c.resources));
+              (this.leases.has(id) || c.active()) && this._conflicts(resources, this._resources(id, c)));
+            if (conflicts.some(([id, c]) => rejectResources.some(r => this._resources(id, c).has(r))))
+              throw new Error('CDC 串口正在使用：请先关闭串口，或取消 JScope 的暂停 CDC 选项');
             if (policy === 'reject' && conflicts.length) throw new Error('共享资源正在使用中，请先停止对应功能');
             for (const [id, c] of conflicts){
               try { await c.release(reason); }
@@ -70,7 +84,7 @@ export class ProbeManager {
             // One page owns the physical device. Compatible local clients share that ownership.
             if (!this.leases.size && this.beforeAcquire) await this.beforeAcquire(reason);
             alive();
-            const lease = Object.freeze({ owner, signal: ticket.controller.signal, assert: alive });
+            const lease = Object.freeze({ owner, resources, signal: ticket.controller.signal, assert: alive });
             this.leases.set(owner, lease);
             return await fn(lease);
           } finally {
@@ -127,6 +141,7 @@ export class ProbeManager {
   summary(){
     return {
       owners: [...this.leases.keys()],
+      ...(this.cdcMode ? { cdc: this.cdcMode.state() } : {}),
       pending: [...this.pending].map(t => ({ owner: t.owner, phase: t.phase })),
       failures: [...this.failures].map(([owner, error]) => ({ owner, error: error.message })),
     };

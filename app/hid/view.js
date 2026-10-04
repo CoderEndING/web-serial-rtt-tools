@@ -288,6 +288,9 @@ export class RttCdcView {
       if (g !== this._engineGen) return;
       const before = this.last?.startRc ?? 0;
       this._bridgeRequested = true;
+      // Block new UART writes, then let already submitted writes finish before changing producer.
+      await this.probeManager?.cdcMode?.drainWrites();
+      if (g !== this._engineGen) return;
       const response = auto ? await this.dev.autostart() : await this.dev.start(p);
       if (g !== this._engineGen) return;
       if (response?.rc < 0 && response.rc !== START_PENDING){

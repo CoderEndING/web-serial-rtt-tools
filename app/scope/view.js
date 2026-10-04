@@ -663,9 +663,12 @@ export class ScopeView {
     const g = this._captureGen = (this._captureGen || 0) + 1;
     this._starting = true;
     this._startTouched = false;
+    this._captureCdcOff = !!$('sc-cdcoff')?.checked;
     this.syncButtons();
     this._startPromise = runProbeOperation(this, 'scope', () => this._startOnce(g), {
       mock: this.usingMock, reason: 'J-Scope 要开始采样',
+      resources: this._captureCdcOff ? ['cdc-port'] : [],
+      rejectResources: ['cdc-port'],
     });
     try { return await this._startPromise; }
     catch (e){ this.setStatusText(e.message, 'err'); return false; }
@@ -676,6 +679,7 @@ export class ScopeView {
           try { await this._stopData(); } catch (e) { this.setStatusText('采样收尾失败：' + e.message, 'err'); }
         }
       }
+      if (!this._cdcPausedRequested) this.probeManager?.narrow('scope');
       this._starting = false; this._startPromise = null; this.syncButtons();
     }
   }
@@ -696,7 +700,9 @@ export class ScopeView {
       throw error;
     }
     this._stopUnconfirmed = false;
+    this._cdcPausedRequested = false;
     this.probeManager?.confirm('scope');
+    this.probeManager?.narrow('scope');
   }
 
   async _startOnce(g){
@@ -814,7 +820,7 @@ export class ScopeView {
        * 会自己换另一条路重试，所以我们只把**请求**发下去，显示一律用探针回报的生效值。
        */
       const flags = (clockKhz >= 60000 ? P.SCOPE_FLAG.ALLOW_60M : 0)
-        | ($('sc-cdcoff')?.checked ? P.SCOPE_FLAG.CDC_OFF : 0)
+        | (this._captureCdcOff ? P.SCOPE_FLAG.CDC_OFF : 0)
         | ($('sc-batch')?.checked ? P.SCOPE_FLAG.FAST_BATCH : 0)
         | (this.targetRiscv ? P.SCOPE_FLAG.RISCV : 0);
       if (clockKhz > 0 && this.backend !== P.BACKEND.RISCV) await this.hidXfer(P.HID_CMD, P.clockData(clockKhz * 1000));
@@ -825,6 +831,7 @@ export class ScopeView {
        *    页面显示"变量表为空（先在左侧选 1~8 个变量）"，而用户明明选了变量，方向全错。
        */
       if (!this._captureAlive(g)) return;
+      this._cdcPausedRequested = !!this._captureCdcOff && !this.usingMock;
       this._startTouched = true;
       this._captureFlags = flags;
       const cfgRes = await this.configureScope({ periodUs, flags, vars });

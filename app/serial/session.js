@@ -6,6 +6,8 @@
  */
 import { Bus } from '../core/bus.js';
 import { waitMs } from '../core/pace.js';
+import { isProbeCdcPort } from '../core/cdc-mode.js';
+import { ProbeCancelled } from '../core/probe-manager.js';
 
 export class SerialSession extends Bus {
   constructor(){
@@ -18,6 +20,7 @@ export class SerialSession extends Bus {
     this.info = null;
     this._wq = Promise.resolve();
     this._closing = false;
+    this._epoch = 0;
   }
 
   static supported(){ return typeof navigator !== 'undefined' && 'serial' in navigator; }
@@ -50,7 +53,28 @@ export class SerialSession extends Bus {
    *   「CDC 波特率不生效」，两页都勾自动记录还会把同一路数据写成两个文件）。
    */
   async open(port, opts){
-    if (this.isOpen) await this.close();
+    if (this._openTask || this._closeTask) throw new Error('串口连接正在切换，请稍后再试');
+    const generation = ++this._epoch;
+    const setup = () => this._openNow(port, opts, generation);
+    this._openTask = this.probeManager && isProbeCdcPort(port)
+      ? this.probeManager.run('serial', setup, {
+        reason: '串口要使用探针 CDC',
+        resources: opts.owner === 'rtt' ? [] : ['cdc-mode'],
+        rejectResources: ['cdc-port'],
+      }) : setup();
+    try { return await this._openTask; }
+    finally {
+      this._openTask = null;
+      if (this.isOpen){
+        if (isProbeCdcPort(this.port)) this.probeManager?.narrow('serial');
+        else this.probeManager?.forget('serial');
+      }
+    }
+  }
+
+  async _openNow(port, opts, generation){
+    if (this.isOpen) await this._closeNow();
+    if (generation !== this._epoch) throw new ProbeCancelled();
     const o = {
       baudRate: Number(opts.baudRate) || 115200,
       dataBits: Number(opts.dataBits) || 8,
@@ -69,6 +93,11 @@ export class SerialSession extends Bus {
       owner: opts.owner || '',
     };
     await port.open(o);
+    if (generation !== this._epoch){
+      try { await port.close(); }
+      catch (e){ this.port = port; this.isOpen = true; this.probeManager?.fail('serial', e); throw e; }
+      throw new ProbeCancelled();
+    }
     this.port = port;
     this.opts = o;
     this.info = SerialSession.describe(port);
@@ -77,7 +106,7 @@ export class SerialSession extends Bus {
     // DTR/RTS：默认都不拉（很多开发板靠 DTR/RTS 复位/进下载模式，别乱动）
     try { await port.setSignals({ dataTerminalReady: !!opts.dtr, requestToSend: !!opts.rts }); } catch {}
     this.emit('open', { opts: o, info: this.info });
-    this._readLoop();
+    this._readTask = this._readLoop();
   }
 
   async _readLoop(){
@@ -115,24 +144,50 @@ export class SerialSession extends Bus {
     } catch (e){
       if (!this._closing && this.isOpen) this.emit('error', e);
     }
-    if (this.isOpen) this.emit('close', { unexpected: !this._closing });
+    if (this.isOpen && !this._closing) queueMicrotask(() => this.close({ unexpected: true }).catch(e => this.emit('error', e)));
   }
 
-  async close(){
+  async close({ unexpected = false } = {}){
+    this.probeManager?.cancel('serial');
+    if (this._closeTask) return await this._closeTask;
+    ++this._epoch;
+    this._closeTask = (async () => {
+      if (this._openTask) await this._openTask.catch(() => {});
+      await this._closeNow(unexpected);
+      this.probeManager?.forget('serial');
+    })();
+    try { return await this._closeTask; }
+    finally { this._closeTask = null; }
+  }
+
+  async _closeNow(unexpected = false){
     if (!this.isOpen) return;
     this._closing = true;
+    // Invalidate queued writes before releasing any stream locks.
     this.isOpen = false;
-    try { if (this.reader) await this.reader.cancel(); } catch {}
-    try { if (this.writer){ this.writer.releaseLock(); this.writer = null; } } catch {}
-    try { await this.port.close(); } catch (e){ console.warn('关闭串口出错', e); }
+    try {
+      if (this.reader) await this.reader.cancel();
+      if (this._readTask) await this._readTask;
+      await this._wq;
+      if (this.writer){ this.writer.releaseLock(); this.writer = null; }
+      await this.port.close();
+    } catch (e){
+      this.isOpen = true;
+      this.probeManager?.fail('serial', e);
+      this.emit('error', e);
+      throw e;
+    }
     const p = this.port;
-    this.port = null; this.opts = null; this.info = null;
-    this.emit('close', { unexpected: false, port: p });
+    this.port = null; this.opts = null; this.info = null; this._readTask = null;
+    this.emit('close', { unexpected, port: p });
   }
 
   /** 写入（串行排队：Web Serial 同一时刻只允许一个 write） */
   write(bytes){
     if (!this.isOpen || !this.port) return Promise.reject(new Error('串口未打开'));
+    try { if (isProbeCdcPort(this.port)) this.probeManager?.cdcMode.assertUart(); }
+    catch (e){ return Promise.reject(e); }
+    const generation = this._epoch;
     const data = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
     /**
      * 🚨 catch 里**不要 rethrow**：那会把 `_wq` 这条链永久留在 rejected 状态 ——
@@ -141,7 +196,8 @@ export class SerialSession extends Bus {
      *    这里把链恢复成 resolved，让后面的写继续。
      */
     this._wq = this._wq.then(async () => {
-      if (!this.isOpen) throw new Error('串口已关闭');
+      if (!this.isOpen || generation !== this._epoch) throw new Error('串口已关闭或已切换');
+      if (isProbeCdcPort(this.port)) this.probeManager?.cdcMode.assertUart();
       if (!this.writer) this.writer = this.port.writable.getWriter();
       await this.writer.write(data);
       this.emit('tx', data);
@@ -151,6 +207,7 @@ export class SerialSession extends Bus {
 
   async setSignals({ dtr, rts }){
     if (!this.isOpen) return;
+    if (isProbeCdcPort(this.port)) this.probeManager?.cdcMode.assertUart();
     const s = {};
     if (dtr !== undefined) s.dataTerminalReady = !!dtr;
     if (rts !== undefined) s.requestToSend = !!rts;
