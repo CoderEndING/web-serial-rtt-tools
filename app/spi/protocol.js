@@ -111,13 +111,13 @@ export const HID_OFF_DATA = 3;    // payload[3..] = 数据（= 固件的 res_hid
 
 export const ACT = {
   STATUS: 0, ENABLE: 1, RESET: 2, SET_CFG: 3, GET_CFG: 4,
-  PIN_CFG: 5, ABORT: 6, SET_PROFILE: 7, GET_PROFILE: 8,
+  PIN_CFG: 5, ABORT: 6, SET_PROFILE: 7, GET_PROFILE: 8, DRAIN: 9,
   // 10/11/12 = DBG / PINTEST / WIGGLE：固件侧的**研发调板**诊断，本页不做 UI（用户 2026-09-29 明确）。
   // 记在这里只是别让以后的人以为号段空着。
 };
 export const ACT_NAME = {
   0: 'STATUS', 1: 'ENABLE', 2: 'RESET', 3: 'SET_CFG', 4: 'GET_CFG',
-  5: 'PIN_CFG', 6: 'ABORT', 7: 'SET_PROFILE', 8: 'GET_PROFILE',
+  5: 'PIN_CFG', 6: 'ABORT', 7: 'SET_PROFILE', 8: 'GET_PROFILE', 9: 'DRAIN',
 };
 
 /** 状态字（res 数据区第 1 个字）*/
@@ -592,6 +592,7 @@ export const hidData = {
   enable: on => Uint8Array.of(ACT.ENABLE, on ? 1 : 0),
   reset: () => Uint8Array.of(ACT.RESET),
   abort: () => Uint8Array.of(ACT.ABORT),
+  drain: count => Uint8Array.of(ACT.DRAIN, Math.max(0, Math.min(16, count))),
   setCfg: cfg => concat(Uint8Array.of(ACT.SET_CFG), cfg),
   getCfg: () => Uint8Array.of(ACT.GET_CFG),
   pinCfg: (line, pad) => Uint8Array.of(ACT.PIN_CFG, line & 0xff, pad & 0xff, 0),
@@ -626,6 +627,13 @@ export function parseStatusPayload(res){
 export function parseWordPayload(res){
   const dv = new DataView(res.buffer, res.byteOffset, res.byteLength);
   return dv.getUint32(HID_OFF_DATA, true);
+}
+
+/** Old firmware may return a padded error packet; require the explicit DRN1 capability. */
+export function supportsDrain(res){
+  return res?.byteLength >= 11 && res[0] >= 12 && res[HID_OFF_CMD] === HID_CMD &&
+    res[HID_OFF_ACTION] === ACT.DRAIN &&
+    new DataView(res.buffer, res.byteOffset, res.byteLength).getUint32(7, true) === 0x314e5244;
 }
 
 export function parseCfgPayload(res){ return decodeCfg(res.subarray(HID_OFF_DATA, HID_OFF_DATA + CFG_LEN)); }

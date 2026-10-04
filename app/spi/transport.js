@@ -32,6 +32,8 @@ export class WebUsbSpiTransport {
     this._usb = new UsbLease(device, 'spi');
     this.device = this._usb.device;
     this._pending = new Set();
+    this._pendingReads = new Set();
+    this.drainReads = opts.drainReads;
     this.chunkBytes = opts.chunkBytes ?? 4096;
     this.inFlight = opts.inFlight ?? 4;        // IN 读（收应答）
     this.outInFlight = opts.outInFlight ?? 8;  // OUT 写（发帧）—— 刷屏吞吐的关键，见 sendPacks。
@@ -136,6 +138,7 @@ export class WebUsbSpiTransport {
       this.dirty = false;
     }
     this.running = true;
+    this._stopped = false;
     this.gen++;                                   // 新一轮代号：上一轮没收干净的 worker 靠它作废
     this._fatal = null;
     this.onError = typeof onError === 'function' ? onError : null;
@@ -164,7 +167,11 @@ export class WebUsbSpiTransport {
     // 那时 running 又被 start() 置回 true —— 只判 running 它就"复活"了，而且不在 workers 里（2026-10 代码审查）
     while (this.running && g === this.gen){
       let r;
-      try { r = await this.device.transferIn(this.epIn, this.chunkBytes); }
+      try {
+        const native = this.device.transferIn(this.epIn, this.chunkBytes);
+        this._pendingReads.add(native);
+        try { r = await native; } finally { this._pendingReads.delete(native); }
+      }
       catch (e){
         if (this.running && g === this.gen){
           this.errors++; this.lastError = e?.message || String(e); this.dirty = true;
@@ -206,6 +213,7 @@ export class WebUsbSpiTransport {
    * 固件仍按 512 B 槽解析，所以包序列不变，只是主机少喊几次）。
    */
   async sendRaw(buf, timeoutMs = this.outTimeoutMs){
+    if (this._stopped) throw new Error('SPI 数据端点正在停止或已停止');
     const data = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
     if (!data.length) return 0;
     if (data.length > BATCH_MAX) throw new Error(`一次传输 ${data.length} B 超过上限 ${BATCH_MAX} B`);
@@ -218,6 +226,9 @@ export class WebUsbSpiTransport {
       if (r.status !== 'ok'){ this.errors++; this.lastError = r.status; throw new Error(`transferOut 状态 ${r.status}`); }
       this.writes++; this.writeBytes += r.bytesWritten ?? data.length;
       return r.bytesWritten ?? data.length;
+    } catch (e){
+      this.dirty = true;
+      throw e;
     } finally { if (timer) clearTimeout(timer); }
   }
 
@@ -263,15 +274,27 @@ export class WebUsbSpiTransport {
 
   /** 停止收流：等在飞的读全部回来（最多 800 ms），**不要**让它们挂在那儿 */
   async stop(){
+    if (this._stopPromise) return await this._stopPromise;
     this.gen++;                    // 代号一变，超时残留在飞的那条读回来后就自行作废
     this.running = false;
-    let settled = 0;
-    const all = [...this._pending].map(p => p.then(() => { settled++; }, () => { settled++; }));
-    await Promise.race([Promise.allSettled(all), sleep(800)]);
-    this.workers = [];
-    /** 800 ms 还没回来的在飞读有几笔（WebUSB 取消不掉，只能如实记账）*/
-    this.stalledInFlight = Math.max(0, all.length - settled);
-    if (this.stalledInFlight) this.dirty = true;
+    this._stopped = true;
+    this._stopPromise = (async () => {
+      // Stop rearming first. Each short reply retires one native EP11 read only.
+      // Never invent completion: unsupported/failed drain still requires guarded reset.
+      if (this._pendingReads.size && this.drainReads){
+        try { await this.drainReads(this._pendingReads.size); }
+        catch (e){ this.lastError = 'EP11 收尾失败：' + e.message; }
+      }
+      let timer;
+      try {
+        await Promise.race([Promise.allSettled([...this._pending]),
+          new Promise(resolve => { timer = setTimeout(resolve, 800); })]);
+      } finally { clearTimeout(timer); }
+      this.workers = [];
+      this.stalledInFlight = this._pending.size;
+      if (this.stalledInFlight) this.dirty = true;
+    })();
+    try { await this._stopPromise; } finally { this._stopPromise = null; }
   }
 
   async close(){

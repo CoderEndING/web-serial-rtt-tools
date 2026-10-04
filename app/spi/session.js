@@ -143,14 +143,15 @@ export class SpiSession {
   async _connectUsbNow(interactive = null, opts = {}){
     try {
       let t;
+      const transportOpts = { inFlight: opts.inFlight ?? 4, drainReads: count => this._drainReads(count) };
       const devs = await WebUsbSpiTransport.authorized();
       const useAuthorized = interactive === false || (interactive == null && devs.length > 0);
       if (useAuthorized){
         if (!devs.length) throw new Error('没有已授权的探针（先点一次「连接数据端点」授权一次）');
-        t = new WebUsbSpiTransport(devs[0], { inFlight: opts.inFlight ?? 4 });
+        t = new WebUsbSpiTransport(devs[0], transportOpts);
         await t.open();
       } else {
-        t = await WebUsbSpiTransport.request({ inFlight: opts.inFlight ?? 4 });
+        t = await WebUsbSpiTransport.request(transportOpts);
       }
       this.transport = t;
       this.stream.reset();
@@ -235,6 +236,16 @@ export class SpiSession {
     this.stream?.reset();
     this.lastStatus = null;
     this._setState(NOT_CONNECTED_HINT);
+  }
+
+  async _drainReads(count){
+    const temporary = !this.connected;
+    const hid = temporary ? new AkaLinkHid() : this.hid;
+    try {
+      if (temporary) await hid.reconnect();
+      const res = await hid.xfer(P.HID_CMD, P.hidData.drain(count));
+      if (!P.supportsDrain(res)) throw new Error('固件不支持 EP11 DRAIN，请更新探针固件');
+    } finally { if (temporary) await hid.close(); }
   }
 
   /** 长任务（回环自检 / 刷图）期间置忙：轮询暂停、两页的按钮一起禁用 */
