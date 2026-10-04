@@ -23,7 +23,7 @@ export function createProbeManager(t, { bus = null, locks } = {}){
   const register = (id, active, release, guarded) => manager.register(id, {
     resources: PROBE_RESOURCES[id], active, release, protected: guarded,
   });
-  register('flash', () => !!t.flash?.busy, async () => {}, () => !!t.flash?.busy);
+  register('flash', () => !!(t.flash?.busy || t.flash?.probe), () => t.flash?._closeProbe(), () => !!t.flash?.busy);
   register('dbg', () => !!t.dbg?.session?.connected && t.dbg?.session?.backendName !== '模拟目标',
     () => t.dbg.disconnect());
   register('rtt', () => !!(t.rtt?.probe || t.rtt?.bridge) && !t.rtt?._probeMock,

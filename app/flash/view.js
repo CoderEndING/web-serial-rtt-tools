@@ -172,11 +172,40 @@ export class FlashView {
   async flash(){
     if (this.busy) return;
     if (!this.file && !String($('f-path')?.value || '').trim()) return await this._flashOnce();
-    // Reserve the whole lifecycle before preparation can yield.
+    return await this._withProbeOwnership(() => this._flashOnce(), '烧录器要使用探针');
+  }
+
+  /** Flash and identification share reservation, retry cleanup and button state. */
+  async _withProbeOwnership(fn, reason){
     this.busy = true;
-    $('f-flash').disabled = true;
-    try { return await runProbeOperation(this, 'flash', () => this._flashOnce(), { reason: '烧录器要使用探针' }); }
-    finally { this.busy = false; this.probeManager?.forget('flash'); $('f-flash').disabled = false; }
+    for (const id of ['f-flash', 'f-idcode']) if ($(id)) $(id).disabled = true;
+    try {
+      return await runProbeOperation(this, 'flash', async () => {
+        // Retry the retained close before opening another native handle.
+        if (this._probeCloseFailed) await this._closeProbe();
+        return await fn();
+      }, { reason, recovery: true });
+    } finally {
+      this.busy = false;
+      if (!this._probeCloseFailed && !this.probeManager?.failures.has('flash')) this.probeManager?.forget('flash');
+      for (const id of ['f-flash', 'f-idcode']) if ($(id)) $(id).disabled = false;
+    }
+  }
+
+  async _closeProbe(operationError = null){
+    const probe = this.probe;
+    if (!probe) return;
+    try { await probe.disconnect(); }
+    catch (e){
+      this._probeCloseFailed = true;
+      this.probeManager?.fail('flash', e);
+      if (operationError) throw new AggregateError([operationError, e],
+        `${operationError.message}；探针关闭失败：${e.message}`);
+      throw e;
+    }
+    this.probe = null;
+    this._probeCloseFailed = false;
+    this.probeManager?.confirm('flash');
   }
 
   async _flashOnce(){
@@ -200,6 +229,7 @@ export class FlashView {
       if ($('f-bar').hidden) this._status(`烧录中… 已耗时 ${((Date.now() - t0) / 1000) | 0}s`);
     }, 500);
     this._hbStart();
+    let operationError;
     try {
       if ($('f-backend').value === 'webusb'){
         await this._flashWebusb(name);
@@ -208,6 +238,7 @@ export class FlashView {
       }
       this._status(`空闲（上次烧录用时 ${((Date.now() - t0) / 1000).toFixed(1)}s）`);
     } catch (e){
+      operationError = e;
       this._status('空闲');
       setStatus($('f-result'), `❌ ${e?.message || e}`, 'err');
       /**
@@ -241,8 +272,7 @@ export class FlashView {
        *    现象：烧录失败后 RTT 连不上、再点一次烧录报「占用 USB 接口失败」，
        *    用户只能刷新页面才好（实测就是这么个坑）。
        */
-      try { if (this.probe) await this.probe.disconnect(); } catch {}
-      this.probe = null;
+      await this._closeProbe(operationError);
     }
   }
 
@@ -277,17 +307,12 @@ export class FlashView {
    */
   async readIdcode(){
     if (this.busy){ this._err(new Error('正在忙（烧录 / 读身份）—— 等它跑完再点')); return; }
-    this.busy = true;
-    if ($('f-idcode')) $('f-idcode').disabled = true;
-    try { return await runProbeOperation(this, 'flash', () => this._readIdcodeOnce(), { reason: '读取目标身份' }); }
-    finally {
-      this.busy = false; this.probeManager?.forget('flash');
-      if ($('f-idcode')) $('f-idcode').disabled = false;
-    }
+    return await this._withProbeOwnership(() => this._readIdcodeOnce(), '读取目标身份');
   }
 
   async _readIdcodeOnce(){
     const t0 = Date.now();
+    let operationError;
     try {
       if (!(await this._clearProbeUsers('读取目标身份'))) return;
       const isRv = HPM_BOARDS.some(b => b.id === $('f-chip').value);
@@ -296,9 +321,11 @@ export class FlashView {
       if (isRv) await this._idcodeRiscv();
       else await this._idcodeArm();
       this._log(`──── 读完（${Date.now() - t0} ms）────`);
+    } catch (e){
+      operationError = e;
+      throw e;
     } finally {
-      try { if (this.probe) await this.probe.disconnect(); } catch {}
-      this.probe = null;
+      await this._closeProbe(operationError);
     }
   }
 
