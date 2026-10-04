@@ -31,3 +31,13 @@ console.log('rtt-lifecycle: target reset drains reader and cannot rescan a repla
  await v.connectProbe();assert.equal(closes,1);assert.equal(v.lastError,'original connection failure','outer finalizer cannot erase original failure');
 }
 console.log('rtt-lifecycle: failed connect retains its original error without duplicate cleanup PASS');
+{
+ const v=Object.create(RttView.prototype),messages=[];
+ const savedDoc=globalThis.document,savedTimer=globalThis.setTimeout;
+ globalThis.document={getElementById:id=>id==='toasts'?{appendChild:el=>messages.push(el)}:{classList:{remove(){},add(){}}},createElement:()=>({})};
+ globalThis.setTimeout=()=>0;
+ Object.assign(v,{rec:{needsClose:true,stop:async()=>({name:'failed.txt',bytes:42,error:new Error('disk full')})},_recordBtn(){},_uiConnected(){}});
+ try{await v._disconnectNow();assert.equal(messages.length,1);assert.equal(messages[0].className,'toast t-err');assert.match(messages[0].textContent,/disk full/);}
+ finally{globalThis.document=savedDoc;globalThis.setTimeout=savedTimer;}
+}
+console.log('rtt-lifecycle: disconnect reports recording failure instead of saved success PASS');

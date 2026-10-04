@@ -529,7 +529,8 @@ export class RttView {
     if (this.rec.active || this.rec.needsClose || this.rec.starting || this.rec.draining){
       const info = await this.rec.stop();
       this._recordBtn();
-      if (info) toast(`记录已停止并保存：${info.name}（${fBytes(info.bytes)}）`, 'ok', 6000);
+      if (info?.error) toast('记录落盘出错：' + (info.error.message || info.error), 'err', 8000);
+      else if (info) toast(`记录已停止并保存：${info.name}（${fBytes(info.bytes)}）`, 'ok', 6000);
     }
     let failure = null;
     if (this.probe?.disconnect){
