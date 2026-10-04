@@ -84,6 +84,8 @@ test:
 	$(NODE) tools/selftest/hid-proto.test.mjs
 	$(NODE) tools/selftest/dwarf.test.mjs
 	$(NODE) tools/selftest/scope-proto.test.mjs
+	$(NODE) tools/selftest/scope-transport.test.mjs
+	$(NODE) tools/selftest/scope-store-batch.test.mjs
 	$(NODE) tools/selftest/bridge-origin.test.mjs
 	$(NODE) tools/selftest/bridge-lifecycle.test.mjs
 	$(NODE) tools/selftest/flash-image.test.mjs
@@ -215,6 +217,8 @@ test-dwarf:
 # J-Scope 引擎层：采样计划 / 512B 包编解码 / 缓冲+LOD / 触发 / 假探针端到端
 test-scope:
 	$(NODE) tools/selftest/scope-proto.test.mjs
+	$(NODE) tools/selftest/scope-transport.test.mjs
+	$(NODE) tools/selftest/scope-store-batch.test.mjs
 
 # 「工程生成」页与 Python 工具（uvprojx2cmake.py）产物的逐字节对账
 # 外加「本地桥安装包」生成器的自测（桥源码哈希对账 + bat/ps1/config 内容）
