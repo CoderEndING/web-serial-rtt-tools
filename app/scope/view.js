@@ -13,6 +13,7 @@
  * 满了之后新样本计入 `overrun` 并显示在"丢样本"里 —— 绝不静默丢。
  */
 import { releaseLocalProbeUsers } from '../core/probe-users.js';
+import { runProbeOperation } from '../core/probe-manager.js';
 import { waitMs } from '../core/pace.js';
 import { $, setStatus, seg, esc } from '../ui/dom.js';
 import { store } from '../core/store.js';
@@ -302,6 +303,15 @@ export class ScopeView {
 
   // ================================================================= 连接
   async connectHid(request){
+    if (this._hidConnectPromise) return await this._hidConnectPromise;
+    if (this._releasing || this.usingMock) return;
+    this._hidConnectPromise = runProbeOperation(this, 'scope', () => this._connectHidNow(request), { reason: 'J-Scope 要连接探针' });
+    try { return await this._hidConnectPromise; }
+    catch (e){ this.setStatusText(e.message, 'err'); return false; }
+    finally { this._hidConnectPromise = null; }
+  }
+
+  async _connectHidNow(request){
     if (this.usingMock){ this.setStatusText('假探针模式下不需要连真探针', 'warn'); return; }
     try {
       if (!AkaLinkHid.supported()) throw new Error('这个浏览器没有 WebHID（桌面版 Chrome / Edge 才有）');
@@ -366,10 +376,21 @@ export class ScopeView {
    * （和 HID 的「重连」一个道理：授权过一次就不用再点弹框，自动化测试也走这条路）。
    */
   async connectUsb(request = true){
+    if (this._usbConnectPromise) return await this._usbConnectPromise;
+    if (this._releasing || this.usingMock) return;
+    this._usbConnectPromise = runProbeOperation(this, 'scope', () => this._connectUsbNow(request), { reason: 'J-Scope 要使用数据端点' });
+    try { return await this._usbConnectPromise; }
+    catch (e){ this.setStatusText(e.message, 'err'); return false; }
+    finally { this._usbConnectPromise = null; }
+  }
+
+  async _connectUsbNow(request = true){
     if (this.usingMock){ this.setStatusText('假探针模式下不需要数据端点', 'warn'); return; }
     try {
-      await releaseLocalProbeUsers('scope', 'J-Scope 要使用数据端点');
-      if (this.bus?.supported) await this.bus.requestRelease({ why: 'J-Scope 要使用数据端点' });
+      if (!this.probeManager){
+        await releaseLocalProbeUsers('scope', 'J-Scope 要使用数据端点');
+        if (this.bus?.supported) await this.bus.requestRelease({ why: 'J-Scope 要使用数据端点' });
+      }
       // 先关掉可能残留的旧对象（否则新的一次 claim 会被自己上一把占着而失败）
       if (this.transport){ const old = this.transport; this.transport = null; try { await old.close(); } catch {} }
       /**
@@ -409,9 +430,11 @@ export class ScopeView {
    * 让出之后本页回到"未连接"状态，用户再点「连接探针」就能重新拿回来（不会自锁）。
    */
   async releaseProbe(reason = '别的页签要占用探针'){
+    this.probeManager?.cancel('scope');
     this._releasing = true;
     let failure;
     try { await this.stop(reason); } catch (e) { failure = e; }
+    await Promise.allSettled([this._hidConnectPromise, this._usbConnectPromise].filter(Boolean));
     const t = this.transport;
     if (t){ this.transport = null; try { await t.close(); } catch { /* 忽略 */ } }
     const h = this.hid;
@@ -422,12 +445,14 @@ export class ScopeView {
     const ui = $('sc-usbinfo'); if (ui) ui.textContent = '未连接数据端点';
     this._releasing = false;
     if (failure){ this.setStatusText(failure.message, 'err'); throw failure; }
+    this.probeManager?.forget('scope');
     this.setStatusText('已让出探针（' + reason + '）—— 需要时点「连接探针 / 数据端点」重新占用', 'warn');
     this.syncButtons();
     return true;
   }
 
-  setMock(on){
+  async setMock(on){
+    await this.releaseProbe('切换模拟目标');
     this.usingMock = !!on;
     this.running = false;
     this._capturing = false;
@@ -620,12 +645,18 @@ export class ScopeView {
   // ================================================================= 采样
   async start(){
     if (this.running || this._startPromise || this._stopPromise || this._releasing) return;
+    if (!this.selected.length && (!this.usingMock || !this.mockVars().length)){
+      this.setStatusText('先选变量（或用假探针自带的通道）', 'warn'); return;
+    }
     const g = this._captureGen = (this._captureGen || 0) + 1;
     this._starting = true;
     this._startTouched = false;
     this.syncButtons();
-    this._startPromise = this._startOnce(g);
+    this._startPromise = runProbeOperation(this, 'scope', () => this._startOnce(g), {
+      mock: this.usingMock, reason: 'J-Scope 要开始采样',
+    });
     try { return await this._startPromise; }
+    catch (e){ this.setStatusText(e.message, 'err'); return false; }
     finally {
       if (g === this._captureGen && !this.running){
         this._capturing = false; this._stopWatchdog();
@@ -659,7 +690,7 @@ export class ScopeView {
      */
     const vars = [...pick].sort((a, b) => a.addr - b.addr);
     if (!vars.length){ this.setStatusText('先选变量（或用假探针自带的通道）', 'warn'); return; }
-    if (!this.usingMock){
+    if (!this.usingMock && !this.probeManager){
       try { await releaseLocalProbeUsers('scope', 'J-Scope 要开始采样'); }
       catch (e) { this.setStatusText(e.message, 'err'); return; }
       if (!this._captureAlive(g)) return;
@@ -673,9 +704,9 @@ export class ScopeView {
      */
     if (!this.usingMock && (!this.hid || !this.transport)){
       this.setStatusText('探针还没连上，正在自动重连…', 'warn');
-      if (!this.hid) await this.connectHid(false);
+      if (!this.hid) await this._connectHidNow(false);
       if (!this.transport){
-        try { await this.connectUsb(false); } catch (e){ /* 下面统一报错 */ }
+        try { await this._connectUsbNow(false); } catch (e){ /* 下面统一报错 */ }
       }
       if (!this._captureAlive(g)) return;
       if (!this.hid || !this.transport){
@@ -891,6 +922,7 @@ export class ScopeView {
   }
 
   async stop(reason){
+    this.probeManager?.cancel('scope');
     if (this._stopPromise) return await this._stopPromise;
     this._captureGen = (this._captureGen || 0) + 1;
     this._stopPromise = this._stopOnce(reason);
@@ -902,12 +934,13 @@ export class ScopeView {
   async _stopOnce(reason){
     this._stopWatchdog();
     if (!this.running && !this._starting && !this.transport?.running) return;
+    const hadData = this.running || this.transport?.running;
     this.running = false;
     this._capturing = false;                 // DATA 分支据此停止入缓冲（见那里的说明）
     // 先给个即时反馈：后面两个 await（排空 + HID STOP）要几十毫秒，这期间界面上不该还写着"采样中"
     this.setStatusText('正在停止…', '');
     if (this._startPromise) await this._startPromise.catch(() => {});
-    await this._stopData();
+    if (hadData || this._startTouched || this.transport?.running) await this._stopData();
     const st = this.store;
     const spanUs = st?.count > 1 ? st.timeAt(st.count - 1) - st.timeAt(0) : 0;
     const why = reason || this._stopReason;
