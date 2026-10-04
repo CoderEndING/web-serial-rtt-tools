@@ -356,7 +356,7 @@ export class AkaLinkHid {
       });
       wait.catch(() => {}); // sendReport can fail before the response promise is awaited.
       try {
-        await this.device.sendReport(1, pkt);
+        await Promise.race([this.device.sendReport(1, pkt), wait]);
       } catch (e){
         this._settle(req);                  // 写失败：别把定时器留着
         if (this._pending === req) this._pending = null;
