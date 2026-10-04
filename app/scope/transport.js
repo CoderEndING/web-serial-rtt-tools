@@ -243,6 +243,14 @@ export class VendorEpTransport {
     }
   }
 
+  /** Stop rearming while the producer can still finish already submitted reads. */
+  async quiesce(timeoutMs = 40){
+    this.running = false;
+    this.gen++;
+    if (this.workers.length)
+      await Promise.race([Promise.allSettled(this.workers), sleep(timeoutMs)]);
+  }
+
   /** 停止收流：等在飞的读全部回来（最多 800 ms），**不要**让它们挂在那儿 */
   async stop(){
     this.gen++;                    // 代号一变，超时残留在飞的那条读回来后就自行作废

@@ -74,3 +74,10 @@ console.log('scope-transport: stalled restart resets/retire reads; failed reset 
  usb.resolve(packet(10));await tick();assert.deepEqual(seen,[10]);const stop=replacement.stop();usb.drain();await stop;
 }
 console.log('scope-transport: replacing transport cannot orphan native reads on the same device PASS');
+{
+ const usb=new USB();let resets=0;usb.reset=async()=>{resets++;usb.drain();};usb.close=async()=>{};
+ const t=new VendorEpTransport(usb,{inFlight:3});t.open=async()=>t;await t.start(()=>{});
+ const quiesce=t.quiesce();usb.drain();await quiesce;assert.equal(usb.calls,3,'quiescing never rearms reads');await t.stop();assert.equal(t.stalledInFlight,0);
+ await t.start(()=>{});assert.equal(resets,0,'ordinary capture restart needs no USB reset');const stop=t.stop();usb.drain();await stop;
+}
+console.log('scope-transport: quiesce drains producer-completed reads without rearming or resetting normal captures PASS');

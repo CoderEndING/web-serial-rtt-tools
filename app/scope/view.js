@@ -641,6 +641,7 @@ export class ScopeView {
 
   async _stopData(){
     let failure;
+    try { await this.transport?.quiesce?.(); } catch (e) { failure = e; }
     try { if (this.hid) await this.hidXfer(P.HID_CMD, P.flagsData(P.ACT.STOP)); }
     catch (e) { failure = e; }
     try { await this.transport?.stop(); } catch (e) { failure ||= e; }
