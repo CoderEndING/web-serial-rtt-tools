@@ -76,6 +76,25 @@ RTT 转发 · J-Scope 波形 · SPI/QSPI 桥 · SPI/QSPI 屏（含**局部刷新
 > 也无权开 TCP。所以这里的零安装通路是 **WebUSB 直连 CMSIS-DAP 探针**（RTT / J-Scope / 烧录 /
 > 调试全走它），想用 J-Link 或 OpenOCD 时再启动那个**可选**的本仓库 `bridge/`。
 
+## 日常验证入口
+
+固件、构建目录和测试脚本曾经随着不同板卡逐步增加，容易把 F103ZE 的旧产物拿给 F103CB。
+现在由 [`tools/target-firmware/board-matrix.json`](tools/target-firmware/board-matrix.json) 统一
+记录板卡、容量、例程和唯一 ELF 路径；行为约定见
+[`tools/target-firmware/CONTRACT.md`](tools/target-firmware/CONTRACT.md)，测试顺序见
+[`tools/selftest/README.md`](tools/selftest/README.md)。
+
+```powershell
+make check                  # 语法与文档模板
+make test-offline           # 全部离线逻辑回归
+make rebuild-all-examples   # 清理旧生成目录并重建四块活动板卡
+make full_flow_f103cb       # 当前 F103CB：认板 → 基准 → 调试压力
+```
+
+只清固件生成目录用 `make clean-firmware`；`make clean` 还会清理临时采集文件，但会保留
+源码、文档、根目录入库的 `fw.elf` 和 bundle。真机日期记录统一从
+[`docs/validation/README.md`](docs/validation/README.md) 进入。
+
 ## 功能一览（11 个标签页）
 
 | 标签页 | 干什么 | 需要什么 |

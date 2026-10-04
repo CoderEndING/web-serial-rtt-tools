@@ -66,6 +66,12 @@ Write-Output ("board   : {0}  ({1})" -f $Board, $b.Note)
 & $objcopy -O ihex   $elf (Join-Path $build 'fw.hex')
 & $size $elf
 
+# 根目录只发布 ZE 默认档；CB/C8 必须使用各自 build-* 目录，避免容量档互相覆盖。
+if ($Board -eq 'ze') {
+  Copy-Item -Force $elf (Join-Path $root 'fw.elf')
+  Write-Output ("已复制给用户下载： {0}" -f (Join-Path $root 'fw.elf'))
+}
+
 # 顺手把被采样变量的地址打印出来 —— 手填地址/排障时不用再开 nm。
 # ⚠️ -g 会把 -Os 优化掉的静态变量……这里全是 volatile 全局，不会被优化掉。
 Write-Output ""

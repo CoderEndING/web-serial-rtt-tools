@@ -13,6 +13,8 @@
 import { readFileSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import path from 'node:path';
+import { artifact, getBoard } from './board-matrix.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..', '..');
@@ -28,8 +30,8 @@ const SECS = Number(process.env.SECS || 4);
  * 🚨 不覆盖就会拿 F103 的 g_bytes 地址去对账，读回来是垃圾 → 每档都被判"数据不可信"（假警报）。
  * RAM= 可缩小控制块扫描范围（默认 0x20000000-0x20005000 覆盖 F103/H7B0 都够）。
  */
-const ELF = process.env.ELF || join(root, 'tools', 'target-firmware', 'stm32f103_rtt_speed', 'build', 'fw.elf');
-const RANGE = process.env.RAM || '0x20000000-0x20005000';
+const ELF = process.env.ELF || join(root, artifact('f103ze', 'rtt').split('/').join(path.sep));
+const RANGE = process.env.RAM || getBoard('f103ze').viewerRange;
 
 const syms = {};
 if (existsSync(ELF)){

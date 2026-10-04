@@ -24,6 +24,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { findSymbol } from '../../app/rtt/elf.js';
 import { printSummary } from './campaign-summary.mjs';
+import { artifact } from './board-matrix.mjs';
 
 const arg = k => process.argv.find(a => a.startsWith(`--${k}=`));
 const has = k => process.argv.includes(`--${k}`);
@@ -37,8 +38,8 @@ const ORIGIN = LOCAL ? 'http://127.0.0.1:8899' : 'https://minichao9901.github.io
 const PROFILE = path.join(process.env.TEMP, 'chrome-rtt-authorized');
 const CHIP = (arg('chip') || '--chip=hpm6800evk').split('=')[1];
 const FW = {
-  flood: 'tools/target-firmware/hpm6800evk_rtt_flood/fw.elf',   // RTT flood（AXI SRAM 里的 RTT 环）
-  scope: 'tools/target-firmware/hpm6800evk_scope/fw.elf',       // J-Scope 靶子（契约变量块 g_v）
+  flood: artifact('6800evk', 'rtt'),       // RTT flood（AXI SRAM 里的 RTT 环）
+  scope: artifact('6800evk', 'scope'),     // J-Scope 靶子（契约变量块 g_v）
 };
 const COM = (arg('com') || '--com=COM5').split('=')[1];
 const CYCLES = argN('cycles', 2);

@@ -1,8 +1,13 @@
 # 靶子固件（tools/target-firmware）
 
-给本仓库各页面当**被测目标**的测试固件。每个目录**根上的 `fw.elf` 都是编好的产物（入库）**，
+给本仓库各页面当**被测目标**的测试固件。四块活动板卡和每个例程的唯一构建路径见
+[`board-matrix.json`](board-matrix.json) 与 [`CONTRACT.md`](CONTRACT.md)。每个目录**根上的 `fw.elf` 都是编好的产物（入库）**，
 用户不必装工具链：网页里直接载入就行 —— 页面要从 ELF 的符号（`_SEGGER_RTT`）和 DWARF
 （变量地址/类型）里取地址，**所以光有 .bin/.hex 是不够的**。
+
+日常重建用 `make rebuild-all-examples`；它先删除所有被忽略的 `build/`、`build-*` 目录，
+再按清单重建 F103CB、F103ZE、H743 和 6800EVK 的 RTT、scope、调试压力例程。完整流程只
+使用清单里的 `buildArtifact`，容量不同的 F103 不会互相覆盖。
 
 | 目录 | 板子 | 干什么 | 入库产物 |
 |---|---|---|---|

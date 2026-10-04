@@ -51,6 +51,7 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { printSummary } from './campaign-summary.mjs';
+import { artifact, getBoard } from './board-matrix.mjs';
 
 const arg = k => process.argv.find(a => a.startsWith(`--${k}=`));
 const argV = (k, d) => { const a = arg(k); return a ? a.split('=').slice(1).join('=') : d; };
@@ -63,6 +64,7 @@ const REMOTE = 'https://minichao9901.github.io/web-serial-rtt-tools/';
 const APP = (LOCAL ? (process.env.APP || 'http://127.0.0.1:8899/index.html') : REMOTE) + '?t=' + Date.now() + '#flash';
 const ORIGIN = LOCAL ? 'http://127.0.0.1:8899' : 'https://minichao9901.github.io:443';
 const PROFILE = path.join(process.env.TEMP, 'chrome-rtt-authorized');
+const flowArtifact = (board, example) => artifact(board, example);
 /**
  * 板子档案：**芯片相关的东西全在这里**（靶子固件、RTT 控制块在哪、探针怎么找它）。
  * 命令行 `--board=` 选一条，`--chip=` / `--com=` 仍可覆盖。
@@ -83,9 +85,9 @@ const BOARDS = {
     /** 🚨 必须 ZE 版（512KB flash / 64KB RAM，RTT 上行 32KB）：编译
      *  `pwsh -File tools/target-firmware/stm32f103_rtt_speed/build.ps1 -Board ze`
      *  （CB/C8 版输出在 build-cb / build-c8，三份产物可以同时躺着） */
-    spam: 'tools/target-firmware/stm32f103_rtt_speed/build-ze/fw.elf',
-    scope: 'tools/target-firmware/stm32f103_scope/build/fw.elf',
-    viewerRange: '0x20000000-0x20005000',
+    spam: flowArtifact('f103ze', 'rtt'),
+    scope: flowArtifact('f103ze', 'scope'),
+    viewerRange: getBoard('f103ze').viewerRange,
     findCb: 'auto',
   },
   f103cb: {
@@ -93,9 +95,9 @@ const BOARDS = {
     chip: 'stm32f103',
     target: 'swd',
     /** CB 只有 128 KB Flash / 20 KB SRAM；必须使用独立的小容量产物。 */
-    spam: 'tools/target-firmware/stm32f103_rtt_speed/build-cb/fw.elf',
-    scope: 'tools/target-firmware/stm32f103_scope/build-cb/fw.elf',
-    viewerRange: '0x20000000-0x20005000',
+    spam: flowArtifact('f103cb', 'rtt'),
+    scope: flowArtifact('f103cb', 'scope'),
+    viewerRange: getBoard('f103cb').viewerRange,
     findCb: 'auto',
   },
   h743: {
@@ -103,9 +105,9 @@ const BOARDS = {
     chip: 'stm32h7',
     target: 'swd',
     /** 目录根那份就是 build/fw.elf（实测同哈希），仓库里跟踪着，新克隆不用重建 */
-    spam: 'tools/target-firmware/stm32h743_rtt_speed/fw.elf',
-    scope: 'tools/target-firmware/stm32h743_scope/fw.elf',
-    viewerRange: '0x24000000-0x24005000',
+    spam: flowArtifact('h743', 'rtt'),
+    scope: flowArtifact('h743', 'scope'),
+    viewerRange: getBoard('h743').viewerRange,
     findCb: 'elf',
   },
 };

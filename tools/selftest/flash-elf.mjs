@@ -21,6 +21,7 @@
  *      F103 那块板"只靠探针供电时 BOOT0 悬空 → 掉进 ROM"就是这个提示。
  */
 import { Cdp, sleep, DEV_RE } from './cdp-lib.mjs';
+import { artifact } from './board-matrix.mjs';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -29,11 +30,12 @@ const argv = process.argv.slice(2);
 const arg = (k, d = null) => { const h = argv.find(a => a.startsWith('--' + k + '=')); return h ? h.split('=').slice(1).join('=') : (argv.includes('--' + k) ? true : d); };
 
 /** 板子档案：芯片下拉 / 后端 / 目标类型 / 靶子固件 —— 与 dbg-hw-stress.mjs、hw-campaign*.mjs 对得上 */
+const flowElf = id => '/' + artifact(id, 'dbgstress').replaceAll('\\', '/');
 const BOARDS = {
-  f103ze:  { label: 'STM32F103ZE', chip: 'stm32f103',  backend: 'webusb', target: 'swd',   elf: '/tools/target-firmware/stm32f103_dbgstress/build/fw.elf',  waitMs: 120000 },
-  f103cb:  { label: 'STM32F103CB', chip: 'stm32f103',  backend: 'webusb', target: 'swd',   elf: '/tools/target-firmware/stm32f103_dbgstress/build-cb/fw.elf', waitMs: 120000 },
-  h743:    { label: 'STM32H743',   chip: 'stm32h7',    backend: 'webusb', target: 'swd',   elf: '/tools/target-firmware/stm32h743_dbgstress/build/fw.elf',  waitMs: 120000 },
-  '6800evk': { label: 'HPM6800EVK', chip: 'hpm6800evk', backend: 'webusb', target: 'riscv', elf: '/tools/target-firmware/hpm6800evk_dbgstress/fw.elf',      waitMs: 360000 },
+  f103ze:  { label: 'STM32F103ZE', chip: 'stm32f103',  backend: 'webusb', target: 'swd',   elf: flowElf('f103ze'),  waitMs: 120000 },
+  f103cb:  { label: 'STM32F103CB', chip: 'stm32f103',  backend: 'webusb', target: 'swd',   elf: flowElf('f103cb'), waitMs: 120000 },
+  h743:    { label: 'STM32H743',   chip: 'stm32h7',    backend: 'webusb', target: 'swd',   elf: flowElf('h743'),  waitMs: 120000 },
+  '6800evk': { label: 'HPM6800EVK', chip: 'hpm6800evk', backend: 'webusb', target: 'riscv', elf: flowElf('6800evk'), waitMs: 360000 },
 };
 const BOARD_ID = String(arg('board', 'f103ze'));
 const BOARD = BOARDS[BOARD_ID];

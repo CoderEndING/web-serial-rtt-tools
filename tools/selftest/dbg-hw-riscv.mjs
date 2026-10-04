@@ -19,22 +19,22 @@
  */
 import { Cdp, sleep, DEV_RE } from './cdp-lib.mjs';
 import { writeFileSync, existsSync, readFileSync, readdirSync } from 'node:fs';
-import { dirname, relative, resolve, sep } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { relative, resolve, sep } from 'node:path';
+import { artifact, repoRoot } from './board-matrix.mjs';
 
 const argv = process.argv.slice(2);
 const arg = (k, d = null) => { const h = argv.find(a => a.startsWith('--' + k + '=')); return h ? h.split('=').slice(1).join('=') : (argv.includes('--' + k) ? true : d); };
 
 const APP = 'http://127.0.0.1:8899/index.html';
-const ELF = String(arg('elf', '/tools/target-firmware/hpm6800evk_dbgstress/fw.elf'));
-const SRCDIR = String(arg('src', 'E:\\web-serial-rtt-tools\\tools\\target-firmware\\hpm6800evk_dbgstress\\src'));
+const ELF = String(arg('elf', '/' + artifact('6800evk', 'dbgstress')));
+const SRCDIR = String(arg('src', resolve(repoRoot, 'tools', 'target-firmware', 'hpm6800evk_dbgstress', 'src')));
 const ORACLE = String(arg('oracle', 'tmp/rv-gdb-oracle.json'));
 const JSON_OUT = String(arg('out', 'tmp/rv-stress-page.json'));
 /**
  * 页面侧拿源码只能走**静态服务**（8899 的根 = 仓库根），所以把磁盘路径换算成 URL 路径。
  * 为什么要这么绕：见下面"源码目录"那段的 🚨。
  */
-const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
+const ROOT = repoRoot;
 const SRC_REL = relative(ROOT, resolve(SRCDIR));
 if (SRC_REL.startsWith('..')) throw new Error('--src 必须指向仓库里的目录（页面是通过 8899 静态服务取源码的）：' + SRCDIR);
 const SRC_HTTP = '/' + SRC_REL.split(sep).join('/');

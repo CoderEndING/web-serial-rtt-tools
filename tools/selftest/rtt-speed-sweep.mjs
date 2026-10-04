@@ -11,6 +11,8 @@
 import { readFileSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import path from 'node:path';
+import { artifact, getBoard } from './board-matrix.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..', '..');
@@ -21,8 +23,8 @@ const { findSymbol } = await import('file://' + join(app, 'rtt', 'elf.js').repla
 
 const SPEEDS = (process.env.SPEEDS || '1000,2000,4000,8000,12000,20000,30000').split(',').map(Number);
 const SECS = Number(process.env.SECS || 4);
-const RANGE = process.env.RAM || '0x20000000-0x20005000';
-const ELF = join(root, 'tools', 'target-firmware', 'stm32f103_rtt_speed', 'build', 'fw.elf');
+const RANGE = process.env.RAM || getBoard('f103ze').viewerRange;
+const ELF = join(root, artifact('f103ze', 'rtt').split('/').join(path.sep));
 
 const syms = {};
 if (existsSync(ELF)){

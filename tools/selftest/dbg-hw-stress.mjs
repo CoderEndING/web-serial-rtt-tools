@@ -37,6 +37,7 @@ import { Cdp, sleep, DEV_RE } from './cdp-lib.mjs';
 import { writeFileSync, existsSync, readFileSync, readdirSync } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { artifact } from './board-matrix.mjs';
 
 const argv = process.argv.slice(2);
 const arg = (k, d = null) => { const h = argv.find(a => a.startsWith('--' + k + '=')); return h ? h.split('=').slice(1).join('=') : (argv.includes('--' + k) ? true : d); };
@@ -48,7 +49,7 @@ const arg = (k, d = null) => { const h = argv.find(a => a.startsWith('--' + k + 
 const BOARDS = {
   h743: {
     label: 'STM32H743（阿波罗 H743 · Cortex-M7）',
-    elf: '/tools/target-firmware/stm32h743_dbgstress/build/fw.elf',
+    elf: '/' + artifact('h743', 'dbgstress'),
     src: 'tools\\target-firmware\\stm32h743_dbgstress\\src',
     oracle: 'tmp/gdb-oracle.json',
     out: 'tmp/dbg-stress-page.json',
@@ -60,7 +61,7 @@ const BOARDS = {
   },
   f103ze: {
     label: 'STM32F103ZE（本机那块 · Cortex-M3）',
-    elf: '/tools/target-firmware/stm32f103_dbgstress/build/fw.elf',
+    elf: '/' + artifact('f103ze', 'dbgstress'),
     src: 'tools\\target-firmware\\stm32f103_dbgstress\\src',
     /** 别跟 H743 那份共用：忘了删的旧 oracle 会让逐地址比对整段"假红" */
     oracle: 'tmp/gdb-oracle-f103.json',
@@ -73,7 +74,7 @@ const BOARDS = {
   },
   f103cb: {
     label: 'STM32F103CB（当前板 · Cortex-M3）',
-    elf: '/tools/target-firmware/stm32f103_dbgstress/build-cb/fw.elf',
+    elf: '/' + artifact('f103cb', 'dbgstress'),
     src: 'tools\\target-firmware\\stm32f103_dbgstress\\src',
     oracle: 'tmp/gdb-oracle-f103cb.json',
     out: 'tmp/dbg-stress-page-f103cb.json',

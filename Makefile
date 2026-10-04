@@ -29,7 +29,7 @@ FW_DIR   = tools/target-firmware/stm32f103
 LA       = tools/la/kingst_la.py
 
 .DEFAULT_GOAL := help
-.PHONY: help serve serve-dev serve-stop browser open page-prep spi-flash-hw idcode board-check-f103ze board-check-f103cb board-check-h743 board-check-6800evk test test-ui test-gen test-gen-page gen-embed samples-anim test-hid test-dwarf test-scope test-scope-page test-scope-render test-spi test-read test-spi-page test-hw test-record test-bridge test-bridge-gate test-hpm test-image test-all test-dbg test-dbg-page test-dbg-hw test-dbg-stress test-dbg-stress-f103ze test-dbg-stress-f103cb flash-dbgstress-f103ze flash-dbgstress-f103cb flash-dbgstress-h743 flash-dbgstress-6800evk test-dbg-riscv test-idcode test-dsl test-flash flash-timing hw-campaign hw-campaign-f103ze hw-campaign-f103cb hw-campaign-h743 hw-campaign-hpm hw-campaign-riscv build-f103ze-examples build-f103cb-examples build-h743-examples build-6800evk-examples campaign-summary full_flow_f103ze full_flow_f103cb full_flow_h743 full_flow_6800evk \
+.PHONY: help serve serve-dev serve-stop browser open page-prep spi-flash-hw idcode board-check-f103ze board-check-f103cb board-check-h743 board-check-6800evk test test-offline test-board-matrix test-ui test-gen test-gen-page gen-embed samples-anim test-hid test-dwarf test-scope test-scope-page test-scope-render test-spi test-read test-spi-page test-hw test-record test-bridge test-bridge-gate test-hpm test-image test-all test-dbg test-dbg-page test-dbg-hw test-dbg-stress test-dbg-stress-f103ze test-dbg-stress-f103cb flash-dbgstress-f103ze flash-dbgstress-f103cb flash-dbgstress-h743 flash-dbgstress-6800evk test-dbg-riscv test-idcode test-dsl test-flash flash-timing hw-campaign hw-campaign-f103ze hw-campaign-f103cb hw-campaign-h743 hw-campaign-hpm hw-campaign-riscv build-f103ze-examples build-f103cb-examples build-h743-examples build-6800evk-examples build-all-examples rebuild-all-examples clean-firmware campaign-summary full_flow_f103ze full_flow_f103cb full_flow_h743 full_flow_6800evk \
         bridge bridge-stop fw-build fw-flash fw-restore fw-h7-build fw-h7-flash \
         algo-check flash-plan la-info la-capture git-status git-log check clean spi-hw spi-flow i2c-hw spi-partial-hw dbg-step-hw probe-diag
 
@@ -78,7 +78,7 @@ grant:
 	$(NODE) tools/selftest/serial-grant.mjs $(ARGS)
 
 # ---------------------------------------------------------------- 自测
-test: test-stability test-dbg-features
+test: test-stability test-dbg-features test-board-matrix
 	$(NODE) tools/selftest/rtt.test.mjs
 	$(NODE) tools/selftest/gen-parity.mjs
 	$(NODE) tools/selftest/hid-proto.test.mjs
@@ -102,6 +102,13 @@ test: test-stability test-dbg-features
 	$(NODE) tools/selftest/i2c-registers.test.mjs
 	$(NODE) tools/selftest/spi-regs.test.mjs
 	$(NODE) tools/selftest/scenery-samples.test.mjs
+
+# 离线总入口：先做语法/液体页面检查，再跑纯 Node 自测；不打开浏览器、不碰探针。
+test-offline: check test
+
+# 板卡/例程唯一清单的静态检查；发现路径漂移时在进入真机流程前就失败。
+test-board-matrix:
+	$(NODE) tools/selftest/board-matrix.test.mjs
 
 # USB→I2C 页的协议层 + 假探针 + 假器件（AT24C02/MPU6050/ADS1115/Si5351）—— 不需要硬件
 test-i2c:
@@ -374,6 +381,7 @@ hw-campaign-f103ze: page-prep build-f103ze-examples
 
 build-f103ze-examples:
 	pwsh -NoProfile -File tools/target-firmware/stm32f103_rtt_speed/build.ps1 -Board ze
+	pwsh -NoProfile -File tools/target-firmware/stm32f103_rtt_seq/build.ps1 -Board ze
 	pwsh -NoProfile -File tools/target-firmware/stm32f103_scope/build.ps1 -Board ze
 	pwsh -NoProfile -File tools/target-firmware/stm32f103_dbgstress/build.ps1 -Board ze
 
@@ -383,6 +391,7 @@ hw-campaign-f103cb: page-prep build-f103cb-examples
 
 build-f103cb-examples:
 	pwsh -NoProfile -File tools/target-firmware/stm32f103_rtt_speed/build.ps1 -Board cb
+	pwsh -NoProfile -File tools/target-firmware/stm32f103_rtt_seq/build.ps1 -Board cb
 	pwsh -NoProfile -File tools/target-firmware/stm32f103_scope/build.ps1 -Board cb
 	pwsh -NoProfile -File tools/target-firmware/stm32f103_dbgstress/build.ps1 -Board cb
 
@@ -415,6 +424,13 @@ build-6800evk-examples:
 
 # 别名（用户口径叫"RISC-V 那条"）：就是上面 hw-campaign-hpm（脚本名按探针/芯片叫 hpm）
 hw-campaign-riscv: hw-campaign-hpm
+
+# 四块活动板卡的全量固件构建。每个例程的唯一产物见 board-matrix.json。
+build-all-examples: build-f103cb-examples build-f103ze-examples build-h743-examples build-6800evk-examples
+	REQUIRE_BUILDS=1 $(NODE) tools/selftest/board-matrix.test.mjs
+
+# 清掉所有被忽略的旧 build/build-* 目录后再从源码全量重建。
+rebuild-all-examples: clean-firmware build-all-examples
 
 # ---------------------------------------------------------------- 认板子（真机流程的硬前置）
 # 在**真页面**上点「读 IDCODE」，把目标身份读出来：
@@ -553,9 +569,13 @@ check:
 	$(NODE) tools/dev/check-liquid.mjs
 	pwsh -NoProfile -Command "Write-Host 'syntax + liquid check ok'"
 
-clean:
+clean: clean-firmware
 	pwsh -NoProfile -Command "Remove-Item -Recurse -Force -ErrorAction SilentlyContinue tmp/*.csv, tmp/*.bin, tools/la/__pycache__"
-	pwsh -NoProfile -Command "Write-Host '清理完成（保留源码与构建产物）'"
+	pwsh -NoProfile -Command "Write-Host '清理完成（临时文件与固件构建目录）'"
+
+# 只清理靶子固件的生成目录；根上的入库 fw.elf 和源码会保留。
+clean-firmware:
+	pwsh -NoProfile -ExecutionPolicy Bypass -File tools/dev/clean-firmware.ps1
 
 .PHONY: test-stability test-probe
 test-probe:

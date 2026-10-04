@@ -68,6 +68,12 @@ if ($LASTEXITCODE -ne 0) { throw "编译失败 (exit $LASTEXITCODE)" }
 & $objcopy -O ihex   $elf (Join-Path $build 'fw.hex')
 & $size $elf
 
+# 根目录只发布 ZE 默认档；CB/C8 必须使用各自 build-* 目录，避免容量档互相覆盖。
+if ($Board -eq 'ze') {
+  Copy-Item -Force $elf (Join-Path $root 'fw.elf')
+  Write-Output ("入库： {0}" -f (Join-Path $root 'fw.elf'))
+}
+
 Write-Output ""
 Write-Output ("产物： {0}" -f $elf)
 Write-Output ("       {0} ({1} B)" -f (Join-Path $build 'fw.bin'), (Get-Item (Join-Path $build 'fw.bin')).Length)

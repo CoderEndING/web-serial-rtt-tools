@@ -11,6 +11,8 @@
 import { readFileSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import path from 'node:path';
+import { artifact, getBoard } from './board-matrix.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..', '..');
@@ -23,9 +25,9 @@ const BACKEND = (process.argv[2] || 'bridge').toLowerCase();
 const SECS = Number(process.argv[3] || 5);
 const CDP = process.env.CDP || 'http://127.0.0.1:9333';
 const APP = process.env.APP || 'http://127.0.0.1:8899/index.html';
-const RANGE = process.env.RAM || '0x20000000-0x20005000';
+const RANGE = process.env.RAM || getBoard('f103ze').viewerRange;
 // 换板子/换固件时用 ELF=<路径> 覆盖（例：STM32H7B0 那份固件），符号只用于目标侧对账，缺了也能跑
-const ELF = process.env.ELF || join(root, 'tools', 'target-firmware', 'stm32f103_rtt_speed', 'build', 'fw.elf');
+const ELF = process.env.ELF || join(root, artifact('f103ze', 'rtt').split('/').join(path.sep));
 
 // 从 ELF 里取几个全局量的地址，用来交叉验证
 const syms = {};
