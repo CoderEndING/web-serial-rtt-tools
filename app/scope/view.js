@@ -961,7 +961,15 @@ export class ScopeView {
 
   async _stopOnce(reason){
     this._stopWatchdog();
-    if (!this.running && !this._starting && !this.transport?.running && !this._stopUnconfirmed) return;
+    /**
+     * A failed USB teardown is recorded by ProbeManager so another feature
+     * cannot race the still-uncertain sampler.  After the user reconnects
+     * HID/USB there may be no local `running` flag left, but one explicit STOP
+     * is still required to confirm the handoff and clear that fault.  Treat
+     * the manager failure as an active stop request instead of returning early.
+     */
+    const needsManagerConfirm = this.probeManager?.failures?.has('scope') === true;
+    if (!this.running && !this._starting && !this.transport?.running && !this._stopUnconfirmed && !needsManagerConfirm) return;
     const hadData = this.running || this.transport?.running;
     this.running = false;
     this._capturing = false;                 // DATA 分支据此停止入缓冲（见那里的说明）

@@ -71,6 +71,19 @@ const BOARDS = {
     boot0: 1,
     clockKhz: 10000,
   },
+  f103cb: {
+    label: 'STM32F103CB（当前板 · Cortex-M3）',
+    elf: '/tools/target-firmware/stm32f103_dbgstress/build-cb/fw.elf',
+    src: 'tools\\target-firmware\\stm32f103_dbgstress\\src',
+    oracle: 'tmp/gdb-oracle-f103cb.json',
+    out: 'tmp/dbg-stress-page-f103cb.json',
+    /** CB SRAM 末端为 0x20005000，越界读必须仍然得到总线 FAULT。 */
+    faultAddr: 0x20005000,
+    faultText: 'SRAM 末尾之后的空洞',
+    boot0: 0,
+    /** 杜邦线连接下先用 1 MHz 调试时钟，调试压力本身与 RTT 60 MHz 流程分开。 */
+    clockKhz: 1000,
+  },
 };
 const BOARD_ID = String(arg('board', 'h743'));
 const BOARD = BOARDS[BOARD_ID];

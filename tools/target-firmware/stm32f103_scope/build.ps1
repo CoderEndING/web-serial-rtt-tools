@@ -1,19 +1,21 @@
 <#
   STM32F103 scope 测试固件编译脚本（不需要 make，也不需要 Keil）
     pwsh -File build.ps1                 # 默认 ZE（512KB flash / 64KB RAM）
+    pwsh -File build.ps1 -Board cb       # F103CB（128KB flash / 20KB RAM）
     pwsh -File build.ps1 -Board c8       # 中等密度 64KB flash / 20KB RAM
     pwsh -File build.ps1 -Clean
   依赖：arm-none-eabi-gcc 在 PATH 里（本机在 E:\Share\env-windows\tools\gnu_gcc\arm_gcc\mingw\bin）
 
   默认板的产物固定落在 build\ —— check.py / flash.ps1 / 文档都按这个路径找。
 #>
-param([switch]$Clean, [ValidateSet('c8', 'ze')][string]$Board = 'ze')
+param([switch]$Clean, [ValidateSet('c8', 'cb', 'ze')][string]$Board = 'ze')
 
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
 
 $BOARDS = @{
   ze = @{ Ld = 'stm32f103ze.ld'; Out = 'build';    Note = '512KB flash / 64KB RAM' }
+  cb = @{ Ld = 'stm32f103cb.ld'; Out = 'build-cb'; Note = '128KB flash / 20KB RAM' }
   c8 = @{ Ld = 'stm32f103c8.ld'; Out = 'build-c8'; Note = '64KB flash  / 20KB RAM' }
 }
 $b = $BOARDS[$Board]

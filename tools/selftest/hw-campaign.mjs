@@ -88,6 +88,16 @@ const BOARDS = {
     viewerRange: '0x20000000-0x20005000',
     findCb: 'auto',
   },
+  f103cb: {
+    label: 'STM32F103CB + akaLinkPro（SWD/ARM）',
+    chip: 'stm32f103',
+    target: 'swd',
+    /** CB 只有 128 KB Flash / 20 KB SRAM；必须使用独立的小容量产物。 */
+    spam: 'tools/target-firmware/stm32f103_rtt_speed/build-cb/fw.elf',
+    scope: 'tools/target-firmware/stm32f103_scope/build-cb/fw.elf',
+    viewerRange: '0x20000000-0x20005000',
+    findCb: 'auto',
+  },
   h743: {
     label: 'STM32H743（阿波罗 H743）+ akaLinkPro（SWD/ARM）',
     chip: 'stm32h7',
@@ -280,6 +290,10 @@ class Cdp {
     await this.send('Page.enable');
     await this.send('Runtime.enable');
     try { await this.send('Network.enable'); await this.send('Network.setCacheDisabled', { cacheDisabled: true }); } catch {}
+    // Keep the real page in the foreground.  A background/occluded Chrome
+    // tab throttles the RTT Viewer timer to ~20 Hz, which measures browser
+    // scheduling rather than the probe's 60 MHz path.
+    try { await this.send('Page.bringToFront'); } catch {}
     this.on('Page.javascriptDialogOpening', () => { this.send('Page.handleJavaScriptDialog', { accept: true }).catch(() => {}); });
     return this;
   }
@@ -367,6 +381,7 @@ console.log(`   RTT 控制块搜索窗口：${BOARD.viewerRange}（找法：${BO
 console.log(`   计划：${CYCLES} 轮 × (烧狂发→RTT Viewer ${RTT_SECS}s→转发 ${FWD_SECS}s+存盘 ${REC_SECS}s→烧 scope→J-Scope 4 组) ＋ 交替烧录 ${ALT} 遍`);
 
 await cdp.send('Page.navigate', { url: APP });
+try { await cdp.send('Page.bringToFront'); } catch {}
 await cdp.waitFor('window.__tools?.flash && window.__tools?.hid && window.__tools?.stream', 25000, '页面模块加载');
 await ensureSerialGrant();
 
@@ -671,9 +686,29 @@ async function rttForward(){
 }
 
 /* ------------------------------------------------------------ 2) J-Scope 采样率 */
-async function scopeConnect(){
-  await cdp.eval(`(async()=>{ try{ await window.__tools.hid.stop(); }catch(e){}
-                              try{ await window.__tools.hid.dev?.close?.(); }catch(e){} })()`).catch(() => {});
+async function scopeConnect({ force = false } = {}){
+  if (force){
+    /**
+     * A failed WebUSB reset can leave the page holding an object whose
+     * `device` is no longer usable.  Merely checking `scope.hid`/
+     * `scope.transport` therefore reports a false reconnection.  Close both
+     * handles, clear the references, and let the normal authorized-device
+     * path create fresh objects.
+     */
+    await cdp.eval(`(async()=>{ const t=window.__tools, s=t.scope;
+      try{ await s.stop('重试清理'); }catch(e){}
+      try{ await s.releaseProbe?.('重试清理'); }catch(e){}
+      try{ await s.transport?.close?.(); }catch(e){}
+      try{ await s.hid?.close?.(); }catch(e){}
+      s.transport = null; s.hid = null;
+      try{ await t.hid.stop(); }catch(e){}
+      try{ await t.hid.dev?.close?.(); }catch(e){}
+    })()`).catch(() => {});
+    await nap(900);
+  } else {
+    await cdp.eval(`(async()=>{ try{ await window.__tools.hid.stop(); }catch(e){}
+                                try{ await window.__tools.hid.dev?.close?.(); }catch(e){} })()`).catch(() => {});
+  }
   await nap(300);
   await cdp.eval(`(async()=>{ const s=window.__tools.scope; if (!s.hid) await s.connectHid(false); })()`);
   if (!await cdp.evalJson(`!!window.__tools.scope.hid`)){
@@ -685,7 +720,14 @@ async function scopeConnect(){
     await cdp.eval(`document.getElementById('sc-usb').click()`, true);
     await nap(2000);
   }
-  return { hid: await cdp.evalJson(`!!window.__tools.scope.hid`), usb: await cdp.evalJson(`!!window.__tools.scope.transport`) };
+  const conn = { hid: await cdp.evalJson(`!!window.__tools.scope.hid`), usb: await cdp.evalJson(`!!window.__tools.scope.transport`) };
+  if (force && conn.hid && conn.usb){
+    // A previous failed stop marks the manager lease as unconfirmed.  Now
+    // that fresh handles exist, send a real STOP once so the manager can
+    // clear that fault through its normal confirm() path.
+    await cdp.eval(`window.__tools.scope.stop('重连后确认')`).catch(() => {});
+  }
+  return conn;
 }
 async function scopeEnsureElf(){
   const cached = await cdp.evalJson(`(window.__tools.scope.all || []).length`);
@@ -719,7 +761,7 @@ async function scopeRun(opts){
       await cdp.eval(`(async()=>{ const s=window.__tools.scope; try{ await s.stop('重试'); }catch(e){}
                                   try{ await s.releaseProbe?.('重试'); }catch(e){} })()`).catch(() => {});
       await nap(600);
-      const conn = await scopeConnect();
+      const conn = await scopeConnect({ force: true });
       console.log(`   [J-Scope] 重连结果：hid=${conn.hid} usb=${conn.usb}`);
       await nap(800);
     }
@@ -772,7 +814,11 @@ async function scopeRunOnce({ idxs, periodUs, secs, label }){
   if (periodUs === 20) judge(`J-Scope ${label} 零丢样本（探针跳拍 ≤ 100 ppm）`,
     LOST_PROBE_PPM <= 100 && out.lostUsb === 0 && out.lostGap <= 10,
     `探针 ${out.lostProbe}/${out.samples}（${LOST_PROBE_PPM.toFixed(1)} ppm）/ USB ${out.lostUsb} / 缺口 ${out.lostGap}`);
-  else judge(`J-Scope ${label} 跑通`, out.samples > 1000 && out.rateHz > 1000, `${(out.rateHz / 1000).toFixed(2)} kHz / ${out.samples} 样本`);
+  else {
+    if (!(out.samples > 1000 && out.rateHz > 1000))
+      throw new Error(`J-Scope 起不来：${label} 只有 ${(out.rateHz / 1000).toFixed(2)} kHz / ${out.samples} 样本`);
+    judge(`J-Scope ${label} 跑通`, true, `${(out.rateHz / 1000).toFixed(2)} kHz / ${out.samples} 样本`);
+  }
   await cdp.eval(`window.__tools.scope.stop('下一步')`).catch(() => {});
   await nap(400);
   return out;

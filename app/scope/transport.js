@@ -275,7 +275,31 @@ export class VendorEpTransport {
 
   async close(){
     await this.stop();
-    await this._usb.close({ dirty: dirtyDevices.has(this.device) });
+    const dirty = dirtyDevices.has(this.device);
+    try {
+      await this._usb.close({ dirty });
+    } catch (e){
+      /**
+       * Windows may reject USBDevice.reset() after a transfer has already
+       * failed.  The reset is useful for recovery, but leaving the lease
+       * claimed is worse: the next session then sees "endpoint in use by
+       * scope" and cannot even reconnect.  All workers have been quiesced by
+       * stop() above, so make one best-effort close without another reset to
+       * release the interface and the native handle.
+       */
+      // Do not bypass the shared-resource guard (for example an active SPI
+      // lease).  Only a native reset failure is recoverable by this fallback.
+      if (!dirty || /USB 整设备复位需要先断开|USB 端点正在被/.test(String(e?.message || e))) throw e;
+      try {
+        await this._usb.close({ dirty: false });
+        dirtyDevices.delete(this.device);
+      } catch (cleanup){
+        e.message += `；无复位释放也失败：${cleanup.message}`;
+        throw e;
+      }
+      console.warn('[scope] USB reset 失败，已用无复位 close 释放数据端点：' + e.message);
+      return;
+    }
     dirtyDevices.delete(this.device);
   }
 

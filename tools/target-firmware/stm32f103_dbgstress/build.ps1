@@ -1,7 +1,8 @@
 <#
-  F103ZE 调试器压力测试靶子固件编译脚本（不需要 make 也不需要 Keil）
+  F103 调试器压力测试靶子固件编译脚本（不需要 make 也不需要 Keil）
 
-    pwsh -File build.ps1              # 默认：DWARF 4 → build\fw.elf
+    pwsh -File build.ps1              # 默认：DWARF 4 → build\fw.elf（ZE）
+    pwsh -File build.ps1 -Board cb    # F103CB → build-cb\fw.elf
     pwsh -File build.ps1 -Dwarf5      # 同源码、换成 DWARF 5 → build-dw5\fw.elf
     pwsh -File build.ps1 -Clean
 
@@ -16,14 +17,15 @@
 
   产物保证带 **DWARF + .symtab**（-g3 且不 strip）—— 页面的符号/行号/类型全靠它。
 #>
-param([switch]$Clean, [switch]$Dwarf5)
+param([switch]$Clean, [switch]$Dwarf5, [ValidateSet('ze', 'cb')][string]$Board = 'ze')
 
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
 
-$outName = if ($Dwarf5) { 'build-dw5' } else { 'build' }
+$outName = if ($Board -eq 'cb') { if ($Dwarf5) { 'build-cb-dw5' } else { 'build-cb' } }
+          elseif ($Dwarf5) { 'build-dw5' } else { 'build' }
 $build = Join-Path $root $outName
-$ldpath = Join-Path $root 'ld\stm32f103ze.ld'
+$ldpath = Join-Path $root ('ld\stm32f103' + $Board + '.ld')
 if (-not (Test-Path $ldpath)) { throw "找不到链接脚本 $ldpath" }
 
 $gcc = (Get-Command arm-none-eabi-gcc -ErrorAction SilentlyContinue).Source
@@ -71,6 +73,7 @@ $hexout = Join-Path $build 'fw.hex'
 & $size $elf
 
 Write-Output ""
+Write-Output ("board   ： {0}" -f $Board)
 Write-Output ("DWARF   ： {0}" -f ($(if ($Dwarf5) { '5' } else { '4' })))
 Write-Output ("产物    ： {0}" -f $elf)
 Write-Output ("          {0} ({1} B)" -f $binout, (Get-Item $binout).Length)
@@ -81,7 +84,7 @@ Write-Output "关键符号（压测脚本要按这些地址/名字断言）："
 Write-Output ""
 
 # 默认版额外复制一份到本目录根 —— 与其它靶子同一套约定（build*/ 被 .gitignore 忽略）
-if (-not $Dwarf5){
+if (-not $Dwarf5 -and $Board -eq 'ze'){
   Copy-Item $elf (Join-Path $root 'fw.elf') -Force
   Write-Output ("已复制给用户下载： {0}" -f (Join-Path $root 'fw.elf'))
 } else {

@@ -33,14 +33,24 @@ const BOARDS = {
     label: 'STM32F103ZE（本机那块 · Cortex-M3）',
     chip: 'stm32f103', target: 'swd',
     idcode: /1BA01477/i,                 // Cortex-M3 的 SW-DP
-    dev: /DEV_ID 0x414\b|STM32F103|F10x 大容量/i,
+    dev: /DEV_ID\s+0x414\b/i,
+    flash: /flash\s*容量[^\n]*=\s*512\s*KB/i,
     note: 'Cortex-M3 · 512KB flash / 64KB RAM · 6 个 FPB 比较器',
+  },
+  f103cb: {
+    label: 'STM32F103CB（当前板 · Cortex-M3）',
+    chip: 'stm32f103', target: 'swd',
+    idcode: /1BA01477/i,
+    dev: /DEV_ID\s+0x410\b/i,
+    flash: /flash\s*容量[^\n]*=\s*128\s*KB/i,
+    note: 'Cortex-M3 · 128KB flash / 20KB RAM · 6 个 FPB 比较器',
   },
   h743: {
     label: 'STM32H743（阿波罗 H743 · Cortex-M7）',
     chip: 'stm32h7', target: 'swd',
     idcode: /6BA02477/i,                 // Cortex-M7 的 SW-DP
     dev: /DEV_ID 0x450\b|H74[0-9]|H742\/743/i,
+    flash: null,
     note: 'Cortex-M7 · 8 个 FPB 比较器 · RTT 控制块要放 AXI SRAM(0x24000000)',
   },
   '6800evk': {
@@ -48,6 +58,7 @@ const BOARDS = {
     chip: 'hpm6800evk', target: 'riscv',
     idcode: /1000563D/i,                 // JTAG TAP IDCODE
     dev: null,
+    flash: null,
     note: 'RISC-V · 走 JTAG + DMI/SBA；探针的 output_mode 必须是 SWD+JTAG',
   },
 };
@@ -110,6 +121,7 @@ const all = lines.join('\n');
 const gotIdcode = /DP IDCODE|TAP IDCODE|IDCODE/i.test(all);
 const idcodeOk = BOARD ? BOARD.idcode.test(all) : gotIdcode;
 const devOk = BOARD?.dev ? BOARD.dev.test(all) : true;
+const flashOk = BOARD?.flash ? BOARD.flash.test(all) : true;
 const errish = /NO ACK|FAULT|读失败|连不上|超时/.test(all) && !gotIdcode;
 
 clearTimeout(WD);
@@ -127,10 +139,10 @@ if (!BOARD){
   console.log('（没给 --board，不判决；上面就是目标的身份）');
   process.exit(0);
 }
-if (idcodeOk && devOk){
+if (idcodeOk && devOk && flashOk){
   console.log(`✅ 板上就是 ${BOARD.label}`);
   process.exit(0);
 }
-console.error(`❌ 板上**不是** ${BOARD.label}：IDCODE 特征 ${idcodeOk ? '匹配' : '不匹配'} · DEV_ID 特征 ${devOk ? '匹配' : '不匹配'}`);
-console.error('   换板子之后请跑对应那条流程（full_flow_f103ze / full_flow_h743 / full_flow_6800evk），别硬跑。');
+console.error(`❌ 板上**不是** ${BOARD.label}：IDCODE 特征 ${idcodeOk ? '匹配' : '不匹配'} · DEV_ID 特征 ${devOk ? '匹配' : '不匹配'} · Flash 容量 ${flashOk ? '匹配' : '不匹配'}`);
+console.error('   换板子之后请跑对应那条流程（full_flow_f103ze / full_flow_f103cb / full_flow_h743 / full_flow_6800evk），别硬跑。');
 process.exit(1);

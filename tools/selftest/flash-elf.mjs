@@ -31,6 +31,7 @@ const arg = (k, d = null) => { const h = argv.find(a => a.startsWith('--' + k + 
 /** 板子档案：芯片下拉 / 后端 / 目标类型 / 靶子固件 —— 与 dbg-hw-stress.mjs、hw-campaign*.mjs 对得上 */
 const BOARDS = {
   f103ze:  { label: 'STM32F103ZE', chip: 'stm32f103',  backend: 'webusb', target: 'swd',   elf: '/tools/target-firmware/stm32f103_dbgstress/build/fw.elf',  waitMs: 120000 },
+  f103cb:  { label: 'STM32F103CB', chip: 'stm32f103',  backend: 'webusb', target: 'swd',   elf: '/tools/target-firmware/stm32f103_dbgstress/build-cb/fw.elf', waitMs: 120000 },
   h743:    { label: 'STM32H743',   chip: 'stm32h7',    backend: 'webusb', target: 'swd',   elf: '/tools/target-firmware/stm32h743_dbgstress/build/fw.elf',  waitMs: 120000 },
   '6800evk': { label: 'HPM6800EVK', chip: 'hpm6800evk', backend: 'webusb', target: 'riscv', elf: '/tools/target-firmware/hpm6800evk_dbgstress/fw.elf',      waitMs: 360000 },
 };

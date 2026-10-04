@@ -29,7 +29,7 @@ FW_DIR   = tools/target-firmware/stm32f103
 LA       = tools/la/kingst_la.py
 
 .DEFAULT_GOAL := help
-.PHONY: help serve serve-dev serve-stop browser open page-prep spi-flash-hw idcode board-check-f103ze board-check-h743 board-check-6800evk test test-ui test-gen test-gen-page gen-embed samples-anim test-hid test-dwarf test-scope test-scope-page test-scope-render test-spi test-read test-spi-page test-hw test-record test-bridge test-bridge-gate test-hpm test-image test-all test-dbg test-dbg-page test-dbg-hw test-dbg-stress test-dbg-stress-f103ze flash-dbgstress-f103ze flash-dbgstress-h743 flash-dbgstress-6800evk test-dbg-riscv test-idcode test-dsl test-flash flash-timing hw-campaign hw-campaign-h743 hw-campaign-hpm hw-campaign-riscv campaign-summary full_flow_f103ze full_flow_h743 full_flow_6800evk \
+.PHONY: help serve serve-dev serve-stop browser open page-prep spi-flash-hw idcode board-check-f103ze board-check-f103cb board-check-h743 board-check-6800evk test test-ui test-gen test-gen-page gen-embed samples-anim test-hid test-dwarf test-scope test-scope-page test-scope-render test-spi test-read test-spi-page test-hw test-record test-bridge test-bridge-gate test-hpm test-image test-all test-dbg test-dbg-page test-dbg-hw test-dbg-stress test-dbg-stress-f103ze test-dbg-stress-f103cb flash-dbgstress-f103ze flash-dbgstress-f103cb flash-dbgstress-h743 flash-dbgstress-6800evk test-dbg-riscv test-idcode test-dsl test-flash flash-timing hw-campaign hw-campaign-f103cb hw-campaign-h743 hw-campaign-hpm hw-campaign-riscv build-f103cb-examples campaign-summary full_flow_f103ze full_flow_f103cb full_flow_h743 full_flow_6800evk \
         bridge bridge-stop fw-build fw-flash fw-restore fw-h7-build fw-h7-flash \
         algo-check flash-plan la-info la-capture git-status git-log check clean spi-hw spi-flow i2c-hw spi-partial-hw dbg-step-hw probe-diag
 
@@ -169,11 +169,18 @@ test-dbg-stress: page-prep
 test-dbg-stress-f103ze: page-prep flash-dbgstress-f103ze
 	$(NODE) tools/selftest/dbg-hw-stress.mjs --board=f103ze $(ARGS)
 
+# 同一套压测 · **F103CB 靶子**（128KB Flash / 20KB SRAM；BOOT0=0）。
+test-dbg-stress-f103cb: page-prep flash-dbgstress-f103cb
+	$(NODE) tools/selftest/dbg-hw-stress.mjs --board=f103cb $(ARGS)
+
 # 调试器的靶子固件（就是各自 target-firmware/*_dbgstress 那份）烧进板子 —— 页面 WebUSB 烧录。
 # 为什么要有这一步：跑完 hw-campaign 的板子上是"狂发/scope"固件，不换靶子压测必然连不上；
 # 以前这一步藏在 tmp/ 的脚手架里（tmp/ 不进仓库，新克隆根本没有）。
 flash-dbgstress-f103ze:
 	$(NODE) tools/selftest/flash-elf.mjs --board=f103ze $(ARGS)
+
+flash-dbgstress-f103cb:
+	$(NODE) tools/selftest/flash-elf.mjs --board=f103cb $(ARGS)
 
 flash-dbgstress-h743:
 	$(NODE) tools/selftest/flash-elf.mjs --board=h743 $(ARGS)
@@ -358,6 +365,15 @@ test-record: page-prep
 hw-campaign: page-prep
 	$(NODE) tools/selftest/hw-campaign.mjs $(FLOW_LOCAL) $(ARGS)
 
+# 同一套网页流程的 F103CB 档案：固件与 RTT 扫描窗口都按 128KB/20KB 目标构建。
+hw-campaign-f103cb: page-prep build-f103cb-examples
+	$(NODE) tools/selftest/hw-campaign.mjs --board=f103cb $(FLOW_LOCAL) $(ARGS)
+
+build-f103cb-examples:
+	pwsh -NoProfile -File tools/target-firmware/stm32f103_rtt_speed/build.ps1 -Board cb
+	pwsh -NoProfile -File tools/target-firmware/stm32f103_scope/build.ps1 -Board cb
+	pwsh -NoProfile -File tools/target-firmware/stm32f103_dbgstress/build.ps1 -Board cb
+
 # 同上，靶子是 STM32H743（阿波罗 H743）：狂发/scope 固件换成 stm32h743_*，
 # RTT 控制块在 **AXI SRAM(0x24000000)** —— H7 的 DTCM 探针走 AHB-AP 读不到，
 # 所以自动搜的区间必须跟着换（脚本的 BOARD 表里写着）。F103 那条线不适用于 H7。
@@ -394,6 +410,9 @@ idcode: page-prep
 board-check-f103ze: page-prep
 	$(NODE) tools/selftest/read-idcode.mjs --board=f103ze
 
+board-check-f103cb: page-prep
+	$(NODE) tools/selftest/read-idcode.mjs --board=f103cb
+
 board-check-h743: page-prep
 	$(NODE) tools/selftest/read-idcode.mjs --board=h743
 
@@ -406,6 +425,7 @@ board-check-6800evk: page-prep
 # 烧录走 tools/selftest/flash-elf.mjs（以前藏在 tmp/ 里，新克隆没有）。
 #
 #   make full_flow_f103ze     探针挂 STM32F103ZE 时用：hw-campaign + test-dbg-stress-f103ze
+#   make full_flow_f103cb     探针挂 STM32F103CB 时用：CB 容量固件 + 同一套网页流程
 #   make full_flow_h743       换阿波罗 H743 之后用：  hw-campaign-h743 + 烧靶子 + test-dbg-stress
 #   make full_flow_6800evk    换 HPM6800EVK 之后用：  hw-campaign-hpm + 烧靶子 + test-dbg-riscv
 #
@@ -420,6 +440,10 @@ board-check-6800evk: page-prep
 full_flow_f103ze: FLOW_LOCAL = --local
 full_flow_f103ze: board-check-f103ze hw-campaign test-dbg-stress-f103ze
 	pwsh -NoProfile -Command "Write-Host 'full flow (f103ze) done'"
+
+full_flow_f103cb: FLOW_LOCAL = --local
+full_flow_f103cb: board-check-f103cb build-f103cb-examples hw-campaign-f103cb test-dbg-stress-f103cb
+	pwsh -NoProfile -Command "Write-Host 'full flow (f103cb) done'"
 
 full_flow_h743: FLOW_LOCAL = --local
 full_flow_h743: board-check-h743 hw-campaign-h743 flash-dbgstress-h743 test-dbg-stress
