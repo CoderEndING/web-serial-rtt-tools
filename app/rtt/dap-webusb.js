@@ -173,6 +173,7 @@ export class WebUsbDapProbe {
    *   clockKhz>0 指定 SWD 时钟；不指定则从高到低自动选（见 CLOCK_CANDIDATES）
    */
   async _setup({ skipTargetInit = false, skipInfo = false, skipClearHalt = false, clockKhz = 0, framing = null } = {}){
+    this._closing = false;
     this.skipTargetInit = skipTargetInit;
     this.skipClearHalt = skipClearHalt;
     await this._claim();
@@ -396,7 +397,7 @@ export class WebUsbDapProbe {
   }
 
   async _ctrl(cmd, payload){
-    if (!this._ready) throw new Error('探针未连接');
+    if (!this._ready || (this._closing && cmd !== CMD.Disconnect)) throw new Error('探针未连接或正在断开');
     const n = 1 + (payload ? payload.length : 0);
     if (n > this.pkt) throw new Error(`CMSIS-DAP 命令太长（${n} > ${this.pkt} 字节/包）`);
     /**
@@ -451,7 +452,7 @@ export class WebUsbDapProbe {
   async _onXferTimeout(what){
     dirty.add(this.device);
     this.xferFails++;
-    if (this._recovering) return;
+    if (this._recovering || this._closing) return;
     this._recovering = true;
     this.recoveries++;
     try {
@@ -1335,6 +1336,8 @@ export class WebUsbDapProbe {
   }
 
   async disconnect(){
+    this._closing = true;
+    if (this._lockChain) await this._lockChain;
     try { await this._ctrl(CMD.Disconnect); } catch {}
     try { await this.device.releaseInterface(this.iface); } catch {}
     // 🚨 有过超时的会话必须先做端口复位：挂起的 bulk 传输不会随 close() 消失，

@@ -884,10 +884,17 @@ export class RttView {
       toast('当前目标（RISC-V）没有软复位通路：探针的 RISC-V 引擎只管 halt/resume，要复位请按板子上的复位键', 'warn', 7000);
       return;
     }
+    const probe = this.probe;
+    const generation = this._sessionGen = (this._sessionGen || 0) + 1;
+    this.running = false;
+    clearTimeout(this.timer); clearTimeout(this._idleTimer); clearTimeout(this._resetTimer);
     try {
-      const how = await this._strict(() => this.probe.reset());   // 复位是关键动作 → 严格档
+      if (this._pollTask) await this._pollTask.catch(() => {});
+      if (generation !== this._sessionGen || probe !== this.probe) return;
+      const how = await this._strict(() => probe.reset());   // 复位是关键动作 → 严格档
+      if (generation !== this._sessionGen || probe !== this.probe) return;
       toast(`已复位目标（${how}），2 秒后重新读取控制块…`, 'ok');
-      const g = this._sessionGen, probe = this.probe;
+      const g = generation;
       clearTimeout(this._resetTimer);
       this._resetTimer = setTimeout(() => {
         if (g === this._sessionGen && probe === this.probe) this._startRtt().catch(e => this._err(e));

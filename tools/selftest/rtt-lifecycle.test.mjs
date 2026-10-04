@@ -14,3 +14,14 @@ try{
  }
 }finally{globalThis.setTimeout=saved;}
 console.log('rtt-lifecycle: stale successful/failed polls cannot publish, stop replacement or schedule old workers PASS');
+{
+ const old=(()=>{let resolve;const promise=new Promise(r=>resolve=r);return {promise,resolve};})(),events=[];
+ const v=Object.create(RttView.prototype);v.probe={reset:async()=>{events.push('reset');return 'mock';}};
+ v.running=true;v._pollTask=old.promise;globalThis.document={getElementById:()=>null};
+ const savedTimer=globalThis.setTimeout;let scheduled;globalThis.setTimeout=f=>{scheduled=f;return 1;};
+ try{
+  const reset=v.resetTarget();await tick();assert.equal(v.running,false);assert.deepEqual(events,[]);
+  old.resolve();await reset;assert.deepEqual(events,['reset']);v._sessionGen++;v._startRtt=()=>assert.fail('late reset timer');scheduled();
+ }finally{globalThis.setTimeout=savedTimer;}
+}
+console.log('rtt-lifecycle: target reset drains reader and cannot rescan a replacement session PASS');
