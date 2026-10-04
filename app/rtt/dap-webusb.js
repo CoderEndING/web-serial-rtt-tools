@@ -1221,11 +1221,14 @@ export class WebUsbDapProbe {
     await this.writeMem(0xE000EDF4, new Uint8Array([regsel & 0x1f, 0, 0, 0]));
     for (let i = 0; i < 50; i++){
       const b = await this.readMem(0xE000EDF0, 4);
-      if (b[2] & 0x01) break;                        // DHCSR.S_REGRDY = bit16（字节 2 的 bit0）
+      if (b[2] & 0x01){                           // DHCSR.S_REGRDY = bit16
+        const data = await this.readMem(0xE000EDF8, 4);
+        if (data.length !== 4) throw new Error('调试寄存器数据不完整');
+        return (data[0] | (data[1] << 8) | (data[2] << 16) | (data[3] << 24)) >>> 0;
+      }
       await waitMs(2);
     }
-    const b = await this.readMem(0xE000EDF8, 4);
-    return (b[0] | (b[1] << 8) | (b[2] << 16) | (b[3] << 24)) >>> 0;
+    throw new Error('调试寄存器同步超时（S_REGRDY 没置位）');
   }
   async regWrite(regsel, value){
     await this.writeMem(0xE000EDF8, u32leBytes(value >>> 0));
