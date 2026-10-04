@@ -149,6 +149,15 @@ export class VendorEpTransport {
 
   async _worker(onChunk, g){
     let stalls = 0;
+    // Attach rejection handling immediately: a rearmed read can reject while decoding.
+    const issue = () => {
+      try {
+        return Promise.resolve(this.device.transferIn(this.ep, this.chunkBytes))
+          .then(result => ({ result }), error => ({ error }));
+      } catch (error){ return Promise.resolve({ error }); }
+    };
+    let pending = issue();
+    try {
     /**
      * 🚨 循环条件要带上**代号** `g`：`stop()` 等在飞的读回来最多 800 ms，超时的那一条会活到
      *    下一轮 —— 那时 `running` 又被 `start()` 置回 true，只判 running 的话它会"复活"继续收，
@@ -157,7 +166,10 @@ export class VendorEpTransport {
     while (this.running && g === this.gen){
       let r;
       try {
-        r = await this.device.transferIn(this.ep, this.chunkBytes);
+        const completed = await pending;
+        pending = null;
+        if (completed.error) throw completed.error;
+        r = completed.result;
       } catch (e){
         /* 读抛异常（USB 抖动、探针复位）以前是直接 break —— 几条 worker 全退出后数据面就停了，
          * 而 `running` 还是 true、页面还显示"采样中"（2026-10 代码审查）。现在上报并整体停下。 */
@@ -170,7 +182,10 @@ export class VendorEpTransport {
       if (r.status === 'ok' && r.data?.byteLength){
         stalls = 0;
         this.chunks++; this.bytes += r.data.byteLength;
-        onChunk(new Uint8Array(r.data.buffer, r.data.byteOffset, r.data.byteLength));
+        // Keep the native USB request queue full before doing synchronous JS work.
+        pending = issue();
+        try { onChunk(new Uint8Array(r.data.buffer, r.data.byteOffset, r.data.byteLength)); }
+        catch (e){ this._fail('数据解析失败：' + (e?.message || String(e))); break; }
       } else if (r.status !== 'ok'){
         this.errors++; this.lastError = r.status;
         if (r.status === 'stall'){
@@ -188,13 +203,18 @@ export class VendorEpTransport {
           }
         }
       }
+      if (!pending && this.running && g === this.gen) pending = issue();
+    }
+    } finally {
+      // stop/error must track the already rearmed transfer until it settles.
+      if (pending) await pending;
     }
   }
 
   /** 停止收流：等在飞的读全部回来（最多 800 ms），**不要**让它们挂在那儿 */
   async stop(){
     this.gen++;                    // 代号一变，超时残留在飞的那条读回来后就自行作废
-    if (!this.running){ this.workers = []; this.stalledInFlight = 0; return; }
+    if (!this.workers.length){ this.stalledInFlight = 0; return; }
     this.running = false;
     let settled = 0;
     const all = this.workers.map(p => p.then(() => { settled++; }, () => { settled++; }));
