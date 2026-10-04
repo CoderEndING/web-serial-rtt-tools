@@ -33,7 +33,7 @@ export function createProbeManager(t, { bus = null, locks } = {}){
   register('scope', () => !!(t.scope && !t.scope.usingMock &&
     (t.scope.running || t.scope.transport || (t.scope.hid && t.scope.hid !== t.scope.mockProbe))),
     why => t.scope.releaseProbe(why));
-  register('hid', () => !t.hid?.mock && !!t.hid?.last?.running,
+  register('hid', () => !t.hid?.mock && !!(t.hid?.last?.running || t.hid?._bridgeRequested),
     async () => { await t.hid.stop({ fromManager: true }); await t.hid.dev?.close?.(); });
   register('spi', () => !t.spiSession?.usingMock && !!(t.spiSession?.connected || t.spiSession?.dataReady),
     async () => { t.spi?.abortLoop?.(); t.panel?.anim?.stop?.(); await t.spiSession.teardown(); },

@@ -82,6 +82,7 @@ export class MockAkaLinkHid {
   async stop(){
     this.running = false;
     this.armed = null;
+    this.startRc = 0;
     this.calls.push('stop');
     return this.status();
   }

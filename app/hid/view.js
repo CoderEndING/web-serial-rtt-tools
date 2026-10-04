@@ -287,13 +287,18 @@ export class RttCdcView {
       if (!auto && (p.clockHz || this.isRiscv) && !this.mock) await this.dev.configure({ clockHz: p.clockHz });
       if (g !== this._engineGen) return;
       const before = this.last?.startRc ?? 0;
+      this._bridgeRequested = true;
       const response = auto ? await this.dev.autostart() : await this.dev.start(p);
       if (g !== this._engineGen) return;
-      if (response?.rc < 0 && response.rc !== START_PENDING) throw new Error(startRcText(response.rc));
+      if (response?.rc < 0 && response.rc !== START_PENDING){
+        this._bridgeRequested = false;
+        throw new Error(startRcText(response.rc));
+      }
       this.persist();
       await this._settle(before, 3000, g);
     } catch (e){
       if (g !== this._engineGen) return;
+      if (this._bridgeRequested) this.probeManager?.fail('hid', e);
       this.render({ error: e?.message || String(e) });
       toast('启动转发失败：' + (e?.message || e), 'err');
     }
@@ -318,7 +323,7 @@ export class RttCdcView {
       if (this._activeTask) await this._activeTask.catch(() => {});
       if (this.probeManager && !this.probeManager.leases.has('hid') && !fromManager){
         // A cancelled queued START has never owned the firmware engine.
-        if (!this.last?.running) return;
+        if (!this.last?.running && !this._bridgeRequested) return;
         return await runProbeOperation(this, 'hid', () => this._sendStopNow(), {
           reason: '停止探针侧 RTT 转发', policy: 'reject',
         });
@@ -333,12 +338,13 @@ export class RttCdcView {
       if (r?.rc < 0 && r.rc !== START_PENDING) throw new Error(startRcText(r.rc));
       this.last = r.status;
       const deadline = Date.now() + 3000;
-      while (this.last?.running){
+      while (this.last?.running || this.last?.startRc === START_PENDING){
         if (Date.now() >= deadline) throw new Error('停止 RTT 转发超时（探针还在运行）');
         await waitMs(40);
         this.last = (await this.dev.status()).status;
       }
       this._stall = 0; this._lastMoved = null;
+      this._bridgeRequested = false;
       this.probeManager?.confirm('hid');
       clearInterval(this._timer);
       this.render();
@@ -418,6 +424,7 @@ export class RttCdcView {
       await waitMs(120);
     }
     const st = this.last;
+    if (!st?.running && st?.startRc && st.startRc !== START_PENDING) this._bridgeRequested = false;
     if (st?.running && st.cbAddr){
       toast(`转发已启动 · 控制块 ${hex(st.cbAddr)} · 档位 ${st.swdMhz} MHz`, 'ok', 5000);
       this._armAutoRefresh();
