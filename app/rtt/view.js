@@ -118,6 +118,7 @@ export class RttView {
     this.mode = 'term';
     this.paused = false;
     this.running = false;
+    this._sessionGen = 0;
     this.timer = null;
     this.interval = 5;
     this.records = [];
@@ -354,6 +355,17 @@ export class RttView {
 
   // ================= 连接 =================
   async connectProbe(){
+    if (this._connectPromise || this._disconnectPromise) return;
+    const g = this._sessionGen = (this._sessionGen || 0) + 1;
+    this._connectPromise = this._connectProbe(g);
+    try { return await this._connectPromise; }
+    finally {
+      if (g !== this._sessionGen) await this.disconnect();
+      this._connectPromise = null;
+    }
+  }
+
+  async _connectProbe(g){
     const b = $('r-backend').value;
     try {
       if (b === 'webusb'){
@@ -390,7 +402,8 @@ export class RttView {
           const inf = this.probe.info();
           toast(`RISC-V 已就绪：${this.probe.name} · IDCODE 0x${Number(inf.idcode || 0).toString(16)}`, 'ok');
           this.stream = false;
-          this._uiConnected(true);
+          if (g !== this._sessionGen) return;
+      this._uiConnected(true);
           if ($('r-record-auto').checked && !this.rec.active) this._autoStartRecord();
           await this._startRtt();
           return;
@@ -481,7 +494,7 @@ export class RttView {
       }
       this._uiConnected(true);
       if ($('r-record-auto').checked && !this.rec.active) this._autoStartRecord();
-      if (this.stream) this._stats(); else await this._startRtt();
+      if (this.stream) this._stats(); else await this._startRtt(g);
     } catch (e){
       /**
        * 🚨 收尾时**要把错误留在状态栏上**（2026-10 真机走查踩到）：
@@ -498,6 +511,16 @@ export class RttView {
   }
 
   async disconnect(){
+    this._sessionGen = (this._sessionGen || 0) + 1;
+    this.running = false;
+    clearTimeout(this.timer); clearTimeout(this._idleTimer); clearTimeout(this._resetTimer);
+    if (this._disconnectPromise) return await this._disconnectPromise;
+    this._disconnectPromise = this._disconnectNow();
+    try { return await this._disconnectPromise; }
+    finally { this._disconnectPromise = null; }
+  }
+
+  async _disconnectNow(){
     this.running = false;
     clearTimeout(this.timer);
     if (this.rec.active){
@@ -522,8 +545,11 @@ export class RttView {
     if (!on){ $('r-cb').textContent = '—'; $('r-up').textContent = '0'; $('r-down').textContent = '0'; }
   }
 
-  async _startRtt(){
+  async _startRtt(g){
     if (!this.probe) return;
+    if (g === undefined) g = this._sessionGen = (this._sessionGen || 0) + 1;
+    const probe = this.probe;
+    const active = () => g === this._sessionGen && this.probe === probe;
     this.running = false;
     clearTimeout(this.timer);
     const addrText = String($('r-addr').value || '').trim();
@@ -531,23 +557,27 @@ export class RttView {
     const ranges = parseRanges($('r-range').value);
     setStatus($('r-err'), '正在查找 RTT 控制块…');
     // 定位是"一次性的关键动作" → 严格档（扫描要跨很多地址，读到残渣就会锁错控制块）
-    const found = await this._strict(() => Rtt.locate(this.probe, {
+    const found = await this._strict(() => Rtt.locate(probe, {
       addr, ranges,
       onProgress: (p, a) => setStatus($('r-err'), `扫描控制块 ${(p * 100) | 0}%  @0x${a.toString(16)}`),
     }));
+    if (!active()) return;
     if (!found) throw new Error('没找到 SEGGER RTT 控制块：固件里编进 RTT 了吗？RAM 范围填对了吗？（也可以载入 .elf 用符号定位）');
-    this.rtt = new Rtt(this.probe, { addr: found });
-    await this.rtt.init(found);
-    const inff = this.rtt.info();
+    const rtt = new Rtt(probe, { addr: found });
+    await rtt.init(found);
+    if (!active()) return;
+    const inff = rtt.info();
     $('r-cb').textContent = '0x' + found.toString(16);
     $('r-up').textContent = inff.maxUp;
     $('r-down').textContent = inff.maxDown;
-    const nm = await this.rtt.name('up', 0);
+    const nm = await rtt.name('up', 0);
+    if (!active()) return;
+    this.rtt = rtt;
     $('r-chlabel').textContent = `下行 ch0${nm ? ' · ' + nm : ''}`;
     const sz = inff.up[0]?.size || 0;
     setStatus($('r-err'), `控制块 0x${found.toString(16)}，上行缓冲 ${sz} B${inff.maxUp > 1 ? `（固件声明 ${inff.maxUp} 个上行通道，本页读 ch0）` : ''}`, 'ok');
     setFlag($('conn-flag'), `RTT 0x${found.toString(16)}`, 'on');
-    this._startPoll();
+    this._startPoll(g);
     this._armIdleWatchdog();
   }
 
@@ -557,23 +587,29 @@ export class RttView {
    * 这时主动让它跑起来，并在状态条上说清楚，别让用户以为工具坏了。
    */
   _armIdleWatchdog(){
+    const g = this._sessionGen, probe = this.probe;
     clearTimeout(this._idleTimer);
     this._idleTimer = setTimeout(async () => {
-      if (!this.running || this.stats.bytes > 0) return;
+      if (g !== this._sessionGen || !this.running || this.stats.bytes > 0) return;
       if (typeof this.probe?.run !== 'function') return;
       try {
         // ⚠️ 只在**确实停住**时才写 DHCSR 让它跑。
         //    早期版本无条件写 run()，结果把一个正在运行的固件"弄停"了：
         //    现象是"连上后读到几 KB 就不再来数据"（时间点正好在看门狗触发处）。
-        const halted = await this.probe.isHalted?.();
-        if (halted) await this.probe.run();
+        const halted = await probe.isHalted?.();
+        if (g !== this._sessionGen || probe !== this.probe) return;
+        if (halted) await probe.run();
         else { setStatus($('r-err'), '两秒内没收到数据，但目标在运行中（检查固件有没有在写 RTT）', null); return; }
         setStatus($('r-err'), '目标原本处于 halt 状态（固件不跑就没数据），已自动继续运行', 'ok');
       } catch (e){ /* 不支持就算了 */ }
     }, 2000);
   }
 
-  _startPoll(){
+  _startPoll(g){
+    if (g === undefined) g = this._sessionGen = (this._sessionGen || 0) + 1;
+    const rtt = this.rtt, probe = this.probe;
+    const active = () => this.running && g === this._sessionGen && this.rtt === rtt && this.probe === probe;
+    clearTimeout(this.timer);
     this.running = true;
     /**
      * 后台轮询切**快速档**（RAM 单读 + 热点写不回读）——吞吐优先；
@@ -592,10 +628,11 @@ export class RttView {
      */
     const minGap = this.bridge ? 30 : 0;
     const loop = async () => {
-      if (!this.running) return;
+      if (!active()) return;
       const t0 = performance.now();
       try {
-        const { bytes, lost, high, level, corrupt } = await this.rtt.readUp(0);
+        const { bytes, lost, high, level, corrupt } = await rtt.readUp(0);
+        if (!active()) return;
         if (bytes.length) this._ingest(bytes, new Date());
         if (lost) this.stats.lost += lost;
         if (high) this.highPolls++;
@@ -615,14 +652,15 @@ export class RttView {
           //    升级自愈：recover() 重激活 SWD；不行就 reopen() 重开 USB 会话（resync 只在这条路上跑）。
           if (this._corruptRun === 15 || (this._corruptRun > 15 && this._corruptRun % 60 === 0)){
             if (!this.suppressed) setStatus($('r-err'), `连续 ${this._corruptRun} 轮错位读，正在自愈（SWD 重激活 → 必要时重开 USB 会话）…`, 'err');
-            try { await this.probe?.recover?.(); } catch {}
+            try { await probe?.recover?.();
+            if (!active()) return; } catch {}
             let ok = false;
             try {
-              const hdr = await this.probe.readMem(this.rtt.addr, 16);
+              const hdr = await probe.readMem(rtt.addr, 16);
               ok = String.fromCharCode(...hdr.subarray(0, 10)) === 'SEGGER RTT';
             } catch {}
             if (!ok){
-              try { await this.probe.reopen?.(); } catch {}
+              try { await probe.reopen?.(); } catch {}
             }
           }
           if (this._corruptRun > 150){
@@ -637,7 +675,7 @@ export class RttView {
          * 🚨 手动断开时，在飞的 readUp 稍后会抛"探针未连接" —— 不在这儿让路的话，
          *    `_fail()` 会把状态栏从"已断开"覆盖成"读取失败"（看起来像出了故障，其实是我们自己停的）。
          */
-        if (!this.running) return;
+        if (!active()) return;
         const msg = String(e?.message || e);
         // SWD 访问出错 / 控制块内容不可信 → 先自愈（重新初始化调试口），别立刻放弃
         if (/FAULT|NO ACK|不可信|不合理|没在运行/.test(msg)){
@@ -645,8 +683,9 @@ export class RttView {
           if (this._faults === 3 || this._faults % 15 === 0){
             setStatus($('r-err'), `SWD 访问出错，正在自愈（第 ${this._faults} 次）：${msg}`, 'err');
             try {
-              await this.probe?.recover?.();
-              const hdr = await this.probe.readMem(this.rtt.addr, 16);
+              await probe?.recover?.();
+            if (!active()) return;
+              const hdr = await probe.readMem(rtt.addr, 16);
               const id = String.fromCharCode(...hdr.subarray(0, 10));
               if (id === 'SEGGER RTT'){ this._faults = 0; setStatus($('r-err'), '', null); }
               else setStatus($('r-err'), '目标似乎没在运行（RTT 控制块不见了）：点「复位目标」，或确认固件在跑', 'err');
@@ -655,11 +694,12 @@ export class RttView {
           if (this._faults > 80){ this._fail(new Error('连续 SWD 访问失败，已放弃：' + msg)); return; }
         } else { this._fail(e); return; }
       }
+      if (!active()) return;
       this.stats.polls++;
       const cost = performance.now() - t0;
-      this.timer = setTimeout(loop, Math.max(minGap, this.interval - cost, 0));
+      this.timer = setTimeout(() => { if (active()) this._pollTask = loop(); }, Math.max(minGap, this.interval - cost, 0));
     };
-    loop();
+    this._pollTask = loop();
   }
 
   _fail(e){
@@ -841,7 +881,11 @@ export class RttView {
     try {
       const how = await this._strict(() => this.probe.reset());   // 复位是关键动作 → 严格档
       toast(`已复位目标（${how}），2 秒后重新读取控制块…`, 'ok');
-      setTimeout(() => this._startRtt().catch(e => this._err(e)), 2000);
+      const g = this._sessionGen, probe = this.probe;
+      clearTimeout(this._resetTimer);
+      this._resetTimer = setTimeout(() => {
+        if (g === this._sessionGen && probe === this.probe) this._startRtt().catch(e => this._err(e));
+      }, 2000);
     } catch (e){ this._err(e); }
   }
 
