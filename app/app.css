@@ -938,6 +938,8 @@ fieldset.folded > legend::after{content:' · 已折叠';color:var(--fg2);font-si
 #tab-dbg .bprow:hover{background:var(--bg3)}
 #tab-dbg .bprow span{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #tab-dbg .bprow button{padding:0 6px;flex:none}
+#tab-dbg #d-bt-list{max-height:220px}
+#tab-dbg #d-bt-list button{width:100%;min-width:0;text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 
 /* 窗口窄：右侧面板压到下面去（仍然是一整条 tab 面板，不再平铺） */
 @media (max-width:1240px){

@@ -66,6 +66,14 @@ export function completeLine(line, ctx = {}){
   } else if (SYM_CMDS.has(cmd) && argIndex <= 1){
     pool = symbolNames(ctx.sym);
     kind = 'symbol';
+  } else if (cmd === 'wp' && argIndex === 2){
+    pool = ['r','w','rw']; kind = 'word';
+  } else if (cmd === 'wp' && argIndex === 3){
+    pool = ['1','2','4','8','16','32','64']; kind = 'word';
+  } else if (cmd === 'wpd'){
+    pool = [...(ctx.wps || []).map(w=>'#'+(w.slot+1)), 'all']; kind = 'wp';
+  } else if ((cmd === 'bt' || cmd === 'backtrace') && argIndex === 1){
+    pool = ['scan','8','16','32','64']; kind = 'word';
   } else if (cmd === 'bd' || cmd === 'delete'){
     pool = [...(ctx.bps || []).map((b, i) => `#${i + 1}`), 'all'];
     kind = 'bp';

@@ -846,6 +846,7 @@ export class DbgView {
       sym: this.sym,
       regs: this.session.regList().map(r => r.name.toLowerCase()),
       bps: this.session.bps,
+      wps: this.session.dwt.items,
       files: this.sym?.lines?.paths || [],
       watch: this.watch.items,
     };
