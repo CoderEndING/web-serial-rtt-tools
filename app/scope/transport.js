@@ -17,6 +17,7 @@ import { MockScopeProbe } from './mock.js';
 export const EP_SCOPE = 0x83;
 const VID = 0x0d28;
 const dirtyDevices = new WeakSet();
+const pendingByDevice = new WeakMap();
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
@@ -29,7 +30,8 @@ export class VendorEpTransport {
     this.inFlight = opts.inFlight ?? 3;          // 同时在飞的读
     this.running = false;
     this.workers = [];
-    this._pendingWorkers = new Set();
+    this._pendingWorkers = pendingByDevice.get(device) || new Set();
+    pendingByDevice.set(device, this._pendingWorkers);
     this.gen = 0;                 // 收流"轮次"代号：stop() 一加，超时残留在飞的 worker 就作废
     this.stalledInFlight = 0;     // 上一轮 stop() 里 800 ms 没等回来的在飞读笔数
     this.onError = null;          // 数据面不可恢复时的回调（由 start() 传入）

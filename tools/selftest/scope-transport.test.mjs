@@ -66,3 +66,11 @@ console.log('scope-transport: rearm, ordering, bounded reads, stop/restart, deco
  await assert.rejects(t.start(()=>{}),/cannot reset/);assert.equal(t.running,false);assert.equal(usb.calls,calls,'failed cleanup cannot submit more reads');usb.drain();
 }
 console.log('scope-transport: stalled restart resets/retire reads; failed reset blocks capture PASS');
+{
+ const usb=new USB();usb.close=async()=>{};usb.reset=async()=>usb.drain();
+ const old=new VendorEpTransport(usb,{inFlight:1});await old.start(()=>{});await old.stop();
+ const replacement=new VendorEpTransport(usb,{inFlight:1});replacement.open=async()=>replacement;
+ const seen=[];await replacement.start(b=>seen.push(b[0]));assert.equal(usb.pending.length,1,'replacement waits for old transport native reads');
+ usb.resolve(packet(10));await tick();assert.deepEqual(seen,[10]);const stop=replacement.stop();usb.drain();await stop;
+}
+console.log('scope-transport: replacing transport cannot orphan native reads on the same device PASS');
