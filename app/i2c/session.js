@@ -83,7 +83,19 @@ export class I2cSession {
   async connect(interactive = false, { mock = false, enable = false } = {}){
     if (this._connectPromise) return await this._connectPromise;
     if (this._disconnectPromise) return false;
-    this._connectPromise = runProbeOperation(this, 'i2c', () => this._connectNow(interactive, { mock, enable }), {
+    this._connectPromise = runProbeOperation(this, 'i2c', async () => {
+      if (mock && this.hid && !this.usingMock){
+        this.stopPoll(); this._closing = true;
+        try {
+          await this._chain;
+          await this._disableRealBridge();
+          await this._dropHid();
+          this.probeManager?.forget('i2c');
+        } catch (e){ this.probeManager?.fail('i2c', e); throw e; }
+        finally { this._closing = false; }
+      }
+      return await this._connectNow(interactive, { mock, enable });
+    }, {
       mock, reason: 'I2C 要连接探针', recovery: true,
     });
     try { return await this._connectPromise; }
@@ -135,8 +147,8 @@ export class I2cSession {
 
   async _dropHid(){
     const h = this.hid;
+    await h?.close?.();
     this.hid = null;
-    try { await h?.close?.(); } catch { /* 关不掉也继续 */ }
   }
 
   async disconnect(){
@@ -155,6 +167,15 @@ export class I2cSession {
     this._closing = true;
     await Promise.allSettled([this._connectPromise, this._reacquirePromise].filter(Boolean));
     await this._chain;
+    await this._disableRealBridge();
+    await this._dropHid();
+    this.usingMock = false;
+    this.cfg = null; this.counters = null; this.status = null;
+    this._setState(NOT_CONNECTED);
+    this._closing = false;
+  }
+
+  async _disableRealBridge(){
     if (this.hid && !this.usingMock){
       // Closing WebHID alone leaves firmware enabled and PA28/29 owned by I2C.
       // A timed-out operation can still be pending in firmware; wait for ENABLE=0.
@@ -170,11 +191,6 @@ export class I2cSession {
         await waitMs(5);
       }
     }
-    try { await this._dropHid(); } catch { /* 同上 */ }
-    this.usingMock = false;
-    this.cfg = null; this.counters = null; this.status = null;
-    this._setState(NOT_CONNECTED);
-    this._closing = false;
   }
 
   /** 探针重新枚举过（复位/拔插/重烧）→ 重新取设备对象。对"设备侧端点没打开"无效，只有拔插能救 */
