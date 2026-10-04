@@ -78,7 +78,7 @@ grant:
 	$(NODE) tools/selftest/serial-grant.mjs $(ARGS)
 
 # ---------------------------------------------------------------- 自测
-test:
+test: test-stability test-dbg-features
 	$(NODE) tools/selftest/rtt.test.mjs
 	$(NODE) tools/selftest/gen-parity.mjs
 	$(NODE) tools/selftest/hid-proto.test.mjs
@@ -510,3 +510,21 @@ check:
 clean:
 	pwsh -NoProfile -Command "Remove-Item -Recurse -Force -ErrorAction SilentlyContinue tmp/*.csv, tmp/*.bin, tools/la/__pycache__"
 	pwsh -NoProfile -Command "Write-Host '清理完成（保留源码与构建产物）'"
+
+.PHONY: test-stability
+test-stability:
+	$(NODE) tools/selftest/flash-lifecycle.test.mjs
+	$(NODE) tools/selftest/flash-runner-abi.test.mjs
+	$(NODE) tools/selftest/dbg-lock.test.mjs
+	$(NODE) tools/selftest/dbg-view-lock.test.mjs
+	$(NODE) tools/selftest/dbg-backend-lifecycle.test.mjs
+	$(NODE) tools/selftest/dap-register-ready.test.mjs
+	$(NODE) tools/selftest/dap-disconnect.test.mjs
+	$(NODE) tools/selftest/probe-handoff.test.mjs
+	$(NODE) tools/selftest/probe-users.test.mjs
+	$(NODE) tools/selftest/probe-bus-failure.test.mjs
+	$(NODE) tools/selftest/rtt-lifecycle.test.mjs
+	$(NODE) tools/selftest/rtt-cdc-lifecycle.test.mjs
+	$(NODE) tools/selftest/scope-lifecycle.test.mjs
+	$(NODE) tools/selftest/scope-watchdog.test.mjs
+	$(NODE) tools/selftest/target-switch.test.mjs
