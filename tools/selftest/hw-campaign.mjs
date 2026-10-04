@@ -497,6 +497,11 @@ async function flashOnce(which, label){
 /* ------------------------------------------- 1a) RTT Viewer（判决 >300 KB/s） */
 async function rttViewer(secs){
   await cdp.eval(`document.querySelector('.tab[data-tab="rtt"]').click()`);
+  // 真机编排不弹文件选择框：用户若上次勾过「连接自动记录」，
+  // 未完成的 File System Access 选择会阻塞跨功能交接，导致 RTT lease 一直不释放。
+  await cdp.eval(`(()=>{ const a=document.getElementById('r-record-auto');
+    if (a?.checked){ a.checked=false; a.dispatchEvent(new Event('change')); }
+  })()`);
   await cdp.eval(`(()=>{const b=document.getElementById('r-backend'); b.value='webusb'; b.dispatchEvent(new Event('change'));})()`);
   await cdp.eval(`document.getElementById('r-range').value=${JSON.stringify(BOARD.viewerRange)}`);
   await nap(500);
@@ -553,13 +558,18 @@ async function feedHidElf(file){
       await new Promise(r => setTimeout(r, 500));
       return { addr: document.getElementById('h-addr').value, size: document.getElementById('h-size').value }; })()`);
 }
-/** 启动转发（两种找控制块的方式见 BOARDS 表） */
-async function startForward(label = ''){
-  if (BOARD.findCb === 'elf'){
+/**
+ * 启动转发：真机编排优先用 ELF 精确地址，避免 F103 小 SRAM 的大范围扫描越过有效窗口。
+ * 页面上的「自动搜控制块」仍保留给没有 ELF 的手工场景；H743 也必须走 ELF。
+ */
+async function startForward(label = '', forceElf = false){
+  const useElf = BOARD.findCb === 'elf' || BOARD.findCb === 'auto' || forceElf;
+  if (useElf){
     const r = await feedHidElf(FW.spam);
     if (r.err) throw new Error('喂 ELF 给转发页失败：' + r.err);
     console.log(`   [转发]${label} 从 ELF 取控制块：h-addr=${r.addr} · h-size=${r.size}`);
-    if (!/^0x24/.test(String(r.addr))) throw new Error(`页面没从 ELF 里取到 _SEGGER_RTT（H743 应在 0x24xxxxxx，拿到 ${r.addr}）`);
+    const expected = BOARD.findCb === 'elf' ? /^0x24/ : /^0x20/;
+    if (!expected.test(String(r.addr))) throw new Error(`页面没从 ELF 里取到 _SEGGER_RTT（拿到 ${r.addr}）`);
     await cdp.eval(`document.getElementById('h-start').click()`, true);
   } else {
     await cdp.eval(`document.getElementById('h-auto').click()`, true);
@@ -578,7 +588,9 @@ async function rttForward(){
       k.dispatchEvent(new Event('change')); return { value: k.value, disabled: k.disabled }; })()`);
   if (clk.value !== CLOCK || clk.disabled) throw new Error(`转发前设时钟失败：value=${clk.value} disabled=${clk.disabled}`);
   await nap(700);
-  await startForward();
+  // campaign 已经持有本轮烧录的 ELF：直接使用符号地址，避免 F103CB
+  // 的自动扫描跨过 20 KB SRAM 边界；没有 ELF 的用户仍可在页面点「自动搜」。
+  await startForward('（ELF 精确地址）', true);
   /**
    * 🚨 等的是"**跑起来并且真的找到控制块**"：只看 `running` 会撞上"桥起来了但还在搜控制块"
    *    （cbAddr=0）那一段，后面拿 0x0 当控制块用（用户现场就见过「控制块 0x0」）。
@@ -587,9 +599,31 @@ async function rttForward(){
     try { await cdp.waitFor(`window.__tools.hid.last?.running && window.__tools.hid.last?.cbAddr`, 12000, '转发已启动并找到控制块'); break; }
     catch (e){
       if (i === 2) throw new Error('转发起来了但一直找不到 RTT 控制块（cbAddr=0）—— 目标在跑吗？固件真的用 RTT 吗？');
-      console.log('   [转发] 还没找到控制块，重新启动一次');
-      await startForward('（重试）');
+      /**
+       * 只再次发送 AUTOSTART 不够：如果上一次 Viewer→HID 切换留下了失效的
+       * HIDDevice，探针会表面上返回 running、但扫描永远停在 cbAddr=0。先停止
+       * 桥、关闭旧句柄并重新枚举，再启动下一次，避免把失效会话带给后面的调试/J-Scope。
+       */
+      console.log('   [转发] 还没找到控制块，停止旧桥并重新枚举 HID 后再试');
+      await cdp.eval(`(async()=>{
+        const h=window.__tools.hid;
+        try{ await h.stop('控制块重试清理'); }catch(e){}
+        try{ await h.dev?.close?.(); }catch(e){}
+      })()`).catch(() => {});
+      await nap(900);
+      await cdp.eval(`document.getElementById('h-reconnect').click()`, true).catch(() => {});
+      await cdp.waitFor(`window.__tools.hid.dev?.connected`, 8000, 'HID 重连');
+      await nap(300);
+      // F103CB 的自动扫描偶尔会在 Viewer→HID 切换后停在 cbAddr=0；
+      // 这时用 ELF 的 _SEGGER_RTT 精确地址重新启动，既避开扫描窗口，
+      // 也验证切换问题不在目标固件本身。
+      await startForward('（ELF 精确地址重试）', true);
       await nap(1500);
+      const retrySt = await cdp.evalJson(`(()=>{ const h=window.__tools.hid; return {
+        connected: !!h.dev?.connected, summary: h.summary?.(), last: h.last || null,
+        state: document.getElementById('h-state')?.textContent || '', info: document.getElementById('h-info')?.textContent || ''
+      }; })()`).catch(err => ({ error: String(err?.message || err) }));
+      console.log('   [转发] 重试状态：' + JSON.stringify(retrySt));
     }
   }
   const st0 = await cdp.evalJson(`({ mhz: window.__tools.hid.last?.swdMhz, cb: window.__tools.hid.last?.cbAddr })`);
@@ -866,6 +900,10 @@ try {
 } catch (e){
   console.log('\n!! 出错，立刻停：' + (e?.message || e));
   report.errors.push(String(e?.message || e));
+} finally {
+  // 即使某一步失败，也要把 RTT/HID/CDC/J-Scope 的句柄释放干净，
+  // 否则下一轮或调试器会继承一个半关闭的 WebUSB/WebHID 会话。
+  try { await quietProbe(); } catch {}
 }
 
 /* ================================================================== 汇总 */
