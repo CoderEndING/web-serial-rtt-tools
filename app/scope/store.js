@@ -161,6 +161,29 @@ export class SampleStore {
     return true;
   }
 
+  /** Append a packed little-endian u32 packet without per-sample frame arrays.
+   * Same typed values, LOD extrema, timestamp anchors and capacity semantics as pushFrame.
+   * Returns false when this store does not have the matching single-u32 layout. */
+  pushU32Packet(payload, n, t0, period){
+    if (this.channels.length !== 1 || this.vars[0].size !== 4 || this.channels[0].scalar !== 'u32') return false;
+    const offered = Math.min(n, Math.floor(payload.byteLength / 4));
+    const accepted = Math.min(offered, this.capacity - this.count);
+    const start = this.count, ch = this.channels[0];
+    const dv = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
+    for (let k = 0; k < accepted; k++) ch.push(start + k, dv.getUint32(k * 4, true));
+    if (accepted && t0 != null){
+      if (this.t0Us == null){ this.t0Us = t0; this._firstT = t0; }
+      const firstAnchor = Math.ceil(start / this.tsEvery) * this.tsEvery;
+      for (let i = firstAnchor; i < start + accepted && this.tsN < this.tsUs.length; i += this.tsEvery)
+        this.tsUs[this.tsN++] = t0 + (i - start) * period;
+      this.tLastUs = t0 + (accepted - 1) * period;
+    }
+    this.count += accepted; this.frames += accepted;
+    this.overrun += offered - accepted;
+    if (this.count >= this.capacity) this.full = true;
+    return accepted;
+  }
+
   /** 实测速率（Hz）：用首尾时间戳和样本数算（没有时间戳就返回 0）*/
   rate(){
     if (this.t0Us == null || this.tLastUs == null || this.count < 2) return 0;

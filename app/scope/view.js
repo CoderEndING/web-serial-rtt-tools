@@ -1176,7 +1176,6 @@ export class ScopeView {
           if (this.defMismatch) break;              // 变量表对不上：不解码（见 DEF 分支的说明）
           const vars = this.defVars || this.store?.vars;
           if (!vars?.length) break;
-          const nums = P.decodeSamples(vars, pkt.payload, pkt.n, []);
           const nv = vars.length;
           const t0 = P.packetTimeUs(pkt, this.timeU);
           /**
@@ -1192,13 +1191,20 @@ export class ScopeView {
             if (est > nominal * 0.5 && est < nominal * 2) per = est;    // 离谱就退回名义值
           }
           this._lastPktT = t0; this._lastPktN = pkt.n;
-          for (let i = 0; i < pkt.n; i++){
-            const fr = nums.slice(i * nv, (i + 1) * nv);
-            if (!fr.length) break;
-            const idx = this.store.count;
-            this.store.pushFrame(fr, t0 + i * per);
-            if (this.trigger.mode !== TRIG.NONE && this.trigger.feed(fr, idx)){
-              this.renderer.setTrigger({ index: idx, pre: this.trigger.pre, post: this.trigger.post });
+          const direct = this.trigger.mode === TRIG.NONE && vars.length === 1 &&
+            vars[0].size === 4 && vars[0].scalar === 'u32' &&
+            this.store.pushU32Packet(pkt.payload, pkt.n, t0, per) !== false;
+          if (!direct){
+            const nums = P.decodeSamples(vars, pkt.payload, pkt.n, []);
+            const fr = new Array(nv); // Reuse the frame; Trigger stores only scalar state.
+            const fit = Math.min(pkt.n, Math.floor(nums.length / nv));
+            for (let i = 0; i < fit; i++){
+              for (let k = 0; k < nv; k++) fr[k] = nums[i * nv + k];
+              const idx = this.store.count;
+              this.store.pushFrame(fr, t0 + i * per);
+              if (this.trigger.mode !== TRIG.NONE && this.trigger.feed(fr, idx)){
+                this.renderer.setTrigger({ index: idx, pre: this.trigger.pre, post: this.trigger.post });
+              }
             }
           }
           /**
