@@ -57,22 +57,23 @@ console.log('\n── 3. 同伴磨蹭：请求方有上限，不会被拖住 ─
   b.onRelease = () => sleep(3000);                    // 故意磨蹭 3 s
   await sleep(120);
   const t0 = Date.now();
-  const r = await a.requestRelease({ why: '烧录', waitMs: 600 });
+  let err;
+  try { await a.requestRelease({ why: '烧录', waitMs: 600 }); } catch (e) { err = e; }
   const dt = Date.now() - t0;
   ok(dt < 1100, `请求方 ${dt} ms 就回来了（waitMs=600，不被对方的 3 s 拖住）`);
-  ok(r.acked === 0, '没拿到回执也如实报告（acked=0）');
+  ok(/交接超时/.test(err?.message || ''), '活着的同伴没释放时，禁止继续认领');
   a.close(); b.close();
 }
 
-console.log('\n── 4. 让出动作抛异常：不能把请求方带崩 ──');
+console.log('\n── 4. 让出动作抛异常：不能谎报已释放 ──');
 {
   const a = new ProbeBus('A4'), b = new ProbeBus('B4');
   b.onRelease = () => { throw new Error('让出失败（模拟）'); };
   await sleep(120);
-  const r = await a.requestRelease({ why: '烧录' });
-  ok(r.acked === 1, '对方抛异常也照样回执（请求方关心的是"你还占不占着"）');
-  await sleep(50);
-  ok(true, '请求方没有异常');
+  let err;
+  try { await a.requestRelease({ why: '烧录' }); } catch (e) { err = e; }
+  ok(/让出失败/.test(err?.message || ''), '失败原因返回请求方');
+  ok(a._acked === 0, '失败不能算成已释放');
   a.close(); b.close();
 }
 

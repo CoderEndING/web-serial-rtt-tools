@@ -78,6 +78,7 @@ initTabs(name => {
  */
 const probeBus = new ProbeBus('page');
 probeBus.onRelease = async why => {
+  if (flash.busy) throw new Error('本页正在烧录或读取目标身份，完成后才能释放探针');
   const done = [];
   try {
     if (rtt.probe || rtt.bridge){ await rtt.disconnect(); done.push('RTT 会话'); }

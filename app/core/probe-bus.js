@@ -17,7 +17,7 @@
  *
  * 设计约束：
  *   · **不能阻塞太久**：没人应答时最多等 `settleMs`（默认 250 ms）；
- *     有同伴但还没回时最多等 `waitMs`（默认 1200 ms）。
+ *     有同伴但还没回时最多等 `waitMs`（默认 6000 ms），响应失败时禁止继续抢接口。
  *   · 浏览器没有 BroadcastChannel（老浏览器/无头环境）时**静默降级**成空操作，
  *     绝不让协调层成为新的失败点。
  *   · 只在同源页签之间生效（BroadcastChannel 的天然边界），正合适。
@@ -110,16 +110,24 @@ export class ProbeBus {
         this.peers.add(m.from);
         break;
       case 'release':
-        this._post({ t: 'releasing' });
+        this._post({ t: 'releasing', requestId: m.requestId });
         this.log?.(`另一个页签要占用探针（${m.why || '未说明'}），本页先让出来`);
-        // 无论成功失败都回执：请求方只关心"你还在不在占着"，不关心你的错误
         Promise.resolve()
           .then(() => this.onRelease?.(m.why || ''))
-          .catch(() => {})
-          .then(() => { this._post({ t: 'released' }); });
+          .then(() => this._post({ t: 'released', requestId: m.requestId }))
+          .catch(e => this._post({ t: 'releaseFailed', requestId: m.requestId, why: e?.message || String(e) }));
+        break;
+      case 'releasing':
+        if (this._heard && (!m.requestId || m.requestId === this._releaseId)) this._releasing.add(m.from);
         break;
       case 'released':
-        this._acked++;
+        if (this._heard && (!m.requestId || m.requestId === this._releaseId)){
+          this._released.add(m.from);
+          this._acked = this._released.size;
+        }
+        break;
+      case 'releaseFailed':
+        if (this._heard && (!m.requestId || m.requestId === this._releaseId)) this._releaseError = m.why || '对方无法释放探针';
         break;
       default:
         break;
@@ -132,20 +140,32 @@ export class ProbeBus {
    *   asked = 这次真的喊到的同源页签数；acked = 回执"已让出"的个数；
    *   ghosts = 其中**已经不在**的页签数（关掉/冻结/刷新掉，连喊话都不应答）
    */
-  async requestRelease({ why = '', settleMs = 250, waitMs: waitCap = 1200 } = {}){
+  async requestRelease(opts = {}){
+    if (this._requestInProgress) throw new Error('探针交接正在进行，请稍后再试');
+    this._requestInProgress = true;
+    try { return await this._requestRelease(opts); }
+    finally { this._heard = null; this._requestInProgress = false; }
+  }
+
+  async _requestRelease({ why = '', settleMs = 250, waitMs: waitCap = 6000 } = {}){
     if (!this._channel) return { supported: false, asked: 0, acked: 0, ghosts: 0, ms: 0 };
     const t0 = Date.now();
     this._acked = 0;
     this._heard = new Set();
+    this._releasing = new Set(); this._released = new Set(); this._releaseError = null;
+    this._releaseId = this.name + ':' + (this._releaseSeq = (this._releaseSeq || 0) + 1);
     const asked = this.peers.size;
-    this._post({ t: 'release', why });
+    this._post({ t: 'release', why, requestId: this._releaseId });
     /**
      * 先等一下 'here' 回执：一个同伴都没有就别干等 —— 250 ms 的固定等待在"本来就没别人"
      * 的常见情况下纯属白花（那 80 ms 用让路自旋，页面不可见时也不会被钳成 1 s）。
      */
     if (asked) await sleep(settleMs);
     else await waitMs(Math.min(settleMs, 80));
-    while (Date.now() - t0 < waitCap && this._acked < this.peers.size) await sleep(40);
+    while (Date.now() - t0 < waitCap && this._acked < this.peers.size && !this._releaseError) await waitMs(40);
+    if (this._releaseError) throw new Error('探针交接失败：' + this._releaseError);
+    if ([...this._releasing].some(p => !this._released.has(p)))
+      throw new Error('探针交接超时：另一个页签的操作还未退出，请等待它完成');
     /**
      * 清鬼：一轮下来**一句话都没说过**的同伴，就是已经不在了 —— 它会让每次烧录都白等满 waitMs。
      * 判据很稳：活着的页签收到 'release' 会立刻回一句 'releasing'（同步发的），
