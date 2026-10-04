@@ -337,12 +337,7 @@ export class I2cView {
   }
 
   async _connect(interactive, mock){
-    const ok = await this.session.connect(interactive, { mock });
-    if (ok && !this.session.enabled){
-      // 连上后桥多半还没使能（探针复位/重烧后配置回默认）—— 直接帮用户使能一次
-      this.session.log('dim', '桥还没使能，自动发一次 ENABLE 1');
-      await this.session.setEnabled(true);
-    }
+    return await this.session.connect(interactive, { mock, enable: true });
   }
 
   // ==================================================================== 配置

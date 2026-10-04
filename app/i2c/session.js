@@ -80,10 +80,10 @@ export class I2cSession {
   // ==================================================================== 连接
 
   /** 连探针（HID）。`interactive=true` 会弹浏览器的授权框（第一次必须）*/
-  async connect(interactive = false, { mock = false } = {}){
+  async connect(interactive = false, { mock = false, enable = false } = {}){
     if (this._connectPromise) return await this._connectPromise;
     if (this._disconnectPromise) return false;
-    this._connectPromise = runProbeOperation(this, 'i2c', () => this._connectNow(interactive, { mock }), {
+    this._connectPromise = runProbeOperation(this, 'i2c', () => this._connectNow(interactive, { mock, enable }), {
       mock, reason: 'I2C 要连接探针',
     });
     try { return await this._connectPromise; }
@@ -91,7 +91,7 @@ export class I2cSession {
     finally { this._connectPromise = null; }
   }
 
-  async _connectNow(interactive = false, { mock = false } = {}){
+  async _connectNow(interactive = false, { mock = false, enable = false } = {}){
     try {
       if (mock){
         if (!this.usingMock || !(this.hid instanceof MockI2cProbe)){
@@ -118,6 +118,10 @@ export class I2cSession {
       // 连接后第一件事：GET_CFG 确认桥的现状（探针复位/重烧后配置会回默认）
       await this.loadCfg({ quiet: true });
       await this.readStatus({ quiet: true });
+      if (enable && !this.enabled){
+        this.log('dim', '桥还没使能，自动发一次 ENABLE 1');
+        await this.setEnabled(true);
+      }
       this.startPoll();
       this._setState(this.enabled ? '已连接（桥已使能）' : '已连接（桥还没使能 —— 点「使能」）');
       return true;
