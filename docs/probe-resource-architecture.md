@@ -18,17 +18,19 @@
 
 | 功能 | 持有的主要资源 | 生命周期 |
 |---|---|---|
-| 调试器 | 目标访问引擎、调试引脚、USBDevice | 连接完成至断开 |
-| RTT Viewer | 目标访问引擎、调试引脚、RTT 环、USBDevice | 连接/扫描至断开 |
-| J-Scope | 目标访问引擎、调试引脚、USBDevice、采样流 | 连接至释放探针；停止采样后保留连接 |
+| 调试器 | 目标访问引擎、调试引脚、DAP bulk 接口 | 连接完成至断开 |
+| RTT Viewer | 目标访问引擎、调试引脚、RTT 环、DAP bulk 接口 | 连接/扫描至断开 |
+| J-Scope | 目标访问引擎、调试引脚、Scope bulk 接口、采样流 | 连接至释放探针；停止采样后保留连接 |
 | RTT→CDC | 目标访问引擎、调试引脚、RTT 环、CDC 模式 | START 发出后至确认 STOP；固件尚在排队也保留所有权 |
-| SPI/QSPI 与点屏 | USBDevice、SPI 引脚及可能重叠的调试/I2C 引脚 | 两个页面共用一个 SpiSession；长时间忙操作拒绝抢占 |
+| SPI/QSPI 与点屏 | SPI bulk 接口、SPI 引脚及可能重叠的调试/I2C 引脚 | 两个页面共用一个 SpiSession；长时间忙操作拒绝抢占 |
 | I2C | 固定 I2C 引脚 | 连接至断开；自动 ENABLE 包含在连接初始化里 |
 | 烧录/读身份 | 上述资源全集 | 准备至最终清理；烧录期间不可抢占 |
 
 资源表针对当前 HPM5301EVKLite 的引脚布局：I2C PA28/PA29 与默认 SWD 引脚独立。SPI 辅助引脚可选择 PA28/PA29，且部分选项在其他板级构建上可能占用调试引脚，所以 SPI 的引脚关系保守处理。更换板级引脚布局时必须同步更新声明，不能沿用这个共存结论。
 
-**不同 bulk EP 暂时仍共用 `usb-device` 资源。** 当前驱动的关闭/恢复包含整个 `USBDevice.close/reset`，独立 EP 也会受影响。此次没有放开多个 bulk 会话共存；后续需要先改驱动的接口释放、共享句柄和复位策略。
+**不同 bulk EP 现在可以在同一个 USBDevice 上共存。** 共享层按设备、接口和端点分别登记引用：关闭 DAP、Scope 或 SPI 只释放自己的接口，最后一个使用者退出时才关闭设备。整设备 `reset` 仍是全局操作；有其它使用者、未收尾的 native 请求或旧固件不支持收尾命令时，复位会被拒绝并保留故障占用。
+
+SPI EP11 停止收流时先发送 `DRAIN`，让固件为每个挂起的 IN 请求发一个短应答，再确认所有 native 读已结束；随后发送 `ENABLE 0` 释放桥的引脚。旧固件没有 `DRAIN` 能力标志时，网页不会假装完成，仍按故障路径保留占用并提示更新固件。I2C 断开也会先确认 `ENABLE 0`，避免只关闭 HID 句柄却继续占用 PA28/PA29。
 
 串口助手、终端和 RTT→CDC 接收视图继续共用原有 `SerialSession`，不对串口数据逐包加锁。J-Scope 的 `CDC_OFF` 仍是显式采样选项，会暂停固件 CDC 服务，不能把这种配置影响解释为仲裁器开销。
 
@@ -73,7 +75,7 @@ make test-stability test-dbg-features
 
 新增测试覆盖资源冲突与共存、并发初始化、排队取消、重复释放、停止失败、烧录保护、跨标签页同时申请、共享 HID 响应与句柄、停滞写请求、固件 START 排队期间的所有权。SPI/I2C/RTT/J-Scope 协议及传输回归继续通过。
 
-本轮结果：19 组稳定性测试、3 组 DWT/栈回溯功能测试、18 组协议/传输/调试核心测试通过；210 个 JavaScript 模块语法检查通过。固件 RTT STOP、TARGET guard、scope 生产代码主机测试及 8 项 HSS 测试通过。
+本轮结果：资源交接、EP11 收尾、CDC、调试器/RTT 关闭失败恢复等离线回归通过；JavaScript 语法检查覆盖 216 个模块。固件 RTT STOP、SPI DRAIN、TARGET guard、scope 生产代码主机测试及 HSS 测试通过。
 
 原有 `dbg-core.test.mjs` 错误依赖本地 `build-noncache/fw.elf`。现已改用仓库提交的 `tools/target-firmware/stm32h743_scope/fw.elf`，验证 184 条 H743 行号记录，调试核心测试 321 通过、0 失败。该用例检查 DWARF 序列，与 D-cache/MPU 构建变体无关。此次没有设备和完整固件 SDK；固件使用提取生产代码的 GCC 主机测试验证 STOP 状态转换，不能替代完整编译和上板测试。
 
