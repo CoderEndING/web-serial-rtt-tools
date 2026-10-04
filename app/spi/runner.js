@@ -34,7 +34,8 @@ export class SpiRunner {
     this.stopping = false;
     this.timers = new Set();
     this.stat = { ticks: 0, late: 0, errors: 0, sent: 0, failed: 0, t0: 0, lastTick: 0 };
-    this._resolveStop = null;
+    this._generation = 0;
+    this._activeGroups = new Map();
   }
 
   _emit(e){ try { this.onEvent?.(e); } catch { /* 视图自己出错不该拖垮采集 */ } }
@@ -55,6 +56,8 @@ export class SpiRunner {
       return false;
     }
     this.parsed = parsed;
+    const generation = ++this._generation;
+    this._activeGroups.clear();
     this.running = true;
     this.stopping = false;
     this.stat = { ticks: 0, late: 0, errors: 0, sent: 0, failed: 0, t0: performance.now(), lastTick: 0 };
@@ -73,40 +76,42 @@ export class SpiRunner {
                  vars: parsed.stats?.vars || [] });
     // 一次性部分：先跑完再启动定时（"先认片子再采样"的顺序语义）
     if (once.length){
-      const r = await this._send(once, null);
+      const r = await this._send(once, null, generation);
+      if (generation !== this._generation) return false;
       this._emit({ type: 'once', sent: r.sent, failed: r.failed, ms: r.ms });
     }
-    if (this.stopping){ this.running = false; return true; }
+    if (generation !== this._generation || this.stopping) return false;
     if (!groups.size){
       this._emit({ type: 'stop', reason: '只有一次性帧，已跑完' });
       this.running = false;
       return true;
     }
     // 每组一个定时器；用"目标时刻 + 序号"算下一拍，避免漂移累积
-    for (const grp of groups.values()) this._startGroup(grp);
+    for (const grp of groups.values()) this._startGroup(grp, generation);
     this._emit({ type: 'running', groups: groups.size });
     return true;
   }
 
   /** 停（幂等）：清定时器、取消在飞请求的等待、广播 stop */
   stop(reason = '用户停止'){
+    this._generation++;
     if (!this.running && !this.timers.size) return;
     this.stopping = true;
     for (const t of this.timers) clearTimeout(t);
     this.timers.clear();
+    this._activeGroups.clear();
     this.running = false;
     this._emit({ type: 'stop', reason, stat: { ...this.stat } });
   }
 
-  _startGroup(grp){
+  _startGroup(grp, generation){
     const period = Math.max(1, grp.period | 0);
     let t0 = 0;           // 第一拍建立时基（别把"启动延迟"算成迟拍）
     let n = 0;            // 尝试的拍数
     let done = 0;         // **成功采样**的拍数 —— 轮数按它算
-    this._activeGroups = this._activeGroups || new Map();
     this._activeGroups.set(grp.group, grp);
     const loop = async () => {
-      if (this.stopping || !this.running) return;
+      if (generation !== this._generation || this.stopping || !this.running) return;
       if (!t0) t0 = performance.now();
       n++;
       const target = t0 + (n - 1) * period;
@@ -120,7 +125,8 @@ export class SpiRunner {
         this.stat.late++;
         this._emit({ type: 'late', group: grp.group, late: Math.round(late) });
       }
-      const r = await this._send(grp.items, grp);
+      const r = await this._send(grp.items, grp, generation);
+      if (generation !== this._generation) return;
       if (r.ok){
         done++;
         this.stat.ticks++;
@@ -147,20 +153,22 @@ export class SpiRunner {
   }
 
   /** 发一组帧 → 解码 → 广播；返回 {ok, sent, ms}（`ok` = 这一拍算不算一次成功采样） */
-  async _send(items, grp){
+  async _send(items, grp, generation){
     const t0 = performance.now();
     let rsps = [];
     let okSend = true;
     try {
       // 在飞请求：读帧都带 RSP；这里给一个与帧数相称的超时（默认 1.5 s 对慢器件偏紧）
       const r = await this.session.sendFrames(items.map(it => ({ ...it })), {
-        quiet: true, tag: 'bus', timeoutMs: 2500, shouldStop: () => this.stopping,
+        quiet: true, tag: 'bus', timeoutMs: 2500, shouldStop: () => this.stopping || generation !== this._generation,
       });
+      if (generation !== this._generation) return { ok: false, cancelled: true };
       rsps = r.rsps || [];
       this.stat.sent += r.sent || 0;
       this.stat.failed += r.failed || 0;
       if (r.failed) okSend = false;
     } catch (e){
+      if (generation !== this._generation) return { ok: false, cancelled: true };
       this.stat.errors++;
       this._emit({ type: 'error', group: grp?.group ?? null, msg: `发送失败：${e?.message || e}` });
       return { ok: false, sent: 0, ms: performance.now() - t0 };
