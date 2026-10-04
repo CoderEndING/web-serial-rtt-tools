@@ -34,3 +34,12 @@ await tick(); await c.close(); await Promise.all([heldCheck, queuedCheck]);
 assert.deepEqual(d2.sent, [0x10, 0x31], 'queued request cannot reclaim a closed session');
 await e.close();
 console.log('hid-channel: shared response queue, handle reference ownership, independent devices and close cancellation PASS');
+
+const blocked = device(), stalled = new AkaLinkHid();
+blocked.sendReport = () => new Promise(() => {});
+await stalled.open(blocked);
+await assert.rejects(stalled.xfer(0x31, undefined, 30), /没响应/, 'a stalled report write cannot hold the queue forever');
+const pendingWrite = stalled.xfer(0x31);
+const closeCheck = assert.rejects(pendingWrite, /关闭/);
+await tick(); await stalled.close(); await closeCheck;
+console.log('hid-channel: timeout and close settle a response even while sendReport is stalled PASS');

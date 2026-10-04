@@ -511,8 +511,14 @@ clean:
 	pwsh -NoProfile -Command "Remove-Item -Recurse -Force -ErrorAction SilentlyContinue tmp/*.csv, tmp/*.bin, tools/la/__pycache__"
 	pwsh -NoProfile -Command "Write-Host '清理完成（保留源码与构建产物）'"
 
-.PHONY: test-stability
-test-stability:
+.PHONY: test-stability test-probe
+test-probe:
+	$(NODE) tools/selftest/probe-manager.test.mjs
+	$(NODE) tools/selftest/hid-channel.test.mjs
+	$(NODE) tools/selftest/probe-cross-tab.test.mjs
+	$(NODE) tools/selftest/probe-integration.test.mjs
+
+test-stability: test-probe
 	$(NODE) tools/selftest/flash-lifecycle.test.mjs
 	$(NODE) tools/selftest/flash-runner-abi.test.mjs
 	$(NODE) tools/selftest/dbg-lock.test.mjs
