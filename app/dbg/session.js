@@ -87,9 +87,11 @@ export class DebugSession {
     this._prev = null;                     // 上一次读到的寄存器值（算 changed 高亮）
     this._cfbp = 0;
     this._opChain = Promise.resolve();     // 串行化用的队列（见 exclusive/tryExclusive）
-    this._opBusy = false;
+    this._opDepth = 0;
     this.dwt = new DwtWatchpoints(this);
   }
+
+  get _opBusy(){ return this._opDepth > 0; }
 
   get connected(){ return !!this.probe; }
   get bpCapacity(){ return this.caps.numCode || 0; }
@@ -115,12 +117,12 @@ export class DebugSession {
     const prev = this._opChain;
     let release;
     this._opChain = new Promise(res => { release = res; });
-    this._opBusy = true;
+    this._opDepth++;
     try {
       await prev.catch(() => {});
       return await fn();
     } finally {
-      this._opBusy = false;
+      this._opDepth--;
       release();
     }
   }
