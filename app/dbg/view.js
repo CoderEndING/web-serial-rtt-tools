@@ -61,7 +61,7 @@ export class DbgView {
     this.cancelFlag = false;               // Ctrl+C
     this.queue = [];                       // 多行粘贴 → 排队执行
     this.runningQueue = false;
-    this.dockTab = 'regs';                 // 右侧面板当前 tab（regs / mem / var / rtt）
+    this.dockTab = 'regs';                 // 右侧面板当前 tab（regs / mem / var / svd / rtt）
     this.svd = null;                       // 当前 SVD 模型（用户选择或内置 F103）
     this.svdName = '';
     this.svdRaw = null;
@@ -269,7 +269,7 @@ export class DbgView {
   // ================================================================ 工作区版式（右侧 tab + 可拖分隔条）
 
   /**
-   * 右边那条面板是**局部 tab**（寄存器 / 内存 / 变量 / RTT），一次只显示一个、顶到满高 ——
+   * 右边那条面板是**局部 tab**（寄存器 / 内存 / 变量 / SVD / RTT），一次只显示一个、顶到满高 ——
    * 这是照 Ozone 的意思排的：左边源码与命令行各占一块够大的地方，细节面板做成切换。
    * 分隔条：竖的调右侧宽度、横的调命令行高度，尺寸存 localStorage，刷新不丢。
    */

@@ -690,17 +690,37 @@ console.log('== 15. 版式：源码 + 命令行各占一块大的，右侧是「
     const pages = [...document.querySelectorAll('#d-box-dock .dockpage')];
     const visible = () => pages.filter(p => getComputedStyle(p).display !== 'none').map(p => p.dataset.dock);
     const seq = [visible()];
-    for (const name of ['mem', 'var', 'rtt', 'regs']){
+    for (const name of ['mem', 'var', 'svd', 'rtt', 'regs']){
       document.querySelector('#d-dock-tabs button[data-dock="' + name + '"]').click();
       await new Promise(r => setTimeout(r, 120));
       seq.push(visible());
     }
     return { seq, saved: JSON.parse(localStorage.getItem('serial-rtt-tools:v1') || '{}')['dbg.dock'], tabs: pages.length,
              on: [...document.querySelectorAll('#d-dock-tabs button')].filter(b => b.classList.contains('on')).map(b => b.dataset.dock) };`);
-  ok(tab.tabs === 4, '右侧面板有 4 个 tab（寄存器/内存/变量/RTT）', String(tab.tabs));
+  ok(tab.tabs === 5, '右侧面板有 5 个 tab（寄存器/内存/变量/SVD/RTT）', String(tab.tabs));
   ok(tab.seq.every(v => v.length === 1), '任何时刻只显示一个面板（不再平铺成小格子）', JSON.stringify(tab.seq));
-  ok(JSON.stringify(tab.seq.map(v => v[0])) === JSON.stringify(['regs', 'mem', 'var', 'rtt', 'regs']), '点 tab 真的切换面板', JSON.stringify(tab.seq));
+  ok(JSON.stringify(tab.seq.map(v => v[0])) === JSON.stringify(['regs', 'mem', 'var', 'svd', 'rtt', 'regs']), '点 tab 真的切换面板', JSON.stringify(tab.seq));
   ok(tab.saved === 'regs' && tab.on.length === 1, 'tab 选择落进 localStorage，且只有一个是选中态', JSON.stringify(tab));
+
+  // SVD 位域表：位段与访问权限必须保持单行，且所有行的右列边界一致，避免
+  // `read-write` 换行后出现截图中那种行高和基线错乱。
+  const svd = await ev(`
+    const d = window.__tools.dbg;
+    await d.loadBundledSvd();
+    d._dockSelect('svd', { save: false });
+    await new Promise(r => setTimeout(r, 120));
+    const box = document.getElementById('d-svd-fields');
+    const rows = [...box.querySelectorAll('.svdfield')];
+    const rects = rows.map(row => ({ h: row.getBoundingClientRect().height,
+      right: row.querySelector('.fb')?.getBoundingClientRect().right || 0 }));
+    return { rows: rows.length, heights: [...new Set(rects.map(x => Math.round(x.h * 10) / 10))],
+      rights: [...new Set(rects.map(x => Math.round(x.right * 10) / 10))],
+      nowrap: rows.every(row => getComputedStyle(row.querySelector('.fb')).whiteSpace === 'nowrap'),
+      grid: rows[0] ? getComputedStyle(rows[0]).gridTemplateColumns : '' };
+  `);
+  ok(svd.rows > 0 && svd.heights.length === 1 && svd.rights.length === 1 && svd.nowrap,
+    `SVD 位域表的行高与右列都对齐（${svd.rows} 行，行高 ${svd.heights.join('/')}px）`, JSON.stringify(svd));
+  await ev(`window.__tools.dbg._dockSelect('regs', { save: false }); return true;`);
 
   // 内存 tab 窄面板：一行字节数要按宽度自适应（否则横向溢出）
   const mem = await ev(`
