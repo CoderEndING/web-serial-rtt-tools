@@ -395,6 +395,11 @@ async function flashOnce(which, label){
  */
 async function rttViewerRiscv(secs, cbAddr){
   await cdp.eval(`document.querySelector('.tab[data-tab="rtt"]').click()`);
+  // 基准脚本不把自动记录算进 Viewer 速率窗口：保存框/文件句柄会持有 RTT
+  // manager lease，切换到转发或 scope 时还会把浏览器的文件选择流程带进来。
+  await cdp.eval(`(()=>{ const a=document.getElementById('r-record-auto');
+      if (a?.checked){ a.checked=false; a.dispatchEvent(new Event('change')); }
+    })()`);
   await cdp.eval(`(()=>{
       const b=document.getElementById('r-backend'); b.value='webusb'; b.dispatchEvent(new Event('change'));
       const t=document.getElementById('r-target'); t.value='riscv'; t.dispatchEvent(new Event('change'));
@@ -844,6 +849,10 @@ try {
   console.log('\n!! 出错，立刻停：' + (e?.message || e));
   report.errors.push(String(e?.message || e));
 }
+
+// 无论哪一步失败，都先把页面里的 RTT、Scope、HID 和会话句柄收回；这样同一条
+// `make full_flow_6800evk` 在下一阶段烧调试固件时不会继承半开的 RISC-V 传输。
+await quietProbe();
 
 /* ================================================================== 汇总 */
 /**

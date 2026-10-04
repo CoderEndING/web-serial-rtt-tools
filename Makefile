@@ -29,7 +29,7 @@ FW_DIR   = tools/target-firmware/stm32f103
 LA       = tools/la/kingst_la.py
 
 .DEFAULT_GOAL := help
-.PHONY: help serve serve-dev serve-stop browser open page-prep spi-flash-hw idcode board-check-f103ze board-check-f103cb board-check-h743 board-check-6800evk test test-ui test-gen test-gen-page gen-embed samples-anim test-hid test-dwarf test-scope test-scope-page test-scope-render test-spi test-read test-spi-page test-hw test-record test-bridge test-bridge-gate test-hpm test-image test-all test-dbg test-dbg-page test-dbg-hw test-dbg-stress test-dbg-stress-f103ze test-dbg-stress-f103cb flash-dbgstress-f103ze flash-dbgstress-f103cb flash-dbgstress-h743 flash-dbgstress-6800evk test-dbg-riscv test-idcode test-dsl test-flash flash-timing hw-campaign hw-campaign-f103cb hw-campaign-h743 hw-campaign-hpm hw-campaign-riscv build-f103cb-examples campaign-summary full_flow_f103ze full_flow_f103cb full_flow_h743 full_flow_6800evk \
+.PHONY: help serve serve-dev serve-stop browser open page-prep spi-flash-hw idcode board-check-f103ze board-check-f103cb board-check-h743 board-check-6800evk test test-ui test-gen test-gen-page gen-embed samples-anim test-hid test-dwarf test-scope test-scope-page test-scope-render test-spi test-read test-spi-page test-hw test-record test-bridge test-bridge-gate test-hpm test-image test-all test-dbg test-dbg-page test-dbg-hw test-dbg-stress test-dbg-stress-f103ze test-dbg-stress-f103cb flash-dbgstress-f103ze flash-dbgstress-f103cb flash-dbgstress-h743 flash-dbgstress-6800evk test-dbg-riscv test-idcode test-dsl test-flash flash-timing hw-campaign hw-campaign-f103ze hw-campaign-f103cb hw-campaign-h743 hw-campaign-hpm hw-campaign-riscv build-f103ze-examples build-f103cb-examples build-h743-examples build-6800evk-examples campaign-summary full_flow_f103ze full_flow_f103cb full_flow_h743 full_flow_6800evk \
         bridge bridge-stop fw-build fw-flash fw-restore fw-h7-build fw-h7-flash \
         algo-check flash-plan la-info la-capture git-status git-log check clean spi-hw spi-flow i2c-hw spi-partial-hw dbg-step-hw probe-diag
 
@@ -361,10 +361,21 @@ test-record: page-prep
 #   make hw-campaign ARGS="--cycles=1 --alt=1"   # 只冒烟一遍
 #   make hw-campaign ARGS="--board=h743"    # 换 H743 靶子（靶子固件与 RTT 控制块区间一起换）
 #   make hw-campaign ARGS=--local           # 打**本地 8899 页面**（默认打线上已发布那份）
-# 🚨 三条 full_flow_* 会**强制加 --local**（见下面 FLOW_LOCAL 的说明）：流程验的是当前这棵树，
+# 🚨 四条 full_flow_* 会**强制加 --local**（见下面 FLOW_LOCAL 的说明）：流程验的是当前这棵树，
 #    而线上是"最后一次 push 的快照"，可能落后到会把流程带沟里。
 hw-campaign: page-prep
 	$(NODE) tools/selftest/hw-campaign.mjs $(FLOW_LOCAL) $(ARGS)
+
+# 同一套网页流程的 F103ZE 档案：先把 RTT、Scope、调试压力三个例程按 ZE 容量构建。
+# RTT 缓冲保持 32 KiB；这是 ZE 的板卡条件，不能与 CB 的 12 KiB 混用。
+#   make hw-campaign-f103ze ARGS="--cycles=1 --alt=1"
+hw-campaign-f103ze: page-prep build-f103ze-examples
+	$(NODE) tools/selftest/hw-campaign.mjs --board=f103ze $(FLOW_LOCAL) $(ARGS)
+
+build-f103ze-examples:
+	pwsh -NoProfile -File tools/target-firmware/stm32f103_rtt_speed/build.ps1 -Board ze
+	pwsh -NoProfile -File tools/target-firmware/stm32f103_scope/build.ps1 -Board ze
+	pwsh -NoProfile -File tools/target-firmware/stm32f103_dbgstress/build.ps1 -Board ze
 
 # 同一套网页流程的 F103CB 档案：固件与 RTT 扫描窗口都按 128KB/20KB 目标构建。
 hw-campaign-f103cb: page-prep build-f103cb-examples
@@ -380,8 +391,13 @@ build-f103cb-examples:
 # 所以自动搜的区间必须跟着换（脚本的 BOARD 表里写着）。F103 那条线不适用于 H7。
 #   make hw-campaign-h743                         # 2 轮 + 交替 5 遍
 #   make hw-campaign-h743 ARGS="--cycles=1 --alt=1"   # 只冒烟一遍
-hw-campaign-h743: page-prep
+hw-campaign-h743: page-prep build-h743-examples
 	$(NODE) tools/selftest/hw-campaign.mjs --board=h743 $(FLOW_LOCAL) $(ARGS)
+
+build-h743-examples:
+	pwsh -NoProfile -File tools/target-firmware/stm32h743_rtt_speed/build.ps1
+	pwsh -NoProfile -File tools/target-firmware/stm32h743_scope/build.ps1
+	pwsh -NoProfile -File tools/target-firmware/stm32h743_dbgstress/build.ps1
 
 # 真机场景基准 · HPM6800EVK（HPM6880 / RISC-V + JTAG，akaLinkPro 探针）
 # 与上面那份同一套编排，差别：目标类型 RISC-V、RTT 控制块地址取自 ELF（AXI SRAM 0x01240000）、
@@ -389,8 +405,13 @@ hw-campaign-h743: page-prep
 #   make hw-campaign-hpm ARGS=--record          # 第一遍：只记录 + 打印"实测 × 80%"的 spec 建议
 #   make hw-campaign-hpm                        # 之后：按 SPEC 判决（2 轮 + 交替 5 遍，约 7 分钟）
 #   make hw-campaign-hpm ARGS="--cycles=1 --alt=1"   # 只冒烟一遍
-hw-campaign-hpm: page-prep
+hw-campaign-hpm: page-prep build-6800evk-examples
 	$(NODE) tools/selftest/hw-campaign-hpm.mjs $(FLOW_LOCAL) $(ARGS)
+
+build-6800evk-examples:
+	pwsh -NoProfile -File tools/target-firmware/hpm6800evk_rtt_flood/build.ps1 -BuildType flash_xip
+	pwsh -NoProfile -File tools/target-firmware/hpm6800evk_scope/build.ps1 -BuildType flash_xip
+	pwsh -NoProfile -File tools/target-firmware/hpm6800evk_dbgstress/build.ps1 -BuildType flash_xip
 
 # 别名（用户口径叫"RISC-V 那条"）：就是上面 hw-campaign-hpm（脚本名按探针/芯片叫 hpm）
 hw-campaign-riscv: hw-campaign-hpm
@@ -404,7 +425,7 @@ hw-campaign-riscv: hw-campaign-hpm
 #   make idcode ARGS=--board=h743    # 按板子档案判决，型号对不上退 1
 # 🚨 规矩（用户 2026-10）：**换板子 / 换探针之后先认板子再跑流程** —— 流程每一步都跟着
 #    "是哪块板"走（烧哪份靶子、控制块去哪个窗口找、判决线取哪套），认错板就是十几分钟
-#    跑在错的假设上，失败信息还看着像"工具坏了"。下面三条 full_flow_* 各自带这个前置。
+#    跑在错的假设上，失败信息还看着像"工具坏了"。下面四条 full_flow_* 各自带这个前置。
 idcode: page-prep
 	$(NODE) tools/selftest/read-idcode.mjs $(ARGS)
 
@@ -436,10 +457,10 @@ board-check-6800evk: page-prep
 #    转发跑到 2.9 MB/s 时整页被冻住，于是"打开 CDC 串口"那步超时，看着像串口/探针坏了。
 #    想故意打线上（例如验收线上版本）就 `make full_flow_f103ze FLOW_LOCAL=`。
 #
-# 三条都会把结果写进 tmp/（campaign-result.json / dbg-stress-page*.json），出错**立刻停**；
+# 四条都会把结果写进 tmp/（campaign-result.json / dbg-stress-page*.json），出错**立刻停**；
 # 想只跑其中一段就单独叫那一条（ARGS 照样透传）。
 full_flow_f103ze: FLOW_LOCAL = --local
-full_flow_f103ze: board-check-f103ze hw-campaign test-dbg-stress-f103ze
+full_flow_f103ze: board-check-f103ze hw-campaign-f103ze test-dbg-stress-f103ze
 	pwsh -NoProfile -Command "Write-Host 'full flow (f103ze) done'"
 
 full_flow_f103cb: FLOW_LOCAL = --local

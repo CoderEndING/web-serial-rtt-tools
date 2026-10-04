@@ -263,6 +263,16 @@ make hw-campaign ARGS="--keep-going"          # 出错也跑完（长稳观察�
 
 完整数据与读法见 [`docs/真机基准测试.md`](docs/真机基准测试.md)。跑之前要知道的三件事：
 
+F103ZE 的 609～616 KB/s 与 F103CB 当前约 445～465 KB/s 不属于同一板卡条件；容量、RTT 缓冲和排线差异的完整对照见 [`docs/validation/2026-10-05-rtt-viewer-comparison.md`](docs/validation/2026-10-05-rtt-viewer-comparison.md)。
+
+现在三块目标板的例程构建也接入了同一套 full flow：命令会先按对应容量/内存布局编译 RTT、Scope 和调试压力例程，再认板、烧录、跑场景和调试压测。H743 保留 AXI SRAM 配置，HPM6800EVK 保留 RISC-V/JTAG 与非缓存变量配置。
+
+```powershell
+make full_flow_f103ze
+make full_flow_h743
+make full_flow_6800evk
+```
+
 1. **狂发固件要用 ZE 版**：`pwsh -File tools/target-firmware/stm32f103_rtt_speed/build.ps1 -Board ze`
    → `build-ze/fw.elf`（96 MHz + RTT 32 KB 缓冲）。仓库里曾长期躺着一份**旧简化版**
    （没有 PLL 设置、`SYST_RVR=8000`、缓冲 4 KB）—— 用它测转发只有 **0.45 MB/s**，

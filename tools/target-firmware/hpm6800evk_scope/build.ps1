@@ -2,7 +2,7 @@
 #
 #   powershell -File script_test\hpm6800evk_scope\build.ps1 [-BuildType flash_xip]
 #
-# Output: build\<build_type>\output\hpm6800evk_scope.elf / .bin / .hex
+# Output: build\<build_type>\output\demo.elf / .bin / .hex；并复制为目录根的 fw.elf
 # 末尾会把**变量块的地址**打出来 —— 主机（探针）就按这个地址去采：
 #   g_v          = 契约变量块（8 × u32 = 32 B，偏移见 src/main.c）
 #   g_mchtmr_hz  = 靶子实测的 MCHTMR 频率（用来核对 10 kHz 时基）
@@ -32,9 +32,14 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 $elf = Join-Path $bdir 'output\demo.elf'      # SDK 统一把可执行文件叫 demo.elf
 if (Test-Path $elf) {
+    # 与 flood/dbgstress 例程保持相同约定：campaign/flash 脚本从目录根取默认 fw.elf。
+    # build/ 被 .gitignore 忽略，根上的副本也是用户下载和 full_flow 的稳定入口。
+    $out = Join-Path $here 'fw.elf'
+    Copy-Item -Force $elf $out
     $nm = "$sdkEnv\toolchains\rv32imac_zicsr_zifencei_multilib_b_ext-win\bin\riscv32-unknown-elf-nm.exe"
     Write-Output ""
     Write-Output "J-Scope 变量块（g_v = 契约块 / g_v_hi = 高速平滑块，把它填进 --base）："
     & $nm -S $elf | Select-String 'g_v|g_mchtmr_hz|g_updates'
+    Write-Output ("已复制给用户下载/流程使用： {0}" -f $out)
 }
 
