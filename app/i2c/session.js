@@ -84,7 +84,7 @@ export class I2cSession {
     if (this._connectPromise) return await this._connectPromise;
     if (this._disconnectPromise) return false;
     this._connectPromise = runProbeOperation(this, 'i2c', () => this._connectNow(interactive, { mock, enable }), {
-      mock, reason: 'I2C 要连接探针',
+      mock, reason: 'I2C 要连接探针', recovery: true,
     });
     try { return await this._connectPromise; }
     catch (e){ this.log('e', e.message); return false; }
@@ -143,8 +143,11 @@ export class I2cSession {
     this.probeManager?.cancel('i2c');
     if (this._disconnectPromise) return await this._disconnectPromise;
     this._disconnectPromise = this._disconnectNow();
-    try { return await this._disconnectPromise; }
-    finally { this._disconnectPromise = null; this.probeManager?.forget('i2c'); }
+    try {
+      await this._disconnectPromise;
+      this.probeManager?.forget('i2c');
+    } catch (e){ this.probeManager?.fail('i2c', e); throw e; }
+    finally { this._disconnectPromise = null; this._closing = false; }
   }
 
   async _disconnectNow(){
@@ -152,6 +155,21 @@ export class I2cSession {
     this._closing = true;
     await Promise.allSettled([this._connectPromise, this._reacquirePromise].filter(Boolean));
     await this._chain;
+    if (this.hid && !this.usingMock){
+      // Closing WebHID alone leaves firmware enabled and PA28/29 owned by I2C.
+      // A timed-out operation can still be pending in firmware; wait for ENABLE=0.
+      const deadline = performance.now() + 2000;
+      for (;;){
+        const res = await this._rawCmd(P.actEnable(false));
+        if (res?.length < 7 || res[0] < 8 || res[1] !== P.HID_CMD || res[2] !== P.ACT.ENABLE)
+          throw new Error('I2C 失能响应不完整，保留引脚占用');
+        const st = P.parseStatus(res);
+        if (st.cmdRc === P.E.OK && !st.enabled && !st.pending) break;
+        if (st.cmdRc !== P.E.BUSY || performance.now() >= deadline)
+          throw new Error('I2C 失能未确认，保留引脚占用');
+        await waitMs(5);
+      }
+    }
     try { await this._dropHid(); } catch { /* 同上 */ }
     this.usingMock = false;
     this.cfg = null; this.counters = null; this.status = null;
@@ -164,7 +182,7 @@ export class I2cSession {
     if (this._reacquirePromise) return await this._reacquirePromise;
     if (this._disconnectPromise) return false;
     this._reacquirePromise = runProbeOperation(this, 'i2c', () => this._reacquireNow(), {
-      mock: this.usingMock, reason: 'I2C 要重连探针',
+      mock: this.usingMock, reason: 'I2C 要重连探针', recovery: true,
     });
     try { return await this._reacquirePromise; }
     finally { this._reacquirePromise = null; }

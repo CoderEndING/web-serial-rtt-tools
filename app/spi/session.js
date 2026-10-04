@@ -98,7 +98,7 @@ export class SpiSession {
   async connectHid(interactive){
     if (this._hidConnectPromise) return await this._hidConnectPromise;
     if (this._teardownPromise) return false;
-    this._hidConnectPromise = runProbeOperation(this, 'spi', () => this._connectHidNow(interactive), { reason: 'SPI/QSPI 要连接探针' });
+    this._hidConnectPromise = runProbeOperation(this, 'spi', () => this._connectHidNow(interactive), { reason: 'SPI/QSPI 要连接探针', recovery: true });
     try { return await this._hidConnectPromise; }
     catch (e){ this.log('e', e.message); return false; }
     finally { this._hidConnectPromise = null; }
@@ -227,6 +227,11 @@ export class SpiSession {
   async _teardownNow(){
     if (this.pollTimer){ clearInterval(this.pollTimer); this.pollTimer = null; }   // 会话没了就别空转（重连时 ensurePoll 会再拉起）
     try { this.matcher.abortAll('会话结束'); } catch { /* 忽略 */ }
+    try {
+      // Finish native writes/reads before disabling the bridge (disabled OUT is NAKed).
+      await this.transport?.stop();
+      if (!this.usingMock && (this.hid || this.transport)) await this._disableBridge();
+    } catch (e){ this.probeManager?.fail('spi', e); throw e; }
     if (this.transport){
       try { await this.transport.close(); this.transport = null; }
       catch (e){ this.probeManager?.fail('spi', e); throw e; }
@@ -239,12 +244,27 @@ export class SpiSession {
   }
 
   async _drainReads(count){
+    return await this._withHid(async hid => {
+      const res = await hid.xfer(P.HID_CMD, P.hidData.drain(count));
+      if (!P.supportsDrain(res)) throw new Error('固件不支持 EP11 DRAIN，请更新探针固件');
+    });
+  }
+
+  async _disableBridge(){
+    return await this._withHid(async hid => {
+      const res = await hid.xfer(P.HID_CMD, P.hidData.enable(false));
+      if (res?.length < 7 || res[0] < 8 || res[1] !== P.HID_CMD || res[2] !== P.ACT.ENABLE ||
+          P.statusWord(P.parseWordPayload(res)).enabled)
+        throw new Error('SPI 失能未确认，保留引脚占用');
+    });
+  }
+
+  async _withHid(fn){
     const temporary = !this.connected;
     const hid = temporary ? new AkaLinkHid() : this.hid;
     try {
       if (temporary) await hid.reconnect();
-      const res = await hid.xfer(P.HID_CMD, P.hidData.drain(count));
-      if (!P.supportsDrain(res)) throw new Error('固件不支持 EP11 DRAIN，请更新探针固件');
+      return await fn(hid);
     } finally { if (temporary) await hid.close(); }
   }
 
@@ -258,6 +278,7 @@ export class SpiSession {
 
   /** 统一入口：发一条 0x35，等响应。`opts.tag` 决定这条日志算谁的（'bus' / 'panel'） */
   async hidAction(action, data, label, opts = {}){
+    if (this._teardownPromise) throw new Error('SPI 会话正在断开');
     if (!this.connected) throw new Error('探针没连上（HID）');
     const t0 = performance.now();
     const res = await this.hid.xfer(P.HID_CMD, data);
