@@ -3,7 +3,7 @@
  * 串口助手与终端共用同一个串口会话（一个 COM 口只能被一个程序打开，
  * 两个标签是同一路数据的两种看法）；RTT 是独立的调试器会话。
  */
-import { releaseLocalProbeUsers } from './core/probe-users.js';
+import { createProbeManager } from './core/probe-users.js';
 import { initTabs } from './ui/tabs.js';
 import { SerialSession } from './serial/session.js';
 import { Assistant } from './serial/assistant.js';
@@ -46,6 +46,15 @@ const panel = new SpiPanelView(spiSession);
 // USB→I2C 转发桥（#i2c）：HID 0x36，只走 HID 一条通路（没有 bulk 端点）
 const i2c = new I2cView();
 
+// Install ownership before init(): automatic reconnect/start paths use the same manager.
+const probeBus = new ProbeBus('page');
+const tools = { session, assistant, terminal, rtt, flash, gen, hid, stream, scope, spi, panel, dbg, i2c, spiSession, probeBus, summary, errors };
+const probeManager = createProbeManager(tools, { bus: probeBus });
+tools.probeManager = probeManager;
+for (const client of [dbg, flash, rtt, scope, hid, spiSession, i2c.session]) client.probeManager = probeManager;
+for (const view of [dbg, flash, rtt, scope, hid, i2c]) view.bus = probeBus;
+window.__tools = tools;
+
 assistant.init();
 terminal.init();
 rtt.init();
@@ -77,9 +86,8 @@ initTabs(name => {
  *    两个页签一起用时第二个只会拿到 `Unable to claim interface`（实测 reset 也救不回来）。
  *    以前只能让用户自己去关别的页签 —— 用户的原话是"有时候打开就卡住"。
  */
-const probeBus = new ProbeBus('page');
 probeBus.onRelease = async why => {
-  await releaseLocalProbeUsers(null, why || '另一个页签要使用探针');
+  await probeManager.releaseOthers(null, why || '另一个页签要使用探针');
   const closed = await closeProbeUsbDevices();
   if (closed) console.info(`[probe-bus] 已释放探针会话，关闭 ${closed} 个 USB 句柄`);
 };
@@ -106,6 +114,7 @@ function summary(){
     panel: panel?.summary?.() || null,
     dbg: dbg?.summary?.() || null,
     i2c: i2c?.summary?.() || null,
+    probeResources: probeManager.summary(),
     vendor: 'serial-rtt-tools',
   };
 }
@@ -113,18 +122,6 @@ const box = document.createElement('div');
 box.id = 'selftest';
 box.hidden = true;
 document.body.appendChild(box);
-
-// 烧录器抢探针前会通过它请别的页签让位（见上面的 probeBus）
-flash.bus = probeBus;
-rtt.bus = probeBus;
-scope.bus = probeBus;
-hid.bus = probeBus;
-// 调试器同理：连之前先请别的页签放掉探针（跨页签协调是必需的，不是锦上添花）
-dbg.bus = probeBus;
-// USB→I2C 桥同理：连接前先请别的页签让位（HID 一个探针只能被一个页签占着）
-i2c.bus = probeBus;
-
-window.__tools = { session, assistant, terminal, rtt, flash, gen, hid, stream, scope, spi, panel, dbg, i2c, spiSession, probeBus, summary, errors };
 
 /**
  * 拆掉加载遮罩 —— 放在这里（所有 view 都 init 完、__tools 挂好之后）。
