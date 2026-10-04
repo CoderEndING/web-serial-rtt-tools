@@ -7,6 +7,7 @@ export class ProbeManager {
   constructor({ beforeAcquire = null, locks = globalThis.navigator?.locks } = {}){
     this.clients = new Map();
     this.leases = new Map();
+    this.failures = new Map();
     this.pending = new Set();
     this.current = null;
     this._chain = Promise.resolve();
@@ -27,18 +28,20 @@ export class ProbeManager {
 
   _conflicts(a, b){ return [...a].some(r => b.has(r)); }
 
-  _checkProtected(owner, resources){
+  _checkProtected(owner, resources, recovery = false){
     for (const [id, c] of this.clients){
+      if (this.failures.has(id) && this._conflicts(resources, c.resources) && !(id === owner && recovery))
+        throw new Error(`探针释放尚未确认（${id}）：${this.failures.get(id).message}；请重连原功能并停止`);
       if (id !== owner && this._conflicts(resources, c.resources) && c.guarded())
         throw new Error(`${id === 'flash' ? '烧录器' : id}正在使用探针，请等待完成`);
     }
   }
 
   /** Serialize acquisition AND setup: a later feature cannot close a half-open session. */
-  async run(owner, fn, { reason = '另一个功能要使用探针', policy = 'handoff' } = {}){
+  async run(owner, fn, { reason = '另一个功能要使用探针', policy = 'handoff', recovery = false } = {}){
     const client = this.clients.get(owner);
     if (!client) throw new Error(`未登记的探针使用者：${owner}`);
-    this._checkProtected(owner, client.resources);
+    this._checkProtected(owner, client.resources, recovery);
     const ticket = { owner, controller: new AbortController(), phase: 'queued' };
     this.pending.add(ticket);
     const alive = () => { if (ticket.controller.signal.aborted) throw new ProbeCancelled(); };
@@ -54,12 +57,13 @@ export class ProbeManager {
         const execute = async () => {
           alive(); ticket.phase = 'setup'; this.current = ticket;
           try {
-            this._checkProtected(owner, client.resources);
+            this._checkProtected(owner, client.resources, recovery);
             const conflicts = [...this.clients].filter(([id, c]) => id !== owner &&
               (this.leases.has(id) || c.active()) && this._conflicts(client.resources, c.resources));
             if (policy === 'reject' && conflicts.length) throw new Error('共享资源正在使用中，请先停止对应功能');
             for (const [id, c] of conflicts){
-              await c.release(reason);
+              try { await c.release(reason); }
+              catch (e){ this.fail(id, e); throw e; }
               this.leases.delete(id);
               alive();
             }
@@ -70,7 +74,7 @@ export class ProbeManager {
             this.leases.set(owner, lease);
             return await fn(lease);
           } finally {
-            if (!client.active()) this.leases.delete(owner);
+            if (!client.active() && !this.failures.has(owner)) this.leases.delete(owner);
             this.current = null;
           }
         };
@@ -96,7 +100,12 @@ export class ProbeManager {
     for (const t of this.pending) if (t.owner === owner) t.controller.abort();
   }
 
-  forget(owner){ this.leases.delete(owner); }
+  fail(owner, error){
+    this.failures.set(owner, error);
+    if (!this.leases.has(owner)) this.leases.set(owner, { owner, fault: true });
+  }
+  confirm(owner){ this.failures.delete(owner); }
+  forget(owner){ this.leases.delete(owner); this.confirm(owner); }
 
   async releaseOthers(keep, reason = '另一个功能要使用探针'){
     // Compatibility calls made inside setup have already been arbitrated by run().
@@ -108,14 +117,19 @@ export class ProbeManager {
       this._checkProtected(keep, all);
       for (const [id, c] of this.clients){
         if (id === keep || (!this.leases.has(id) && !c.active())) continue;
-        await c.release(reason); // Failure preserves ownership and aborts the handoff.
+        try { await c.release(reason); }
+        catch (e){ this.fail(id, e); throw e; }
         this.leases.delete(id);
       }
     });
   }
 
   summary(){
-    return { owners: [...this.leases.keys()], pending: [...this.pending].map(t => ({ owner: t.owner, phase: t.phase })) };
+    return {
+      owners: [...this.leases.keys()],
+      pending: [...this.pending].map(t => ({ owner: t.owner, phase: t.phase })),
+      failures: [...this.failures].map(([owner, error]) => ({ owner, error: error.message })),
+    };
   }
 }
 

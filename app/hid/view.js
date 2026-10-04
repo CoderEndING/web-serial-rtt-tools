@@ -339,6 +339,7 @@ export class RttCdcView {
         this.last = (await this.dev.status()).status;
       }
       this._stall = 0; this._lastMoved = null;
+      this.probeManager?.confirm('hid');
       clearInterval(this._timer);
       this.render();
       toast('已停止转发（CDC 口切回 UART）', 'ok');
@@ -355,6 +356,7 @@ export class RttCdcView {
       }
     } catch (e){
       this.render({ error: e?.message || String(e) });
+      if (this.probeManager?.leases.has('hid')) this.probeManager.fail('hid', e);
       throw e;
     }
   }

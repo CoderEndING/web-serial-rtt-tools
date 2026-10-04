@@ -27,7 +27,9 @@ busy = false;
 m.clients.get('rtt').release = async () => { throw new Error('STOP failed'); };
 await assert.rejects(m.run('scope', () => assert.fail()), /STOP failed/);
 assert.ok(m.leases.has('rtt'), 'failed release retains resource ownership');
+await assert.rejects(m.run('scope', () => assert.fail()), /释放尚未确认/, 'later takeover cannot silently bypass a failed stop');
 m.clients.get('rtt').release = async () => states.set('rtt', false);
+m.confirm('rtt');
 await m.releaseOthers(null); assert.deepEqual(m.summary().owners, []);
 console.log('probe-manager: serialized setup, coexistence, cancellation, busy flash, failed release PASS');
 

@@ -305,7 +305,8 @@ export class ScopeView {
   async connectHid(request){
     if (this._hidConnectPromise) return await this._hidConnectPromise;
     if (this._releasing || this.usingMock) return;
-    this._hidConnectPromise = runProbeOperation(this, 'scope', () => this._connectHidNow(request), { reason: 'J-Scope 要连接探针' });
+    if (this.running || this._starting){ this.setStatusText('先停止采样，再重连探针', 'warn'); return; }
+    this._hidConnectPromise = runProbeOperation(this, 'scope', () => this._connectHidNow(request), { reason: 'J-Scope 要连接探针', recovery: true });
     try { return await this._hidConnectPromise; }
     catch (e){ this.setStatusText(e.message, 'err'); return false; }
     finally { this._hidConnectPromise = null; }
@@ -378,6 +379,7 @@ export class ScopeView {
   async connectUsb(request = true){
     if (this._usbConnectPromise) return await this._usbConnectPromise;
     if (this._releasing || this.usingMock) return;
+    if (this.running || this._starting){ this.setStatusText('先停止采样，再重连数据端点', 'warn'); return; }
     this._usbConnectPromise = runProbeOperation(this, 'scope', () => this._connectUsbNow(request), { reason: 'J-Scope 要使用数据端点' });
     try { return await this._usbConnectPromise; }
     catch (e){ this.setStatusText(e.message, 'err'); return false; }
@@ -672,11 +674,19 @@ export class ScopeView {
 
   async _stopData(){
     let failure;
+    if (this._stopUnconfirmed && !this.hid) failure = new Error('探针未连接，不能确认 STOP');
     try { await this.transport?.quiesce?.(); } catch (e) { failure = e; }
     try { if (this.hid) await this.hidXfer(P.HID_CMD, P.flagsData(P.ACT.STOP)); }
     catch (e) { failure = e; }
     try { await this.transport?.stop(); } catch (e) { failure ||= e; }
-    if (failure) throw new Error('无法确认采样已停止：' + failure.message);
+    if (failure){
+      this._stopUnconfirmed = true;
+      const error = new Error('无法确认采样已停止：' + failure.message);
+      this.probeManager?.fail('scope', error);
+      throw error;
+    }
+    this._stopUnconfirmed = false;
+    this.probeManager?.confirm('scope');
   }
 
   async _startOnce(g){
@@ -933,14 +943,15 @@ export class ScopeView {
 
   async _stopOnce(reason){
     this._stopWatchdog();
-    if (!this.running && !this._starting && !this.transport?.running) return;
+    if (!this.running && !this._starting && !this.transport?.running && !this._stopUnconfirmed) return;
     const hadData = this.running || this.transport?.running;
     this.running = false;
     this._capturing = false;                 // DATA 分支据此停止入缓冲（见那里的说明）
     // 先给个即时反馈：后面两个 await（排空 + HID STOP）要几十毫秒，这期间界面上不该还写着"采样中"
     this.setStatusText('正在停止…', '');
     if (this._startPromise) await this._startPromise.catch(() => {});
-    if (hadData || this._startTouched || this.transport?.running) await this._stopData();
+    if (this._stopUnconfirmed && !this.hid) throw new Error('采样停止尚未确认，请先重连探针，再点停止');
+    if (hadData || this._startTouched || this.transport?.running || this._stopUnconfirmed) await this._stopData();
     const st = this.store;
     const spanUs = st?.count > 1 ? st.timeAt(st.count - 1) - st.timeAt(0) : 0;
     const why = reason || this._stopReason;

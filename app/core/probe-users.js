@@ -3,13 +3,14 @@ import { ProbeManager } from './probe-manager.js';
 // Current bulk drivers close/reset the whole USBDevice, so separate bulk interfaces
 // still conflict on usb-device. I2C has fixed PA28/PA29 pins, independent of SWD/SPI.
 export const PROBE_RESOURCES = Object.freeze({
-  dbg: ['target-engine', 'usb-device'],
-  rtt: ['target-engine', 'rtt-ring', 'usb-device'],
-  scope: ['target-engine', 'usb-device', 'scope-stream'],
-  hid: ['target-engine', 'rtt-ring', 'cdc-mode'],
-  spi: ['usb-device', 'spi-pins'],
+  dbg: ['target-engine', 'debug-pins', 'usb-device'],
+  rtt: ['target-engine', 'debug-pins', 'rtt-ring', 'usb-device'],
+  scope: ['target-engine', 'debug-pins', 'usb-device', 'scope-stream'],
+  hid: ['target-engine', 'debug-pins', 'rtt-ring', 'cdc-mode'],
+  // Auxiliary SPI pads are configurable, including PA28/PA29 and alternate-board debug pins.
+  spi: ['usb-device', 'spi-pins', 'i2c-pins', 'debug-pins'],
   i2c: ['i2c-pins'],
-  flash: ['target-engine', 'rtt-ring', 'usb-device', 'scope-stream', 'cdc-mode', 'spi-pins', 'i2c-pins'],
+  flash: ['target-engine', 'debug-pins', 'rtt-ring', 'usb-device', 'scope-stream', 'cdc-mode', 'spi-pins', 'i2c-pins'],
 });
 
 /** Resource declarations and teardown adapters are the only place that knows other features. */
