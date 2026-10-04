@@ -447,7 +447,10 @@ export class ScopeView {
       catch (e){ failure ||= e; this.probeManager?.fail('scope', e); }
     }
     const h = this.hid;
-    if (h && h !== this.mockProbe){ this.hid = null; try { await h.close(); } catch { /* 忽略 */ } }
+    if (h && h !== this.mockProbe){
+      try { await h.close(); this.hid = null; }
+      catch (e){ failure ||= e; this.probeManager?.fail('scope', e); }
+    }
     if (this.hid === null){
       const info = $('sc-info'); if (info) info.textContent = '未连接（已让出探针：' + reason + '）';
     }

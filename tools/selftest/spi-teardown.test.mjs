@@ -79,3 +79,13 @@ for (const supported of [true, false]){
   await peer.close(); await t.close();
 }
 console.log('spi-teardown: EP11 drain preserves peer, cancels delivery/rearm, guards old firmware and timed-out OUT PASS');
+{
+ const s=new SpiSession(),events=[];let fail=true;
+ const hid={close:async()=>{if(fail)throw new Error('HID close failed');}};
+ s.hid=hid;s._disableBridge=async()=>{};
+ s.probeManager={cancel(){},fail:(owner,e)=>events.push([owner,e.message]),forget:owner=>events.push(['forget',owner])};
+ await assert.rejects(s.teardown(),/HID close failed/);assert.equal(s.hid,hid);
+ assert.deepEqual(events,[['spi','HID close failed']]);
+ fail=false;await s.teardown();assert.equal(s.hid,null);assert.deepEqual(events.at(-1),['forget','spi']);
+}
+console.log('spi-teardown: HID close failure retains handle and ownership until successful retry PASS');

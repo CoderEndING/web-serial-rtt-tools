@@ -63,3 +63,24 @@ releaseWrite(); await tick();
 unsettled.sendReport = async () => {};
 const fresh = pendingNative.xfer(0x31); await tick(); unsettled.reply(0x31); await fresh; await pendingNative.close();
 console.log('hid-channel: timed-out shared channel quarantines late replies until native write and reply settle PASS');
+
+{
+ const d=device(),client=new AkaLinkHid();let finish,attempts=0;
+ d.close=()=>{attempts++;return new Promise((resolve,reject)=>{finish={resolve,reject};});};
+ await client.open(d);
+ const first=client.close(),second=client.close();
+ const checks=[assert.rejects(first,/close failed/),assert.rejects(second,/close failed/)];
+ await tick();assert.equal(attempts,1);await assert.rejects(client.xfer(0x31),/正在关闭/);
+ finish.reject(new Error('close failed'));await Promise.all(checks);
+ assert.equal(client.device,d);assert.equal(client.connected,true);
+ const reply=client.xfer(0x31);await tick();d.reply(0x31);await reply;
+ const retry=client.close();await tick();d.opened=false;finish.resolve();await retry;
+ assert.equal(attempts,2);assert.equal(client.device,null);
+}
+{
+ const d=device(),client=new AkaLinkHid();await client.open(d);
+ d.close=async()=>{throw new Error('unplugged handle');};
+ client._handleDisconnect({device:d});await tick();
+ assert.equal(client.device,null,'physical unplug does not retain a dead handle');
+}
+console.log('hid-channel: native close failure retains shared registration for retry; duplicate close coalesces PASS');

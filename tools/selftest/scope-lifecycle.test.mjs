@@ -27,3 +27,12 @@ console.log('scope-lifecycle: double start, cancellation during CONFIG/STATUS, S
  await v.start();assert.equal(stopped,0,'invalid start cannot stop someone else\'s engine');
 }
 console.log('scope-lifecycle: STOP errors propagate while USB drains; rejected input does not send STOP PASS');
+{
+ const v=Object.create(ScopeView.prototype),events=[];let fail=true;
+ const hid={close:async()=>{if(fail)throw new Error('HID close failed');}};
+ Object.assign(v,{hid,stop:async()=>{},syncButtons(){},setStatusText(){},probeManager:{cancel(){},fail:(owner,e)=>events.push([owner,e.message]),forget:owner=>events.push(['forget',owner])}});
+ await assert.rejects(v.releaseProbe(),/HID close failed/);assert.equal(v.hid,hid);
+ assert.deepEqual(events,[['scope','HID close failed']]);
+ fail=false;await v.releaseProbe();assert.equal(v.hid,null);assert.deepEqual(events.at(-1),['forget','scope']);
+}
+console.log('scope-lifecycle: HID close failure retains handle and ownership until successful retry PASS');

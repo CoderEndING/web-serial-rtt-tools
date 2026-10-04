@@ -236,7 +236,10 @@ export class SpiSession {
       try { await this.transport.close(); this.transport = null; }
       catch (e){ this.probeManager?.fail('spi', e); throw e; }
     }
-    if (this.hid && !this.usingMock){ try { await this.hid.close(); } catch { /* 忽略 */ } }
+    if (this.hid && !this.usingMock){
+      try { await this.hid.close(); }
+      catch (e){ this.probeManager?.fail('spi', e); throw e; }
+    }
     this.hid = null;
     this.stream?.reset();
     this.lastStatus = null;

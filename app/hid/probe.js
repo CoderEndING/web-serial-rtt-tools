@@ -178,6 +178,8 @@ export class AkaLinkHid {
     this._reqSeq = 0;                    // 请求身份序号（超时回调按它匹配，不按 cmd —— 见 _settle）
     this._generation = 0;
     this._requests = new Set();
+    this._closePromise = null;
+    this._disconnectedDevice = null;
     this.onDisconnect = null;
     this._onDisc = this._handleDisconnect.bind(this);
   }
@@ -240,11 +242,13 @@ export class AkaLinkHid {
   }
 
   async open(device){
+    if (this._closePromise) await this._closePromise;
     if (this.device && this.device !== device) await this.close();
     const channel = channelFor(device);
     await onChannel(channel, async () => {
       if (!device.opened) await device.open();
       this.device = device;
+      this._disconnectedDevice = null;
       channel.clients.add(this);
       device.addEventListener('inputreport', channel.input);
       navigator.hid.addEventListener('disconnect', this._onDisc);
@@ -252,23 +256,33 @@ export class AkaLinkHid {
   }
 
   async close(){
+    if (this._closePromise) return await this._closePromise;
+    this._closePromise = this._closeNow();
+    try { return await this._closePromise; }
+    finally { this._closePromise = null; }
+  }
+
+  async _closeNow(){
     const d = this.device;
     this._generation++;
     for (const controller of this._requests) controller.abort();
-    this.device = null;
     const pending = this._pending;
     if (pending && !pending.replyReceived) channelFor(d).fault = pending;
     this._settle(pending);
     this._pending = null;
     pending?.reject(new Error('HID 会话已关闭'));
     if (!d) return;
-    try { navigator.hid.removeEventListener('disconnect', this._onDisc); } catch {}
     const channel = channelFor(d);
-    channel.clients.delete(this);
-    if (!channel.clients.size){ try { d.removeEventListener('inputreport', channel.input); } catch {} }
     await onChannel(channel, async () => {
       // Closing one view must not close the handle used by another view's command queue.
-      try { if (!channel.clients.size && d.opened) await d.close(); } catch {}
+      // Keep the last client and its handle registered if native close fails, so
+      // resource owners can report the failure and retry the same handle.
+      try { if (channel.clients.size === 1 && channel.clients.has(this) && d.opened) await d.close(); }
+      catch (e){ if (this._disconnectedDevice !== d) throw e; }
+      channel.clients.delete(this);
+      if (!channel.clients.size){ try { d.removeEventListener('inputreport', channel.input); } catch {} }
+      try { navigator.hid.removeEventListener('disconnect', this._onDisc); } catch {}
+      this.device = null;
     });
   }
 
@@ -308,6 +322,7 @@ export class AkaLinkHid {
 
   _handleDisconnect(e){
     if (e.device !== this.device) return;
+    this._disconnectedDevice = e.device;
     // close() synchronously rejects the pending response and invalidates queued requests.
     this.close().catch(() => {});
     channelFor(e.device).fault = null; // Unplug also ends any outstanding firmware response.
@@ -333,6 +348,7 @@ export class AkaLinkHid {
 
   /** 同一物理 HID 通道串行请求/响应。失效句柄交给显式重连恢复，避免请求在释放后重新认领。 */
   async xfer(cmd, data, timeout = 3000){
+    if (this._closePromise) throw new Error('HID 会话正在关闭');
     if (!this.connected) throw new Error('探针没连上');
     const device = this.device, generation = this._generation;
     const controller = new AbortController();
