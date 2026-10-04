@@ -70,6 +70,11 @@ export function recordButtonState(rec){
           : ''),
     primary: true,
   };
+  if (rec.error) return {
+    text: rec.needsClose ? '■ 结束失败记录' : '⚠ 记录失败 · 点击重新开始',
+    title: `记录失败：${rec.error.message || rec.error}。已写 ${fBytes(rec.written)} / 收到 ${fBytes(rec.pushed)}，文件可能不完整。`,
+    primary: rec.needsClose,
+  };
   return { text: '● 记录到文件', title: '把收到的字节直接写进本地文件（不走接收区 2MB 上限），高速采集用', primary: false };
 }
 
@@ -106,6 +111,7 @@ export class FileRecorder {
   }
 
   get starting(){ return !!this._startPromise; }
+  get needsClose(){ return !!this._w; }
 
   /** 还没落盘的字节：内存里排着队的那些（越接近 0 越安全） */
   backlog(){ return Math.max(0, this.pushed - this.written); }
@@ -174,6 +180,7 @@ export class FileRecorder {
   }
 
   _flush(){
+    if (this.error){ this._chunks = []; this._pend = 0; return; }
     if (!this._chunks.length) return;
     const chunks = this._chunks;
     this._chunks = [];
@@ -187,6 +194,7 @@ export class FileRecorder {
        *    合成之后同样的字节数只需要 1/几十 次调用。
        */
       this._wq = this._wq.then(async () => {
+        if (this.error) return; // Never append later batches after a failed write.
         if (chunks.length === 1) await w.write(chunks[0]);
         else {
           const buf = new Uint8Array(total);
@@ -215,13 +223,13 @@ export class FileRecorder {
   }
 
   _fail(e){
+    if (this.error) return;
     this.error = e;
     this.active = false;
-    this.draining = false;
     clearInterval(this._timer); this._timer = null;
-    clearInterval(this._progTimer); this._progTimer = null;
-    this._disarmGuards();
-    this.onChange?.();
+    this._chunks = []; this._pend = 0;
+    try { this.onNote?.(`记录写入失败：${e.message || e}。已停止接收，文件可能不完整，请点「结束失败记录」关闭文件`); } catch {}
+    this._notify(true);
   }
 
   // ---------------- 两道"别把数据弄丢"的保护 ----------------
@@ -274,6 +282,7 @@ export class FileRecorder {
     this._progTimer = setInterval(() => this._notify(true), 300);
     this._notify(true);
     try { await this._wq; } catch { /* _fail 里已记 */ }
+    info.error = this.error || info.error;
     clearInterval(this._progTimer); this._progTimer = null;
     /**
      * 🚨 **`draining` 要一直挂到 `close()` 返回为止**（2026-10 真机基准测试抓到）：
@@ -285,13 +294,14 @@ export class FileRecorder {
      *    顺序换一下，`draining` = "文件还没改名完"，语义和按钮文字就能对上。
      */
     if (this._w){
-      try { await this._w.close(); } catch (e){ info.error = info.error || e; }
+      try { await this._w.close(); } catch (e){ info.error = info.error || e; this.error = info.error; }
       this._w = null;
     } else if (this._mem.length){
       download(this.name, new Blob(this._mem, { type: 'application/octet-stream' }));
     }
     this.draining = false;
     info.pushed = this.pushed;
+    info.written = this.written;
     this._mem = []; this._memBytes = 0;
     this._disarmGuards();
     this.onChange?.();

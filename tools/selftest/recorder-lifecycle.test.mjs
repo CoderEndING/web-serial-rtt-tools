@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { FileRecorder } from '../../app/core/recorder.js';
+import { FileRecorder, recordButtonState } from '../../app/core/recorder.js';
 
 const gate = () => { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; };
 const tick = () => new Promise(r => setImmediate(r));
@@ -37,3 +37,32 @@ await Promise.all([startPending, stopPending]); assert.equal(pending.active, fal
 picker = async () => { throw Object.assign(new Error('cancelled'), { name: 'AbortError' }); };
 await assert.rejects(pending.start(), /cancelled/); assert.equal(pending.starting, false);
 console.log('recorder-lifecycle: single picker/stop, close barrier, clean restart and stop during opening PASS');
+
+const failed = new FileRecorder(), diskError = new Error('disk full');
+const failedWrite = gate(), closeFailure = gate(); let attempts = 0, notes = [];
+picker = async () => ({ name: 'failed.bin', createWritable: async () => ({
+  async write(){ attempts++; await failedWrite.promise; throw diskError; },
+  async close(){ await closeFailure.promise; },
+}) });
+failed.onNote = note => notes.push(note);
+await failed.start();
+failed.push(Uint8Array.of(1)); failed._flush(); failed.push(Uint8Array.of(2)); failed._flush();
+const failureStop = failed.stop(); failedWrite.resolve(); await tick();
+assert.equal(failed.draining, true); assert.equal(failed.error, diskError); assert.equal(attempts, 1);
+assert.equal(notes.length, 1); assert.match(notes[0], /写入失败/);
+closeFailure.resolve(); const failureInfo = await failureStop;
+assert.equal(failureInfo.error, diskError); assert.equal(failureInfo.written, 0); assert.equal(failureInfo.bytes, 2);
+assert.match(recordButtonState(failed).text, /记录失败/); assert.equal(failed._w, null);
+
+const liveError = new FileRecorder();
+picker = async () => ({ name: 'live.bin', createWritable: async () => ({
+  async write(){ throw diskError; }, async close(){},
+}) });
+await liveError.start(); liveError.push(Uint8Array.of(3)); liveError._flush(); await liveError._wq;
+assert.equal(liveError.active, false); assert.match(recordButtonState(liveError).text, /结束失败记录/);
+await assert.rejects(liveError.start(), /尚未关闭/);
+assert.equal((await liveError.stop()).error, diskError);
+picker = async () => ({ name: 'recovered.bin', createWritable: async () => ({ async write(){}, async close(){} }) });
+await liveError.start(); liveError.push(Uint8Array.of(4));
+assert.equal((await liveError.stop()).error, null); assert.equal(liveError.written, 1);
+console.log('recorder-lifecycle: write error survives stop, remains visible, stops later batches and recovers after close PASS');

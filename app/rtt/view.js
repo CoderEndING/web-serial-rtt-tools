@@ -526,7 +526,7 @@ export class RttView {
   async _disconnectNow(){
     this.running = false;
     clearTimeout(this.timer);
-    if (this.rec.active){
+    if (this.rec.active || this.rec.needsClose || this.rec.starting || this.rec.draining){
       const info = await this.rec.stop();
       this._recordBtn();
       if (info) toast(`记录已停止并保存：${info.name}（${fBytes(info.bytes)}）`, 'ok', 6000);
@@ -1027,7 +1027,7 @@ export class RttView {
    */
   async _toggleRecord(){
     if (this.rec.starting || this.rec.draining) return;
-    if (this.rec.active){
+    if (this.rec.active || this.rec.needsClose){
       const info = await this.rec.stop();
       this._recordBtn();
       if (info?.error) toast('记录落盘出错：' + (info.error.message || info.error), 'err', 8000);

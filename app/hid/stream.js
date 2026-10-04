@@ -253,7 +253,7 @@ export class RttCdcStreamView {
 
   async _toggleRecord(){
     if (this.rec.starting || this.rec.draining) return;
-    if (this.rec.active){
+    if (this.rec.active || this.rec.needsClose){
       const info = await this.rec.stop();
       this._recordBtn();
       if (info?.error) toast('记录出错：' + (info.error.message || info.error), 'err', 6000);
@@ -270,7 +270,7 @@ export class RttCdcStreamView {
   }
 
   async _stopRecord(){
-    if (!this.rec.active) return;
+    if (!this.rec.active && !this.rec.needsClose && !this.rec.starting && !this.rec.draining) return;
     const info = await this.rec.stop();
     this._recordBtn();
     if (info?.error) toast('记录落盘出错：' + (info.error.message || info.error), 'err', 8000);
