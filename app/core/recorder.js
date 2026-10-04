@@ -113,7 +113,7 @@ export class FileRecorder {
   get starting(){ return !!this._startPromise; }
   get needsClose(){ return !!this._w; }
 
-  /** 还没落盘的字节：内存里排着队的那些（越接近 0 越安全） */
+  /** 尚未写入的字节；即使为零，文件仍须 close 才提交。 */
   backlog(){ return Math.max(0, this.pushed - this.written); }
   /** 积压是否已经大到该告警（界面据此在按钮上加"待落盘 X"） */
   lagging(){ return this.backlog() > BACKLOG_WARN; }
@@ -237,10 +237,10 @@ export class FileRecorder {
     if (typeof addEventListener !== 'function') return;
     /**
      * 记录中离开页面要拦一下：写句柄被销毁 = .crswap 被 Chrome 删掉 = 未落盘的字节全丢
-     * （真机现场就是这么丢的 11.4 MB）。只有"还有积压"时才拦，落完盘就不打扰。
+     * （真机现场就是这么丢的 11.4 MB）。积压清零不等于提交，必须保护到 close 完成。
      */
     this._bye = e => {
-      if (!this.active || this.backlog() <= 0) return;
+      if (!this.needsClose && !this.active && !this.draining) return;
       e.preventDefault();
       e.returnValue = '';
       return '';

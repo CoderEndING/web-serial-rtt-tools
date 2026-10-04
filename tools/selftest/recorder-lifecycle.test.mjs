@@ -66,3 +66,21 @@ picker = async () => ({ name: 'recovered.bin', createWritable: async () => ({ as
 await liveError.start(); liveError.push(Uint8Array.of(4));
 assert.equal((await liveError.stop()).error, null); assert.equal(liveError.written, 1);
 console.log('recorder-lifecycle: write error survives stop, remains visible, stops later batches and recovers after close PASS');
+
+const listeners = new Map();
+globalThis.addEventListener = (name, fn) => listeners.set(name, fn);
+globalThis.removeEventListener = (name, fn) => { if (listeners.get(name) === fn) listeners.delete(name); };
+globalThis.document = { addEventListener(){}, removeEventListener(){} };
+const guarded = new FileRecorder(), finalClose = gate();
+picker = async () => ({ name: 'guard.bin', createWritable: async () => ({
+  async write(){}, async close(){ await finalClose.promise; },
+}) });
+const blocksUnload = () => {
+  let blocked = false; listeners.get('beforeunload')?.({ preventDefault(){ blocked = true; } }); return blocked;
+};
+await guarded.start(); guarded.push(Uint8Array.of(1)); guarded._flush(); await guarded._wq;
+assert.equal(guarded.backlog(), 0); assert.equal(blocksUnload(), true, 'flushed but uncommitted file stays protected');
+const guardStop = guarded.stop(); await tick();
+assert.equal(guarded.draining, true); assert.equal(blocksUnload(), true, 'close in progress stays protected');
+finalClose.resolve(); await guardStop; assert.equal(blocksUnload(), false);
+console.log('recorder-lifecycle: unload stays protected through zero backlog and pending close PASS');
