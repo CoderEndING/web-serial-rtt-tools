@@ -402,6 +402,7 @@ class OpenOcdBackend {
       };
       const t = setTimeout(() => fail(new Error(`OpenOCD 命令超时：${line}；连接已关闭，请重新连接`)), timeout);
       const onData = d => {
+        if (this.sock !== socket) return fail(new Error('OpenOCD 会话已替换，请重新连接'));
         this.buf = Buffer.concat([this.buf, d]);
         const i = this.buf.indexOf(0x1a);
         if (i >= 0 && !done){
@@ -426,7 +427,7 @@ class OpenOcdBackend {
   static _words(text){
     const out = [];
     for (const tok of text.split(/\s+/)){
-      if (!tok.startsWith('0x')) continue;
+      if (!/^0x[0-9a-f]+$/i.test(tok)) continue;
       out.push(parseInt(tok, 16) >>> 0);
     }
     return out;
@@ -438,25 +439,27 @@ class OpenOcdBackend {
     const out = new Uint8Array(len);
     const dv = new DataView(out.buffer);
     let a = addr, left = len, o = 0;
+    const readWords = async (address, width, count) => {
+      const w = OpenOcdBackend._words(await this.rpc(`read_memory 0x${address.toString(16)} ${width} ${count}`, 20000));
+      if (w.length < count || (width === 8 && w.slice(0, count).some(v => v > 255)))
+        throw new Error(`read_memory 数据不完整或无效：${w.length}/${count} 个 ${width} 位值（@0x${address.toString(16)}）`);
+      return w;
+    };
     // 头部对齐
     if (a & 3){
       const n = Math.min(4 - (a & 3), left);
-      const w = OpenOcdBackend._words(await this.rpc(`read_memory 0x${a.toString(16)} 8 ${n}`));
+      const w = await readWords(a, 8, n);
       for (let i = 0; i < n; i++) out[o + i] = w[i] & 0xff;
       a += n; left -= n; o += n;
     }
     while (left >= 4 && (left % 4 === 0 || left >= 8)){
       const n = Math.min(256, left >> 2);                    // 256 字 = 1KB/次（实测比大块更快）
-      const t0 = Date.now();
-      const text = await this.rpc(`read_memory 0x${a.toString(16)} 32 ${n}`, 20000);
-      const w = OpenOcdBackend._words(text);
-      if (w.length < n) throw new Error(`read_memory 只回来 ${w.length}/${n} 个字（@0x${a.toString(16)}）`);
+      const w = await readWords(a, 32, n);
       for (let i = 0; i < n; i++) dv.setUint32(o + i * 4, w[i], true);
       a += n * 4; left -= n * 4; o += n * 4;
-      void t0;
     }
     if (left > 0){
-      const w = OpenOcdBackend._words(await this.rpc(`read_memory 0x${a.toString(16)} 8 ${left}`));
+      const w = await readWords(a, 8, left);
       for (let i = 0; i < left; i++) out[o + i] = w[i] & 0xff;
     }
     return out;
