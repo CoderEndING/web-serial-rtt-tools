@@ -10,7 +10,7 @@
  * 所以自测可以逐点断言"画出来的值应当是什么"，而不是"看着像正弦"。
  */
 import { HID_CMD, ACT, KIND, TYPES, SCOPE_FLAG, buildDef, buildData, buildStat, buildEvt, packSamples,
-         samplesPerPacket, START_PENDING } from './protocol.js';
+         samplesPerPacket, START_PENDING, VERSION, VERSION_TICKS, ticksForUs, usForTicks } from './protocol.js';
 
 /** 类型 → 波形（i = 样本序号，k = 通道序号）。返回"原始整数值"（f32/f64 返浮点，其余按类型含义）*/
 export function waveformFor(scalar, i, k = 0){
@@ -40,6 +40,7 @@ export class MockScopeProbe {
     this.vars = [];
     this.periodUs = opts.periodUs ?? 100;          // 10 kHz
     this.periodUsActual = this.periodUs;
+    this.version = Number.isInteger(this.periodUs) ? VERSION : VERSION_TICKS;
     this.slowdown = opts.slowdown ?? 1;            // 探针跟不上请求周期时的倍数（见 poll()）
     this.swdMhz = opts.swdMhz ?? 45;
     this.dropEvery = opts.dropEvery ?? 0;
@@ -76,7 +77,8 @@ export class MockScopeProbe {
     if (cmd !== HID_CMD) return this._res(cmd, -1);
     const action = data ? data[0] : ACT.STATUS;
     switch (action){
-      case ACT.CONFIG: {
+      case ACT.CONFIG:
+      case ACT.CONFIG_TICKS: {
         const dv = new DataView(data.buffer, data.byteOffset, data.byteLength);
         const n = data[6];
         const vars = [];
@@ -85,7 +87,8 @@ export class MockScopeProbe {
           vars.push({ addr: dv.getUint32(o, true), size: data[o + 4], type: data[o + 5] });
           o += 6;
         }
-        this.configure({ periodUs: dv.getUint32(1, true), flags: data[5], vars });
+        this.configure({ periodUs: data[0] === ACT.CONFIG_TICKS ? usForTicks(dv.getUint32(1, true)) : dv.getUint32(1, true), flags: data[5], vars });
+        this.version = data[0] === ACT.CONFIG_TICKS ? VERSION_TICKS : VERSION;
         return this._res(cmd, 0);
       }
       case ACT.START:
@@ -126,7 +129,7 @@ export class MockScopeProbe {
     const running = this.running ? 1 : 0;
     // 状态字 0：bit0 运行中 / bit1 **生效后端是 RISC-V** / bit8-15 span 数 / bit16 SWD 已就绪 / bit24-31 变量数
     // （RISC-V 模式下探针不上报 SWD 时钟，bit16 也置 0 —— 与真固件一致）
-    dv.setUint32(3, running | (this.riscv ? 2 : 0) | (this.nspans << 8) |
+    dv.setUint32(3, running | 4 | (this.riscv ? 2 : 0) | (this.nspans << 8) |
                     ((this.riscv ? 0 : 1) << 16) | (this.vars.length << 24), true);
     dv.setUint32(7, this.riscv ? 0 : Math.round(this.swdMhz * 1e6), true);
     dv.setUint32(11, this.produced >>> 0, true);
@@ -138,7 +141,8 @@ export class MockScopeProbe {
     dv.setUint32(35, this._planHash(), true);
     dv.setUint32(39, (ACT.STATUS & 0xff) | (0 << 8), true);
     dv.setInt32(43, rc, true);
-    dv.setUint32(47, this.periodUs & 0xffff, true);
+    dv.setUint32(47, ((this.version === VERSION_TICKS ? ticksForUs(this.periodUs) : this.periodUs) & 0xffff)
+      | (this.version === VERSION_TICKS ? (1 << 17) : 0), true);
     return p;
   }
 
@@ -160,7 +164,8 @@ export class MockScopeProbe {
     //    否则"勾选顺序 ≠ 地址顺序"这类整体错位在自测里根本暴露不出来（真机上已经踩过一次）。
     this.vars = vars.map(v => ({ ...v, scalar: v.scalar || TYPES[v.type]?.name || 'u32' }))
                     .sort((a, b) => a.addr - b.addr);
-    this.periodUs = Math.max(1, periodUs | 0);
+    this.periodUs = Math.max(2, usForTicks(ticksForUs(periodUs)));
+    this.version = Number.isInteger(this.periodUs) ? VERSION : VERSION_TICKS;
     this.periodUsActual = this.periodUs;
     // flags：bit0 = 允许 60 MHz，bit1 = 丢弃模式，bit5 = 采样时暂停 CDC 桥，bit6 = 强制 RISC-V
     // 🚨 老写法 `!!(flags & 1)` 把"允许 60 MHz"当成了丢弃模式（位搞错了）—— 顺手对齐协议。
@@ -206,7 +211,7 @@ export class MockScopeProbe {
     if (!this._sentDef){ out.push(buildDef({ seq: this.seq++, swdHz: Math.round(this.swdMhz * 1e6),
                                              periodUs: this.periodUs,
                                              flags: (this._discarding ? SCOPE_FLAG.DISCARD : 0) | (this.riscv ? SCOPE_FLAG.RISCV : 0),
-                                             vars: this.vars }));
+                                             vars: this.vars, version: this.version }));
       this._sentDef = true; this.pkts++; }
     for (let i = 0; i < want; i++) this._emit(out, perEff);
     return out;
@@ -226,14 +231,14 @@ export class MockScopeProbe {
       const frameBytes = this.frameBytes();
       const payload = new Uint8Array(spp * frameBytes);
       for (let j = 0; j < this._packetAccum.length; j++) packSamples(this.vars, this._packetAccum[j], payload.subarray(j * frameBytes));
-      out.push(buildData({ seq: this.seq++, tUs: this._pktT0, n: this._packetAccum.length, payload }));
+      out.push(buildData({ seq: this.seq++, tUs: this._pktT0, n: this._packetAccum.length, payload, version: this.version }));
       this.delivered += this._packetAccum.length;
       this._packetAccum = [];
       this.pkts++;
       if (this.pkts % this._statEvery === 0){
         out.push(buildStat({ seq: this.seq++, tUs: this._pktT0, produced: this.produced, dropped: this.dropped,
                              pkts: this.pkts, usbErr: this.usbErr, swdErr: this.swdErr,
-                             periodUs: this.periodUsActual, swdMhz: this.swdMhz, discarding: this._discarding }));
+                             periodUs: this.periodUsActual, swdMhz: this.swdMhz, discarding: this._discarding, version: this.version }));
         this.pkts++;
       }
     }
@@ -252,7 +257,7 @@ export class MockScopeProbe {
       packSamples(this.vars, this._packetAccum[j], payload.subarray(j * frameBytes));
     }
     out.push(buildData({ seq: this.seq++, tUs: this._pktT0 ?? 0,
-                         n: this._packetAccum.length, payload }));
+                         n: this._packetAccum.length, payload, version: this.version }));
     this.delivered += this._packetAccum.length;
     this.pkts++;
     this._packetAccum = [];

@@ -606,7 +606,7 @@ export class ScopeView {
     return sc.map((s, i) => ({ name: `mock${i}.${s}`, addr: 0x20000000 + i * 4, size: P.SCALARS[s].size, scalar: s }));
   }
 
-  periodUs(){ return Math.max(2, Number($('sc-period').value) || 100); }   // 固件下限是 2 µs（整数微秒）
+  periodUs(){ return Math.min(1e6, Math.max(2, P.usForTicks(P.ticksForUs(Number($('sc-period').value) || 100)))); }   // 固件下限是 2 µs（整数微秒）
   seconds(){ return Math.max(0.5, Number($('sc-seconds').value) || 20); }
 
   // ================================================================= 采样
@@ -724,7 +724,7 @@ export class ScopeView {
        *    不看它的话，被拒之后固件已经**把变量表清空了**，紧接着的 START 会回 -3 →
        *    页面显示"变量表为空（先在左侧选 1~8 个变量）"，而用户明明选了变量，方向全错。
        */
-      const cfgRes = await this.hidXfer(P.HID_CMD, P.configData({ periodUs, flags, vars }));
+      const cfgRes = await this.configureScope({ periodUs, flags, vars });
       const cfgRc = this.signed(cfgRes?.[2]);
       if (cfgRc < 0 && cfgRc !== P.START_PENDING){
         this._capturing = false;
@@ -1032,7 +1032,7 @@ export class ScopeView {
         | (this.targetRiscv ? P.SCOPE_FLAG.RISCV : 0);
       // JTAG 下 action 3（SWD 时钟）无效，别发
       if (clockKhz > 0 && !riscv) await this.hidXfer(P.HID_CMD, P.clockData(clockKhz * 1000));
-      await this.hidXfer(P.HID_CMD, P.configData({ periodUs: this.periodUs(), flags, vars }));
+      await this.configureScope({ periodUs: this.periodUs(), flags, vars });
       this.plan = this.updatePlan();
       await this.hidXfer(P.HID_CMD, P.benchData({ iters: 2000 }));
       await sleep(600);
@@ -1087,6 +1087,16 @@ export class ScopeView {
     return await this.hid.xfer(cmd, data, timeout);
   }
 
+  async configureScope(opts){
+    const data = P.configData(opts);
+    if (data[0] === P.ACT.CONFIG_TICKS){
+      const res = await this.hidXfer(P.HID_CMD, Uint8Array.of(P.ACT.STATUS));
+      const st = P.parseScopeStatus(res.subarray(3));
+      if (!st.supportsTicks) throw new Error('当前探针固件不支持小数周期，请升级固件，或使用整数 µs 周期');
+    }
+    return await this.hidXfer(P.HID_CMD, data);
+  }
+
   /** 数据面回调：字节流 → 包 → 解码 → 缓冲（+触发 +统计）*/
   onChunk(chunk){
     this._lastPktAt = performance.now();       // 看门狗据此判"流断没断"（见 _startWatchdog）
@@ -1124,7 +1134,7 @@ export class ScopeView {
       if (!st.ok && st.why === 'gap') this.lost += st.missing || 1;
       switch (pkt.kind){
         case P.KIND.DEF: {
-          const d = P.parseDef(pkt.payload);
+          const d = P.parseDef(pkt.payload, pkt.version);
           this.defVars = d.vars;
           this.periodActualUs = d.periodUs;
           this.swdMhz = d.swdHz ? Math.round(d.swdHz / 1e6) : this.swdMhz;
@@ -1165,7 +1175,7 @@ export class ScopeView {
           if (!vars?.length) break;
           const nums = P.decodeSamples(vars, pkt.payload, pkt.n, []);
           const nv = vars.length;
-          const t0 = this.timeU.unwrap(pkt.tUs);
+          const t0 = P.packetTimeUs(pkt, this.timeU);
           /**
            * 包内每个样本的时刻：用**上一包实测出来的间隔**折算，而不是配置里的名义周期。
            * 探针的实际节奏会飘（真机实测同一次采集里 10.00 → 10.31 µs/样本），
@@ -1202,7 +1212,7 @@ export class ScopeView {
           break;
         }
         case P.KIND.STAT: {
-          const s = P.parseStat(pkt.payload);
+          const s = P.parseStat(pkt.payload, pkt.version);
           this.probeDropped = s.dropped;
           this.usbDrop = s.usbErr;                 // 固件 w4 高 16 位 = 无缓冲丢样本（主机排空不及）
           this.probeYield = 0;

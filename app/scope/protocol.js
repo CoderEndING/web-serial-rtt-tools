@@ -13,6 +13,10 @@ import { SCALARS } from '../elf/dwarf.js';
 
 export const MAGIC = 0x4a53;            // 'J','S'（小端存储 = 53 4a）
 export const VERSION = 1;
+export const VERSION_TICKS = 2;
+export const TIME_HZ = 24000000;
+export const ticksForUs = us => Math.round(us * TIME_HZ / 1e6);
+export const usForTicks = ticks => ticks * 1e6 / TIME_HZ;
 export const PACKET = 512;              // 一个 USB 包的字节数（HS bulk 的 wMaxPacketSize）
 export const HEADER = 16;
 export const PAYLOAD = PACKET - HEADER; // 496
@@ -138,21 +142,21 @@ function wr32(b, o, v){ b[o] = v & 0xff; b[o + 1] = (v >>> 8) & 0xff; b[o + 2] =
 const rd16 = (b, o) => b[o] | (b[o + 1] << 8);
 const rd32 = (b, o) => (b[o] | (b[o + 1] << 8) | (b[o + 2] << 16) | (b[o + 3] << 24)) >>> 0;
 
-function header(kind, seq, tUs, n, aux){
+function header(kind, seq, tUs, n, aux, version = VERSION){
   const b = new Uint8Array(PACKET);
-  wr16(b, 0, MAGIC); b[2] = VERSION; b[3] = kind;
-  wr32(b, 4, seq >>> 0); wr32(b, 8, tUs >>> 0); wr16(b, 12, n); wr16(b, 14, aux);
+  wr16(b, 0, MAGIC); b[2] = version; b[3] = kind;
+  wr32(b, 4, seq >>> 0); wr32(b, 8, version === VERSION_TICKS ? ticksForUs(tUs) : tUs >>> 0); wr16(b, 12, n); wr16(b, 14, aux);
   return b;
 }
 
 /** DEF：变量表（主机用它和本地计划对账）。
  *  `payload[11]` = 探针自己算出来的 **span 数** —— 主机拿它和本地 `planReads()` 对账，
  *  不一致就说明两边的合并规则不一样（比"波形看起来不对"好查得多）。 */
-export function buildDef({ seq = 0, swdHz = 0, periodUs = 0, flags = 0, vars = [], spans = 0 } = {}){
-  const b = header(KIND.DEF, seq, 0, 0, vars.length);
+export function buildDef({ seq = 0, swdHz = 0, periodUs = 0, flags = 0, vars = [], spans = 0, version = VERSION } = {}){
+  const b = header(KIND.DEF, seq, 0, 0, vars.length, version);
   const dv = new DataView(b.buffer);
   dv.setUint32(HEADER, swdHz >>> 0, true);
-  dv.setUint32(HEADER + 4, periodUs >>> 0, true);
+  dv.setUint32(HEADER + 4, version === VERSION_TICKS ? ticksForUs(periodUs) : periodUs >>> 0, true);
   dv.setUint16(HEADER + 8, flags & 0xffff, true);
   b[HEADER + 10] = vars.length & 0xff;
   b[HEADER + 11] = spans & 0xff;
@@ -166,11 +170,12 @@ export function buildDef({ seq = 0, swdHz = 0, periodUs = 0, flags = 0, vars = [
   return b;
 }
 
-export function parseDef(payload){
+export function parseDef(payload, version = VERSION){
   const dv = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
   const out = { swdHz: dv.getUint32(0, true), periodUs: dv.getUint32(4, true),
                 flags: dv.getUint16(8, true), nvars: payload[10], spans: payload[11], vars: [] };
   // **生效**后端：DEF flags bit6 = 这次真的在走 RISC-V/JTAG（不是你下发的那个）
+  if (version === VERSION_TICKS) out.periodUs = usForTicks(out.periodUs);
   out.riscv = !!(out.flags & SCOPE_FLAG.RISCV);
   let o = 12;
   for (let i = 0; i < out.nvars; i++){
@@ -182,8 +187,8 @@ export function parseDef(payload){
 }
 
 /** DATA：一批样本。载荷 = n × frameBytes，变量按变量表顺序紧排。 */
-export function buildData({ seq = 0, tUs = 0, n = 0, payload = new Uint8Array(0) } = {}){
-  const b = header(KIND.DATA, seq, tUs, n, payload.length);
+export function buildData({ seq = 0, tUs = 0, n = 0, payload = new Uint8Array(0), version = VERSION } = {}){
+  const b = header(KIND.DATA, seq, tUs, n, payload.length, version);
   b.set(payload.subarray(0, PAYLOAD), HEADER);
   return b;
 }
@@ -208,26 +213,26 @@ export function packSamples(vars, nums, into = new Uint8Array(PAYLOAD)){
 }
 
 export function buildStat({ seq = 0, tUs = 0, produced = 0, dropped = 0, pkts = 0,
-                            usbErr = 0, swdErr = 0, periodUs = 0, swdMhz = 0, discarding = false } = {}){
-  const b = header(KIND.STAT, seq, tUs, 0, 0);
+                            usbErr = 0, swdErr = 0, periodUs = 0, swdMhz = 0, discarding = false, version = VERSION } = {}){
+  const b = header(KIND.STAT, seq, tUs, 0, 0, version);
   const dv = new DataView(b.buffer);
   dv.setUint32(HEADER, produced >>> 0, true);
   dv.setUint32(HEADER + 4, dropped >>> 0, true);
   dv.setUint32(HEADER + 8, pkts >>> 0, true);
   dv.setUint16(HEADER + 12, usbErr & 0xffff, true);
   dv.setUint16(HEADER + 14, swdErr & 0xffff, true);
-  dv.setUint32(HEADER + 16, periodUs >>> 0, true);
+  dv.setUint32(HEADER + 16, version === VERSION_TICKS ? ticksForUs(periodUs) : periodUs >>> 0, true);
   b[HEADER + 20] = swdMhz & 0xff;
   b[HEADER + 21] = discarding ? 1 : 0;
   return b;
 }
 
-export function parseStat(payload){
+export function parseStat(payload, version = VERSION){
   const dv = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
   return {
     produced: dv.getUint32(0, true), dropped: dv.getUint32(4, true), pkts: dv.getUint32(8, true),
     usbErr: dv.getUint16(12, true), swdErr: dv.getUint16(14, true),
-    periodUs: dv.getUint32(16, true), swdMhz: payload[20], discarding: !!payload[21],
+    periodUs: version === VERSION_TICKS ? usForTicks(dv.getUint32(16, true)) : dv.getUint32(16, true), swdMhz: payload[20], discarding: !!payload[21],
   };
 }
 
@@ -254,13 +259,14 @@ export function parseEvt(payload){
 export function parsePacket(buf){
   if (!(buf instanceof Uint8Array) || buf.length < PACKET) return null;
   if (rd16(buf, 0) !== MAGIC) return null;
-  if (buf[2] !== VERSION) return null;
+  if (buf[2] !== VERSION && buf[2] !== VERSION_TICKS) return null;
   const kind = buf[3];
   if (!KIND_NAME[kind]) return null;
-  if (kind === KIND.DATA && HEADER + buf[14] > PACKET) return null;   // aux = 有效载荷字节数
+  if (kind === KIND.DATA && HEADER + rd16(buf, 14) > PACKET) return null;   // aux = 有效载荷字节数
   return {
     kind, kindName: KIND_NAME[kind],
-    seq: rd32(buf, 4), tUs: rd32(buf, 8), n: rd16(buf, 12), aux: rd16(buf, 14),
+    version: buf[2], tRaw: rd32(buf, 8),
+    seq: rd32(buf, 4), tUs: buf[2] === VERSION_TICKS ? usForTicks(rd32(buf, 8)) : rd32(buf, 8), n: rd16(buf, 12), aux: rd16(buf, 14),
     payload: buf.subarray(HEADER),
   };
 }
@@ -343,10 +349,16 @@ export class TimeUnwrap {
   }
 }
 
+/** 先在原始 u32 单位去回绕，再换算，v2 不能先除 24 再交给 TimeUnwrap。 */
+export function packetTimeUs(pkt, unwrap){
+  const raw = unwrap.unwrap(pkt.tRaw ?? pkt.tUs);
+  return pkt.version === VERSION_TICKS ? usForTicks(raw) : raw;
+}
+
 // ---------------------------------------------------------------- HID 0x32（控制面）
 export const HID_CMD = 0x32;
-export const ACT = { STOP: 0, START: 1, STATUS: 2, CLOCK: 3, TRIGGER: 4, CONFIG: 7, BENCH: 8, BENCH_RESULT: 9 };
-export const ACT_NAME = { 0: '停止', 1: '启动', 2: '查状态', 3: '设 SWD 时钟', 4: '触发配置', 7: '配置', 8: '标定', 9: '取标定结果' };
+export const ACT = { STOP: 0, START: 1, STATUS: 2, CLOCK: 3, TRIGGER: 4, CONFIG: 7, BENCH: 8, BENCH_RESULT: 9, CONFIG_TICKS: 10 };
+export const ACT_NAME = { 0: '停止', 1: '启动', 2: '查状态', 3: '设 SWD 时钟', 4: '触发配置', 7: '配置', 8: '标定', 9: '取标定结果', 10: '配置 tick 周期' };
 
 /**
  * action 7 的 flags 位（固件 `api_param.c` / `Custom HID Protocol.md` 第 16 条）。
@@ -395,8 +407,11 @@ export function configData({ periodUs = 100, flags = 0, vars = [] } = {}){
   const n = vars.length;
   const d = new Uint8Array(7 + n * 6);
   const dv = new DataView(d.buffer);
-  d[0] = ACT.CONFIG;
-  dv.setUint32(1, periodUs >>> 0, true);
+  if (!Number.isFinite(periodUs) || periodUs < 2 || periodUs > 1e6)
+    throw new Error('采样周期应在 2..1000000 µs 之间');
+  const ticks = !Number.isInteger(periodUs);
+  d[0] = ticks ? ACT.CONFIG_TICKS : ACT.CONFIG;
+  dv.setUint32(1, ticks ? ticksForUs(periodUs) : periodUs, true);
   d[5] = flags & 0xff;
   d[6] = n & 0xff;
   let o = 7;
@@ -447,6 +462,7 @@ export function parseScopeStatus(bytes){
     [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11].map(w);
   return {
     running: !!(w0 & 1),
+    supportsTicks: !!(w0 & 4),
     riscv: !!(w0 & 2),               // **生效**后端：bit1 = 这次会话真的在走 RISC-V/JTAG
     nspans: (w0 >>> 8) & 0xff,       // 探针自己算出来的 span 数（与本地计划对账用）
     swdReady: !!(w0 & (1 << 16)),
@@ -465,7 +481,7 @@ export function parseScopeStatus(bytes){
     lastCmd: w9 & 0xff,
     lastResp: (w9 >>> 8) & 0xff,
     startRc: s8(w10),
-    periodUs: w11 & 0xffff,
+    periodUs: w11 & (1 << 17) ? usForTicks(w11 & 0xffff) : w11 & 0xffff,
     discarding: !!(w11 & (1 << 16)),
     swdMhz: (w11 >>> 24) & 0xff,
   };

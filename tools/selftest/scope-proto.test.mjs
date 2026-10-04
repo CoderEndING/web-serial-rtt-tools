@@ -500,5 +500,38 @@ console.log('== 8. 假探针端到端：配置 → 采样 → 包 → 解码 →
   ok(probe4.running === false && P.scopeRcText(-2).includes('SWD 初始化失败'), '启动失败 rc=-2 → 文案指向接线/供电');
 }
 
+console.log('== 7. tick 周期与 v1/v2 时间轴兼容 ==');
+{
+  const vars = [{ name: 'x', addr: 0x20001044, size: 4, scalar: 'u32' }];
+  for (const us of [2.25, 2.5, 2.75]){
+    const cfg = P.configData({ periodUs: us, vars });
+    ok(cfg[0] === P.ACT.CONFIG_TICKS && new DataView(cfg.buffer).getUint32(1, true) === us*24,
+       `${us} µs 配置为 ${us*24} tick，使用新动作`);
+    const probe = new M.MockScopeProbe();
+    const res = await probe.xfer(P.HID_CMD, cfg);
+    const status = P.parseScopeStatus(res.subarray(3));
+    ok(status.supportsTicks && status.periodUs === us, '假探针配置回报真实小数周期');
+    probe.start(); probe.poll(0);
+    const packets = [...probe.poll(1000), ...probe.flush()].map(P.parsePacket);
+    const def = packets.find(p => p.kind === P.KIND.DEF);
+    ok(def.version === 2 && P.parseDef(def.payload, def.version).periodUs === us, 'v2 DEF 周期单位转换');
+    const time = new P.TimeUnwrap();
+    const data = packets.filter(p => p.kind === P.KIND.DATA);
+    ok(data.every(p => p.version === 2) && P.packetTimeUs(data[1], time) - P.packetTimeUs(data[0], new P.TimeUnwrap()) === 124*us,
+       '满包边界时间间隔 = 124 × 小数周期');
+  }
+  ok(P.configData({ periodUs: 3, vars })[0] === P.ACT.CONFIG, '整数周期继续使用 action 7');
+  const time = new P.TimeUnwrap();
+  const before = P.parsePacket(P.buildData({ tUs: P.usForTicks(0xfffffff0), version: 2 }));
+  const after = P.parsePacket(P.buildData({ tUs: P.usForTicks(60), version: 2 }));
+  const t0 = P.packetTimeUs(before, time), t1 = P.packetTimeUs(after, time);
+  ok(near(t1-t0, 76/24), 'v2 u32 tick 回绕约 179 秒处连续，先 unwrap 后换算');
+  const st = P.parsePacket(P.buildStat({ periodUs: 2.5, version: 2 }));
+  ok(P.parseStat(st.payload, st.version).periodUs === 2.5, 'v2 STAT 不把 60 tick 当 60 µs');
+  const malformed = P.buildData({ n: 1 });
+  new DataView(malformed.buffer).setUint16(14, 512, true);
+  ok(P.parsePacket(malformed) === null, 'DATA aux 校验使用完整 u16，拒绝超长载荷');
+}
+
 console.log(`\n${fail ? '❌' : '✅'} scope-proto.test: ${pass} 通过 / ${fail} 失败`);
 process.exit(fail ? 1 : 0);
