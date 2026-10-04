@@ -31,6 +31,20 @@ import { fileURLToPath } from 'node:url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const VERSION = '1.0';
 
+/** Stop a backend child without turning a missing Windows utility into an
+ * unhandled `error` event on Linux/macOS. `spawn()` reports ENOENT
+ * asynchronously, so a surrounding try/catch is not sufficient. */
+function terminateChildTree(child){
+  if (!child) return;
+  if (process.platform === 'win32'){
+    try {
+      const killer = spawn('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore' });
+      killer.once('error', () => {});
+    } catch {}
+  }
+  try { child.kill(); } catch {}
+}
+
 /* ============================ 参数 ============================ */
 function parseArgs(argv){
   const a = { port: 17321, host: '127.0.0.1', root: path.join(__dirname, '..'), target: '', attach: false,
@@ -473,9 +487,7 @@ class OpenOcdBackend {
      * 会抛 ENOENT，被下面的 catch 吞掉、退回 `child.kill()`。
      */
     if (this.child){
-      const pid = this.child.pid;
-      try { spawn('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore' }); } catch {}
-      try { this.child.kill(); } catch {}
+      terminateChildTree(this.child);
     }
     this.sock = null; this.child = null;
   }
@@ -807,9 +819,7 @@ class JLinkBackend {
     try { this.gdb?.destroy(); } catch {}     // 常连的 RSP（它在给目标"继续"状态，必须一起收掉）
     this.gdb = null;
     if (this.child){
-      const pid = this.child.pid;
-      try { spawn('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore' }); } catch {}
-      try { this.child.kill(); } catch {}
+      terminateChildTree(this.child);
     }
     /**
      * logger 模式会把 RTT 流全量写进 %TEMP%：1.4MB/s 下一小时就是 ~5GB，
@@ -846,7 +856,7 @@ function jlinkFlash({ file, base, device, speed, verify = true, reset = true }, 
       '-autoconnect', '1', '-CommanderScript', script], { stdio: ['ignore', 'pipe', 'pipe'] });
     let out = '';
     const timer = setTimeout(() => {
-      try { spawn('taskkill', ['/PID', String(ch.pid), '/T', '/F'], { stdio: 'ignore' }); } catch {}
+      terminateChildTree(ch);
       reject(new Error(`JLink.exe 超时（${timeoutMs / 1000}s）：\n${out.slice(-800)}`));
     }, timeoutMs);
     ch.stdout.on('data', d => { out += d; log?.(String(d).trimEnd()); });
