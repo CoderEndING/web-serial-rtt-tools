@@ -55,6 +55,7 @@ const enc = new TextEncoder();
  */
 export function recordButtonState(rec){
   const back = rec.backlog();
+  if (rec.starting) return { text: '正在选择记录文件…', title: '等待文件选择完成', primary: true };
   if (rec.draining) return {
     text: `■ 正在落盘… ${fBytes(rec.written)} / ${fBytes(rec.pushed)}`,
     title: `正在把积压写进文件（已写 ${fBytes(rec.written)}，共 ${fBytes(rec.pushed)}）。写完 Chrome 才会把 ${rec.name}.crswap 改名成正式文件。`,
@@ -100,7 +101,11 @@ export class FileRecorder {
     this._timer = null;
     this._progTimer = null;
     this._notifiedAt = 0;
+    this._startPromise = null;
+    this._stopPromise = null;
   }
+
+  get starting(){ return !!this._startPromise; }
 
   /** 还没落盘的字节：内存里排着队的那些（越接近 0 越安全） */
   backlog(){ return Math.max(0, this.pushed - this.written); }
@@ -116,7 +121,17 @@ export class FileRecorder {
    * @returns {Promise<string>} 文件名
    */
   async start({ name = 'capture', timestamps = false } = {}){
+    if (this.draining || this._stopPromise) throw new Error('上一份记录正在落盘，请等待完成');
     if (this.active) return this.name;
+    if (this._startPromise) return await this._startPromise;
+    if (this._w) throw new Error('上一份记录尚未关闭，请先停止记录');
+    this._startPromise = this._startNow({ name, timestamps });
+    this._notify(true);
+    try { return await this._startPromise; }
+    finally { this._startPromise = null; this._notify(true); }
+  }
+
+  async _startNow({ name, timestamps }){
     this.timestamps = timestamps;
     if (FileRecorder.supported()){
       const ext = timestamps ? 'txt' : 'bin';
@@ -130,6 +145,8 @@ export class FileRecorder {
       this.name = `${name}-${fileStamp()}.${timestamps ? 'txt' : 'bin'}`;
     }
     this.bytes = 0; this.frames = 0; this.pushed = 0; this.written = 0;
+    this._wq = Promise.resolve(); this._chunks = []; this._pend = 0;
+    this._mem = []; this._memBytes = 0;
     this.overflow = false; this.error = null; this.draining = false;
     this.t0 = Date.now();
     if (timestamps){
@@ -236,6 +253,14 @@ export class FileRecorder {
 
   /** 停止并落盘；@returns {{name,bytes,frames,seconds,overflow,error}} */
   async stop(){
+    if (this._stopPromise) return await this._stopPromise;
+    this._stopPromise = this._stopNow();
+    try { return await this._stopPromise; }
+    finally { this._stopPromise = null; this._notify(true); }
+  }
+
+  async _stopNow(){
+    if (this._startPromise) await this._startPromise.catch(() => {});
     if (!this.active && !this._w) return null;
     const info = { name: this.name, bytes: this.bytes, frames: this.frames, seconds: (Date.now() - this.t0) / 1000, overflow: this.overflow, error: this.error };
     this.active = false;

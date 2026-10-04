@@ -407,6 +407,7 @@ export class Assistant {
    * 落文件把收到的字节直接写盘 —— 界面卡不卡、有没有被浏览器限速都不影响已写下去的字节。
    */
   async _toggleRecord(){
+    if (this.rec.starting || this.rec.draining) return;
     if (this.rec.active){
       const info = await this.rec.stop();
       this._recordBtn();
@@ -435,6 +436,7 @@ export class Assistant {
     const b = $('s-record');
     if (!b) return;
     const s = recordButtonState(this.rec);
+    b.disabled = this.rec.starting || this.rec.draining;
     b.textContent = s.text;
     b.title = s.title + '　界面卡就先「暂停」——只停显示，不停记录。';
     b.classList.toggle('primary', s.primary);

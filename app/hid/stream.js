@@ -252,6 +252,7 @@ export class RttCdcStreamView {
   }
 
   async _toggleRecord(){
+    if (this.rec.starting || this.rec.draining) return;
     if (this.rec.active){
       const info = await this.rec.stop();
       this._recordBtn();
@@ -280,6 +281,7 @@ export class RttCdcStreamView {
     const b = $('c-record');
     if (!b) return;
     const s = recordButtonState(this.rec);
+    b.disabled = this.rec.starting || this.rec.draining;
     b.textContent = s.text;
     b.title = s.title;
     b.classList.toggle('primary', s.primary);

@@ -1026,6 +1026,7 @@ export class RttView {
    * 之后「保存数据」只能保存剩下那段。落文件把字节直接写盘，采集多久都不丢。
    */
   async _toggleRecord(){
+    if (this.rec.starting || this.rec.draining) return;
     if (this.rec.active){
       const info = await this.rec.stop();
       this._recordBtn();
@@ -1046,6 +1047,7 @@ export class RttView {
     const b = $('r-record');
     if (!b) return;
     const s = recordButtonState(this.rec);
+    b.disabled = this.rec.starting || this.rec.draining;
     b.textContent = s.text;
     b.title = s.title.replace('收到的字节', '读到的 RTT 上行字节');
     b.classList.toggle('primary', s.primary);

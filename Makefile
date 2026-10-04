@@ -525,6 +525,7 @@ test-probe:
 	$(NODE) tools/selftest/spi-teardown.test.mjs
 
 test-stability: test-probe
+	$(NODE) tools/selftest/recorder-lifecycle.test.mjs
 	$(NODE) tools/selftest/flash-lifecycle.test.mjs
 	$(NODE) tools/selftest/flash-runner-abi.test.mjs
 	$(NODE) tools/selftest/dbg-lock.test.mjs
