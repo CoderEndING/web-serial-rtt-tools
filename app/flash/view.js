@@ -180,6 +180,14 @@ export class FlashView {
 
   async flash(){
     if (this.busy) return;
+    // Reserve the whole lifecycle before preparation can yield.
+    this.busy = true;
+    $('f-flash').disabled = true;
+    try { return await this._flashOnce(); }
+    finally { this.busy = false; $('f-flash').disabled = false; }
+  }
+
+  async _flashOnce(){
     const pathText = String($('f-path').value || '').trim();
     const usePath = !this.file && !!pathText;
     if (!this.file && !pathText){ toast('先指定固件：点「选择文件…」或填路径', 'warn'); return; }
@@ -195,8 +203,6 @@ export class FlashView {
     // 探针互斥：同页签的 RTT / J-Scope 会话先断开，再请别的页签让出探针
     if (!(await this._clearProbeUsers(name))) return;
 
-    this.busy = true;
-    $('f-flash').disabled = true;
     const t0 = Date.now();
     const timer = setInterval(() => {
       if ($('f-bar').hidden) this._status(`烧录中… 已耗时 ${((Date.now() - t0) / 1000) | 0}s`);
@@ -237,8 +243,6 @@ export class FlashView {
     } finally {
       this._hbStop();
       clearInterval(timer);
-      this.busy = false;
-      $('f-flash').disabled = false;
       /**
        * 🚨 **烧完必须把探针还回去**（成功失败都要）。
        *    烧录器是另开一个 WebUsbDapProbe 会话的；不释放的话接口一直被占着 ——
