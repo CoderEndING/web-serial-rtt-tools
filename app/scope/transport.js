@@ -10,11 +10,13 @@
  *  2. **收尾必须先停推流、再收干净**：WebUSB 没有取消接口（app/rtt/dap-webusb.js:39-49 记着
  *     这个坑），挂起的 transferIn 会偷走下一场的响应 —— 所以 stop() 里要等在飞的读自己回来。
  */
+import { withTimeout } from '../rtt/dap-webusb.js';
 import { MockScopeProbe } from './mock.js';
 
 /** 探针上那个空闲的 bulk IN 端点（SWO 端点，SWO_STREAM=0 所以没人用）*/
 export const EP_SCOPE = 0x83;
 const VID = 0x0d28;
+const dirtyDevices = new WeakSet();
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
@@ -27,6 +29,7 @@ export class VendorEpTransport {
     this.inFlight = opts.inFlight ?? 3;          // 同时在飞的读
     this.running = false;
     this.workers = [];
+    this._pendingWorkers = new Set();
     this.gen = 0;                 // 收流"轮次"代号：stop() 一加，超时残留在飞的 worker 就作废
     this.stalledInFlight = 0;     // 上一轮 stop() 里 800 ms 没等回来的在飞读笔数
     this.onError = null;          // 数据面不可恢复时的回调（由 start() 传入）
@@ -127,15 +130,42 @@ export class VendorEpTransport {
    *        页面据此停采集并提示。以前没有这条回调：worker 悄悄退出、`running` 还是 true、
    *        界面照旧显示"采样中"，而一个字节都不来（2026-10 代码审查）。
    */
+  async prepare(){
+    if (!dirtyDevices.has(this.device)) return;
+    // Generation checks cannot cancel native USB reads. Reset must retire them
+    // before a new capture is allowed to submit any requests.
+    await withTimeout(this.device.reset(), 3000, '清理残留采样 USB 请求');
+    await withTimeout(this.device.close(), 3000, '关闭旧采样 USB 连接');
+    await withTimeout(Promise.allSettled([...this._pendingWorkers]), 1500, '等待旧采样读退出');
+    await withTimeout(this.open(), 5000, '重新连接采样数据端点');
+    dirtyDevices.delete(this.device);
+    this.stalledInFlight = 0;
+  }
+
   async start(onChunk, onError){
     if (this.running) return;
+    if (this._startPromise) return await this._startPromise;
+    this._startPromise = this._start(onChunk, onError);
+    try { return await this._startPromise; }
+    finally { this._startPromise = null; }
+  }
+
+  async _start(onChunk, onError){
+    const generation = ++this.gen;
+    await this.prepare();
+    if (generation !== this.gen) return;
     this.running = true;
     this._fatal = null;
     this.onError = typeof onError === 'function' ? onError : null;
     this.gen++;                                   // 新一轮的代号：上一轮没收干净的 worker 靠它作废
     this.chunks = 0; this.bytes = 0; this.errors = 0;
     const g = this.gen;
-    this.workers = Array.from({ length: this.inFlight }, () => this._worker(onChunk, g));
+    this.workers = Array.from({ length: this.inFlight }, () => {
+      const worker = this._worker(onChunk, g);
+      this._pendingWorkers.add(worker);
+      worker.then(() => this._pendingWorkers.delete(worker), () => this._pendingWorkers.delete(worker));
+      return worker;
+    });
   }
 
   /** 数据面出事 → 停掉整条流，并把原因交给页面（只报一次：N 条 worker 会同时撞上）*/
@@ -222,10 +252,14 @@ export class VendorEpTransport {
     this.workers = [];
     /** 800 ms 还没回来的在飞读有几笔（WebUSB 取消不掉，只能如实记账；页面可据此提示）*/
     this.stalledInFlight = Math.max(0, all.length - settled);
+    if (this.stalledInFlight) dirtyDevices.add(this.device);
   }
 
   async close(){
     await this.stop();
+    if (dirtyDevices.has(this.device)){
+      try { await withTimeout(this.device.reset(), 3000, '清理残留采样 USB 请求'); } catch { /* next open must retry */ }
+    }
     try { if (this.device?.opened) await this.device.close(); } catch { /* 忽略 */ }
   }
 }

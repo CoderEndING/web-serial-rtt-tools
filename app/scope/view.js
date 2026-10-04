@@ -735,6 +735,8 @@ export class ScopeView {
     this.rawBytes = 0;
 
     try {
+      await this.transport.prepare?.();
+      if (!this._captureAlive(g)) return;
       const clockKhz = Number($('sc-clock').value) || 0;
       /**
        * flags：bit0 允许 60 MHz；bit4 SWD 空闲拍压 0；bit5 采样时暂停 CDC/串口桥；

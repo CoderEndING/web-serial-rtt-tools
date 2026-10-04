@@ -51,3 +51,18 @@ class USB {
   await t.stop();
 }
 console.log('scope-transport: rearm, ordering, bounded reads, stop/restart, decoder error, stall, disconnect PASS');
+{
+ const usb=new USB();let resets=0;
+ usb.reset=async()=>{resets++;usb.drain();};usb.close=async()=>{};
+ const t=new VendorEpTransport(usb,{inFlight:1}),seen=[];t.open=async()=>t;
+ await t.start(b=>seen.push(b[0]));await t.stop();assert.equal(t.stalledInFlight,1);
+ await t.start(b=>seen.push(b[0]));assert.equal(resets,1);assert.equal(usb.pending.length,1,'old native read retired before new request');
+ usb.resolve(packet(9));await tick();assert.deepEqual(seen,[9],'new session first packet delivered');
+ const stop=t.stop();usb.drain();await stop;
+}
+{
+ const usb=new USB();usb.reset=async()=>{throw new Error('cannot reset');};const t=new VendorEpTransport(usb,{inFlight:1});
+ await t.start(()=>{});await t.stop();const calls=usb.calls;
+ await assert.rejects(t.start(()=>{}),/cannot reset/);assert.equal(t.running,false);assert.equal(usb.calls,calls,'failed cleanup cannot submit more reads');usb.drain();
+}
+console.log('scope-transport: stalled restart resets/retire reads; failed reset blocks capture PASS');
