@@ -362,7 +362,7 @@ export class RttView {
     const backend = $('r-backend')?.value || 'webusb';
     this._probeMock = backend === 'mock';
     this._connectPromise = runProbeOperation(this, 'rtt', () => this._connectProbe(g, backend), {
-      mock: this._probeMock, reason: 'RTT Viewer 要使用探针',
+      mock: this._probeMock, reason: 'RTT Viewer 要使用探针', recovery: true,
     });
     try { return await this._connectPromise; }
     catch (e){ this._err(e); return false; }

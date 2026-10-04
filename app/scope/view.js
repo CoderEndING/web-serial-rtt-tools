@@ -380,7 +380,7 @@ export class ScopeView {
     if (this._usbConnectPromise) return await this._usbConnectPromise;
     if (this._releasing || this.usingMock) return;
     if (this.running || this._starting){ this.setStatusText('先停止采样，再重连数据端点', 'warn'); return; }
-    this._usbConnectPromise = runProbeOperation(this, 'scope', () => this._connectUsbNow(request), { reason: 'J-Scope 要使用数据端点' });
+    this._usbConnectPromise = runProbeOperation(this, 'scope', () => this._connectUsbNow(request), { reason: 'J-Scope 要使用数据端点', recovery: true });
     try { return await this._usbConnectPromise; }
     catch (e){ this.setStatusText(e.message, 'err'); return false; }
     finally { this._usbConnectPromise = null; }

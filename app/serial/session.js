@@ -59,6 +59,7 @@ export class SerialSession extends Bus {
     this._openTask = this.probeManager && isProbeCdcPort(port)
       ? this.probeManager.run('serial', setup, {
         reason: '串口要使用探针 CDC',
+        recovery: true,
         resources: opts.owner === 'rtt' ? [] : ['cdc-mode'],
         rejectResources: ['cdc-port'],
       }) : setup();

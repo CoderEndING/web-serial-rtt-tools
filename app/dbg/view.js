@@ -406,7 +406,7 @@ export class DbgView {
     this._connecting = true;
     try {
       return await runProbeOperation(this, 'dbg', () => this._connectNow(generation), {
-        mock: $('d-backend')?.value === 'mock', reason: '调试器要使用探针',
+        mock: $('d-backend')?.value === 'mock', reason: '调试器要使用探针', recovery: true,
       });
     } catch (e){ this._out('✗ 连接失败：' + e.message, 'err'); toast(e.message, 'err'); return false; }
     finally { this._connecting = false; this._connectionTask = null; }

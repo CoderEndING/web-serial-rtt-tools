@@ -134,7 +134,7 @@ export class SpiSession {
     if (this._usbConnectPromise) return await this._usbConnectPromise;
     if (this._teardownPromise) return false;
     if (this.transport) return true;
-    this._usbConnectPromise = runProbeOperation(this, 'spi', () => this._connectUsbNow(interactive, opts), { reason: 'SPI/QSPI 要使用数据端点' });
+    this._usbConnectPromise = runProbeOperation(this, 'spi', () => this._connectUsbNow(interactive, opts), { reason: 'SPI/QSPI 要使用数据端点', recovery: true });
     try { return await this._usbConnectPromise; }
     catch (e){ this.log('e', e.message); return false; }
     finally { this._usbConnectPromise = null; }
