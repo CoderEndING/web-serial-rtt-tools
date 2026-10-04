@@ -300,6 +300,13 @@ class Cdp {
     return r.result.value;
   }
   async evalJson(expr){ return JSON.parse(await this.eval(`(async()=>JSON.stringify(await (${expr})))()`)); }
+  /**
+   * `json()` 是本文件历史上用过的名字（另一套 CDP 封装 `cdp-lib.mjs` 就叫这个）。
+   * 2026-10-04 现场：`feedHidElf()` 里写着 `cdp.json(...)`，而本文件这个内联类只有
+   * `evalJson` —— F103 那轮走"自动搜控制块"从不进那条分支，于是**只有 H743 一跑就炸**
+   * （`cdp.json is not a function`，整轮编排在转发之前中断）。留个别名，两种写法都能用。
+   */
+  async json(expr){ return await this.evalJson(expr); }
   async waitFor(expr, timeout = 15000, label = expr){
     const t0 = Date.now();
     for (;;){
@@ -522,7 +529,7 @@ async function rttViewer(secs){
  */
 async function feedHidElf(file){
   const b64 = fs.readFileSync(file).toString('base64');
-  return await cdp.json(`(async()=>{ const bin = atob(${JSON.stringify(b64)}); const u = new Uint8Array(bin.length);
+  return await cdp.evalJson(`(async()=>{ const bin = atob(${JSON.stringify(b64)}); const u = new Uint8Array(bin.length);
       for (let i=0;i<bin.length;i++) u[i] = bin.charCodeAt(i);
       const dt = new DataTransfer(); dt.items.add(new File([u], ${JSON.stringify(path.basename(file))}));
       const inp = window.__tools.hid._elfInput;
