@@ -88,7 +88,7 @@ function decorate(s,pc,sp,kind,returned=false){
 function executable(elf,pc){ return elf?.sections().some(sec=>(sec.flags&4)&&pc>=sec.addr&&pc<sec.addr+sec.size); }
 export async function backtrace(s,{depth=16,scan=false,stackBytes=4096,signal}={}){
   if(!Number.isInteger(depth)||depth<1||depth>64) throw new Error('bt 深度须为 1..64');
-  if(!Number.isInteger(stackBytes)||stackBytes<32||stackBytes>65536) throw new Error('栈读取范围须为 32..65536 字节');
+  if(!Number.isInteger(stackBytes)||stackBytes<32||stackBytes>65536||stackBytes%4) throw new Error('栈读取范围须为 32..65536 字节且按4字节对齐');
   const cancel=()=>{if(signal?.()){const e=new Error('栈回溯已中断'); e.cancelled=true; throw e;}};
   await s.refresh(); if(!s.halted) throw new Error('先暂停目标再回溯（不自动停止正在运行的程序）');
   const sp=await s.readReg(s.arch.SP), pc=await s.readReg(s.arch.PC);
@@ -100,20 +100,36 @@ export async function backtrace(s,{depth=16,scan=false,stackBytes=4096,signal}={
   if(depth===1) return {frames,reason,scan};
   if(scan){
     if(!elf) return {frames,reason:'扫描需要 ELF 代码和符号验证候选地址',scan:true};
-    const candidates=[{value:await s.readReg(s.arch.LR),slot:null}];
+    reason='扫描结果仅为候选返回地址，可能含旧栈值或普通数据，不是已证实调用链';
+    const candidate=async(value,slot)=>{
+      cancel(); if(frames.length>=depth) return;
+      const a=even(value);
+      if((s.arch.name==='arm'&&!(value&1))||!executable(elf,a-2)) return;
+      const target=await s.arch.callEndingAt(async(a,n)=>elf.bytesAt(a,n,{ro:true}),value);
+      if(target!=null) frames.push({...decorate(s,value,slot??sp,'candidate',true),slot});
+    };
     try {
-      cancel(); const bytes=await s.memRead(sp,Math.min(stackBytes,4096));
-      for(let i=0;i+4<=bytes.length;i+=4) candidates.push({value:word(bytes.subarray(i,i+4)),slot:sp+i});
-      for(const c of candidates){
-        cancel(); const a=even(c.value);
-        if((s.arch.name==='arm'&&!(c.value&1))||!executable(elf,a-2)) continue;
-        const target=await s.arch.callEndingAt(async(a,n)=>elf.bytesAt(a,n,{ro:true}),c.value);
-        if(target==null) continue;
-        frames.push({...decorate(s,c.value,c.slot??sp,'candidate',true),slot:c.slot});
-        if(frames.length>=depth) break;
+      await candidate(await s.readReg(s.arch.LR),null);
+      const limit=Math.min(stackBytes,4096);
+      for(let offset=0;offset<limit&&frames.length<depth;offset+=128){
+        cancel(); const length=Math.min(128,limit-offset);
+        let bytes;
+        try { bytes=await s.memRead(sp+offset,length); }
+        catch(e){
+          // A halted stack is often close to RAM's upper boundary. Salvage the
+          // readable prefix instead of discarding LR/all frames after a bulk FAULT.
+          for(let k=0;k<length&&frames.length<depth;k+=4){
+            let value;
+            try { value=await readWord(sp+offset+k); }
+            catch(inner){ if(inner.cancelled) throw inner; reason+='；扫描到读取边界：'+inner.message; break; }
+            await candidate(value,sp+offset+k);
+          }
+          break;
+        }
+        for(let k=0;k+4<=bytes.length;k+=4) await candidate(word(bytes.subarray(k,k+4)),sp+offset+k);
+        if(bytes.length!==length){reason+='；扫描短读';break;}
       }
-      reason='扫描结果仅为候选返回地址，可能含旧栈值或普通数据，不是已证实调用链';
-    } catch(e){if(e.cancelled) throw e; reason='扫描停止：'+e.message;}
+    } catch(e){if(e.cancelled) throw e; reason+='；扫描停止：'+e.message;}
     return {frames,reason,scan:true};
   }
   if(s.arch.name!=='arm') return {frames,reason:'当前 bt 展开仅支持 Cortex-M EHABI；RISC-V 可使用 bt scan 查看候选地址',scan:false};
