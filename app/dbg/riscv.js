@@ -98,6 +98,7 @@ export class RiscvDebugSession extends DebugSession {
    *   · `WebUsbDapProbe.open` 必须 `skipTargetInit: true` —— 默认那套按 SWD 协商，RISC-V 上必 NO ACK。
    */
   async connect({ clockKhz = 0, all = false, bus = null } = {}){
+    if (this.probe) throw new Error('已经连接了（先断开）');
     if (bus?.supported){
       const r = await bus.requestRelease({ why: '调试页要占用探针（RISC-V/JTAG）' });
       if (r.asked) this._log(`跨页签协调：请 ${r.asked} 个其他页签让出探针，${r.acked} 个确认（等了 ${r.ms} ms）`, 'dim');
@@ -165,12 +166,13 @@ export class RiscvDebugSession extends DebugSession {
 
   async disconnect(){
     const dm = this.dm, p = this.probe;
+    try { if (dm) for (let i = 0; i < 8; i++){ await dm.writeReg(CSR.tselect, i); if ((await dm.readReg(CSR.tdata1)) !== 0x21800000) await dm.writeReg(CSR.tdata1, 0); } } catch {}
+    try { await dm?.sbaClearErrors(); } catch {}
+    if (p?.disconnect) await p.disconnect();
     this.dm = null; this.jtag = null; this.probe = null;
     this.halted = false; this.regs = []; this._prev = null; this.bps = [];
     this._xipFallbackLogged = false;
-    try { if (dm) for (let i = 0; i < 8; i++){ await dm.writeReg(CSR.tselect, i); if ((await dm.readReg(CSR.tdata1)) !== 0x21800000) await dm.writeReg(CSR.tdata1, 0); } } catch {}
-    try { await dm?.sbaClearErrors(); } catch {}
-    try { if (p?.disconnect) await p.disconnect(); this._log('已断开探针', 'dim'); } catch (e){ this._log('断开探针时报错（忽略）：' + (e?.message || e), 'warn'); }
+    if (p) this._log('已断开探针', 'dim');
   }
 
   // ---------------------------------------------------------------- 状态

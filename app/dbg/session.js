@@ -239,17 +239,16 @@ export class DebugSession {
   async disconnect(){
     const p = this.probe;
     if (p && this.dwt.items.length) {
-      try { await this.dwt.clear(); } catch (e) { this._log('清理 DWT 失败：'+e.message,'warn'); }
+      await this.dwt.clear();
     }
+    // Retain the backend and ownership until hardware cleanup and USB close succeed.
+    if (p?.disconnect) await p.disconnect();
     this.dwt = new DwtWatchpoints(this);
     this.probe = null;
     this.halted = false; this.regs = []; this._prev = null;
     this.bps = [];
     this._cStepWorks = null;              // 换了目标/重连之后重新探一次 C_STEP
-    if (p?.disconnect){
-      try { await p.disconnect(); this._log('已断开探针', 'dim'); }
-      catch (e){ this._log('断开探针时报错（忽略）：' + (e?.message || e), 'warn'); }
-    }
+    if (p) this._log('已断开探针', 'dim');
   }
 
   // ------------------------------------------------------------ 状态
