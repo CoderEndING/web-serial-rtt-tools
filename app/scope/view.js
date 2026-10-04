@@ -698,6 +698,7 @@ export class ScopeView {
      *    并**明说**砍了多少（宁可少存点，也不能让页面挂掉还不知道为什么）。
      */
     const bytesPerFrame = vars.reduce((s, v) => s + (P.SCALARS[v.scalar]?.size || 4), 0);
+    this._frameBytes = bytesPerFrame;
     const LIMIT = 128 * 1024 * 1024;
     let capNote = '';
     const est = cap => cap * bytesPerFrame * 1.35 + vars.length * 8192;
@@ -756,6 +757,7 @@ export class ScopeView {
        *    页面显示"变量表为空（先在左侧选 1~8 个变量）"，而用户明明选了变量，方向全错。
        */
       if (!this._captureAlive(g)) return;
+      this._captureFlags = flags;
       const cfgRes = await this.configureScope({ periodUs, flags, vars });
       if (!this._captureAlive(g)) return;
       if (!cfgRes || cfgRes.length < 3) throw new Error('采样配置响应不完整');
@@ -826,16 +828,23 @@ export class ScopeView {
     this._needDraw = true;
   }
 
-  /** 数据面看门狗：采集期间 **>2.5 s 一个包都没来**就判流断了（正常最少也是几十 Hz）*/
+  _packetTimeoutMs(){
+    const samples = Math.max(1, Math.floor(496 / Math.max(1, this._frameBytes || 4)));
+    return Math.max(2500, 3 * samples * (this._periodUs || 100) / 1000);
+  }
+
+  /** Packet cadence follows both sample period and samples per packet. */
   _startWatchdog(){
     this._stopWatchdog();
+    if (this._captureFlags & P.SCOPE_FLAG.DISCARD) return;
+    const generation = this._captureGen;
     this._lastPktAt = performance.now();
     /* 1 s 一跳：看门狗只做"粗粒度判死"，被后台节流成 1 s 也无所谓（不是短等待，
      * 所以这里用 setInterval 是对的 —— pace.js 管的是 ≤128 ms 那类等待）。 */
     this._wdTimer = setInterval(() => {
-      if (!this._capturing) return;
+      if (!this._capturing || generation !== this._captureGen) return;
       const age = performance.now() - this._lastPktAt;
-      if (age > 2500){
+      if (age > this._packetTimeoutMs()){
         this._stopWatchdog();
         this._onDataPlaneDead(new Error(`超过 ${(age / 1000).toFixed(1)} s 没收到任何数据包`));
       }
