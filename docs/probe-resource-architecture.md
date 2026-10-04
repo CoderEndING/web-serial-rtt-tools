@@ -88,7 +88,7 @@ HID 的被动型号/状态查询也必须经过命令锁，否则另一个标签
 
 新回归文件 `recorder-lifecycle`、`i2c-lifecycle`、`spi-runner-lifecycle`、`bridge-rpc`、`bridge-memory` 全部进入 `test-stability`；现有 ELF、调试、HID、RTT 和采样生命周期用例补充故障场景。桥源码变更已重新生成网页安装包，使用 `bridge-kit` 用例检查嵌入内容一致性。页面构建号更新为 `2026-10-04-r5`。
 
-补丁导出时待验收的项目包括截断 ELF、记录写失败、HID 迟到响应及拔插、I2C 切模拟、SPI 脚本重启、OpenOCD 超时重连和断开重试。2026-10-04 本机已使用在线 akaLinkPro + STM32F103CB 完成主要硬件路径；详见 [逐项验收记录](validation/2026-10-04-f103cb.md)。网页生产模块通过原生 HID/USB 测试适配器或 OpenOCD 访问实机，浏览器本身仅验证模拟界面。浏览器原生 API 的授权、文件提交、物理拔插，以及外接 SPI/I2C 器件仍需对应场景验收。
+补丁导出时待验收的项目包括截断 ELF、记录写失败、HID 迟到响应及拔插、I2C 切模拟、SPI 脚本重启、OpenOCD 超时重连和断开重试。2026-10-04 本机已使用在线 akaLinkPro + STM32F103CB 完成主要硬件路径，后续补做 AT24C02 整片读取、W25Q64 单线读取、20 轮外设交接与调试共存、10 轮 Scope→RTT 转发→调试交接与 I2C 共存；详见 [逐项验收记录](validation/2026-10-04-f103cb.md)。网页生产模块通过原生 HID/USB 测试适配器或 OpenOCD 访问实机，浏览器本身仅验证模拟界面。浏览器原生 API 的授权、文件提交、跨标签页实机并发、后台运行、物理拔插、长期压力、外设写入/擦除仍需对应场景验收。W25Q64 的 IO2/IO3 未接到探针，未验收四线模式。
 
 ## RTT STOP 的固件配套
 
