@@ -623,9 +623,10 @@ console.log('== 14b. 行号表的"序列"边界（nextStmtAddr 不许跨进隔�
   const n1 = check(symtab, 'F103 靶子 ELF');
   ok(n1 > 20, `F103 靶子上覆盖到 ${n1} 条记录（样本够大）`);
 
-  // 同一套检查再跑一遍 H743 scope 靶子（那份的行号表里正好有"主循环 + 被调函数交错"的排布）
+  // 同一套检查再跑一遍仓库已提交的 H743 scope 靶子：这里验证 DWARF 序列，
+  // 与目标是否开启 D-cache/MPU 无关，不依赖本地 build-noncache 的实验产物。
   try {
-    const h7 = SY.SymTab.fromBuffer(new Uint8Array(readFileSync(join(here, '..', 'target-firmware', 'stm32h743_scope', 'build-noncache', 'fw.elf'))));
+    const h7 = SY.SymTab.fromBuffer(new Uint8Array(readFileSync(join(here, '..', 'target-firmware', 'stm32h743_scope', 'fw.elf'))));
     const n2 = check(h7, 'H743 scope ELF');
     ok(n2 > 20, `H743 scope 靶子上覆盖到 ${n2} 条记录`);
   } catch (e){

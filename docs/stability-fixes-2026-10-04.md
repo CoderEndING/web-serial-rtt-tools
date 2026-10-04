@@ -33,8 +33,8 @@ python script_test/scope_host_test.py
 python script_test/test_scope_hss_test.py
 ```
 
-现有 `dbg-core` 依赖 `tools/target-firmware/stm32h743_scope/build-noncache/fw.elf`；
-没有该产物时，原有这一个 fixture 检查仍失败。它与本轮修复无关。
+`dbg-core` 原先错误依赖本地 `stm32h743_scope/build-noncache/fw.elf`。
+后续已改用仓库提交的 `stm32h743_scope/fw.elf`：DWARF 序列检查不需要非缓存构建变体，当前为 321 通过、0 失败。
 
 ## 回家上板验收
 
@@ -54,7 +54,7 @@ python script_test/test_scope_hss_test.py
 
 - `make test-stability`：15 组针对性回归全部通过。
 - 原有 RTT/HID、J-Scope 协议/传输/存储、烧录解析/HPM、DWT/bt、探针协调共 12 组检查：
-  11 组通过；`dbg-core` 为 318 通过 / 1 失败（缺少上述已有 ELF fixture）。
+  初次验证时 11 组通过；`dbg-core` 为 318 通过 / 1 失败（路径指向未提交的构建产物）。后续修正 fixture 路径后，`dbg-core` 为 321 通过 / 0 失败。
 - JavaScript 语法检查：205 个模块通过；Liquid 检查：53 个 Markdown 通过。
 - 算法表离线校验通过；固件 TARGET 拒绝、采样器主机测试、8 个测量脚本测试通过。
 - 当前环境没有设备和 HPM SDK，未执行真实 USB、上板吞吐或完整固件构建。

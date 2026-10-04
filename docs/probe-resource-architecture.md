@@ -73,9 +73,9 @@ make test-stability test-dbg-features
 
 新增测试覆盖资源冲突与共存、并发初始化、排队取消、重复释放、停止失败、烧录保护、跨标签页同时申请、共享 HID 响应与句柄、停滞写请求、固件 START 排队期间的所有权。SPI/I2C/RTT/J-Scope 协议及传输回归继续通过。
 
-本轮结果：19 组稳定性测试、3 组 DWT/栈回溯功能测试、17 组协议与传输测试通过；210 个 JavaScript 模块语法检查通过。固件 RTT STOP、TARGET guard、scope 生产代码主机测试及 8 项 HSS 测试通过。
+本轮结果：19 组稳定性测试、3 组 DWT/栈回溯功能测试、18 组协议/传输/调试核心测试通过；210 个 JavaScript 模块语法检查通过。固件 RTT STOP、TARGET guard、scope 生产代码主机测试及 8 项 HSS 测试通过。
 
-已知原有失败：`dbg-core.test.mjs` 的 H743 ELF 读取用例缺少 `tools/target-firmware/stm32h743_scope/build-noncache/fw.elf`（318 通过、1 失败）。此次没有设备和完整固件 SDK；固件使用提取生产代码的 GCC 主机测试验证 STOP 状态转换，不能替代完整编译和上板测试。
+原有 `dbg-core.test.mjs` 错误依赖本地 `build-noncache/fw.elf`。现已改用仓库提交的 `tools/target-firmware/stm32h743_scope/fw.elf`，验证 184 条 H743 行号记录，调试核心测试 321 通过、0 失败。该用例检查 DWARF 序列，与 D-cache/MPU 构建变体无关。此次没有设备和完整固件 SDK；固件使用提取生产代码的 GCC 主机测试验证 STOP 状态转换，不能替代完整编译和上板测试。
 
 高速 bulk 读取、RTT DAP 内存读取、采样存储和 SPI 数据传输文件在此次重构中保持原样。仲裁在控制边界执行，没有逐样本/逐 bulk 包的全局锁。HID 控制命令新增排队和跨页面锁的开销，启动/切换延迟可能变化；同时进行其他固件任务也可能占用 CPU/USB 带宽，速率仍须实测。
 
