@@ -361,7 +361,7 @@ export class RttView {
     this._connectPromise = this._connectProbe(g);
     try { return await this._connectPromise; }
     finally {
-      if (g !== this._sessionGen) await this.disconnect();
+      if (g !== this._sessionGen && (this.probe || this.bridge)) await this.disconnect();
       this._connectPromise = null;
     }
   }

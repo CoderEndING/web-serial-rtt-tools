@@ -25,3 +25,9 @@ console.log('rtt-lifecycle: stale successful/failed polls cannot publish, stop r
  }finally{globalThis.setTimeout=savedTimer;}
 }
 console.log('rtt-lifecycle: target reset drains reader and cannot rescan a replacement session PASS');
+{
+ const v=Object.create(RttView.prototype);let closes=0;
+ Object.assign(v,{_sessionGen:0,_connectProbe:async function(){await this.disconnect();this.lastError='original connection failure';},disconnect:async function(){closes++;this._sessionGen++;this.probe=null;this.bridge=null;}});
+ await v.connectProbe();assert.equal(closes,1);assert.equal(v.lastError,'original connection failure','outer finalizer cannot erase original failure');
+}
+console.log('rtt-lifecycle: failed connect retains its original error without duplicate cleanup PASS');

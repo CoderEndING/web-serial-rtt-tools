@@ -459,7 +459,9 @@ export class WebUsbDapProbe {
       console.warn(`[dap] ${what} 超时 → 自动复位 USB 端口并清队列`);
       this._note(`${what} 超时 → 自动复位 USB 端口并清队列（第 ${this.recoveries} 次）`);
       await resetDevice(this.device);
+      if (this._closing){ this._recovering = false; return; }
       await sleep(150);
+      if (this._closing){ this._recovering = false; return; }
       await this._claim();
       this._recovering = false;
     } catch (e){

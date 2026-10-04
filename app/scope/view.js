@@ -886,7 +886,7 @@ export class ScopeView {
     const msg = e?.message || String(e);
     void this.stop('数据流中断：' + msg).then(() => {
       this.setStatusText(`采样中断：${msg} —— 探针掉线了？拔插一次，或改用假探针`, 'err');
-    });
+    }).catch(error => this.setStatusText(`采样中断：${msg}；${error.message}`, 'err'));
   }
 
   async stop(reason){
