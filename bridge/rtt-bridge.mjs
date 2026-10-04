@@ -382,6 +382,7 @@ class OpenOcdBackend {
 
   /** 发一条 Tcl RPC 命令：以 0x1A 结尾，读到 0x1A 结束 */
   rpc(line, timeout = 30000){
+    const socket = this.sock;
     /**
      * 🚨 **必须串行化**：一次只允许一条命令在飞。
      *    每条调用各自挂一个 `data` 监听、共享同一个 socket 和 `this.buf`，两条并发时
@@ -389,9 +390,17 @@ class OpenOcdBackend {
      *    OpenOCD 的 Tcl RPC 本来就是"一问一答、0x1A 收尾"，排队既安全又不会拖慢什么。
      */
     const run = () => new Promise((res, rej) => {
-      if (!this.sock) return rej(new Error('OpenOCD 未连接'));
+      if (!socket || this.sock !== socket) return rej(new Error('OpenOCD 未连接或会话已替换，请重新连接'));
       let done = false;
-      const t = setTimeout(() => { if (!done){ done = true; cleanup(); rej(new Error(`OpenOCD 命令超时：${line}`)); } }, timeout);
+      const fail = e => {
+        if (done) return;
+        done = true; cleanup();
+        if (this.sock === socket){ this.sock = null; this.buf = Buffer.alloc(0); }
+        // Tcl replies have no request ID: a timed-out socket cannot be reused.
+        try { socket.destroy(); } catch {}
+        rej(e);
+      };
+      const t = setTimeout(() => fail(new Error(`OpenOCD 命令超时：${line}；连接已关闭，请重新连接`)), timeout);
       const onData = d => {
         this.buf = Buffer.concat([this.buf, d]);
         const i = this.buf.indexOf(0x1a);
@@ -401,11 +410,13 @@ class OpenOcdBackend {
           done = true; cleanup(); res(out);
         }
       };
-      const onErr = e => { if (!done){ done = true; cleanup(); rej(e); } };
-      const cleanup = () => { clearTimeout(t); this.sock.off('data', onData); this.sock.off('error', onErr); };
-      this.sock.on('data', onData);
-      this.sock.on('error', onErr);
-      this.sock.write(line + '\n\x1a');
+      const onErr = e => fail(e);
+      const onClose = () => fail(new Error('OpenOCD 连接已断开，请重新连接'));
+      const cleanup = () => { clearTimeout(t); socket.off('data', onData); socket.off('error', onErr); socket.off('close', onClose); };
+      socket.on('data', onData);
+      socket.on('error', onErr);
+      socket.on('close', onClose);
+      try { socket.write(line + '\n\x1a'); } catch (e){ fail(e); }
     });
     const p = (this._rpcChain || Promise.resolve()).then(run, run);   // 前一条失败也要继续跑下一条
     this._rpcChain = p.catch(() => {});                              // 链尾永远 resolved（不留未处理拒绝）
