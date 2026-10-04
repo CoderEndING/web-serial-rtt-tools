@@ -17,6 +17,7 @@ import { AkaLinkHid } from '../hid/probe.js';
 import { MockI2cProbe } from './mock.js';
 import { waitMs } from '../core/pace.js';
 import * as P from './protocol.js';
+import { runProbeOperation } from '../core/probe-manager.js';
 
 const RING_MAX = 600;          // 日志环（切页时全量重放用）
 const POLL_MS = 1500;          // STATUS 轮询间隔（观察量，1.5 s 够）
@@ -80,6 +81,17 @@ export class I2cSession {
 
   /** 连探针（HID）。`interactive=true` 会弹浏览器的授权框（第一次必须）*/
   async connect(interactive = false, { mock = false } = {}){
+    if (this._connectPromise) return await this._connectPromise;
+    if (this._disconnectPromise) return false;
+    this._connectPromise = runProbeOperation(this, 'i2c', () => this._connectNow(interactive, { mock }), {
+      mock, reason: 'I2C 要连接探针',
+    });
+    try { return await this._connectPromise; }
+    catch (e){ this.log('e', e.message); return false; }
+    finally { this._connectPromise = null; }
+  }
+
+  async _connectNow(interactive = false, { mock = false } = {}){
     try {
       if (mock){
         if (!this.usingMock || !(this.hid instanceof MockI2cProbe)){
@@ -124,16 +136,38 @@ export class I2cSession {
   }
 
   async disconnect(){
+    this.probeManager?.cancel('i2c');
+    if (this._disconnectPromise) return await this._disconnectPromise;
+    this._disconnectPromise = this._disconnectNow();
+    try { return await this._disconnectPromise; }
+    finally { this._disconnectPromise = null; this.probeManager?.forget('i2c'); }
+  }
+
+  async _disconnectNow(){
     this.stopPoll();
+    this._closing = true;
+    await Promise.allSettled([this._connectPromise, this._reacquirePromise].filter(Boolean));
+    await this._chain;
     try { await this._dropHid(); } catch { /* 同上 */ }
     this.usingMock = false;
     this.cfg = null; this.counters = null; this.status = null;
     this._setState(NOT_CONNECTED);
+    this._closing = false;
   }
 
   /** 探针重新枚举过（复位/拔插/重烧）→ 重新取设备对象。对"设备侧端点没打开"无效，只有拔插能救 */
   async reacquire(){
-    if (this.usingMock || !this.hid) return this.connect(false);
+    if (this._reacquirePromise) return await this._reacquirePromise;
+    if (this._disconnectPromise) return false;
+    this._reacquirePromise = runProbeOperation(this, 'i2c', () => this._reacquireNow(), {
+      mock: this.usingMock, reason: 'I2C 要重连探针',
+    });
+    try { return await this._reacquirePromise; }
+    finally { this._reacquirePromise = null; }
+  }
+
+  async _reacquireNow(){
+    if (this.usingMock || !this.hid) return this._connectNow(false);
     await this.hid._reacquire();
     this.lost = false; this.failStreak = 0;
     this.log('g', '已重新取到探针句柄');
@@ -152,7 +186,12 @@ export class I2cSession {
    *    1.5 s 一次的 STATUS 轮询 —— 不排队就会互相踩，表现是"偶尔报『上一条请求还没回来』"。
    */
   _enqueue(fn){
-    const p = this._chain.then(fn, fn);
+    if (this._closing) return Promise.reject(new Error('I2C 会话正在断开'));
+    const guarded = () => {
+      if (this._closing) throw new Error('I2C 会话正在断开');
+      return fn();
+    };
+    const p = this._chain.then(guarded, guarded);
     this._chain = p.catch(() => {});
     return p;
   }

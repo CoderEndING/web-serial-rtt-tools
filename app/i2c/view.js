@@ -325,7 +325,6 @@ export class I2cView {
   _bindConn(){
     $('i2-connect').addEventListener('click', async () => {
       if ($('i2-mock').checked) return this._connect(true, true);
-      await this.bus?.requestRelease?.({ why: '「USB→I2C」页要占用探针' });
       return this._connect(true, false);
     });
     $('i2-reconnect').addEventListener('click', async () => {
@@ -970,4 +969,3 @@ function abbreviateHex(hex, keep){
 }
 
 /** 迷你曲线：抽到 `app/ui/spark.js`（与 `#spi` 的实时值共用一份，别在这儿再写一遍）*/
-
