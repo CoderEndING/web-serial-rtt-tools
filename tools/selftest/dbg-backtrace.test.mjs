@@ -44,7 +44,7 @@ const entryStop=session();entryStop.regs.PC=code; assert.match((await backtrace(
 const fault=session();fault.mem.clear(); assert.match((await backtrace(fault)).reason,/FAULT/);
 const reserved=session([0x80ffb0b0]);assert.match((await backtrace(reserved)).reason,/opcode/);
 const loop=session([0x80b0b0b0]);loop.regs.LR=loop.regs.PC|1;
-assert.match((await backtrace(loop)).reason,/进展|循环/);
+assert.match((await backtrace(loop)).reason,/进展|循环|LR 不可恢复/);
 // Register pops, delayed r13 update, explicitly popped zero PC, reserved/truncated opcodes.
 const r=new Uint32Array(16);r[13]=sp;r[14]=code|1;r[7]=sp+32;
 const valid=(a,n)=>a>=sp&&a+n<=sp+256&&a%4===0;

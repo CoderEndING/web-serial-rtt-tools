@@ -1,0 +1,102 @@
+/** Bounded DWARF32 .debug_frame reader. Debugger-only; unsupported rules fail closed.
+ * DWARF 5 §6.4. No target code execution and no guessed caller registers.
+ */
+export class Reader {
+  constructor(bytes, pos=0, end=bytes.length){if(!Number.isInteger(pos)||pos<0||end>bytes.length||pos>end)throw new Error('DWARF 偏移无效');this.b=bytes;this.p=pos;this.end=end;}
+  need(n){if(n<0||this.p+n>this.end)throw new Error('DWARF 数据被截断');}
+  u8(){this.need(1);return this.b[this.p++];}
+  uint(n){this.need(n);let v=0;for(let i=0;i<n;i++)v+=this.b[this.p++]*2**(8*i);return v;}
+  leb(signed=false){let v=0,shift=0,b;do{b=this.u8();v+=(b&127)*2**shift;shift+=7;if(shift>35)throw new Error('DWARF LEB 过长');}while(b&128);if(signed&&(b&64))v-=2**shift;return v;}
+  bytes(n){this.need(n);const v=this.b.subarray(this.p,this.p+n);this.p+=n;return v;}
+  str(){let s='';for(let i=0;i<256;i++){const b=this.u8();if(!b)return s;s+=String.fromCharCode(b);}throw new Error('CFI augmentation 过长');}
+}
+const cache=new WeakMap();
+function entries(elf){
+  if(cache.has(elf))return cache.get(elf);
+  const b=elf.section('.debug_frame')?elf.data('.debug_frame'):null;
+  const out=[],cies=new Map(); if(!b){cache.set(elf,out);return out;}
+  const r=new Reader(b);
+  while(r.p<b.length){
+    const offset=r.p,length=r.uint(4);if(!length)continue;
+    if(length<4)throw new Error('CFI 记录过短');
+    if(length===0xffffffff)throw new Error('暂不支持 DWARF64 CFI');
+    r.need(length);const end=r.p+length,id=r.uint(4),q=new Reader(b,r.p,end);
+    if(id===0xffffffff){
+      const version=q.u8(),augmentation=q.str();
+      if(![1,3,4].includes(version)||augmentation)throw new Error('暂不支持该 CFI version/augmentation');
+      if(version===4&&(q.u8()!==4||q.u8()!==0))throw new Error('CFI 地址格式不是32位平坦地址');
+      const ca=q.leb(),da=q.leb(true),ra=version===1?q.u8():q.leb();
+      if(ca<1||ra>15)throw new Error('CFI 对齐/返回寄存器无效');
+      cies.set(offset,{ca,da,ra,ops:q.bytes(end-q.p)});
+    }else{
+      const cie=cies.get(id);if(!cie)throw new Error('CFI 引用不存在的 CIE');
+      const start=q.uint(4),size=q.uint(4);if(start+size>0x100000000)throw new Error('CFI 地址溢出');
+      out.push({start,end:start+size,cie,ops:q.bytes(end-q.p)});
+    }
+    r.p=end;
+  }
+  cache.set(elf,out);return out;
+}
+const clone=s=>({reg:s.reg,offset:s.offset,rules:new Map(s.rules)});
+function program(ops,cie,state,initial,start,pc){
+  const r=new Reader(ops),saved=[];let loc=start,steps=0;
+  const register=()=>{const n=r.leb();if(n>15)throw new Error('CFI 非核心寄存器规则');return n;};
+  while(r.p<r.end){
+    if(++steps>16384)throw new Error('CFI 指令过多');
+    const op=r.u8(),primary=op&0xc0,n=op&63;
+    if(primary===0x40){const next=loc+n*cie.ca;if(pc<next)break;loc=next;continue;}
+    if(primary===0x80){if(n>15)throw new Error('CFI 非核心寄存器');state.rules.set(n,{kind:'offset',v:r.leb()*cie.da});continue;}
+    if(primary===0xc0){if(n>15)throw new Error('CFI 非核心寄存器');if(initial.rules.has(n))state.rules.set(n,initial.rules.get(n));else state.rules.delete(n);continue;}
+    if(op>=1&&op<=4){const next=op===1?r.uint(4):loc+r.uint(2**(op-2))*cie.ca;if(next<loc)throw new Error('CFI PC 倒退');if(pc<next)break;loc=next;continue;}
+    switch(op){
+      case 0:break;
+      case 5:state.rules.set(register(),{kind:'offset',v:r.leb()*cie.da});break;
+      case 6:{const n=register();if(initial.rules.has(n))state.rules.set(n,initial.rules.get(n));else state.rules.delete(n);break;}
+      case 7:state.rules.set(register(),{kind:'undefined'});break;
+      case 8:state.rules.set(register(),{kind:'same'});break;
+      case 9:state.rules.set(register(),{kind:'register',v:register()});break;
+      case 10:if(saved.length>=32)throw new Error('CFI 状态栈过深');saved.push(clone(state));break;
+      case 11:{const old=saved.pop();if(!old)throw new Error('CFI 状态栈为空');Object.assign(state,old);break;}
+      case 12:state.reg=register();state.offset=r.leb();break;
+      case 13:state.reg=register();break;
+      case 14:state.offset=r.leb();break;
+      case 17:state.rules.set(register(),{kind:'offset',v:r.leb(true)*cie.da});break;
+      case 18:state.reg=register();state.offset=r.leb(true)*cie.da;break;
+      case 19:state.offset=r.leb(true)*cie.da;break;
+      case 20:state.rules.set(register(),{kind:'value',v:r.leb()*cie.da});break;
+      case 21:state.rules.set(register(),{kind:'value',v:r.leb(true)*cie.da});break;
+      case 0x2e:r.leb();break; // GNU_args_size: no effect on unwinding
+      default:throw new Error('不支持 CFI opcode 0x'+op.toString(16));
+    }
+  }
+  return state;
+}
+export function cfiRow(elf,pc){
+  const f=entries(elf).find(f=>pc>=f.start&&pc<f.end);if(!f)return null;
+  const empty={reg:null,offset:0,rules:new Map()};
+  const initial=program(f.cie.ops,f.cie,clone(empty),empty,0,Infinity);
+  const row=program(f.ops,f.cie,clone(initial),initial,f.start,pc);
+  return {...row,ra:f.cie.ra};
+}
+export async function unwindCfi(regs,known,row,readWord,valid){
+  if(row.reg==null||!known.has(row.reg))throw new Error('CFA 寄存器不可用');
+  const cfa=regs[row.reg]+row.offset;if(!valid(cfa,0))throw new Error('CFA 超出栈边界');
+  const out=new Uint32Array(16),available=new Set();
+  // ARM preserved registers only. Volatile caller registers are unknown unless restored.
+  for(let n=4;n<=11;n++)if(known.has(n)){out[n]=regs[n];available.add(n);}
+  for(const [n,rule]of row.rules){
+    available.delete(n);
+    if(rule.kind==='undefined')continue;
+    if(rule.kind==='same'){if(known.has(n)){out[n]=regs[n];available.add(n);}continue;}
+    if(rule.kind==='register'){if(known.has(rule.v)){out[n]=regs[rule.v];available.add(n);}continue;}
+    const a=cfa+rule.v;
+    if(rule.kind==='value'){if(a<0||a>0xffffffff)throw new Error('CFI 值溢出');out[n]=a;}
+    else {if(!valid(a,4))throw new Error('CFI 栈读取超出边界');out[n]=await readWord(a);}
+    available.add(n);
+  }
+  // ABI leaf functions may keep return address in LR without emitting an explicit rule.
+  if(!row.rules.has(row.ra)&&known.has(row.ra)){out[row.ra]=regs[row.ra];available.add(row.ra);}
+  if(!available.has(row.ra))throw new Error('返回地址不可用');
+  out[15]=out[row.ra];out[13]=cfa;available.add(15);available.add(13);
+  return {regs:out,known:available,cfa};
+}

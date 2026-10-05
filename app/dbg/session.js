@@ -237,6 +237,7 @@ export class DebugSession {
   }
 
   async disconnect(){
+    this.clearFrames();
     const p = this.probe;
     if (p && this.dwt.items.length) {
       await this.dwt.clear();
@@ -259,6 +260,7 @@ export class DebugSession {
     const v = await this.probe._readWord(DHCSR);
     this.halted = ((v >>> 17) & 1) === 1;
     if (this.halted) this.pc = await this.readReg('PC');
+    if(this._frames&&(!this.halted||this.pc!==this._framePc))this.clearFrames();
     return this.statusInfo();
   }
 
@@ -281,6 +283,7 @@ export class DebugSession {
   }
 
   async run(){
+    this.clearFrames();
     await this._clearDfsr();
     await this.probe.run();
     this.halted = false;
@@ -294,6 +297,7 @@ export class DebugSession {
    *    正确做法是 gdb/pyOCD 那一套：**先单步跨过它再继续**（step() 自己会临时摘比较器）。
    */
   async cont(){
+    this.clearFrames();
     if (!this.halted) { await this.run(); return false; }
     const pc = align2(await this.readReg('PC'));
     if (this._bpAt(pc) !== undefined){
@@ -391,6 +395,7 @@ export class DebugSession {
    *    现在：C_STEP 没让 PC 前进就自动改用**断点单步**，并把这件事写进日志（不许静默降级）。
    */
   async step(){
+    this.clearFrames();
     if (!this.halted) throw new Error('目标在运行 —— 先「暂停」再单步');
     const pc = align2(await this.readReg('PC'));
     this.lastStepMode = null;
@@ -647,6 +652,7 @@ export class DebugSession {
 
   /** 源码级「单步跳过」(F10)：跑到**当前行的下一条语句**停下（函数调用整行跳过） */
   async stepOver(){
+    this.clearFrames();
     if (!this.halted) throw new Error('目标在运行 —— 先「暂停」再单步');
     if (!this.sym?.lines) throw new Error('这份 ELF 没有行号信息（编译时没带 -g？）—— 源码级单步用不了，用 `s` 走指令级单步');
     const pc = align2(await this.readReg('PC'));
@@ -687,6 +693,7 @@ export class DebugSession {
    * 不是调用（普通语句）→ 等同"单步跳过"；`BLX <reg>` 这类目标算不出来 → 走指令级单步。
    */
   async stepInto(){
+    this.clearFrames();
     if (!this.halted) throw new Error('目标在运行 —— 先「暂停」再单步');
     const pc = align2(await this.readReg(this.arch.PC));
     let call = null;
@@ -756,6 +763,7 @@ export class DebugSession {
    *      代价只有"本函数剩余指令数"，与调用深度、被调函数多大都无关。
    */
   async stepOut(){
+    this.clearFrames();
     if (!this.halted) throw new Error('目标在运行 —— 先「暂停」再单步');
     const pc0 = align2(await this.readReg(this.arch.PC));
     const sp0 = (await this.readReg(this.arch.SP)) >>> 0;
@@ -828,6 +836,7 @@ export class DebugSession {
    * 目标地址上**已经有用户断点**时直接跑（让那个断点拦住），不再加临时比较器。
    */
   async runTo(addr, { label = '', timeoutMs = 8000 } = {}){
+    this.clearFrames();
     if (!this.connected) throw new Error('还没连接目标（先点「连接」）');
     const target = align2(addr);
     const pc = this.halted ? align2(await this.readReg(this.arch.PC)) : null;
@@ -882,6 +891,7 @@ export class DebugSession {
   }
 
   async resetHalt(){
+    this.clearFrames();
     await this._resetCore();
     await this.probe.halt();
     await this.refresh();
@@ -891,6 +901,7 @@ export class DebugSession {
   }
 
   async resetRun(){
+    this.clearFrames();
     await this._resetCore();
     await this.dwt.rearm();
     await this.run();
@@ -909,6 +920,7 @@ export class DebugSession {
 
   /** 写一个寄存器（CFBP 子寄存器走"读-改-写"，别把兄弟字节冲掉） */
   async writeReg(name, value){
+    this.clearFrames();
     const info = regInfo(name);
     if (!info) throw new Error(`不认识的寄存器「${name}」`);
     if (isCfbpSub(info)){
@@ -950,7 +962,24 @@ export class DebugSession {
   regList(){ return this.regs; }
 
   /** Caller holds session.exclusive, just like command/register/memory operations. */
-  async backtrace(opts={}){ return await backtrace(this,opts); }
+  clearFrames(){ this._frames=null;this._selectedFrame=0; }
+  async backtrace(opts={}){
+    this.clearFrames();
+    const result=await backtrace(this,opts);
+    if(!result.scan){this._frames=result;this._frameElf=this.sym?.elf;this._framePc=this.pc;this._frameSp=result.frames[0]?.sp;}
+    return result;
+  }
+  async selectFrame(index=0){
+    await this.refresh();
+    if(!this._frames||!this.halted||this.pc!==this._framePc||this.sym?.elf!==this._frameElf||await this.readReg(this.arch.SP)!==this._frameSp){this.clearFrames();throw new Error('栈帧已失效，请重新 bt');}
+    if(!Number.isInteger(index)||index<0||index>=this._frames.frames.length)throw new Error('栈帧序号越界');
+    this._selectedFrame=index;return this._frames.frames[index];
+  }
+  async locals(opts={}){
+    const frame=await this.selectFrame(this._selectedFrame||0);
+    const {frameLocals}=await import('./locals.js');
+    return await frameLocals(this,frame,opts);
+  }
 
   // ------------------------------------------------------------ 内存
 
@@ -973,6 +1002,7 @@ export class DebugSession {
   }
 
   async memWrite(addr, bytes){
+    this.clearFrames();
     const a = addr >>> 0;
     const budget = Math.max(3000, Math.ceil(bytes.length / 32) * 200);
     try {

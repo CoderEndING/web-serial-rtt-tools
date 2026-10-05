@@ -15,7 +15,7 @@
 export const CMD_NAMES = [
   'h', 'help', 'c', 'cont', 's', 'step', 'n', 'next', 'si', 'fin', 'out', 'rc',
   'halt', 'reset', 'r', 'md', 'mw', 'ms',
-  'p', 'x', 'b', 'bd', 'bl', 'wp', 'wpl', 'wpd', 'bt', 'backtrace', 'info', 'sym', 'w', 'wl', 'wd', 'src', 'sl', 'cls',
+  'p', 'x', 'b', 'bd', 'bl', 'wp', 'wpl', 'wpd', 'bt', 'backtrace', 'frame', 'locals', 'args', 'info', 'sym', 'w', 'wl', 'wd', 'src', 'sl', 'cls',
 ];
 
 const SYM_CMDS = new Set(['wp', 'b', 'break', 'p', 'x', 'w', 'watch', 'md', 'mw', 'ms', 'sym', 'rc', 'runto']);
@@ -74,6 +74,8 @@ export function completeLine(line, ctx = {}){
     pool = [...(ctx.wps || []).map(w=>'#'+(w.slot+1)), 'all']; kind = 'wp';
   } else if ((cmd === 'bt' || cmd === 'backtrace') && argIndex === 1){
     pool = ['scan','8','16','32','64']; kind = 'word';
+  } else if (cmd === 'info' && argIndex === 1){
+    pool = ['locals','args'];kind = 'word';
   } else if (cmd === 'bd' || cmd === 'delete'){
     pool = [...(ctx.bps || []).map((b, i) => `#${i + 1}`), 'all'];
     kind = 'bp';

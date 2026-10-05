@@ -155,6 +155,7 @@ test-dbg: test-dbg-features
 test-dbg-features:
 	$(NODE) tools/selftest/dbg-dwt.test.mjs
 	$(NODE) tools/selftest/dbg-backtrace.test.mjs
+	$(NODE) tools/selftest/dbg-frame-locals.test.mjs
 	$(NODE) tools/selftest/dbg-watch-bt-ui.test.mjs
 	$(NODE) tools/selftest/dbg-svd.test.mjs
 

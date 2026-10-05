@@ -751,7 +751,12 @@
         <legend>调用栈</legend>
         <div class="row btnrow"><button id="d-bt">栈回溯</button><button id="d-bt-scan">扫描候选地址</button></div>
         <div id="d-bt-list" class="bplist" aria-live="polite">暂停后点击回溯；需要匹配的 ELF。</div>
-        <p class="hint" id="d-bt-status">点击帧可查看源码；扫描结果不是已证实调用链。</p>
+        <p class="hint" id="d-bt-status">点击帧切换源码和局部变量；扫描结果不是已证实调用链。</p>
+      </fieldset>
+      <fieldset>
+        <legend>局部变量 / 参数</legend>
+        <div id="d-locals" class="bplist" aria-live="polite">暂停后回溯，再选择栈帧</div>
+        <p class="hint">只读当前作用域；优化掉或无法恢复的值会标明原因。</p>
       </fieldset>
     </aside>
 

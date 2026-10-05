@@ -654,6 +654,8 @@ export class DbgView {
   }
 
   _invalidateBacktrace(){
+    this.session.clearFrames?.();
+    const locals=$('d-locals');if(locals)locals.textContent='暂停后回溯，再选择栈帧';
     if(!this._btSnapshotValid) return;
     this._btSnapshotValid=false;
     const box=$('d-bt-list'); if(box) box.textContent='目标状态已变化，请重新回溯';
@@ -663,17 +665,39 @@ export class DbgView {
   presentBacktrace(result){
     const box=$('d-bt-list'); if(!box) return;
     box.textContent='';
+    const locals=$('d-locals');if(locals)locals.textContent=result.scan?'候选地址没有可靠帧上下文，不能读取局部变量':result.frames[0]?.regs?'正在读取当前帧变量…':'当前架构或 ELF 没有可靠的栈帧上下文';
     this._btSnapshotPc=this.session.pc; this._btSnapshotValid=true;
     for(const [i,frame] of result.frames.entries()){
       const row=document.createElement('button'); row.className='mono';
       const loc=frame.loc;
       row.textContent=`#${i} ${frame.name||hex32(frame.pc)} [${frame.kind}]${loc?' '+loc.file+':'+loc.line:''}`;
       row.title=`PC ${hex32(frame.pc)} · SP ${hex32(frame.sp)}`;
-      row.disabled=!loc;
-      row.addEventListener('click',()=>this.showSource(loc.file,loc.line));
+      row.disabled=frame.kind==='candidate'&&!loc;row.dataset.frame=String(i);
+      if(!result.scan)row.setAttribute('aria-pressed',String(i===0));
+      row.addEventListener('click',()=>result.scan?this.showSource(loc.file,loc.line):this.runLine(`frame ${i}`));
       const wrap=document.createElement('div'); wrap.className='bprow'; wrap.append(row); box.append(wrap);
     }
     const status=$('d-bt-status'); if(status) status.textContent=result.reason;
+  }
+
+  async presentSelectedFrame(index,frame){
+    const box=$('d-bt-list');
+    for(const row of box?.querySelectorAll('[data-frame]')||[])row.setAttribute('aria-pressed',String(Number(row.dataset.frame)===index));
+    if(frame.loc)await this.showSource(frame.loc.file,frame.loc.line);
+  }
+
+  presentLocals(result,index=0){
+    const box=$('d-locals');if(!box)return;box.textContent='';
+    const title=document.createElement('div');title.className='hint';title.textContent=`帧 #${index} · ${result.function||''}`;box.append(title);
+    for(const row of result.rows){
+      const item=document.createElement(row.children?'details':'div');item.className='mono';
+      const label=document.createElement(row.children?'summary':'span');
+      label.textContent=`${row.argument?'参数':'局部'} ${row.name}: ${row.type?.alias||row.type?.name||row.type?.kind||'?'} = ${row.error||row.value}`;
+      item.append(label);
+      for(const child of row.children||[]){const line=document.createElement('div');line.style.paddingLeft=`${(child.depth+1)*12}px`;line.textContent=`${child.name} = ${child.text}`;item.append(line);}
+      box.append(item);
+    }
+    if(result.reason){const hint=document.createElement('div');hint.className='hint';hint.textContent=result.reason;box.append(hint);}
   }
 
   renderDwt(){
@@ -941,7 +965,7 @@ export class DbgView {
     const line = String(text || '').trim();
     if (!line) return { lines: [] };
     if (this._disconnecting || this._connecting) return { cancelled: true, lines: [] };
-    if(!/^(bt|backtrace)(\s|$)/i.test(line)) this._invalidateBacktrace();
+    if(!/^(frame|locals|args|info)(\s|$)/i.test(line)) this._invalidateBacktrace();
     this._out('> ' + line, 'cmd');
     if (line !== this.hist[this.hist.length - 1]) this.hist.push(line);
     this.histIdx = -1;
@@ -961,6 +985,7 @@ export class DbgView {
       });
     } catch (e){
       if (e?.cancelled){ this._out('（已中断）', 'warn'); return { cancelled: true, lines: [] }; }
+      if(/^栈帧已失效/.test(e?.message||''))this._invalidateBacktrace();
       this._out('✗ ' + (e?.message || e), 'err');
       return { error: String(e?.message || e) };
     }
@@ -1480,8 +1505,9 @@ export class DbgView {
     if (!this.sym){ ph('（载入 .elf 后可用：停下来时这里显示 PC 所在的源码行，点行号下断点）'); this.srcCur = null; return; }
     if (!this.sym.lines){ ph('这份 ELF 没有行号信息（编译时没带 -g，或被 strip 过）—— 只能用 `sym` 找符号地址'); this.srcCur = null; return; }
     if (!this.session.connected){ ph('（还没连接：连上并停下来后这里显示源码行）'); this.srcCur = null; return; }
-    const pc = this.session.pc >>> 0;
-    const at = this.sym.at(pc & 0xfffffffe);
+    const selected=this._btSnapshotValid?this.session._frames?.frames[this.session._selectedFrame||0]:null;
+    const pc = (selected?.lookup??this.session.pc) >>> 0;
+    const at = selected?.loc || this.sym.at(pc & 0xfffffffe);
     if (!at || !at.file){
       ph(`PC ${hex32(pc)} 不在有行号信息的代码里（可能在库函数/启动代码里）`);
       this.srcCur = null;

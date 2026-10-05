@@ -83,6 +83,7 @@ const HELP = [
   '  b <地址|符号|文件:行> 加硬件断点（例：b main / b main.c:192 / b +5 / b 0x08000123）',
   '  bd <编号|地址|符号|文件:行|all>   删断点（编号见 bl）',
   '  bl                    列出断点（带源码位置）',
+  '  frame [序号] / info locals / info args  选择栈帧、读取局部变量与参数',
   '  bt [深度] / bt scan [深度]  调用栈 / 候选返回地址扫描（先暂停）',
   '  wp <地址|符号> [r|w|rw] [字节数]  DWT 数据观察点（默认写入、4字节）',
   '  wpl / wpd <编号|all>  列出 / 删除 DWT 观察点（不影响 w 变量监视）',
@@ -130,6 +131,8 @@ async function runCmdInner(p, session, opts = {}){
   const V = opts.view || null;
   const lines = [];
   const need = () => { if (!S?.connected) throw new Error('还没连接目标（先点「连接」）'); };
+
+  if(!['bt','backtrace','frame','info','locals','args','h','help','?','cls','sym','symbols','bl','wpl','wl','src','sl'].includes(cmd))S?.clearFrames?.();
 
   switch (cmd){
     case 'h': case 'help': case '?':
@@ -399,9 +402,26 @@ async function runCmdInner(p, session, opts = {}){
         lines.push(L(`#${i} ${hex32(frame.pc)}  SP=${hex32(frame.sp)}  ${atOf(S,frame.lookup)}  [${frame.kind}]`,frame.kind==='candidate'?'warn':'ok'));
       lines.push(L(result.reason,'dim'));
       V?.presentBacktrace?.(result);
+      if(!scan&&S.locals&&result.frames[0]?.regs){const locals=await S.locals({signal:opts.signal});V?.presentLocals?.(locals,0);}
       return {lines,backtrace:result};
     }
 
+    case 'frame': {
+      need();if(args.length>1)throw new Error('用法：frame [序号]');
+      const index=args.length?parseNum(args[0]):(S._selectedFrame||0);
+      const frame=await S.selectFrame(index);
+      lines.push(L(`#${index} ${hex32(frame.pc)} SP=${hex32(frame.sp)} ${atOf(S,frame.lookup)}`,'ok'));
+      await V?.presentSelectedFrame?.(index,frame);
+      const locals=await S.locals({signal:opts.signal});V?.presentLocals?.(locals,index);
+      return {lines,frame,locals};
+    }
+    case 'locals': case 'args': {
+      need();if(args.length)throw new Error('用法：locals / args');const locals=await S.locals({signal:opts.signal});
+      V?.presentLocals?.(locals,S._selectedFrame||0);
+      for(const row of locals.rows.filter(r=>cmd==='args'?r.argument:!r.argument))lines.push(L(`${row.name} = ${row.error||row.value}`,row.error?'warn':'ok'));
+      if(!lines.length)lines.push(L(locals.reason||'当前作用域没有对应变量','dim'));
+      return {lines,locals};
+    }
     case 'wp': {
       need(); if (!args.length || args.length>3) throw new Error('用法：wp <地址|符号> [r|w|rw] [字节数]');
       const size=args[2] == null ? 4 : parseNum(args[2]);
@@ -420,6 +440,7 @@ async function runCmdInner(p, session, opts = {}){
     }
 
     case 'info': {
+      if(args[0]==='locals'||args[0]==='args'){if(args.length!==1)throw new Error('用法：info locals / info args');return await runCmdInner({cmd:args[0],args:[],rest:''},session,opts);}
       lines.push(L(infoLine(S)));
       if (S.connected) lines.push(L(statusLine(S)));
       if (S.sym){

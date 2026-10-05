@@ -51,7 +51,8 @@ DEMCR 按读改写保留其他位，不主动关闭全局 TRCENA，避免破坏�
 
 ## bt 展开与准确性边界
 
-当前自动展开使用匹配ELF中的 `.ARM.exidx` / `.ARM.extab`，按
+自动展开优先使用匹配 ELF 中的 `.debug_frame` CFI；无对应 CFI 时使用
+`.ARM.exidx` / `.ARM.extab`，按
 [Arm EHABI](https://github.com/ARM-software/abi-aa/blob/main/ehabi32/ehabi32.rst)
 解释compact personality 0/1/2、整数寄存器弹栈、vsp调整及常见VFP栈大小调整。
 不会在目标上执行personality函数，也不修改寄存器/内存或继续运行目标。
@@ -59,7 +60,9 @@ DEMCR 按读改写保留其他位，不主动关闭全局 TRCENA，避免破坏�
 
 GCC工程可启用 `-g -funwind-tables`，链接脚本须保留ARM unwind段，并载入与板上程序
 一致的最终ELF。只带 `-g` 不保证存在 `.ARM.exidx`；strip/链接丢弃也可能使其缺失。
-当前没有DWARF `.debug_frame/.eh_frame` CFI展开器，因此缺EHABI时不会把任意栈值冒充帧。
+现已支持 DWARF32 `.debug_frame` 的常见 Cortex-M 核心寄存器规则；
+`.eh_frame`、CFI 表达式和非核心寄存器规则尚不支持，会说明停止原因。
+局部变量、参数和帧切换参见 [栈帧与局部变量](debug-frame-locals.md)。
 
 EHABI按函数描述稳定栈帧，不能保证任意序言/尾声中途都准确。停在函数入口时明确提示
 先单步到函数体后重试；序言/尾声其他位置、优化/内联/尾调用仍可能导致缺帧或不准确。
