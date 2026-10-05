@@ -100,8 +100,9 @@ console.log('== 1. 标签页与初始状态 ==');
 {
   const s = await ev('return window.__tools.summary();');
   ok(s.tabs.includes('i2c'), '标签栏里有 i2c（USB→I2C）');
-  ok(s.tabs[s.tabs.length - 2] === 'i2c' && s.tabs[s.tabs.length - 1] === 'gen',
-     `i2c 排在「工程生成」前面（${s.tabs.slice(-3).join(' → ')}）`, s.tabs.join(','));
+  const i2cIndex = s.tabs.indexOf('i2c'), analogIndex = s.tabs.indexOf('analog'), genIndex = s.tabs.indexOf('gen');
+  ok(i2cIndex >= 0 && i2cIndex < analogIndex && analogIndex < genIndex && genIndex === s.tabs.length - 1,
+     `I²C、ADC/DAC、工程生成的顺序正确（${s.tabs.slice(-3).join(' → ')}）`, s.tabs.join(','));
   ok(s.ok === true, '页面无 JS 错误', JSON.stringify(s.errors));
   ok(s.i2c && s.i2c.connected === false, '初始：未连接');
   ok(s.i2c.rows === 3, `命令表默认 3 行（实际 ${s.i2c?.rows}）`);
