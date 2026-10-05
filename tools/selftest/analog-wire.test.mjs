@@ -25,5 +25,8 @@ try{
  for(const [a,b]of requests)await assert.rejects(client.command(a,b),e=>e instanceof DacError&&e.code===RC.UNSUPPORTED);
  await assert.rejects(client.command(ACT.WRITE,Uint8Array.of(0)),e=>e.code===RC.RANGE);
  const adc=await xfer(CMD,Uint8Array.of(0));assert.equal(adc[0],20);assert.equal(String.fromCharCode(...adc.subarray(7,11)),'ANA1');
- console.log('Analog production C/JS ABI: DAC1 zero channels, every reserved action UNSUPPORTED, truncated write RANGE, unchanged ADC CAPS PASS');
+ const stream=await xfer(CMD,Uint8Array.of(9));assert.equal(stream[0],28);assert.equal(String.fromCharCode(...stream.subarray(7,11)),'ADB2');
+ const open=await xfer(CMD,Uint8Array.of(10,16,0xf4,1,0,0,0,2,0,0));
+ assert.equal(open[0],12);assert.equal(open[3],0);assert.deepEqual([...open.subarray(7,11)],[1,0,0,0]);
+ console.log('Analog production C/JS ABI: DAC reservations, ADC CAPS, JS-framed finite OPEN length/payload PASS');
 }finally{child.stdin.end();assert.equal(await exit,0);rmSync(dir,{recursive:true,force:true});}
