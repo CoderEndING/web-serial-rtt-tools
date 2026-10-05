@@ -2,9 +2,12 @@ import { $ } from '../ui/dom.js';
 import { AnalogSession } from './session.js';
 import { WAVES, dacTable, signalLevels, waveCsv } from './model.js';
 import { AdcScopeStore, envelope } from './scope-store.js';
+import { PinMap } from '../ui/pin-map.js';
 export class AnalogView {
   constructor(){ this.session = new AnalogSession(); this.store = new AdcScopeStore(); this.wave = []; this._raf = null; this.total = 0; }
   init(){
+    this.pinMap=new PinMap({buttonId:'an-pinmap-btn',feature:'adc',state:()=>({connected:this.session.connected,connectionKey:this.session.hid?.device||this.session.hid,supported:!!this.session.caps})});
+    this.pinMap.init();
     const bind = (id, fn) => $(id).addEventListener('click', () => { Promise.resolve().then(fn).catch(e => this.status(e.message, true)); });
     bind('an-connect', async () => {
       const c = await this.session.connect(); if (!c) return;
@@ -37,7 +40,7 @@ export class AnalogView {
     for(const id of ['an-time','an-volts','an-offset','an-trigger','an-level','an-edge','an-freeze'])$(id).addEventListener('change',()=>this.renderAdc());
     this.updateDacControls(); this.preview(); this.renderAdc();
   }
-  status(text, error = false){ $('an-state').textContent = text; $('an-state').style.color = error ? '#f85149' : ''; }
+  status(text, error = false){ $('an-state').textContent = text; $('an-state').style.color = error ? '#f85149' : '';this.pinMap?.refresh(); }
   async acquire(count){
     if(this.session.busy)throw Error('先停止当前采集');
     const options={bits:Number($('an-bits').value),rate:Number($('an-rate').value),count};

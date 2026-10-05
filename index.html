@@ -1525,6 +1525,7 @@
           <button id="i2-reconnect" title="用浏览器记住的探针直接连（不用再点弹框）">重连</button>
         </div>
         <p class="hint" id="i2-info">未连接</p>
+        <div class="row btnrow"><button id="i2-pinmap-btn" title="先确认板型，再查看 SDA/SCL、GND 与上拉要求">引脚分配图 / 接线</button></div>
         <label class="chk" title="不需要硬件：内置 AT24C02@0x50 / MPU6050@0x68 / ADS1115@0x48 / Si5351@0x60 四个假器件，传感器数据是活的（会动的正弦），示例脚本能直接看出效果"><input type="checkbox" id="i2-mock"> 用假探针（无需硬件）</label>
         <p class="hint" id="i2-state">未连接</p>
         <p class="hint">一个探针同时只能被一个页签占着 —— 本页连接前会请别的页签让出（RTT 转发 / J-Scope / SPI 桥 / 调试器）。</p>
@@ -1920,7 +1921,8 @@
     <aside class="side">
       <fieldset><legend>ADC · USB 示波器</legend>
         <div class="row btnrow"><button id="an-connect" class="primary">连接探针</button><button id="an-disconnect">断开</button></div>
-        <p id="an-channel">连接后识别板型和可用输入</p>
+        <p id="an-channel">连接后查询可用输入；查看引脚图前请确认板型</p>
+        <div class="row btnrow"><button id="an-pinmap-btn" title="先确认板型，再查看 ADC 输入、GND 与 QSPI 共脚说明">引脚分配图 / 接线</button></div>
         <p class="hint">配置走 HID；数据与 SPI/QSPI 共用 Bulk 0x8B 和缓冲，互斥使用。首次采集请在 WebUSB 授权框中选择同一台探针（桌面 Chrome/Edge）。</p>
         <label class="row"><span>ADC 分辨率</span><select id="an-bits"><option>8</option><option>10</option><option>12</option><option selected>16</option></select></label>
         <p class="hint">单通道 PB14 / ADC0.6（EVKLite J3[10]），定时器硬件触发 + DMA。停止后归还 QSPI 引脚和共享缓冲。</p>

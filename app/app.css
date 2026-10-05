@@ -666,6 +666,12 @@ fieldset.folded > legend::after{content:' · 已折叠';color:var(--fg2);font-si
 /* I2C 桥的固定脚（PA29=SCL / PA28=SDA）：**无论配置与否都显示**，因为它们在固件里是写死的 ——
    接线的人必须一眼看到这两根已经名花有主（详见 i2c_bridge.c 的 BOARD_I2C_BRIDGE_*_PAD）。 */
 .pintab .is-i2c{color:#c792ea}
+.pintab .is-signal{color:#79c0ff;font-weight:600}
+.pintab .is-ground{color:#7ee787}
+.pinmap-board{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin:4px 0 8px}
+.pinmap-board select{max-width:100%}
+.pinmap-notes{padding-left:20px;font-size:12.5px;line-height:1.5}
+.pinmap-notes li{margin:5px 0}
 .pintab .is-i2c .p-fixed{margin-left:8px;padding:0 5px;border:1px solid rgba(199,146,234,.5);
   border-radius:3px;font-size:11px;color:#c792ea}
 .pintab .p-sel.is-bad{color:#ff7b72;font-weight:600}

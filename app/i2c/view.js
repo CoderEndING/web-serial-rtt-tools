@@ -18,6 +18,7 @@
  *      （浏览器会把隐藏页面的 rAF 降频甚至挂起）。
  */
 import { $, appendLogLine, setStatus } from '../ui/dom.js';
+import { PinMap } from '../ui/pin-map.js';
 import { drawSpark } from '../ui/spark.js';
 import { store } from '../core/store.js';
 import { I2cSession } from './session.js';
@@ -154,6 +155,8 @@ export class I2cView {
 
   init(){
     const s = this.session;
+    this.pinMap=new PinMap({buttonId:'i2-pinmap-btn',feature:'i2c',state:()=>({connected:s.connected,connectionKey:s.hid?.device||s.hid,mock:s.usingMock,lost:s.lost})});
+    this.pinMap.init();
     s.subscribe(this);
     this.reg.init();
     this._bindConn();
@@ -304,6 +307,7 @@ export class I2cView {
 
   _setState(text, kind){
     setStatus($('i2-state'), text, kind === 'err' ? 'err' : kind === 'warn' ? 'warn' : 'ok');
+    this.pinMap?.refresh();
   }
   _syncButtons(st){
     const on = st.connected;
