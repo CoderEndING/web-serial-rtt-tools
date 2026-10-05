@@ -10,7 +10,7 @@ function rig({wrongValue=false,mutate=false,badFlash=false,m7Erratum=false,uncon
  const rows=()=>[{name:'test',value:wrongValue?'8':'7',argument:false}];
  const frames=()=>[{pc:checkpoint,lookup:checkpoint,sp,loc:{file:'dbg_frames.c',line:10},regs:Array(16).fill(0),known:[0]}];
  const session={connected:true,halted:true,pc:checkpoint,_frames:null,bps:[],caps:{numCode:8,rev:1},
-  probe:{_readWord:async a=>a===0xe000ed00?0x410fc271:a===0xe000ed30?(unconfirmedErratum==='dfsr'?0:2):a===0xe0002000?0x80:
+  probe:{_readWord:async a=>a===0xe000ed00?0x410fc271:a===0xe000ed30?(unconfirmedErratum==='dfsr'?0:unconfirmedErratum==='dwt'?6:2):a===0xe0002000?0x80:
    a===0xe0002008?(((checkpoint&0x1ffffffc)|(((checkpoint&2)?2:1)<<30)|1)>>>0):0},
   dwt:{async haltReason(){return null;}},
   exclusive:async fn=>await fn(),refresh:async()=>{if(!session.halted){session.halted=true;if(racePending){racePending=false;session.pc=0x080000f4;}else session.pc=checkpoint;}},
@@ -51,7 +51,7 @@ const m7=rig({m7Erratum:true}),m7report=await runFrameStress(m7);
 assert.ok(m7.results.every(r=>r.passed),JSON.stringify(m7.results));
 assert.equal(m7report[0].m7ErratumRecoveries.length,1,'严格确认的 M7 异常/FPB 竞态应恢复一次');
 assert.equal(m7report.find(r=>r.id==='recursive').pressureM7ErratumRecoveries,0,'报告应记录递归压力中的恢复次数');
-for(const unconfirmedErratum of ['stack','dfsr']){
+for(const unconfirmedErratum of ['stack','dfsr','dwt']){
  const r=rig({m7Erratum:true,unconfirmedErratum});await runFrameStress(r);
  assert.ok(r.results.some(v=>!v.passed),'缺少 erratum 证据时必须保持失败');assert.equal(r.session.connected,false);
 }

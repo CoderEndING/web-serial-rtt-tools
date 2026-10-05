@@ -16,7 +16,7 @@ async function captureCheckpoint(address,ramEnd,board){
   const cpuid=(await s.probe._readWord(0xe000ed00).catch(()=>0))>>>0;
   if(((cpuid>>>4)&0xfff)!==0xc27)return null;
   const dfsr=(await s.probe._readWord(0xe000ed30).catch(()=>0))>>>0;
-  if(!(dfsr&2)||await s.dwt.haltReason().catch(()=>true))return null;
+  if(!(dfsr&2)||(dfsr&4)||await s.dwt.haltReason().catch(()=>true))return null;
   if(!s.bps?.some(bp=>((bp&0xfffffffe)>>>0)===address))return null;
   const ctrl=(await s.probe._readWord(0xe0002000).catch(()=>0))>>>0;
   const count=Math.min(s.caps?.numCode||0,16),rev=1+((ctrl>>>28)&15);
