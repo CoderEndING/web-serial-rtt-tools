@@ -116,7 +116,9 @@ export class FlashRunner {
   chunkSize(){
     const a = this.algo;
     const gap = a.page_buffers.length > 1 ? (a.page_buffers[1] - a.page_buffers[0]) : 0;
-    const cap = gap > 0 ? gap : a.page_size;
-    return Math.max(4, Math.min(a.page_size, cap));
+    const cap = a.program_buffer_size || (gap > 0 ? gap : a.page_size);
+    const gran = a.write_granularity || 4;
+    const bounded = Math.min(a.page_size, cap);
+    return Math.max(gran, Math.floor(bounded / gran) * gran);
   }
 }

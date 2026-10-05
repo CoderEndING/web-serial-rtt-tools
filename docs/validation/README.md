@@ -7,8 +7,8 @@
 | --- | --- | --- |
 | 2026-10-04 | [`2026-10-04-f103cb.md`](2026-10-04-f103cb.md) | F103CB 多轮真机验证、调试压力和随机场景 |
 | 2026-10-05 | [`2026-10-05-rtt-viewer-comparison.md`](2026-10-05-rtt-viewer-comparison.md) | F103ZE 609–616 KB/s 基线与 F103CB 杜邦线差异 |
-| 2026-10-05 | [`2026-10-05-hardware-test-results.md`](2026-10-05-hardware-test-results.md) | F103CB、H743、HPM6800EVK 历史与本次真机结果 |
 | 2026-10-05 | [`../真机基准测试.md`](../真机基准测试.md) | 活动板卡场景基准的长期判据和历史数据 |
+| 2026-10-05–06 | [`2026-10-05-hardware-test-results.md`](2026-10-05-hardware-test-results.md) | F103CB、H743、HPM6800EVK 真机结果；含 10-06 H743 full_flow 与 Flash 分块修复复测 |
 
 ## 当前推荐顺序
 

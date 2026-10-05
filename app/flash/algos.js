@@ -151,7 +151,11 @@ export const ALGOS = {
     ],
     "flash_start": 134217728,
     "flash_length": 1048576,
-    "page_size": 131072
+    // H7 erase sectors are 128 KB, but the RAM flash-algorithm buffer is 1 KB.
+    // Keep erase geometry separate from the size of each program call.
+    "page_size": 131072,
+    "program_buffer_size": 1024,
+    "write_granularity": 32
   },
   "stm32l0": {
     "code": "AL4K4A14LQZoQAgkQAAA01hAZB760UkcUh4AKvLRcEcBKgHQAioX0TtIgWkPIhICEUOBYTlJwWA5ScFgOUkBYTlJAWHAacACBtQ5SDdJAWAGIUFgN0mBYAAgcEcBKAHQAigI0SxIQWgCIhFDQWBBaAEiEUNBYAAgcEcwtSZJSmhMFSJDSmBKaAglKkNKYAAiAmApSCZKAOAQYItp2wf70UhooENIYEhoqENIYAAgML0BIHBH8LUYTAAjJRUIJj8xiQmMRiTgYWgpQ2FgYWgxQ2FgQCGAyoDACR8AKfrRFkmnaf8HAtASTzlg+eehaQkFCQ8G0KBpDyEJAghDoGEBIPC9YWipQ2FgYWixQ2FgWxycRdjYACDwvQAgAkDvzauJBQQDAr+unYwWFRQTVVUAAAAwAED/DwAAqqoAAAAAAAA=",
