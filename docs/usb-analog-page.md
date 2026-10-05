@@ -6,7 +6,7 @@
 
 - 单次、有限次数和连续采集；周期由 probe GPTMR1 通道 1 驱动，网页只取结果。
 - 输出位宽 8/10/12/16 bit。硬件保持 16 bit，较低位宽截取高位；这是输出量化，**没有实现硬件转换分辨率切换**。避免改变 akaLinkPro 共用的 VREF 检测配置。
-- 目标速率 1/60–1000 Sa/s，周期四舍五入为整数毫秒。1000 Sa/s 是可请求的调度上限，不是 HID 持续吞吐保证。缓冲满后明确停止；高采样率必须板测。
+- 目标速率 1/60–1000 Sa/s，周期四舍五入为整数毫秒。控制走 HID，样本走专用 WebUSB Bulk IN 0x8C（HS MPS 512），不再逐样本通过 HID READ/ACK。1000 Sa/s 仍是调度上限，持续吞吐必须板测。首次采集需要授权同一台探针的 WebUSB。
 - EVKLite：PB11 / ADC0.3，复用 SPI2 引脚。采样期间固件禁止 SPI 重配；ADC 开始时要求 SPI 已关闭，网页协调器释放 SPI 会话。
 - akaLinkPro：PB10 / ADC0.2，**现有 VREF 的 10k/10k 分压输入**，换算乘二。不是新开放的通用 ADC 引脚，不能把 LED、电源控制或调试脚当 ADC 输入。
 - ADC 内部满量程参考默认 3.3 V，可输入实测参考值作电压换算；这不改变硬件参考，也不扩大允许输入范围。
@@ -37,6 +37,10 @@ CSV 只是数据文件，不代表硬件已输出，也不是已验证的循环 
 ## 固件契约
 
 - HID 0x38，action 0（CAPS），请求标准 req[1]=2。
+- HID 最大包长仍为 64 bytes，报告 ID 保持 1/2/3；HS bInterval=6（4 ms），非 4 个微帧。RTT/JScope 端点不变。
+- 0x38 action 9/10/11/12：Bulk CAPS/OPEN/END/CLOSE。OPEN 返回 u32 任务代数；先开始 USB 读取再启动周期程序，停止时先停止周期程序，再 END、读完 END 包、CLOSE。未确认停止保留资源占用。
+- Bulk 帧：`ADC1`、version:u8=1、type:u8（1 DATA/2 END）、count:u8、stride:u8=26、token:u32 LE、fault:u32 LE。DATA 后接最多 19 条记录，沿用周期结果的 24 字节元信息，再接 2 字节 ADC 码值。END count=0。最长 510 bytes，短包结束 USB 读取，不需额外 ZLP。
+- 固件沿用 32 条结果队列；DMA 完成后才移除记录，满时停止且报错，不覆盖。网页单个挂起读取，校验任务代数与连续序号，缓冲上限 2048 条。新增 Windows WinUSB 接口绑定和 EP0 描述符缓冲容量。
 - 响应长度 res[1]=20，res[4..7] u32 状态（0 成功，1 参数错误）。
 - res[8..19]：ANA1 ASCII，channel:u8、native_bits:u8=16、input_gain:u8、physical_dac:u8=0、reference_mv:u16、max_requested_rate:u16=1000。
 - HID 0x37 周期程序扩展 bus/kind=4（ADC）；payload 为 channel:u8、output_bits:u8。结果为右对齐 u16 LE 码值。

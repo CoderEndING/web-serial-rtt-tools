@@ -61,10 +61,23 @@ try {
   const analog = new AnalogSession();
   let adcAdvanced = false;
   analog.hid = { connected:true, async xfer(cmd,data){
+    if(cmd===0x38){
+      const payload=data[0]===9?Uint8Array.of(65,68,66,49,0x8c,1,0,2):data[0]===10?Uint8Array.of(1,0,0,0):new Uint8Array();
+      return Uint8Array.of(8+payload.length,cmd,data[0],0,0,0,0,...payload);
+    }
     if(data[0]===6 && !adcAdvanced){adcAdvanced=true;await send('T 25');}
     return xfer(cmd,data);
   }};
   analog.caps = {channel:3,nativeBits:16,gain:1,reference:3.3,maxRate:1000};
+  // Simulated bulk sink fed by production periodic records; physical producer is
+  // covered separately by adc_stream_host_test.py (HID READ is forbidden there).
+  const adcClient=new BusPeriodicClient(xfer);
+  analog.transport={rows:[],done:false,start(){this.done=false;},async read(){
+    if(!adcAdvanced){adcAdvanced=true;await send('T 25');}
+    const r=await adcClient.read();
+    if(!r){const s=await adcClient.status();this.done=!s.active&&!s.queued;}
+    return r;
+  },async drain(){this.done=true;}};
   const samples=[];
   await analog.acquire({bits:16,rate:100,count:3},r=>samples.push(r));
   assert.deepEqual(samples.map(r=>r.cycle),[1,2,3]);

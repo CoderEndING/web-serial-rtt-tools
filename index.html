@@ -1921,6 +1921,7 @@
       <fieldset><legend>ADC · probe 定时采集</legend>
         <div class="row btnrow"><button id="an-connect" class="primary">连接探针</button><button id="an-disconnect">断开</button></div>
         <p id="an-channel">连接后识别板型和可用输入</p>
+        <p class="hint">配置走 HID；ADC 数据走独立 WebUSB Bulk IN 0x8C。首次采集请在 WebUSB 授权框中选择同一台探针（桌面 Chrome/Edge）。</p>
         <label class="row"><span>输出位宽</span><select id="an-bits"><option>8</option><option>10</option><option>12</option><option selected>16</option></select></label>
         <p class="hint">ADC 硬件固定 16 bit，低位宽为截取高位，不改变 VREF 检测配置。</p>
         <label class="row"><span>采样率 Sa/s</span><input id="an-rate" type="number" min="0.0166666667" max="1000" step="any" value="100"></label>

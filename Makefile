@@ -80,6 +80,7 @@ grant:
 # ---------------------------------------------------------------- 自测
 test: test-stability test-dbg-features test-board-matrix test-random-flow
 	$(NODE) tools/selftest/analog.test.mjs
+	$(NODE) tools/selftest/adc-transport.test.mjs
 	$(NODE) tools/selftest/dac-protocol.test.mjs
 	$(NODE) tools/selftest/rtt.test.mjs
 	$(NODE) tools/selftest/gen-parity.mjs
