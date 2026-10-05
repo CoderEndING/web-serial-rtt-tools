@@ -126,6 +126,19 @@ Og/DWARF5 的早期 20 轮复测曾在一个检查点误停到 `SysTick_Handler`
 递归压力中的 M7 误停恢复次数保存在报告 `frameResults[0].pressureM7ErratumRecoveries` 字段；两次均为1次，
 保存的事件 PC 是 `SysTick_Handler`，DFSR.BKPT、目标 FPB 和异常栈保存的检查点地址均匹配。
 
+## 2026-10-06 补充：F103CB ARM 构建矩阵
+
+2026-10-06 约 05:19（北京时间），用 `stm32f103_dbgstress/build.ps1` 为 F103CB 构建了四种优化级别与 DWARF 组合。四个构建均成功，`engine_frame_leaf`、`engine_frame_recursive`、`engine_frame_migrate`、`engine_frame_register` 等检查点符号齐全；Og 镜像 text/data/bss 为 10016/100/784 B，Os 为 9720/100/784 B，均适配 F103CB 容量。
+
+| 配置 | 构建目录 | ELF SHA-256 | ELF / BIN 大小 |
+|---|---|---|---:|
+| Og / DWARF4 | `build-cb-og` | `7d1c9593df06e1348c90cb4c9a9df82369c2437d1a834f2fd8fca9932b2a70e1` | 187952 / 10116 B |
+| Os / DWARF4 | `build-cb` | `e6054e6572a43f55640cbaadcd219e3366a543323f2aaf0175969cae62c76b9f` | 189280 / 9820 B |
+| Og / DWARF5 | `build-cb-dw5-og` | `4897e19e3131a84ffeddfd031dd6b41947849ed803592fcfe0628229a5bf7d17` | 185912 / 10116 B |
+| Os / DWARF5 | `build-cb-dw5` | `6780a13c3770bc1d0d70559bc7285dfa7d0a09996c02988167082889dd874cad` | 186924 / 9820 B |
+
+这只是 ARM 交叉编译和 ELF/符号检查，不算 F103CB 板上验收。本轮接着的是 H743；板卡 ID 检查确认芯片为 H743 后，F103CB 烧录流程按预期拒绝继续，因此没有把 CB 固件写进 H743。F103CB Og/DWARF4 的实板流程仍需在 CB 接回后依次烧录该目录镜像、采集匹配 ELF 的 GDB oracle，再运行严格 Web 验收。
+
 ## 离线检查及验证边界
 
 - `make test-dbg-features`：真实既有 ARM ELF解析、变量/帧命令、对照契约和错误答案检测；浏览器/会话替身还检查压力流程、
@@ -137,8 +150,9 @@ Og/DWARF5 的早期 20 轮复测曾在一个检查点误停到 `SysTick_Handler`
 
 本次本地也通过 `node tools/selftest/dbg-frame-contract.test.mjs` 和
 `node tools/selftest/dbg-frame-hw-runner.test.mjs`；后者覆盖 M7 误停证据完整时恢复，
-以及异常栈 PC 或 DFSR 证据不完整时拒绝恢复。板上验收仅覆盖本节所列 H743 构建，
-F103CB 等其他板型仍需按上面的流程各自构建、采集 GDB oracle 和实测。
+以及异常栈 PC 或 DFSR 证据不完整时拒绝恢复。H743 已完成本节所列板上验收；F103CB 的四种
+ARM 构建已完成，但仍需在对应实板上采集 GDB oracle 并实测。其他板型也必须使用各自新构建的
+ELF、匹配的 oracle 和板上运行结果。
 
 GDB API依据：
 [Frames](https://sourceware.org/gdb/current/onlinedocs/gdb.html/Frames-In-Python.html)、
