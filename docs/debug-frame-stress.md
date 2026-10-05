@@ -144,6 +144,12 @@ Og/DWARF5 的早期 20 轮复测曾在一个检查点误停到 `SysTick_Handler`
 
 这只是 ARM 交叉编译和 ELF/符号检查，不算 F103CB 板上验收。本轮接着的是 H743；板卡 ID 检查确认芯片为 H743 后，F103CB 烧录流程按预期拒绝继续，因此没有把 CB 固件写进 H743。F103CB Og/DWARF4 的实板流程仍需在 CB 接回后依次烧录该目录镜像、采集匹配 ELF 的 GDB oracle，再运行严格 Web 验收。
 
+## 2026-10-06 补充：HPM6800EVK 的 RISC-V 栈帧验证边界
+
+2026-10-06 06:56–07:02（北京时间），HPM6800EVK 的 `make full_flow_6800evk` 完成；固定 RISC-V 调试压力 57/0，随机切换中的调试阶段 53/0。固定流程覆盖源码定位、断点、单步、复位、内存读写和 40 轮停—走—停；另有 RISC-V GDB 指令单步/行断点对照。详细数据见[真机测试记录](validation/2026-10-05-hardware-test-results.md)。
+
+这不等价于本文件中 H743 的栈帧验收：当前 `app/dbg/backtrace.js` 对非 ARM 架构会明确返回“仅支持 Cortex-M DWARF CFI / EHABI”，RISC-V 的 `bt` 只能用 `bt scan` 查看候选地址。因而 RISC-V 尚未验证可靠 CFI 展开、递归栈帧局部变量和优化位置迁移，也未构建/验收 Og/Os × DWARF4/5 矩阵。后续需先补 RISC-V DWARF CFI 与寄存器位置解析，再为 HPM 固件构建每个配置、采集匹配的 RISC-V GDB oracle，最后逐项进行板上压力测试；在此之前只报告已经通过的基本调试器压力结果。
+
 ## 离线检查及验证边界
 
 - `make test-dbg-features`：真实既有 ARM ELF解析、变量/帧命令、对照契约和错误答案检测；浏览器/会话替身还检查压力流程、
