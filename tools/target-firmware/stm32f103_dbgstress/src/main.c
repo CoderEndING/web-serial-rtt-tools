@@ -10,7 +10,7 @@
  *   ② 没有 FPU、没有 D-Cache（Cortex-M3）：`double` 走软件浮点，探针走 AHB-AP 读到的
  *      就是真内存 —— 监视窗口"看到的值 == CPU 刚写进去的值"在 M3 上是天然成立的。
  *
- * 主循环是个 11 段的流水线：每轮把每一段都跑一遍，`g_stage` 就是"现在在第几段"。
+ * 主循环是个 12 段的流水线：每轮把每一段都跑一遍，`g_stage` 就是"现在在第几段"。
  * 这样任何一段下断点都会**每轮必命中**，而且停下来一眼能看出停在哪一段。
  *
  * 两个中断：
@@ -32,7 +32,7 @@
 #define TICK_HZ     10000u
 #define PENDSV_EVERY 1000u             /* 每 1000 tick 触发一次 PendSV（10 Hz） */
 
-#define STAGE_COUNT 11u
+#define STAGE_COUNT 12u
 
 volatile uint32_t g_ticks;             /* SysTick 计数（ISR 里 ++） */
 volatile uint32_t g_pendsv_count;      /* PendSV 计数 */
@@ -79,6 +79,7 @@ static uint32_t stage_run(uint32_t s)
     case 7:  return engine_branchy(g_loops);                           /* 分支/循环/switch */
     case 8:  return engine_uses_inline(g_loops);                       /* 内联 */
     case 9:  model_bitfield_touch(g_loops); return g_model.flags.word; /* 位域 */
+    case 11: return engine_frame_stage();                          /* deterministic locals / frames */
     default: return model_update(g_loops);                             /* 结构体全量更新 */
   }
 }

@@ -34,10 +34,13 @@
  * 这是"和 MDK/gdb 一个水平"这句话的硬证据。
  */
 import { Cdp, sleep, DEV_RE } from './cdp-lib.mjs';
-import { writeFileSync, existsSync, readFileSync, readdirSync } from 'node:fs';
+import { writeFileSync, existsSync, readFileSync, readdirSync, mkdirSync } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { artifact } from './board-matrix.mjs';
+import { readJson,validateOracle } from './dbg-frame-contract.mjs';
+import { Elf } from '../../app/elf/elf.js';
+import { runFrameStress } from './dbg-frame-hw-runner.mjs';
 
 const argv = process.argv.slice(2);
 const arg = (k, d = null) => { const h = argv.find(a => a.startsWith('--' + k + '=')); return h ? h.split('=').slice(1).join('=') : (argv.includes('--' + k) ? true : d); };
@@ -93,7 +96,7 @@ if (!BOARD) throw new Error(`--board 只认 ${Object.keys(BOARDS).join(' / ')}�
 const APP = 'http://127.0.0.1:8899/index.html';
 const ELF = String(arg('elf', BOARD.elf));
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
-const SRCDIR = String(arg('src', resolve(ROOT, BOARD.src)));
+const SRCDIR = String(arg('src', resolve(ROOT, BOARD.src.replaceAll('\\','/'))));
 const SRC_ENGINE = join(SRCDIR, 'engine.c');
 /**
  * 页面侧拿源码只能走**静态服务**（8899 的根 = 仓库根），所以把磁盘路径换算成 URL 路径。
@@ -105,6 +108,19 @@ const SRC_HTTP = '/' + SRC_REL.split(sep).join('/');
 const SRC_NAMES = readdirSync(resolve(SRCDIR)).filter(f => /\.(c|h)$/i.test(f)).sort();
 const ORACLE = String(arg('oracle', BOARD.oracle));
 const JSON_OUT = String(arg('out', BOARD.out));
+const FRAME_ONLY=!!arg('frames-only',false),FRAME_ORACLE=arg('frame-oracle');
+const FRAME_ROUNDS=Number(arg('frame-rounds',200));
+if(!Number.isInteger(FRAME_ROUNDS)||FRAME_ROUNDS<1||FRAME_ROUNDS>2000)throw new Error('--frame-rounds 必须为1..2000');
+let frameOracle=null,frameBuild=null,frameCode=[];
+if(FRAME_ONLY||arg('require-frame-oracle')||FRAME_ORACLE){
+ if(!FRAME_ORACLE)throw new Error('发布栈帧验收必须指定 --frame-oracle');
+ const elfDisk=resolve(ROOT,ELF.replace(/^\//,'')),bytes=readFileSync(elfDisk);
+ frameBuild=readJson(join(dirname(elfDisk),'build-info.json'));frameOracle=readJson(String(FRAME_ORACLE));
+ validateOracle(frameOracle,frameBuild,bytes,BOARD_ID);
+ const image=new Elf(new Uint8Array(bytes));frameCode=image.sections().filter(s=>(s.flags&2)&&!(s.flags&1)&&s.type===1&&s.addr>=0x08000000&&s.addr<0x09000000).map(s=>({name:s.name,addr:s.addr,bytes:[...image.data(s.name)]}));
+ if(!FRAME_ONLY)throw new Error('栈帧验收会验证断开清理；请使用 --frames-only，既有综合验收另行执行');
+}
+
 /** SWD 时钟（kHz）：默认取板子档案；`--clock=5000` 可覆盖（排"是链路还是代码"时用） */
 const CLOCK_KHZ = Number(arg('clock', BOARD.clockKhz || 10000));
 setTimeout(() => { console.error('[WATCHDOG] 25 分钟'); process.exit(9); }, 1500000);
@@ -326,6 +342,7 @@ await cdp.eval(`
  * 并把次数记进 `window.__faulWrap.n`（收尾打出来 —— 悄悄重试等于把问题藏了）。
  */
 await cdp.eval(`
+  if (${JSON.stringify(FRAME_ONLY)}) return true;
   const S = window.__tools.dbg.session;
   if (!window.__faultWrap){
     window.__faultWrap = { n: 0, which: {} };
@@ -390,6 +407,11 @@ const elfInfo = await cdp.json(`(async () => {
       const rr = await fetch(${JSON.stringify(SRC_HTTP)} + '/' + n + '?t=' + Date.now());
       if (!rr.ok) return { err: '源码 ' + n + ' 取不到：HTTP ' + rr.status + '（' + ${JSON.stringify(SRC_HTTP)} + '，检查 --src 是否在仓库里）' };
       files.push(new File([await rr.text()], n));
+    }
+    if(${JSON.stringify(FRAME_ONLY)}){
+      const rr=await fetch('/tools/target-firmware/common/dbg_frames.c?t='+Date.now());
+      if(!rr.ok)return {err:'共享栈帧源码读取失败'};
+      files.push(new File([await rr.text()],'dbg_frames.c'));
     }
     await d._indexSrcFiles(files);
     return { summary: st.summary(), lines: st.lines ? st.lines.summary() : null, src: d.src.summary(), srcReady: d.src.ready };
@@ -490,6 +512,17 @@ ok(env.leak.used === 0 && env.leak.bps === 0, '干净起点：没有任何断点
 
 /** 采集到的"标准答案"，用来跟 gdb 对照 */
 const oracle = { elf: ELF, linear: [], bpAddr: {}, steps: {}, struct: {}, resetVec: RESET_VEC };
+
+if(FRAME_ONLY){
+ const frameResults=await runFrameStress({cdp,oracle:frameOracle,code:frameCode,board:BOARD_ID,rounds:FRAME_ROUNDS,ok,log});
+ const recov=await cdp.eval('return window.__S.recoveries || [];');
+ ok(recov.length===0,'严格栈帧验收期间没有目标意外复位/恢复',JSON.stringify(recov));
+ const heals=await cdp.eval('return window.__faultWrap?.n || 0;');
+ ok(heals===0,'严格栈帧验收期间没有隐藏的传输重试',String(heals));
+ mkdirSync(dirname(resolve(JSON_OUT)),{recursive:true});
+ writeFileSync(JSON_OUT,JSON.stringify({at:new Date().toISOString(),board:BOARD_ID,elf:ELF,elfSha256:frameOracle.elfSha256,build:frameBuild,pass,fail,failures,frameResults},null,2));
+ cdp.close();console.log(`栈帧验收：${pass} 通过 / ${fail} 失败；${JSON_OUT}`);process.exit(fail?1:0);
+}
 
 // ==================================================================== 1
 sec('== 1. 断点：文件:行 / 符号 / static / 偏移 / 多断点 / ISR ==');

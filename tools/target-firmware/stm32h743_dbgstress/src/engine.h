@@ -37,4 +37,7 @@ uint32_t engine_branchy(uint32_t n);
 static inline uint32_t engine_inline_double(uint32_t v){ return v * 2u + 1u; }
 uint32_t engine_uses_inline(uint32_t v);
 
+/* Deterministic stack/locals acceptance stage (shared common/dbg_frames.c). */
+uint32_t engine_frame_stage(void);
+
 #endif /* ENGINE_H */

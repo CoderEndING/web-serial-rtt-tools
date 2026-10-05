@@ -156,6 +156,8 @@ test-dbg-features:
 	$(NODE) tools/selftest/dbg-dwt.test.mjs
 	$(NODE) tools/selftest/dbg-backtrace.test.mjs
 	$(NODE) tools/selftest/dbg-frame-locals.test.mjs
+	$(NODE) tools/selftest/dbg-frame-contract.test.mjs
+	$(NODE) tools/selftest/dbg-frame-hw-runner.test.mjs
 	$(NODE) tools/selftest/dbg-watch-bt-ui.test.mjs
 	$(NODE) tools/selftest/dbg-svd.test.mjs
 
@@ -660,3 +662,28 @@ test-analog:
 .PHONY: test-analog-wire
 test-analog-wire:
 	$(NODE) tools/selftest/analog-wire.test.mjs
+
+# Selected-frame/locals release gate: a matching independently collected GDB oracle is required.
+FRAME_BOARD ?= f103cb
+FRAME_ELF ?= /tools/target-firmware/stm32f103_dbgstress/build-cb-og/fw.elf
+FRAME_ORACLE ?= tmp/frame-oracle-$(FRAME_BOARD).json
+FRAME_REMOTE ?= 127.0.0.1:3333
+FRAME_GDB ?= arm-none-eabi-gdb
+FRAME_ROUNDS ?= 200
+.PHONY: build-dbg-frames-f103cb dbg-frame-oracle test-dbg-frames test-dbg-frame-native test-dbg-frame-gdb
+build-dbg-frames-f103cb:
+	pwsh -NoProfile -File tools/target-firmware/stm32f103_dbgstress/build.ps1 -Board cb -Optimization Og $(ARGS)
+
+dbg-frame-oracle:
+	$(NODE) tools/selftest/dbg-frame-gdb-oracle.mjs --board="$(FRAME_BOARD)" --elf="$(patsubst /%,%,$(FRAME_ELF))" --remote="$(FRAME_REMOTE)" --gdb="$(FRAME_GDB)" --out="$(FRAME_ORACLE)" $(ARGS)
+
+test-dbg-frames:
+	$(NODE) tools/selftest/dbg-frame-gdb-oracle.mjs --validate-only --board="$(FRAME_BOARD)" --elf="$(patsubst /%,%,$(FRAME_ELF))" --out="$(FRAME_ORACLE)"
+	$(MAKE) page-prep
+	$(NODE) tools/selftest/dbg-hw-stress.mjs --board="$(FRAME_BOARD)" --elf="$(FRAME_ELF)" --frames-only --require-frame-oracle --frame-oracle="$(FRAME_ORACLE)" --frame-rounds="$(FRAME_ROUNDS)" $(ARGS)
+
+test-dbg-frame-native:
+	$(NODE) tools/selftest/dbg-frame-contract.test.mjs --native
+
+test-dbg-frame-gdb:
+	python tools/selftest/dbg-frame-gdb.test.py

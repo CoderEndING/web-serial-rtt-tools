@@ -19,12 +19,13 @@
 
   产物保证带 **DWARF + .symtab**（-g3 且不 strip）—— 页面的符号/行号/类型全靠它。
 #>
-param([switch]$Clean, [switch]$Dwarf5)
+param([ValidateSet('Os', 'Og')][string]$Optimization = 'Os', [switch]$Clean, [switch]$Dwarf5)
 
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
 
 $outName = if ($Dwarf5) { 'build-dw5' } else { 'build' }
+if ($Optimization -ne 'Os') { $outName += '-' + $Optimization.ToLower() }
 $build = Join-Path $root $outName
 $ldpath = Join-Path $root 'ld\stm32h743.ld'
 if (-not (Test-Path $ldpath)) { throw "找不到链接脚本 $ldpath" }
@@ -46,14 +47,15 @@ $sources = @(
   (Join-Path $root 'src\main.c'),
   (Join-Path $root 'src\engine.c'),
   (Join-Path $root 'src\model.c'),
-  (Join-Path $root 'src\startup.c')
+  (Join-Path $root 'src\startup.c'),
+  (Join-Path $root '..\common\dbg_frames.c')
 )
 $elf = Join-Path $build 'fw.elf'
 
 # 参数一律加引号并用数组 splat（PowerShell 会把 -specs=nano.specs 按点号拆成两段）
 $cflags = @(
   '-mcpu=cortex-m7', '-mthumb', '-mfpu=fpv5-d16', '-mfloat-abi=hard',
-  '-Os', '-g3',
+  ('-' + $Optimization), '-g3', '-fasynchronous-unwind-tables',
   '-ffunction-sections', '-fdata-sections', '-fno-common',
   '-Wall', '-Wextra', '-Wno-unused-parameter',
   "-I$root\src",
@@ -66,6 +68,18 @@ $cflags += if ($Dwarf5) { '-gdwarf-5' } else { '-gdwarf-4' }
 
 & $gcc @cflags @sources -o $elf
 if ($LASTEXITCODE -ne 0) { throw "编译失败 (exit $LASTEXITCODE)" }
+
+# Bind the oracle to the exact ELF, compiler flags and shared-source content.
+$sourceHashes = @{}
+foreach ($source in $sources) { $sourceHashes[(Split-Path -Leaf $source)] = (Get-FileHash $source -Algorithm SHA256).Hash.ToLower() }
+$buildInfo = @{
+  schema = 1; board = 'h743'; optimization = $Optimization
+  dwarf = $(if ($Dwarf5) { 5 } else { 4 })
+  elfSha256 = (Get-FileHash $elf -Algorithm SHA256).Hash.ToLower()
+  compiler = ((& $gcc --version | Select-Object -First 1) -join '')
+  flags = $cflags; sources = $sourceHashes
+}
+$buildInfo | ConvertTo-Json -Depth 8 | Set-Content -Encoding utf8 (Join-Path $build 'build-info.json')
 
 $binout = Join-Path $build 'fw.bin'
 $hexout = Join-Path $build 'fw.hex'
