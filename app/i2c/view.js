@@ -811,10 +811,10 @@ export class I2cView {
           const chunkTxt = e.chunks > 1 ? `（共 ${e.data?.length ?? 0} B · 分 ${e.chunks} 笔）` : '';
           const hexTxt = abbreviateHex(e.hex, e.chunks > 1 ? 12 : 0);
           parts.push([valTxt, hexTxt, chunkTxt].filter(Boolean).join('  '));
-          parts.push(`${(e.ms || 0).toFixed(1)} ms`);
+          parts.push(e.timeMs == null ? `${(e.ms || 0).toFixed(1)} ms` : 'probe 定时');
         } else parts.push('✗ ' + errText(e.err) + (e.failNote ? `（${e.failNote}）` : ''));
         this._setResult(row, parts.join(' · '), ok ? 'ok' : 'bad');
-        if (ok && e.values?.length) for (const v of e.values) this._pushLive(v);
+        if (ok && e.values?.length) for (const v of e.values) this._pushLive(v, e.timeMs);
         break;
       }
       case 'tick': {
@@ -879,11 +879,14 @@ export class I2cView {
     $('i2-live-spark').addEventListener('change', () => this._renderLive());
   }
 
-  _pushLive(v){
+  _pushLive(v, timeMs){
     if (!Number.isFinite(v.value)) return;
-    const now = performance.now();
+    const clock = timeMs == null ? 'host' : 'probe';
     let e = this.live.get(v.name);
-    if (!e){ e = { name: v.name, last: v.value, min: Infinity, max: -Infinity, n: 0, t0: now, tLast: now, buf: [] }; this.live.set(v.name, e); }
+    if (e?.clock !== clock) e = null;
+    const now = timeMs == null ? performance.now() : e ? e.tLast + ((timeMs - e.rawTime) >>> 0) : timeMs;
+    if (!e){ e = { name: v.name, clock, last: v.value, min: Infinity, max: -Infinity, n: 0, t0: now, tLast: now, buf: [] }; this.live.set(v.name, e); }
+    e.rawTime = timeMs;
     e.last = v.value;
     if (v.value < e.min) e.min = v.value;
     if (v.value > e.max) e.max = v.value;

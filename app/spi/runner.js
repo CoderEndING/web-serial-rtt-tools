@@ -4,26 +4,25 @@
  * 输入是 `frames-dsl.js` 的解析结果：
  *   · **没有周期**的帧 = 一次性：开跑先按顺序各发一遍；
  *   · **有周期**的帧 = 定时组（同一次 `loop`/`every` 块里的帧同属一组，共用周期与轮数）。
- *     每组是一个独立的定时器，到点就把这一组的帧**一次 `sendFrames` 发出去**，
- *     然后把每帧的读回数据交给它自己的 `as` 表达式解码 → 广播成"实时值"。
+ *     真机通过 BPT1 一次上传，由 probe 定时器执行；假探针才由浏览器逐拍 sendFrames。
+ *     每帧读回数据交给自己的 as 表达式解码。
  *
- * 三条口径（都是从 I2C 侧实测学来的，别改回去）：
- *   1. **发送才是节拍器，但"只晚不丢"**：到点发帧、再按下一次的目标时刻算等待；某拍拖到超过一个周期时
- *      这一拍**照样跑**（只把"迟了多少"记进 `late` 与日志）。丢拍等于悄悄少一个采样点 —— 比晚一点坏得多。
+ * 三条口径：
+ *   1. 真机错过节拍会计数并跳过，不补跑；结果队列满会停采。假探针保留只晚不丢的模拟。
  *      轮数（`loop … 3`）按**成功采样**算，一次失败的发送不吃掉用户要的那一轮。
- *   2. **周期用定时器、不用 pace.waitMs**：周期本来就是"至少等这么久"，页面被切到后台
- *      被钳到 1 s 只是采样变慢（面板上显示**实测频率**，看得见）。真正的短等待（重试/握手）
- *      才用 `pace.waitMs`。
+ *   2. 真机周期和延时由 MCU 驱动，网页等待只控制结果读取；实测频率用 probe 时间戳。
+ *      假探针周期仍使用浏览器定时器。
  *   3. **解码偏移是"这一帧自己的读数据"**：SPI 一次 xfer 通常就是一个寄存器/一次转换，
  *      把偏移定义在整组拼起来的大缓冲上会算不清（I2C 那边是"一次逻辑读"，语义不同）。
  */
 import { applyAs } from '../core/expr.js';
 import { waitMs } from '../core/pace.js';
 import * as P from './protocol.js';
+import { BUS, delayRecord, program } from '../core/bus-periodic.js';
 
 export class SpiRunner {
   /**
-   * @param {object} session SpiSession（只用它的 sendFrames）
+   * @param {object} session SpiSession（一次性 sendFrames、周期 runPeriodic）
    * @param {{onEvent?:(e:object)=>void}} opts
    */
   constructor(session, { onEvent } = {}){
@@ -51,6 +50,7 @@ export class SpiRunner {
    */
   async start(parsed){
     if (this.running) this.stop('重新开始');
+    if (this._probeTask) await this._probeTask;
     if (!SpiRunner.runnable(parsed)){
       this._emit({ type: 'error', msg: parsed?.errors?.length ? '脚本有语法错，先修好再跑' : '没有可发的帧' });
       return false;
@@ -74,6 +74,11 @@ export class SpiRunner {
     }
     this._emit({ type: 'start', oneShots: once.length, groups: groups.size, items: parsed.items.length,
                  vars: parsed.stats?.vars || [] });
+    let probeGroups = null;
+    try {
+      if (groups.size && this.session.runPeriodic && !this.session.usingMock)
+        probeGroups = this._probeGroups([...groups.values()]);
+    } catch (e){ this._emit({ type: 'error', msg: e.message }); this.stop('任务不支持'); return false; }
     // 一次性部分：先跑完再启动定时（"先认片子再采样"的顺序语义）
     if (once.length){
       const r = await this._send(once, null, generation);
@@ -87,7 +92,11 @@ export class SpiRunner {
       return true;
     }
     // 每组一个定时器；用"目标时刻 + 序号"算下一拍，避免漂移累积
-    for (const grp of groups.values()) this._startGroup(grp, generation);
+    if (probeGroups){
+      const p = this._runProbe(probeGroups, generation);
+      this._probeTask = p;
+      p.finally(() => { if (this._probeTask === p) this._probeTask = null; });
+    } else for (const grp of groups.values()) this._startGroup(grp, generation);
     this._emit({ type: 'running', groups: groups.size });
     return true;
   }
@@ -102,6 +111,54 @@ export class SpiRunner {
     this._activeGroups.clear();
     this.running = false;
     this._emit({ type: 'stop', reason, stat: { ...this.stat } });
+  }
+
+  _probeGroups(groups){
+    return groups.map(g => {
+      const records = g.items.map(it => {
+        if (it.type === P.T.DELAY) return { ...delayRecord(new DataView(it.payload.buffer, it.payload.byteOffset, it.payload.byteLength).getUint32(0, true)), item: it };
+        if (![P.T.XFER, P.T.CS, P.T.GPIO, P.T.PING, P.T.AUX_IN].includes(it.type))
+          throw Error('probe 周期组支持 XFER/CS/GPIO/PING/AUX_IN/延时；初始化步骤请放到一次性部分');
+        if (it.type === P.T.XFER && new DataView(it.payload.buffer, it.payload.byteOffset, it.payload.byteLength).getUint16(6, true) > 54)
+          throw Error('probe 周期任务每帧最多读取 54 B');
+        return { kind: BUS.SPI, data: P.frame(it.type, it.payload, { flags: it.flags }), item: it };
+      });
+      program(records);
+      return { ...g, records, lastResult: records.findLastIndex(r => r.kind !== BUS.DELAY), values: [], failed: false };
+    });
+  }
+  async _runProbe(groups, generation){
+    try {
+      this.session.log('i', '周期由 probe 定时器驱动；网页只读取结果', 'bus');
+      await this.session.runPeriodic(groups, {
+        shouldStop: () => this.stopping || generation !== this._generation,
+        onResult: (r, g) => {
+          if (generation !== this._generation || this.stopping) return;
+          const it = g.records[r.step].item;
+          if (g.cycle !== r.cycle){ g.cycle = r.cycle; g.values = []; g.failed = false; }
+          this.stat.sent++;
+          if (r.err){
+            g.failed = true; this.stat.errors++;
+            this._emit({ type: 'error', group: g.group, msg: `${it.label || '帧'}：${P.ST_TEXT[r.err] || r.err}` });
+          } else if (it.as?.length){
+            const a = applyAs({ ok: true, fields: it.as, hexOnly: false }, r.data);
+            g.values.push(...a.values);
+            if (a.warn) this._emit({ type: 'warn', group: g.group, msg: a.warn });
+          }
+          if (r.step === g.lastResult){
+            if (g.values.length) this._emit({ type: 'values', group: g.group, values: g.values, timeMs: r.timeMs });
+            if (!g.failed){
+              this.stat.ticks++; this.stat.lastTick = performance.now();
+              this._emit({ type: 'tick', group: g.group, n: r.cycle, stat: { ...this.stat }, timeMs: r.timeMs, timing: 'probe' });
+            }
+            this.stat.late += Math.max(0, r.skipped - (g.skipped || 0)); g.skipped = r.skipped;
+          }
+        },
+      });
+      if (generation === this._generation) this.stop('probe 定时任务结束');
+    } catch (e){
+      if (generation === this._generation){ this._emit({ type: 'error', msg: e.message }); this.stop('probe 采集失败'); }
+    }
   }
 
   _startGroup(grp, generation){

@@ -106,6 +106,10 @@ test: test-stability test-dbg-features test-board-matrix test-random-flow
 # 离线总入口：先做语法/液体页面检查，再跑纯 Node 自测；不打开浏览器、不碰探针。
 test-offline: check test
 
+.PHONY: test-bus-periodic
+test-bus-periodic:
+	$(NODE) tools/selftest/bus-periodic.test.mjs
+
 # 板卡/例程唯一清单的静态检查；发现路径漂移时在进入真机流程前就失败。
 test-board-matrix:
 	$(NODE) tools/selftest/board-matrix.test.mjs

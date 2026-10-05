@@ -20,6 +20,7 @@ import * as P from './protocol.js';
 import { WebUsbSpiTransport, MockSpiTransport } from './transport.js';
 import { MockSpiProbe } from './mock.js';
 import { runProbeOperation } from '../core/probe-manager.js';
+import { BUS, runSessionPeriodic, stopSessionPeriodic } from '../core/bus-periodic.js';
 
 const POLL_MS = 1000;          // 状态/计数器轮询间隔（观察量，1 s 够）
 const RING_MAX = 400;          // 日志 ring（切页时全量重放用）
@@ -225,6 +226,7 @@ export class SpiSession {
   }
 
   async _teardownNow(){
+    await this.stopPeriodic();
     if (this.pollTimer){ clearInterval(this.pollTimer); this.pollTimer = null; }   // 会话没了就别空转（重连时 ensurePoll 会再拉起）
     try { this.matcher.abortAll('会话结束'); } catch { /* 忽略 */ }
     try {
@@ -254,6 +256,7 @@ export class SpiSession {
   }
 
   async _disableBridge(){
+    await this.stopPeriodic();
     return await this._withHid(async hid => {
       const res = await hid.xfer(P.HID_CMD, P.hidData.enable(false));
       if (res?.length < 7 || res[0] < 8 || res[1] !== P.HID_CMD || res[2] !== P.ACT.ENABLE ||
@@ -276,6 +279,8 @@ export class SpiSession {
     this.busy = !!on;
     this._emit('busy', this.busy);
   }
+  runPeriodic(groups, opts){ return runSessionPeriodic(this, BUS.SPI, groups, opts); }
+  stopPeriodic(){ return stopSessionPeriodic(this); }
 
   // ==================================================================== HID 控制面
 

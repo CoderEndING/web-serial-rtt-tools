@@ -15,8 +15,8 @@
  *
  * ── 两条纪律 ─────────────────────────────────────────────────────────
  *   1. **等待用对原语**（见 core/pace.js）：轮询间隔用 `waitMs`（不受后台限速影响），
- *      循环周期与 `delay` 用定时器 —— 它们本来就是"至少等这么久"，页面切后台被钳到 1 s
- *      只是采样变慢（面板上会显示**实测周期**，看得见），不会把一笔事务算错。
+ *      真机循环周期与 delay 由 probe 定时器执行，网页只取结果；假探针用浏览器模拟。
+ *      真机迟拍计数并跳过，满队列停采，不能把网页到包时间当作采样时间。
  *   2. **停止要立刻响应**：`stop()` 会打断等待中的周期，并把在飞的那一笔等完
  *      （浏览器取消不了已经发出的 USB 传输，硬断只会留下半截状态）。
  *   3. **稳态不刷日志**：一轮 50 ms × 几行的循环 = 每秒几十行，日志环（600 条）十几秒就被
@@ -27,7 +27,8 @@
 
 import { KIND, describeItem } from './dsl.js';
 import { applyAs } from './expr.js';
-import { hexBytes, errText, RD_MAX } from './protocol.js';
+import { hexBytes, errText, RD_MAX, actXfer } from './protocol.js';
+import { BUS, delayRecord, program } from '../core/bus-periodic.js';
 
 /** 定时循环里"前几拍"照常写日志，之后转入静默 —— 见 runner 顶部的说明 */
 const LOUD_TICKS = 2;
@@ -119,6 +120,8 @@ export class ScriptRunner {
     this.session.setBusy(true);
     this._emit({ type: 'start', once: once.length, tasks: tasks.length, label });
     try {
+      const probeGroups = tasks.length && this.session.runPeriodic && !this.session.usingMock
+        ? this._probeGroups(tasks) : null;
       if (once.length){
         this._emit({ type: 'phase', phase: 'once', total: once.length });
         const r = await this._runSequence(once, null);
@@ -127,7 +130,11 @@ export class ScriptRunner {
       }
       if (tasks.length){
         this._emit({ type: 'phase', phase: 'timed', tasks: tasks.length });
-        await Promise.all(tasks.map(t => this._runTask(t)));
+        if (probeGroups) await this._runProbeTasks(probeGroups);
+        else {
+          this.session.log?.('i', '假探针周期由浏览器模拟');
+          await Promise.all(tasks.map(t => this._runTask(t)));
+        }
       }
       return this._finish('done');
     } catch (e){
@@ -135,7 +142,7 @@ export class ScriptRunner {
       return this._finish('error');
     } finally {
       this.running = false;
-      this.session.setBusy(false);
+      if (!this.session._periodic?.client.stopError) this.session.setBusy(false);
     }
   }
 
@@ -143,7 +150,7 @@ export class ScriptRunner {
     const s = this.stats || {};
     const ms = performance.now() - (s.t0 || performance.now());
     this._emit({ type: 'end', why, ms, stats: { ...s, ms } });
-    this.session.setBusy(false);
+    if (!this.session._periodic?.client.stopError) this.session.setBusy(false);
     this.running = false;
     return { why, ms, stats: this.stats };
   }
@@ -184,6 +191,40 @@ export class ScriptRunner {
     this._emit({ type: 'task-end', task, ticks: n });
   }
 
+  _probeGroups(tasks){
+    return tasks.map(task => {
+      const records = task.items.map(it => {
+        if (it.kind === KIND.DELAY) return { ...delayRecord(Math.round(it.ms * 1000)), item: it };
+        if (it.kind !== KIND.XFER || it.rd > RD_MAX)
+          throw Error('probe 周期任务支持读写和延时；扫描及单条超过 54 B 的读请放到一次性部分');
+        return { kind: BUS.I2C, data: actXfer({ dev: it.dev, addr: it.addr, wr: it.wr, rd: it.rd }).subarray(1), item: it };
+      });
+      program(records); // Validate the entire plan before any one-shot write.
+      return { ...task, task, records, lastResult: records.findLastIndex(r => r.kind !== BUS.DELAY) };
+    });
+  }
+  async _runProbeTasks(groups){
+    this.session.log('i', '周期由 probe 定时器驱动；网页只读取结果');
+    for (const g of groups) this._emit({ type: 'task-start', task: g.task });
+    await this.session.runPeriodic(groups, {
+      shouldStop: () => this.signal.stopped,
+      onResult: (r, g) => {
+        if (this.signal.stopped) return;
+        const it = g.records[r.step].item;
+        this._publish(it, g.task, r.cycle, { err: r.err, data: r.data, ms: 0, timeMs: r.timeMs, skipped: r.skipped });
+        if (r.step === g.lastResult){
+          this.stats.ticks++;
+          const elapsed = g.lastTime == null ? null : ((r.timeMs - g.lastTime) >>> 0);
+          this._emit({ type: 'tick', task: g.task, n: r.cycle,
+            actualMs: elapsed ?? g.period, busyMs: 0, late: r.skipped > (g.skipped || 0),
+            timeMs: r.timeMs, skipped: r.skipped, timing: 'probe' });
+          g.lastTime = r.timeMs; g.skipped = r.skipped;
+        }
+      },
+    });
+    for (const g of groups) this._emit({ type: 'task-end', task: g.task });
+  }
+
   /** 跑一条命令，并把结果发出去 */
   async _runOne(it, task, iter = 1){
     if (it.kind === KIND.DELAY){
@@ -214,6 +255,10 @@ export class ScriptRunner {
       : await this.session.transaction(
           { dev: it.dev, addr: it.addr, wr: it.wr, rd: it.rd },
           { label: it.label || describeItem(it), quiet: !loud });
+    this._publish(it, task, iter, r);
+  }
+  _publish(it, task, iter, r){
+    const loud = !task || iter <= LOUD_TICKS;
     let values = [];
     let warn = null;
     if (r.err === 0 && it.as?.fields?.length && r.data.length){
@@ -233,6 +278,7 @@ export class ScriptRunner {
       type: 'item', item: it, task, phase: 'done',
       err: r.err, data: r.data, ms: r.ms, values, warn,
       chunks: r.chunks || 1, failNote: r.failNote || '',
+      timeMs: r.timeMs, skipped: r.skipped,
       hex: hexBytes(r.data),
     });
   }

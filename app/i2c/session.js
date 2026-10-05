@@ -18,6 +18,7 @@ import { MockI2cProbe } from './mock.js';
 import { waitMs } from '../core/pace.js';
 import * as P from './protocol.js';
 import { runProbeOperation } from '../core/probe-manager.js';
+import { BUS, runSessionPeriodic, stopSessionPeriodic } from '../core/bus-periodic.js';
 
 const RING_MAX = 600;          // 日志环（切页时全量重放用）
 const POLL_MS = 1500;          // STATUS 轮询间隔（观察量，1.5 s 够）
@@ -163,6 +164,7 @@ export class I2cSession {
   }
 
   async _disconnectNow(){
+    await this.stopPeriodic();
     this.stopPoll();
     this._closing = true;
     await Promise.allSettled([this._connectPromise, this._reacquirePromise].filter(Boolean));
@@ -176,6 +178,7 @@ export class I2cSession {
   }
 
   async _disableRealBridge(){
+    await this.stopPeriodic();
     if (this.hid && !this.usingMock){
       // Closing WebHID alone leaves firmware enabled and PA28/29 owned by I2C.
       // A timed-out operation can still be pending in firmware; wait for ENABLE=0.
@@ -255,6 +258,8 @@ export class I2cSession {
 
   /** 排队发一条命令（页面上的按钮 / 轮询走这条）*/
   _cmd(data, timeout = 3000){ return this._enqueue(() => this._rawCmd(data, timeout)); }
+  runPeriodic(groups, opts){ return runSessionPeriodic(this, BUS.I2C, groups, opts); }
+  stopPeriodic(){ return stopSessionPeriodic(this); }
 
   /**
    * 一次事务（**登记 + 轮询 RESULT**），串行排队。

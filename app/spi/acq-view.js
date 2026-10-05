@@ -83,12 +83,12 @@ export class AcqView {
         appendLogLine($('sp-log'), `采集迟了 ${e.late} ms（周期比一次发送还短）—— 只晚不丢，采样点不会少`, 'w', 400);
         this.renderPill('running');
         break;
-      case 'values': for (const v of e.values) this._push(v); break;
+      case 'values': for (const v of e.values) this._push(v, e.timeMs); break;
       case 'warn': appendLogLine($('sp-log'), '解码提示：' + e.msg, 'w', 400); break;
       case 'error': appendLogLine($('sp-log'), '采集错误：' + e.msg, 'e', 400); break;
       case 'groupDone': appendLogLine($('sp-log'), `定时组 #${e.group} 跑完 ${e.n} 轮`, 'i', 400); break;
       case 'stop':
-        appendLogLine($('sp-log'), `定时采集停止（${e.reason}）` + (e.stat ? ` · 共 ${e.stat.ticks} 拍 · 丢 ${e.stat.dropped} · 错 ${e.stat.errors}` : ''), 'i', 400);
+        appendLogLine($('sp-log'), `定时采集停止（${e.reason}）` + (e.stat ? ` · 共 ${e.stat.ticks} 拍 · 迟/跳过 ${e.stat.late} · 错 ${e.stat.errors}` : ''), 'i', 400);
         this.renderPill('idle');
         break;
       default: break;
@@ -119,11 +119,14 @@ export class AcqView {
     if (stop) stop.disabled = !running;
   }
 
-  _push(v){
+  _push(v, timeMs){
     if (!Number.isFinite(v.value)) return;
-    const now = performance.now();
+    const clock = timeMs == null ? 'host' : 'probe';
     let e = this.live.get(v.name);
-    if (!e){ e = { name: v.name, last: v.value, min: Infinity, max: -Infinity, n: 0, t0: now, tLast: now, buf: [] }; this.live.set(v.name, e); }
+    if (e?.clock !== clock) e = null;
+    const now = timeMs == null ? performance.now() : e ? e.tLast + ((timeMs - e.rawTime) >>> 0) : timeMs;
+    if (!e){ e = { name: v.name, clock, last: v.value, min: Infinity, max: -Infinity, n: 0, t0: now, tLast: now, buf: [] }; this.live.set(v.name, e); }
+    e.rawTime = timeMs;
     e.last = v.value;
     if (v.value < e.min) e.min = v.value;
     if (v.value > e.max) e.max = v.value;
