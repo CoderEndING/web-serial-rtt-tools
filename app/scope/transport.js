@@ -145,7 +145,30 @@ export class VendorEpTransport {
     if (!dirtyDevices.has(this.device)) return;
     // Generation checks cannot cancel native USB reads. Reset must retire them
     // before a new capture is allowed to submit any requests.
-    await this._usb.reset();
+    try { await this._usb.reset(); }
+    catch (resetError){
+      /**
+       * Windows sometimes rejects USBDevice.reset() after a timed-out EP 0x83
+       * read, even though this transport is the only active owner. A reset is
+       * still the preferred way to retire the native request; if the browser
+       * refuses it, close the released interface/device and reopen it instead.
+       * Never use this fallback for a shared-resource guard failure: that means
+       * another live client still owns the probe and must be released first.
+       */
+      const why = String(resetError?.message || resetError);
+      if (/USB 整设备复位需要先断开|USB 端点正在被/.test(why)) throw resetError;
+      try {
+        await this._usb.close({ dirty: false });
+        await withTimeout(Promise.allSettled([...this._pendingWorkers]), 1500, '等待旧采样读退出（USB 重开）');
+        await withTimeout(this.open(), 5000, '重开采样数据端点');
+        console.warn('[scope] USB reset 失败，已关闭并重开数据端点：' + why);
+        dirtyDevices.delete(this.device);
+        this.stalledInFlight = 0;
+        return;
+      } catch (reopenError){
+        throw new Error(`USB reset 失败（${why}），关闭并重开数据端点也失败：${reopenError?.message || reopenError}`);
+      }
+    }
     await withTimeout(Promise.allSettled([...this._pendingWorkers]), 1500, '等待旧采样读退出');
     await withTimeout(this.open(), 5000, '重新连接采样数据端点');
     dirtyDevices.delete(this.device);

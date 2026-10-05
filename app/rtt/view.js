@@ -401,7 +401,7 @@ export class RttView {
           if (g !== this._sessionGen) return;
       this._uiConnected(true);
           if ($('r-record-auto').checked && !this.rec.active) this._autoStartRecord();
-          await this._startRtt();
+          await this._startRtt(g);
           return;
         }
         // 已经授权过的探针**不用再弹选择框**（用户体验也好得多）；想换设备点「换设备…」

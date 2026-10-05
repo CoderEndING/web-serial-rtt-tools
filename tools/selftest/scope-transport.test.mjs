@@ -61,11 +61,19 @@ console.log('scope-transport: rearm, ordering, bounded reads, stop/restart, deco
  const stop=t.stop();usb.drain();await stop;
 }
 {
- const usb=new USB();usb.reset=async()=>{throw new Error('cannot reset');};const t=new VendorEpTransport(usb,{inFlight:1});
- await t.start(()=>{});await t.stop();const calls=usb.calls;
- await assert.rejects(t.start(()=>{}),/cannot reset/);assert.equal(t.running,false);assert.equal(usb.calls,calls,'failed cleanup cannot submit more reads');usb.drain();
+ const usb=new USB();let resets=0,closes=0,reopens=0;
+ const t=new VendorEpTransport(usb,{inFlight:1});
+ t._usb.reset=async()=>{resets++;throw new Error("Failed to execute 'reset' on 'USBDevice': Unable to reset the device.")};
+ t._usb.close=async({dirty}={})=>{assert.equal(dirty,false);closes++;usb.drain()};
+ t.open=async()=>{reopens++;return t};
+ await t.start(()=>{});await t.stop();assert.equal(t.stalledInFlight,1);
+ await t.start(()=>{});
+ assert.equal(resets,1);assert.equal(closes,1);assert.equal(reopens,1);
+ assert.equal(usb.pending.length,1,'close/reopen retires the previous read before submitting a new one');
+ usb.resolve(packet(9));await tick();
+ const stop=t.stop();usb.drain();await stop;
 }
-console.log('scope-transport: stalled restart resets/retire reads; failed reset blocks capture PASS');
+console.log('scope-transport: stalled restart resets/retire reads; native reset failure recovers by close/reopen PASS');
 {
  const usb=new USB();usb.close=async()=>{};usb.reset=async()=>usb.drain();
  const old=new VendorEpTransport(usb,{inFlight:1});await old.start(()=>{});await old.stop();
