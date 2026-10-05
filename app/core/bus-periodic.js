@@ -129,11 +129,20 @@ export function runSessionPeriodic(session, bus, groups, opts = {}){
   if (!session.connected || session.usingMock) throw Error('probe 周期采集需要真实探针连接');
   if (session._periodic) throw Error('已有 probe 周期采集在运行');
   const hid = session.hid, controller = new AbortController();
-  const client = new BusPeriodicClient((cmd, data) => hid.xfer(cmd, data));
+  const xfer = (cmd, data) => session._enqueue
+    ? session._enqueue(() => hid.xfer(cmd, data))
+    : hid.xfer(cmd, data);
+  const client = new BusPeriodicClient(xfer);
   const wasBusy = session.busy;
   session._periodic = { controller, client, promise: null };
   session.setBusy(true);
-  const p = client.run(bus, groups, { ...opts, signal: controller.signal }).finally(() => {
+  // Retire work already queued by the session (for example a STATUS poll)
+  // before the periodic client takes exclusive ownership of the same HID link.
+  const p = (async () => {
+    await session._chain;
+    if (!controller.signal.aborted)
+      return await client.run(bus, groups, { ...opts, signal: controller.signal });
+  })().finally(() => {
     if (!client.stopError){ session._periodic = null; session.setBusy(wasBusy); }
     else session.setBusy(true); // Failed STOP retains ownership for an explicit retry.
   });

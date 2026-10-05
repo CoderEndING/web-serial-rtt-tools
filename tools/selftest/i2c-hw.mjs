@@ -325,6 +325,16 @@ console.log('== 6. 页面上跑一段 while(1) 定时读（真机）==');
   const r = await ev(`
     const t = window.__tools.i2c;
     t.session.log = () => {};
+    const hid = t.session.hid, trace = [], events = [];
+    const xfer = hid.xfer.bind(hid);
+    hid.xfer = async (cmd, data, ...rest) => {
+      const item = { cmd, action: data?.[0] };
+      try { const out = await xfer(cmd, data, ...rest); item.res = [...out].slice(0, 24); return out; }
+      catch (e){ item.error = String(e?.message || e); throw e; }
+      finally { trace.push(item); }
+    };
+    const emit = t.runner._emit.bind(t.runner);
+    t.runner._emit = e => { if (['error','tick','end','phase'].includes(e.type)) events.push({ type:e.type, error:e.error, why:e.why, n:e.n }); emit(e); };
     document.getElementById('i2-dsl-text').value = ${JSON.stringify(script)};
     document.getElementById('i2-dsl-parse').click();
     await new Promise(r => setTimeout(r, 200));
@@ -345,7 +355,13 @@ console.log('== 6. 页面上跑一段 while(1) 定时读（真机）==');
     document.getElementById('i2-run-stop').click();
     await new Promise(r => setTimeout(r, 500));
     return { sum, errRows, running, pill, stillRunning, pillAfterSwitch, n: e ? e.n : 0,
-             last: e ? e.last : null, ticks, errors, afterStop: t.runner.running };`);
+             last: e ? e.last : null, ticks, errors, afterStop: t.runner.running,
+             trace: trace.slice(-24), events, lost:t.session.lost,
+             periodic: !!t.session._periodic, stopError:t.session._periodic?.client.stopError?.message || null,
+             pending: !!t.session.hid._pending };`);
+  if (r.n < 12 || r.trace.some(x => x.error) || r.events.some(x => x.type === 'error'))
+    console.log(`    诊断：${JSON.stringify({ trace:r.trace, events:r.events, lost:r.lost,
+      periodic:r.periodic, stopError:r.stopError, pending:r.pending })}`);
   ok(r.errRows === 0, '生成的脚本零语法错');
   ok(/1 个循环任务/.test(r.sum), '脚本解析出 1 个循环任务', r.sum);
   ok(r.running === true, '真机上 while(1) 跑起来了');
@@ -361,8 +377,10 @@ console.log('== 7. 收尾 ==');
 {
   const s = await ev(`
     const t = window.__tools.i2c;
-    await t.session.readStatus({ quiet: true });
-    return { counters: t.session.counters, status: t.session.status };`);
+    let error = null;
+    try { await t.session.readStatus({ quiet: true }); } catch(e){ error = e.message; }
+    return { counters: t.session.counters, status: t.session.status, error };`);
+  if (s.error) console.log(`    收尾读状态失败：${s.error}`);
   const c = s.counters;
   console.log(`    计数器：ok=${c.framesOk} err=${c.framesErr} tx=${c.bytesTx}B rx=${c.bytesRx}B ` +
     `nack地址=${c.nackAddr} 超时=${c.timeouts} 单笔=${(c.lastTicks / 24).toFixed(0)}µs`);

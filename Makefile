@@ -31,7 +31,7 @@ LA       = tools/la/kingst_la.py
 .DEFAULT_GOAL := help
 .PHONY: help serve serve-dev serve-stop browser open page-prep spi-flash-hw idcode board-check-f103ze board-check-f103cb board-check-h743 board-check-6800evk test test-offline test-board-matrix test-random-flow test-ui test-gen test-gen-page gen-embed samples-anim test-hid test-dwarf test-scope test-scope-page test-scope-render test-spi test-read test-spi-page test-hw test-record test-bridge test-bridge-gate test-hpm test-image test-all test-dbg test-dbg-page test-dbg-hw test-dbg-stress test-dbg-stress-f103ze test-dbg-stress-f103cb flash-dbgstress-f103ze flash-dbgstress-f103cb flash-dbgstress-h743 flash-dbgstress-6800evk test-dbg-riscv test-idcode test-dsl test-flash flash-timing hw-campaign hw-campaign-f103ze hw-campaign-f103cb hw-campaign-h743 hw-campaign-hpm hw-campaign-riscv hw-random-flow-f103cb hw-random-flow-h743 hw-random-flow-6800evk build-f103ze-examples build-f103cb-examples build-h743-examples build-6800evk-examples build-all-examples rebuild-all-examples clean-firmware campaign-summary full_flow_f103ze full_flow_f103cb full_flow_h743 full_flow_6800evk \
         bridge bridge-stop fw-build fw-flash fw-restore fw-h7-build fw-h7-flash \
-        algo-check flash-plan la-info la-capture git-status git-log check clean spi-hw spi-flow i2c-hw spi-partial-hw dbg-step-hw probe-diag
+        algo-check flash-plan la-info la-capture git-status git-log check clean spi-hw spi-flow i2c-hw spi-partial-hw spi-periodic-hw dbg-step-hw probe-diag
 
 # 探针 HID 直驱诊断（绕开页面）：rc=-4 归因 / RTT 字节级完整性
 #   make probe-diag ARGS="--mode=disc --iters=40 --clk=60"
@@ -326,6 +326,10 @@ spi-partial-hw: page-prep
 #   打开 web -> 连接探针 -> 初始化屏 -> 发图 x3 -> 再次初始化屏 -> 发图 x3
 spi-flow: page-prep
 	$(NODE) tools/selftest/spi-hw-flow.mjs $(ARGS)
+
+# 「SPI/I2C probe 定时采集」的 SPI 真机回归：重复只读 W25Q64 JEDEC ID，不写/擦 Flash。
+spi-periodic-hw: page-prep
+	$(NODE) tools/selftest/spi-periodic-hw.mjs $(ARGS)
 
 # 「SPI/NOR Flash 测试」卡的**真机回归**（真探针 + 外接 NOR，本机 = W25Q64）：
 #   认 ID（EF 40 17）→ 先把第 2 个扇区写成 0x00 → 跑「写测速」（擦 N 扇区 → 写 → 回读）

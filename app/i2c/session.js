@@ -558,7 +558,7 @@ export class I2cSession {
       // 页面看不见时别刷（省 USB 带宽，也免得和别的页签抢探针）
       if (typeof document !== 'undefined' && document.hidden) return;
       if (this.lost) return;
-      // ⚠️ 这里**不看** `busy`：定时循环跑着的时候计数器正是最该看的。冲突由串行链解决。
+      // 定时循环里计数器正是最该看的；周期任务和轮询通过同一串行链排队。
       this.readStatus({ quiet: true }).catch(() => { /* 失联由 _rawCmd 记账 */ });
     }, POLL_MS);
   }

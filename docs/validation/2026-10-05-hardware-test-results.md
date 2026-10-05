@@ -68,6 +68,15 @@ H743 的 3 变量 @2 µs J-Scope 实测约 73.5–84.8 kHz，并伴随大量探�
 
 原始随机日志与逐步 JSON：`tmp/hw-random-flow-h743-2026-10-05T14-55-10-711Z.log`、`tmp/hw-random-flow-h743-result.json`、`tmp/hw-random-flow-6800evk-2026-10-05T14-46-35-977Z.log`、`tmp/hw-random-flow-6800evk-result.json`。这些临时结果保留在本地 `tmp/`，未纳入 Git。
 
+## 2026-10-06 补充：probe 端 SPI/I²C 定时采集
+
+- **时间：**约 00:00–00:01（北京时间）。目标 H743 仍连接着；本组测试只访问 probe 上的外设，不读写 H743 目标内存或 Flash。
+- **固件前置：**第一次 `0x37` 周期采集命令超时。将探针通过自身 DFU 更新到当前配套 APP 后重测成功；因此此功能验收必须确认 probe 固件已更新。
+- **I²C / AT24C02：**`0x50` 扫描和普通只读事务通过；256 B 读取分 5 笔、首字节与短读一致。100 ms probe 定时读运行 2.2 s 收到 26 拍，循环错误 0，`b0=0xAD` 与基线首字节一致；停止后可继续读状态。默认写测试跳过，未修改 EEPROM 内容。
+- **SPI / W25Q64：**单线 SPI、1 MHz、只读 JEDEC 命令 `0x9F`，50 ms 周期共 12 拍，每拍均为 `EF 40 17`；探针时间戳相邻间隔为 50 ms，跳拍 0。结束后 SPI 桥空闲、CS 已释放、`frames_err=0`；probe 周期队列、fault 和 cleanup 均为 0。没有发送写使能、编程或擦除命令；IO2/WP# 与 IO3/HOLD# 保持上拉，未测四线模式。
+- **网页验证：**I²C 与 SPI 都通过真实页面调用配套固件的 probe 定时调度器，不依赖浏览器定时器维持采样节拍。I²C 周期命令与实时状态轮询共用串行 HID 队列；停止后探针通道仍可用。
+- **脚本：**I²C 使用 `tools/selftest/i2c-hw.mjs`；SPI 只读周期回归使用 `tools/selftest/spi-periodic-hw.mjs`（`make spi-periodic-hw`）。
+
 ## 结果解读与限制
 
 1. F103CB 本次 Viewer 为 445.5 KB/s，低于 F103ZE 历史的 616 / 609 KB/s；但它们不是同板、同线缆的配对测试。F103CB 用杜邦线，F103ZE 用调试排线；现有证据支持“连接条件可能影响速率”，不足以判定下降由本次架构修改造成。F103CB 尚缺一次同硬件、同固件、旧版/新版交替的 Viewer A/B 对照。

@@ -75,6 +75,33 @@ try {
   assert.equal((await overflow.status()).active, 0);
   const unsupported = new BusPeriodicClient(async () => Uint8Array.of(1,0x37));
   await assert.rejects(unsupported.run(BUS.I2C,[{ period:10,records:[i2c] }]), /未支持/);
+  // A status poll may already be queued when acquisition takes the HID link.
+  // The periodic client must wait for that session chain to retire before CAPS.
+  await send('R'); auto = true; calls.length = 0;
+  let releaseQueued, finishQueued = false, pollQueued = null, inFlight = 0, overlap = false;
+  const queuedSession = { connected:true, usingMock:false, busy:false,
+    _chain:new Promise(resolve => { releaseQueued = resolve; }),
+    setBusy(v){ this.busy=v; },
+    _enqueue(fn){ const p=this._chain.then(fn,fn); this._chain=p.catch(()=>{}); return p; },
+    hid:{ async xfer(cmd,data){
+      inFlight++; if (inFlight > 1) overlap = true;
+      try { await new Promise(resolve => setTimeout(resolve,2)); return await xfer(cmd,data); }
+      finally { inFlight--; }
+    } },
+  };
+  const queuedRun = runSessionPeriodic(queuedSession,BUS.I2C,[{period:10,count:0,records:[i2c]}],{
+    shouldStop:()=>finishQueued,onResult(){
+      if (!pollQueued) pollQueued=queuedSession._enqueue(()=>queuedSession.hid.xfer(0x37,Uint8Array.of(0)));
+      finishQueued=true;
+    },
+  });
+  await new Promise(resolve => setTimeout(resolve,0));
+  assert.deepEqual(calls, [], 'no periodic HID command overlaps the queued session transaction');
+  assert.equal(queuedSession.busy,true);
+  releaseQueued(); await queuedRun; await pollQueued;
+  assert.ok(calls.includes(0) && calls.includes(4), 'periodic CAPS and STOP run after the queued transaction');
+  assert.equal(overlap,false,'periodic commands and a live status query share one HID serial chain');
+  assert.ok(calls.filter(x=>x===0).length >= 2,'a status query can run during periodic capture without interleaving');
   await send('R'); auto = true;
   let stopFailed = false, finish = false;
   const session = { connected:true, usingMock:false, busy:false, setBusy(v){ this.busy=v; },
