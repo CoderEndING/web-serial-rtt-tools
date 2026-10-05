@@ -113,11 +113,11 @@ Arm 的 errata notice：[Cortex-M7 Software Developer Errata Notice，3092511](h
 | 配置 | 结果 | 说明 |
 |---|---:|---|
 | Os / DWARF4 | 19 通过 / 0 失败 | 7 个 GDB 检查点及 200 轮压力通过（05:55，SWD 5 MHz；首次 10 MHz 尝试在第80轮发生 WebUSB transferOut 错误，完整重跑通过） |
-| Os / DWARF5 | 19 通过 / 0 失败 | 7 个 GDB 检查点及 20 轮压力通过（02:59，SWD 10 MHz） |
+| Os / DWARF5 | 19 通过 / 0 失败 | 7 个 GDB 检查点及 200 轮压力通过（06:12，SWD 5 MHz；此前 20 轮通过于 02:59） |
 | Og / DWARF4 | 19 通过 / 0 失败 | 7 个 GDB 检查点及 200 轮压力通过（06:03，SWD 5 MHz） |
 | Og / DWARF5 | 19 通过 / 0 失败 | 03:25:15 完成200轮；03:30:54 用最终 DWTTRAP 判据再跑20轮。两次均有1次经确认的误停恢复（SWD 10 MHz） |
 
-Os/DWARF4 与 Og/DWARF4 的 200 轮结果均逐项比较 Web 局部变量和 GDB 对照，检查寄存器、栈只读性、FPB 比较器无泄漏，以及写操作、单步、继续、重载 ELF、复位和断开后的旧帧/缓存清理。两组均为变量差异0，无意外复位、无隐藏传输重试。测试使用匹配固件和 oracle：Os ELF SHA-256 为 `4c5205678f420bde77906aa6bf5a208a0f00858e7aa9b7e8cbcdffb9081f7f37`，Og ELF SHA-256 为 `18172a408ed01865794af2eae02d2643165bd84d06ac43a08af4d480f22f52f4`；原始报告分别为 `tmp/dbg-frame-h743-os-dw4-200-5mhz.json` 与 `tmp/dbg-frame-h743-og-dw4-200-5mhz.json`。首次 Os/DWARF4 的 10 MHz 尝试在第80轮遇到2次 WebUSB `transferOut` 网络错误，因此不计通过；确认目标仍为 H743 后降到 5 MHz 完整重跑。两次完整 200 轮测试都在 5 MHz 完成。
+Os/DWARF4、Os/DWARF5 与 Og/DWARF4 的 200 轮结果均逐项比较 Web 局部变量和 GDB 对照，检查调用者易失寄存器、递归同名变量、位置迁移、作用域/优化标记、寄存器和栈只读性、FPB 比较器无泄漏，以及写操作、单步、继续、重载 ELF、复位和断开后的旧帧/缓存清理。三组均为变量差异0，无意外复位、无隐藏传输重试。测试使用匹配固件和 oracle：Os/DWARF4 ELF SHA-256 为 `4c5205678f420bde77906aa6bf5a208a0f00858e7aa9b7e8cbcdffb9081f7f37`，Os/DWARF5 为 `c09ec44878298c72b915b624fe93de0af72245a76e1d50422782afb1e75292f6`，Og/DWARF4 为 `18172a408ed01865794af2eae02d2643165bd84d06ac43a08af4d480f22f52f4`；原始报告分别为 `tmp/dbg-frame-h743-os-dw4-200-5mhz.json`、`tmp/dbg-frame-h743-os-dw5-200-5mhz.json` 与 `tmp/dbg-frame-h743-og-dw4-200-5mhz.json`。首次 Os/DWARF4 的 10 MHz 尝试在第80轮遇到2次 WebUSB `transferOut` 网络错误，因此不计通过；确认目标仍为 H743 后降到 5 MHz 完整重跑。三组完整 200 轮测试都在 5 MHz 完成。
 
 Og/DWARF5 的早期 20 轮复测曾在一个检查点误停到 `SysTick_Handler`，PC 为 `0x080000f4`，
 目标检查点为 `0x08000a3a`。加入上述证据核验后，H743 实板完整 200 轮通过，变量差异为0，
