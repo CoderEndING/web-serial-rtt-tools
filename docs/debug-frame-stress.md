@@ -114,7 +114,7 @@ Arm 的 errata notice：[Cortex-M7 Software Developer Errata Notice，3092511](h
 |---|---:|---|
 | Os / DWARF4 | 19 通过 / 0 失败 | 7 个 GDB 检查点及 20 轮压力通过（02:57） |
 | Os / DWARF5 | 19 通过 / 0 失败 | 7 个 GDB 检查点及 20 轮压力通过（02:59） |
-| Og / DWARF5 | 19 通过 / 0 失败 | 03:25:15；7 个检查点与 GDB 逐项一致，200 轮递归/正反切帧通过；严格确认并恢复1次误停 |
+| Og / DWARF5 | 19 通过 / 0 失败 | 03:25:15 完成200轮；03:30:54 用最终 DWTTRAP 判据再跑20轮。两次均有1次经确认的误停恢复 |
 
 Og/DWARF5 的早期 20 轮复测曾在一个检查点误停到 `SysTick_Handler`，PC 为 `0x080000f4`，
 目标检查点为 `0x08000a3a`。加入上述证据核验后，H743 实板完整 200 轮通过，变量差异为0，
@@ -122,7 +122,8 @@ Og/DWARF5 的早期 20 轮复测曾在一个检查点误停到 `SysTick_Handler`
 也没有意外复位或隐藏传输重试。此次执行使用 Og/DWARF5 ELF SHA-256
 `c559f42988cfc43359ed07e897a895816dcf2b5b9c3d36b1647b0b9baee50153`，报告为
 `tmp/dbg-stress-page.json`，GDB oracle 为 `tmp/frame-oracle-h743-og-dw5.json`。
-递归压力中的 M7 误停恢复次数也保存在报告 `frameResults[0].pressureM7ErratumRecoveries` 字段；本次为1次，
+最终 DWTTRAP 判据对应的20轮复归报告是 `tmp/dbg-frames-h743-final-guard.json`。
+递归压力中的 M7 误停恢复次数保存在报告 `frameResults[0].pressureM7ErratumRecoveries` 字段；两次均为1次，
 保存的事件 PC 是 `SysTick_Handler`，DFSR.BKPT、目标 FPB 和异常栈保存的检查点地址均匹配。
 
 ## 离线检查及验证边界
