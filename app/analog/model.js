@@ -1,0 +1,43 @@
+/** Analog math, independent of DOM/USB. Amplitude is peak; offset is DC volts. */
+export const WAVES = Object.freeze({ sine: '正弦', square: '方波', triangle: '三角波', saw: '锯齿波↑', reverseSaw: '锯齿波↓', pulse: '脉冲', dc: '直流', noise: '白噪声（伪随机）' });
+export function adcPlan({ channel, bits, rate, count = 0 }){
+  if (!Number.isInteger(channel) || channel < 0 || channel > 15 || ![8, 10, 12, 16].includes(bits)) throw Error('ADC 通道或输出位宽无效');
+  if (!Number.isFinite(rate) || rate < 1 / 60 || rate > 1000) throw Error('采样率范围为 1/60–1000 Sa/s');
+  if (!Number.isInteger(count) || count < 0 || count > 0xFFFFFFFF) throw Error('采集次数必须为非负整数');
+  const period = Math.round(1000 / rate);
+  return { period, count, actualRate: 1000 / period, records: [{ kind: 4, data: Uint8Array.of(channel, bits) }] };
+}
+export function adcValue(data, bits, reference, gain = 1){
+  if (data.length !== 2 || ![8, 10, 12, 16].includes(bits) || !Number.isFinite(reference) || reference <= 0 || ![1, 2].includes(gain)) throw Error('ADC 结果或标定无效');
+  const code = data[0] | data[1] << 8;
+  if (code >= 2 ** bits) throw Error('ADC 码值超出输出位宽');
+  return { code, volts: code / (2 ** bits - 1) * reference * gain };
+}
+export function waveform({ shape = 'sine', rate = 10000, frequency = 100, amplitude = 1, offset = 1.65, reference = 3.3, bits = 12, duty = 50, points = 1024, seed = 1 } = {}){
+  if (!Object.hasOwn(WAVES, shape) || ![8, 10, 12, 16].includes(bits) || !Number.isInteger(points) || points < 16 || points > 65536) throw Error('波形类型、位宽或点数无效');
+  if (![rate, frequency, amplitude, offset, reference, duty].every(Number.isFinite) || rate <= 0 || rate > 1e7 || frequency <= 0 || reference <= 0 || amplitude < 0 || duty <= 0 || duty >= 100) throw Error('波形参数无效');
+  if (!['dc', 'noise'].includes(shape) && rate / frequency < 8) throw Error('每周期至少 8 个采样点，请提高更新率或降低频率');
+  const low = shape === 'dc' ? offset : offset - amplitude, high = shape === 'dc' ? offset : offset + amplitude;
+  if (low < 0 || high > reference) throw Error('offset ± 峰值幅度必须落在 0–参考电压之间，不自动削顶');
+  let random = seed >>> 0 || 1;
+  const rows = new Array(points);
+  for (let i = 0; i < points; i++){
+    const phase = (i * frequency / rate) % 1;
+    let unit;
+    switch (shape){
+      case 'sine': unit = Math.sin(2 * Math.PI * phase); break;
+      case 'square': unit = phase < 0.5 ? 1 : -1; break;
+      case 'triangle': unit = 1 - 4 * Math.abs(phase - 0.5); break;
+      case 'saw': unit = 2 * phase - 1; break;
+      case 'reverseSaw': unit = 1 - 2 * phase; break;
+      case 'pulse': unit = phase < duty / 100 ? 1 : -1; break;
+      case 'dc': unit = 0; break;
+      case 'noise': random ^= random << 13; random ^= random >>> 17; random ^= random << 5; unit = (random >>> 0) / 0xFFFFFFFF * 2 - 1; break;
+    }
+    const volts = offset + amplitude * unit;
+    rows[i] = { time: i / rate, volts, code: Math.round(volts / reference * (2 ** bits - 1)) };
+  }
+  return rows;
+}
+export function adcCsv(rows){ return 'probe_time_ms,cycle,skipped,code,volts\n' + rows.map(r => `${r.timeMs},${r.cycle},${r.skipped},${r.code},${r.volts.toFixed(8)}`).join('\n') + '\n'; }
+export function waveCsv(rows){ return 'time_s,volts,code\n' + rows.map(r => `${r.time.toFixed(9)},${r.volts.toFixed(8)},${r.code}`).join('\n') + '\n'; }

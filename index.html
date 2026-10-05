@@ -34,6 +34,7 @@
     <button class="tab" data-tab="spi">SPI/QSPI 桥</button>
     <button class="tab" data-tab="panel">SPI/QSPI 屏</button>
     <button class="tab" data-tab="i2c">USB→I2C</button>
+    <button class="tab" data-tab="analog">USB→ADC / DAC</button>
     <button class="tab" data-tab="gen">工程生成</button>
   </nav>
   <div class="topright">
@@ -1910,6 +1911,45 @@
         <span class="hint">模板逐字节移植自 <code>uvprojx2cmake.py</code>，默认再套 4 项修正（<code>make test-gen</code> 负责对账）</span>
       </div>
     </section>
+  </div>
+</section>
+
+
+<section class="panel" id="tab-analog">
+  <div class="ws">
+    <aside class="side">
+      <fieldset><legend>ADC · probe 定时采集</legend>
+        <div class="row btnrow"><button id="an-connect" class="primary">连接探针</button><button id="an-disconnect">断开</button></div>
+        <p id="an-channel">连接后识别板型和可用输入</p>
+        <label class="row"><span>输出位宽</span><select id="an-bits"><option>8</option><option>10</option><option>12</option><option selected>16</option></select></label>
+        <p class="hint">ADC 硬件固定 16 bit，低位宽为截取高位，不改变 VREF 检测配置。</p>
+        <label class="row"><span>采样率 Sa/s</span><input id="an-rate" type="number" min="0.0166666667" max="1000" step="any" value="100"></label>
+        <label class="row"><span>次数（0=连续）</span><input id="an-count" type="number" min="0" max="4294967295" value="0"></label>
+        <label class="row"><span>ADC 参考 V</span><input id="an-reference" type="number" min="0.01" max="10" step="0.001" value="3.3"></label>
+        <p class="hint">周期量化到整数 ms（1–60000 ms）；曲线时间和实测速率来自 probe。参考电压用于换算，输入电压必须符合板卡电气范围。</p>
+        <div class="row btnrow"><button id="an-once">单次采集</button><button id="an-start" class="primary">定时采集</button><button id="an-stop">停止</button></div>
+        <button id="an-adc-export">导出 ADC CSV</button>
+      </fieldset>
+      <fieldset><legend>DAC · 波形参数与预览</legend>
+        <p>HPM5301 无通用输出 DAC。当前提供波形预览/CSV；外接 DAC 型号与接线确认后才能启用物理输出。</p>
+        <label class="row"><span>波形</span><select id="an-wave"></select></label>
+        <label class="row"><span>更新率 Sa/s</span><input id="an-update" type="number" min="1" max="10000000" value="10000"></label>
+        <label class="row"><span>频率 Hz</span><input id="an-frequency" type="number" min="0.001" step="any" value="100"></label>
+        <label class="row"><span>峰值幅度 V</span><input id="an-amplitude" type="number" min="0" step="0.01" value="1"></label>
+        <label class="row"><span>Offset V</span><input id="an-offset" type="number" step="0.01" value="1.65"></label>
+        <label class="row"><span>满量程 V</span><input id="an-dac-reference" type="number" min="0.01" step="0.01" value="3.3"></label>
+        <label class="row"><span>脉冲占空比 %</span><input id="an-duty" type="number" min="0.01" max="99.99" step="any" value="50"></label>
+        <label class="row"><span>量化位宽</span><select id="an-dac-bits"><option>8</option><option selected>12</option><option>16</option></select></label>
+        <label class="row"><span>预览点数</span><input id="an-points" type="number" min="16" max="65536" value="1024"></label>
+        <div class="row btnrow"><button id="an-preview">预览</button><button id="an-wave-export">导出波形 CSV</button></div>
+        <button disabled title="需要确认外接 DAC 器件与接线">硬件输出尚未接入</button>
+      </fieldset>
+    </aside>
+    <div class="work" style="min-width:0;overflow:auto;padding:16px">
+      <p id="an-state" role="status" aria-live="polite">未连接</p>
+      <fieldset><legend>ADC 实时输入</legend><p id="an-value">— V</p><p id="an-stats">等待采集</p><canvas id="an-adc-canvas" width="1000" height="260" style="width:100%;height:260px" aria-label="ADC 最近 512 个采样值"></canvas></fieldset>
+      <fieldset><legend>DAC 波形预览（无物理输出）</legend><canvas id="an-dac-canvas" width="1000" height="260" style="width:100%;height:260px" aria-label="DAC 波形数据预览"></canvas><p id="an-wave-state"></p></fieldset>
+    </div>
   </div>
 </section>
 

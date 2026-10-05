@@ -2,7 +2,7 @@
  * Browser waits only drain results; they never determine the bus sampling period. */
 import { waitMs } from './pace.js';
 export const CMD = 0x37;
-export const BUS = { I2C: 1, SPI: 2, DELAY: 3 };
+export const BUS = { I2C: 1, SPI: 2, DELAY: 3, ADC: 4 };
 const ACT = { CAPS: 0, CLEAR: 1, PUT: 2, START: 3, STOP: 4, STATUS: 5, READ: 6, ACK: 7, RUN: 8 };
 const view = b => new DataView(b.buffer, b.byteOffset, b.byteLength);
 const word = (b, off) => view(b).getUint32(off, true);

@@ -79,6 +79,7 @@ grant:
 
 # ---------------------------------------------------------------- 自测
 test: test-stability test-dbg-features test-board-matrix test-random-flow
+	$(NODE) tools/selftest/analog.test.mjs
 	$(NODE) tools/selftest/rtt.test.mjs
 	$(NODE) tools/selftest/gen-parity.mjs
 	$(NODE) tools/selftest/hid-proto.test.mjs
@@ -640,3 +641,7 @@ test-stability: test-probe
 	$(NODE) tools/selftest/scope-lifecycle.test.mjs
 	$(NODE) tools/selftest/scope-watchdog.test.mjs
 	$(NODE) tools/selftest/target-switch.test.mjs
+
+.PHONY: test-analog
+test-analog:
+	$(NODE) tools/selftest/analog.test.mjs

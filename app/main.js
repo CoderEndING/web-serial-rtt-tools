@@ -18,6 +18,7 @@ import { DbgView } from './dbg/view.js';
 import { SpiSession } from './spi/session.js';
 import { SpiBusView } from './spi/bus-view.js';
 import { SpiPanelView } from './spi/panel-view.js';
+import { AnalogView } from './analog/view.js';
 import { I2cView } from './i2c/view.js';
 import { ProbeBus, closeProbeUsbDevices } from './core/probe-bus.js';
 import { toast } from './ui/toast.js';
@@ -45,10 +46,11 @@ const spi = new SpiBusView(spiSession);
 const panel = new SpiPanelView(spiSession);
 // USB→I2C 转发桥（#i2c）：HID 0x36，只走 HID 一条通路（没有 bulk 端点）
 const i2c = new I2cView();
+const analog = new AnalogView();
 
 // Install ownership before init(): automatic reconnect/start paths use the same manager.
 const probeBus = new ProbeBus('page');
-const tools = { session, assistant, terminal, rtt, flash, gen, hid, stream, scope, spi, panel, dbg, i2c, spiSession, probeBus, summary, errors };
+const tools = { session, assistant, terminal, rtt, flash, gen, hid, stream, scope, spi, panel, dbg, i2c, analog, spiSession, probeBus, summary, errors };
 const probeManager = installProbeManager(tools, { bus: probeBus });
 window.__tools = tools;
 
@@ -64,6 +66,7 @@ spi.init();
 panel.init();
 dbg.init();
 i2c.init();
+analog.init();
 
 initTabs(name => {
   if (name === 'terminal') requestAnimationFrame(() => terminal.onShow());
@@ -74,6 +77,7 @@ initTabs(name => {
   if (name === 'panel') requestAnimationFrame(() => panel.onShow());
   if (name === 'dbg') requestAnimationFrame(() => dbg.onShow());
   if (name === 'i2c') requestAnimationFrame(() => i2c.onShow());
+  if (name === 'analog') requestAnimationFrame(() => analog.onShow());
   if (name === 'gen') requestAnimationFrame(() => gen.onShow());
 });
 
@@ -111,6 +115,7 @@ function summary(){
     panel: panel?.summary?.() || null,
     dbg: dbg?.summary?.() || null,
     i2c: i2c?.summary?.() || null,
+    analog: analog.summary(),
     probeResources: probeManager.summary(),
     vendor: 'serial-rtt-tools',
   };

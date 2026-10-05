@@ -43,16 +43,23 @@ export const PROBE_FEATURES = Object.freeze([
   },
   {
     id: 'spi', label: 'SPI/QSPI', client: t => t.spiSession, usbKind: 'spi',
-    resources: ['spi-bulk', 'spi-pins', 'i2c-pins'],
+    resources: ['spi-bulk', 'spi-pins', 'i2c-pins', 'periodic-engine'],
     active: t => !t.spiSession?.usingMock && !!(t.spiSession?.connected || t.spiSession?.dataReady),
     release: async t => { t.spi?.abortLoop?.(); t.panel?.anim?.stop?.(); await t.spiSession.teardown(); },
     guarded: t => !t.spiSession?.usingMock && !!t.spiSession?.busy,
   },
   {
     id: 'i2c', label: 'I2C', client: t => t.i2c?.session, view: t => t.i2c,
-    resources: ['i2c-pins'],
+    resources: ['i2c-pins', 'periodic-engine'],
     active: t => !t.i2c?.session?.usingMock && !!t.i2c?.session?.connected,
     release: async t => { t.i2c?.runner?.stop(); await t.i2c.session.disconnect(); },
+  },
+  {
+    id: 'analog', label: 'ADC', client: t => t.analog?.session, view: t => t.analog,
+    resources: ['analog-engine', 'spi-pins', 'target-engine', 'periodic-engine'],
+    active: t => !!t.analog?.session?.connected,
+    release: t => t.analog?.session?.disconnect(),
+    guarded: t => !!t.analog?.session?.busy,
   },
   {
     id: 'serial', label: 'CDC 串口', client: t => t.session,
