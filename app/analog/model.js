@@ -14,7 +14,7 @@ export function adcValue(data, bits, reference, gain = 1){
   return { code, volts: code / (2 ** bits - 1) * reference * gain };
 }
 export function waveform({ shape = 'sine', rate = 10000, frequency = 100, amplitude = 1, offset = 1.65, reference = 3.3, bits = 12, duty = 50, points = 1024, seed = 1 } = {}){
-  if (!Object.hasOwn(WAVES, shape) || ![8, 10, 12, 16].includes(bits) || !Number.isInteger(points) || points < 16 || points > 65536) throw Error('波形类型、位宽或点数无效');
+  if (!Object.hasOwn(WAVES, shape) || ![8, 10, 12, 16].includes(bits) || !Number.isInteger(points) || points < 8 || points > 65536) throw Error('波形类型、位宽或点数无效');
   if (![rate, frequency, amplitude, offset, reference, duty].every(Number.isFinite) || rate <= 0 || rate > 1e7 || frequency <= 0 || reference <= 0 || amplitude < 0 || duty <= 0 || duty >= 100) throw Error('波形参数无效');
   if (!['dc', 'noise'].includes(shape) && rate / frequency < 8) throw Error('每周期至少 8 个采样点，请提高更新率或降低频率');
   const low = shape === 'dc' ? offset : offset - amplitude, high = shape === 'dc' ? offset : offset + amplitude;
@@ -41,3 +41,14 @@ export function waveform({ shape = 'sine', rate = 10000, frequency = 100, amplit
 }
 export function adcCsv(rows){ return 'probe_time_ms,cycle,skipped,code,volts\n' + rows.map(r => `${r.timeMs},${r.cycle},${r.skipped},${r.code},${r.volts.toFixed(8)}`).join('\n') + '\n'; }
 export function waveCsv(rows){ return 'time_s,volts,code\n' + rows.map(r => `${r.time.toFixed(9)},${r.volts.toFixed(8)},${r.code}`).join('\n') + '\n'; }
+
+/** A periodic LUT has exactly one cycle; do not loop the arbitrary preview window. */
+export function dacTable(options, caps){
+  const rate=options.rate, frequency=options.frequency;
+  if(!Number.isInteger(rate)||rate<1||rate>caps.maxRate)throw Error('更新率需为固件范围内的整数');
+  if(!Number.isFinite(frequency)||frequency<=0)throw Error('波形频率无效');
+  const points=options.shape==='dc'?8:options.shape==='noise'?(options.points||1024):Math.round(rate/frequency);
+  if(points<8||points>caps.maxPoints||rate/frequency<8&&!['dc','noise'].includes(options.shape))throw Error('每周期点数超出 DAC 能力；调整频率或更新率');
+  const rows=waveform({...options,rate,frequency:rate/points,points,bits:caps.bits,reference:caps.fullScale});
+  return {codes:rows.map(r=>r.code),actualFrequency:['dc','noise'].includes(options.shape)?null:rate/points};
+}

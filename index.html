@@ -1930,8 +1930,9 @@
         <div class="row btnrow"><button id="an-once">单次采集</button><button id="an-start" class="primary">定时采集</button><button id="an-stop">停止</button></div>
         <button id="an-adc-export">导出 ADC CSV</button>
       </fieldset>
-      <fieldset><legend>DAC · 波形参数与预览</legend>
-        <p>HPM5301 无通用输出 DAC。当前提供波形预览/CSV；外接 DAC 型号与接线确认后才能启用物理输出。</p>
+      <fieldset><legend>DAC · 预留接口与波形预览</legend>
+        <p>当前 HPM5301 不支持 DAC 输出。以后接入支持 DAC 的 probe 固件后，将自动启用输出。</p>
+        <label class="row"><span>DAC 通道</span><select id="an-dac-channel" disabled><option value="0">等待支持 DAC 的固件</option></select></label>
         <label class="row"><span>波形</span><select id="an-wave"></select></label>
         <label class="row"><span>更新率 Sa/s</span><input id="an-update" type="number" min="1" max="10000000" value="10000"></label>
         <label class="row"><span>频率 Hz</span><input id="an-frequency" type="number" min="0.001" step="any" value="100"></label>
@@ -1942,13 +1943,14 @@
         <label class="row"><span>量化位宽</span><select id="an-dac-bits"><option>8</option><option selected>12</option><option>16</option></select></label>
         <label class="row"><span>预览点数</span><input id="an-points" type="number" min="16" max="65536" value="1024"></label>
         <div class="row btnrow"><button id="an-preview">预览</button><button id="an-wave-export">导出波形 CSV</button></div>
-        <button disabled title="需要确认外接 DAC 器件与接线">硬件输出尚未接入</button>
+        <div class="row btnrow"><button id="an-dac-start" disabled>启动输出</button><button id="an-dac-stop" disabled>停止输出</button><button id="an-dac-status" disabled>输出状态</button></div>
+        <p id="an-dac-state" role="status">DAC 已预留，当前固件不支持</p>
       </fieldset>
     </aside>
     <div class="work" style="min-width:0;overflow:auto;padding:16px">
       <p id="an-state" role="status" aria-live="polite">未连接</p>
       <fieldset><legend>ADC 实时输入</legend><p id="an-value">— V</p><p id="an-stats">等待采集</p><canvas id="an-adc-canvas" width="1000" height="260" style="width:100%;height:260px" aria-label="ADC 最近 512 个采样值"></canvas></fieldset>
-      <fieldset><legend>DAC 波形预览（无物理输出）</legend><canvas id="an-dac-canvas" width="1000" height="260" style="width:100%;height:260px" aria-label="DAC 波形数据预览"></canvas><p id="an-wave-state"></p></fieldset>
+      <fieldset><legend>DAC 波形预览</legend><canvas id="an-dac-canvas" width="1000" height="260" style="width:100%;height:260px" aria-label="DAC 波形数据预览"></canvas><p id="an-wave-state"></p></fieldset>
     </div>
   </div>
 </section>

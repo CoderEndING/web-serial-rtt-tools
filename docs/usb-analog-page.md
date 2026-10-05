@@ -18,16 +18,21 @@
 ## 已实现：DAC 波形数据；尚未实现：物理输出
 
 官方 HPM5300 数据手册的型号资源表明确 HPM5301 为 1×16 bit ADC、无通用 DAC：
-https://www.hpmicro.com/Public/Uploads/uploadfile/files/20240822/HPM5300DSV0.10.pdf
+https://www.hpmicro.com/Public/Uploads/uploadfile/files/20250205/HPM5300DSV011.pdf
 
 页面提供正弦、方波、三角、上/下锯齿、脉冲、直流和伪随机噪声的预览与 CSV。
 可调更新率、波形频率、峰值幅度、offset、满量程、量化位宽、脉冲占空比和预览点数。
 幅度是峰值，Vpp=2×幅度；越过 0–满量程时拒绝生成，不静默削顶。周期波形每周期至少 8 点。
 CSV 只是数据文件，不代表硬件已输出，也不是已验证的循环 LUT；非整数周期的表直接循环会有接缝。
 
-真实 DAC 仍需要用户确认 **外接 DAC 型号、连接 SPI/I²C、参考电压/增益与引脚**。
-本轮没有猜测器件协议、没有把 PWM 冒充 DAC，也没有在主机计时器里逐点发 USB。
-硬件输出按钮明确禁用。后续驱动应采用器件内置波形引擎或 probe 定时/DMA 播放，避免侵占 RTT/J-Scope 热路径。
+当前按 ADC 可用、DAC 预留推进。DAC 网页协议已完成：能力查询、配置、表上传、启动、停止和状态。
+0x38 action 1 返回版本化 DAC1 能力；当前 HPM5301 宣告 0 通道，其他 DAC 动作回 UNSUPPORTED。
+未来支持 DAC 的 HPM 型号接入驱动并广告能力后，网页按通道数、位宽、满量程、速率和表长启用输出，
+不在网页硬编码芯片型号。详细 ABI 见 [usb-analog-dac-hid.md](usb-analog-dac-hid.md)。
+
+当前不会启动任何 DAC 时钟、DMA、定时器或额外主循环轮询。
+未来驱动负责 probe 端播放；网页不逐点发 USB。周期输出使用完整一周期 LUT，更新率若被硬件量化，
+界面显示实际频率。停止等待在飞 START 和硬件 cleanup，失败保留占用供重试。
 
 ## 固件契约
 
@@ -35,7 +40,7 @@ CSV 只是数据文件，不代表硬件已输出，也不是已验证的循环 
 - 响应长度 res[1]=20，res[4..7] u32 状态（0 成功，1 参数错误）。
 - res[8..19]：ANA1 ASCII，channel:u8、native_bits:u8=16、input_gain:u8、physical_dac:u8=0、reference_mv:u16、max_requested_rate:u16=1000。
 - HID 0x37 周期程序扩展 bus/kind=4（ADC）；payload 为 channel:u8、output_bits:u8。结果为右对齐 u16 LE 码值。
-- 0x37 原 SPI/I²C wire 格式、BPT1 CAPS 和既有行为保持兼容；ADC 能力通过 0x38 单独识别。
+- 0x37 原 SPI/I²C wire 格式、BPT1 CAPS 和既有行为保持兼容；ADC 能力通过 0x38 action 0 单独识别；DAC 通过 action 1 独立协商。
 
 ## 验证与发布门槛
 
