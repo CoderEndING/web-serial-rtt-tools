@@ -13,24 +13,34 @@ export function adcValue(data, bits, reference, gain = 1){
   if (code >= 2 ** bits) throw Error('ADC 码值超出输出位宽');
   return { code, volts: code / (2 ** bits - 1) * reference * gain };
 }
-export function waveform({ shape = 'sine', rate = 10000, frequency = 100, amplitude = 1, offset = 1.65, reference = 3.3, bits = 12, duty = 50, points = 1024, seed = 1 } = {}){
+/** Linked generator controls: peak amplitude, Vpp, common mode and high/low levels. */
+export function signalLevels({amplitude,offset,min,max,vpp},source='amplitude'){
+  if(source==='range'){
+    if(!Number.isFinite(min)||!Number.isFinite(max)||max<min)throw Error('最大电压必须不小于最小电压');
+    amplitude=(max-min)/2;offset=(max+min)/2;
+  }else if(source==='vpp')amplitude=vpp/2;
+  if(!Number.isFinite(amplitude)||amplitude<0||!Number.isFinite(offset))throw Error('幅度必须为非负数，共模必须为有限电压');
+  return {amplitude,offset,min:offset-amplitude,max:offset+amplitude,vpp:2*amplitude};
+}
+export function waveform({ shape = 'sine', rate = 10000, frequency = 100, amplitude = 1, offset = 1.65, reference = 3.3, bits = 12, duty = 50, points = 1024, seed = 1, phase = 0 } = {}){
   if (!Object.hasOwn(WAVES, shape) || ![8, 10, 12, 16].includes(bits) || !Number.isInteger(points) || points < 8 || points > 65536) throw Error('波形类型、位宽或点数无效');
-  if (![rate, frequency, amplitude, offset, reference, duty].every(Number.isFinite) || rate <= 0 || rate > 1e7 || frequency <= 0 || reference <= 0 || amplitude < 0 || duty <= 0 || duty >= 100) throw Error('波形参数无效');
+  if (![rate, frequency, amplitude, offset, reference, duty, phase].every(Number.isFinite) || rate <= 0 || rate > 1e7 || frequency <= 0 || reference <= 0 || amplitude < 0 || duty <= 0 || duty >= 100) throw Error('波形参数无效');
   if (!['dc', 'noise'].includes(shape) && rate / frequency < 8) throw Error('每周期至少 8 个采样点，请提高更新率或降低频率');
   const low = shape === 'dc' ? offset : offset - amplitude, high = shape === 'dc' ? offset : offset + amplitude;
   if (low < 0 || high > reference) throw Error('offset ± 峰值幅度必须落在 0–参考电压之间，不自动削顶');
   let random = seed >>> 0 || 1;
+  const phaseTurns=((phase%360)+360)%360/360;
   const rows = new Array(points);
   for (let i = 0; i < points; i++){
-    const phase = (i * frequency / rate) % 1;
+    const position = (i * frequency / rate + phaseTurns) % 1;
     let unit;
     switch (shape){
-      case 'sine': unit = Math.sin(2 * Math.PI * phase); break;
-      case 'square': unit = phase < 0.5 ? 1 : -1; break;
-      case 'triangle': unit = 1 - 4 * Math.abs(phase - 0.5); break;
-      case 'saw': unit = 2 * phase - 1; break;
-      case 'reverseSaw': unit = 1 - 2 * phase; break;
-      case 'pulse': unit = phase < duty / 100 ? 1 : -1; break;
+      case 'sine': unit = Math.sin(2 * Math.PI * position); break;
+      case 'square': unit = position < 0.5 ? 1 : -1; break;
+      case 'triangle': unit = 1 - 4 * Math.abs(position - 0.5); break;
+      case 'saw': unit = 2 * position - 1; break;
+      case 'reverseSaw': unit = 1 - 2 * position; break;
+      case 'pulse': unit = position < duty / 100 ? 1 : -1; break;
       case 'dc': unit = 0; break;
       case 'noise': random ^= random << 13; random ^= random >>> 17; random ^= random << 5; unit = (random >>> 0) / 0xFFFFFFFF * 2 - 1; break;
     }
@@ -50,5 +60,5 @@ export function dacTable(options, caps){
   const points=options.shape==='dc'?8:options.shape==='noise'?(options.points||1024):Math.round(rate/frequency);
   if(points<8||points>caps.maxPoints||rate/frequency<8&&!['dc','noise'].includes(options.shape))throw Error('每周期点数超出 DAC 能力；调整频率或更新率');
   const rows=waveform({...options,rate,frequency:rate/points,points,bits:caps.bits,reference:caps.fullScale});
-  return {codes:rows.map(r=>r.code),actualFrequency:['dc','noise'].includes(options.shape)?null:rate/points};
+  return {rows,codes:rows.map(r=>r.code),actualFrequency:['dc','noise'].includes(options.shape)?null:rate/points};
 }

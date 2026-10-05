@@ -85,6 +85,7 @@ test: test-stability test-dbg-features test-board-matrix test-random-flow
 	$(NODE) tools/selftest/adc-view.test.mjs
 	$(NODE) tools/selftest/adc-session.test.mjs
 	$(NODE) tools/selftest/dac-protocol.test.mjs
+	$(NODE) tools/selftest/dac-generator.test.mjs
 	$(NODE) tools/selftest/rtt.test.mjs
 	$(NODE) tools/selftest/gen-parity.mjs
 	$(NODE) tools/selftest/hid-proto.test.mjs
@@ -651,6 +652,7 @@ test-stability: test-probe
 test-analog:
 	$(NODE) tools/selftest/analog.test.mjs
 	$(NODE) tools/selftest/dac-protocol.test.mjs
+	$(NODE) tools/selftest/dac-generator.test.mjs
 
 .PHONY: test-analog-wire
 test-analog-wire:

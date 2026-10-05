@@ -1,6 +1,6 @@
 import { $ } from '../ui/dom.js';
 import { AnalogSession } from './session.js';
-import { WAVES, waveform, waveCsv } from './model.js';
+import { WAVES, dacTable, signalLevels, waveCsv } from './model.js';
 import { AdcScopeStore, envelope } from './scope-store.js';
 export class AnalogView {
   constructor(){ this.session = new AnalogSession(); this.store = new AdcScopeStore(); this.wave = []; this._raf = null; this.total = 0; }
@@ -12,6 +12,7 @@ export class AnalogView {
       $('an-rate').max=c.maxRate;
       $('an-reference').value = c.reference;
       this.updateDacControls();
+      try{this.preview();}catch(e){$('an-wave-state').textContent=e.message;}
       this.status(this.session.dac.caps.supported?'ADC 已连接；DAC 固件能力已识别':'ADC 已连接；当前固件未支持 DAC');
     });
     bind('an-disconnect', async () => { await this.session.disconnect(); this.updateDacControls(); this.status('ADC 已断开'); });
@@ -21,6 +22,7 @@ export class AnalogView {
     bind('an-wave-export', () => { this.preview(); this.download('waveform-preview.csv', waveCsv(this.wave)); });
     bind('an-preview', () => this.preview());
     bind('an-dac-start', async () => {
+      this.preview();
       const options=this.waveOptions(); options.channel=Number($('an-dac-channel').value);
       const r=await this.session.startDac(options);
       $('an-dac-state').textContent=`DAC 已启动：${r.actualRate} Sa/s，${r.points} 点${r.actualFrequency===null?'':`，实际 ${r.actualFrequency.toFixed(4)} Hz`}`;
@@ -28,8 +30,9 @@ export class AnalogView {
     bind('an-dac-stop', async () => {if(!this.session.dac?.owned&&!this.session._dacStart)throw Error('本会话没有 DAC 输出任务，请先查询输出状态');await this.session.stopDac();$('an-dac-state').textContent='DAC 已确认停止';});
     bind('an-dac-status', async () => {const s=await this.session.dacStatus(Number($('an-dac-channel').value));$('an-dac-state').textContent=`DAC ${s.running?'运行':'停止'} · 已完成 ${s.cycles} 周期 · ${s.actualRate} Sa/s`;});
     $('an-wave').innerHTML = Object.entries(WAVES).map(([key, label]) => `<option value="${key}">${label}</option>`).join('');
-    for (const id of ['an-wave', 'an-update', 'an-frequency', 'an-amplitude', 'an-dac-offset', 'an-dac-reference', 'an-duty', 'an-points', 'an-dac-bits']) $(id).addEventListener('change', () => {
-      try { this.preview(); } catch (e){ this.wave = []; this.plot('an-dac-canvas', []); $('an-wave-state').textContent = e.message; }
+    for (const id of ['an-wave', 'an-update', 'an-frequency', 'an-amplitude', 'an-vpp', 'an-min', 'an-max', 'an-dac-offset', 'an-dac-reference', 'an-duty', 'an-phase', 'an-points', 'an-dac-bits']) $(id).addEventListener('change', () => {
+      try { this.syncLevels(['an-min','an-max'].includes(id)?'range':id==='an-vpp'?'vpp':'amplitude');this.preview(); }
+      catch (e){ this.wave = []; this.plot('an-dac-canvas', []); $('an-generator-summary').textContent='设置无效';$('an-wave-state').textContent = e.message; }
     });
     this.session.onDisconnect = () => {this.updateDacControls();this.status('探针已掉线；采集已请求取消', true);};
     for(const id of ['an-time','an-volts','an-offset','an-trigger','an-level','an-edge','an-freeze'])$(id).addEventListener('change',()=>this.renderAdc());
@@ -81,12 +84,33 @@ export class AnalogView {
   }
   preview(){
     this.wave = [];
-    this.wave = waveform(this.waveOptions());
-    this.plot('an-dac-canvas', this.wave.map(r => r.volts), Number($('an-dac-reference').value));
-    $('an-wave-state').textContent = `${this.wave.length} 点预览；幅度为峰值（Vpp = 2 × 幅度）。预览本身不启动输出；实际输出以固件能力和状态为准。`;
+    this.plot('an-dac-canvas',[]);$('an-generator-summary').textContent='';$('an-wave-state').textContent='';
+    this.syncLevels();
+    const options=this.waveOptions(),dc=options.shape==='dc',noise=options.shape==='noise';
+    for(const id of ['an-amplitude','an-vpp','an-min','an-max'])$(id).disabled=dc;
+    for(const id of ['an-frequency','an-phase'])$(id).disabled=dc||noise;
+    $('an-duty').disabled=options.shape!=='pulse';$('an-points').disabled=!noise;
+    const caps=this.session.dac?.caps?.supported?this.session.dac.caps:
+      {maxRate:10000000,maxPoints:65535,bits:options.bits,fullScale:options.reference};
+    const table=dacTable(options,caps);this.wave=table.rows;
+    this.plot('an-dac-canvas', this.wave.map(r => r.volts),caps.fullScale);
+    const amp=dc?0:options.amplitude,low=options.offset-amp,high=options.offset+amp;
+    const freq=table.actualFrequency===null?(dc?'直流':'循环噪声表'):`${table.actualFrequency.toPrecision(6)} Hz`;
+    $('an-generator-summary').textContent=`${WAVES[options.shape]} · ${freq} · ${2*amp} Vpp · 共模 ${options.offset} V · ${low.toPrecision(6)}–${high.toPrecision(6)} V`;
+    $('an-wave-state').textContent=`${this.wave.length} 点${dc?'直流表':noise?'循环伪随机表':'完整一周期表'} · 更新率 ${options.rate} Sa/s · 表时长 ${(1000*this.wave.length/options.rate).toPrecision(6)} ms${table.actualFrequency===null?'':` · 请求 ${options.frequency} Hz，按整数点数量化`}。预览/导出不启动输出；硬件实际更新率以 START 应答为准。`;
+    const ctx=$('an-dac-canvas').getContext('2d');
+    if(ctx){ctx.fillStyle='#d4e2f1';ctx.font='14px monospace';ctx.fillText(`${caps.fullScale} V full scale`,12,20);ctx.fillText(`0 → ${(1000*this.wave.length/options.rate).toPrecision(6)} ms`,12,250);}
+  }
+  syncLevels(source='amplitude'){
+    const levels=signalLevels({amplitude:Number($('an-amplitude').value),offset:Number($('an-dac-offset').value),
+      min:Number($('an-min').value),max:Number($('an-max').value),vpp:Number($('an-vpp').value)},source);
+    const dc=$('an-wave').value==='dc';
+    for(const [id,value] of Object.entries({'an-amplitude':levels.amplitude,'an-dac-offset':levels.offset,
+      'an-min':dc?levels.offset:levels.min,'an-max':dc?levels.offset:levels.max,'an-vpp':dc?0:levels.vpp}))$(id).value=String(Number(value.toPrecision(12)));
   }
   waveOptions(){
-    return {shape:$('an-wave').value,rate:Number($('an-update').value),frequency:Number($('an-frequency').value),amplitude:Number($('an-amplitude').value),offset:Number($('an-dac-offset').value),reference:Number($('an-dac-reference').value),bits:Number($('an-dac-bits').value),duty:Number($('an-duty').value),points:Number($('an-points').value)};
+    const shape=$('an-wave').value,periodic=!['dc','noise'].includes(shape);
+    return {shape,rate:Number($('an-update').value),frequency:periodic?Number($('an-frequency').value):1,amplitude:Number($('an-amplitude').value),offset:Number($('an-dac-offset').value),reference:Number($('an-dac-reference').value),bits:Number($('an-dac-bits').value),duty:shape==='pulse'?Number($('an-duty').value):50,phase:periodic?Number($('an-phase').value):0,points:Number($('an-points').value)};
   }
   updateDacControls(){
     const c=this.session.dac?.caps,enabled=this.session.connected && !!c?.supported;
@@ -96,6 +120,7 @@ export class AnalogView {
     for(const option of $('an-dac-bits').options)option.disabled=enabled && Number(option.value)!==c.bits;
     if(enabled){$('an-dac-reference').value=c.fullScale;$('an-dac-bits').value=c.bits;$('an-update').max=c.maxRate;}
     else $('an-update').max=10000000;
+    $('an-points').max=enabled?c.maxPoints:65535;
     $('an-dac-state').textContent=enabled?`DAC 接口就绪：${c.channels} 通道、${c.bits} bit、最高 ${c.maxRate} Sa/s`:'DAC 已预留，当前未连接或固件不支持；仍可预览和导出';
   }
   plot(id, values, max = 3.3){
