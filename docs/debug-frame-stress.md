@@ -115,7 +115,7 @@ Arm 的 errata notice：[Cortex-M7 Software Developer Errata Notice，3092511](h
 | Os / DWARF4 | 19 通过 / 0 失败 | 7 个 GDB 检查点及 200 轮压力通过（05:55，SWD 5 MHz；首次 10 MHz 尝试在第80轮发生 WebUSB transferOut 错误，完整重跑通过） |
 | Os / DWARF5 | 19 通过 / 0 失败 | 7 个 GDB 检查点及 200 轮压力通过（06:12，SWD 5 MHz；此前 20 轮通过于 02:59） |
 | Og / DWARF4 | 19 通过 / 0 失败 | 7 个 GDB 检查点及 200 轮压力通过（06:03，SWD 5 MHz） |
-| Og / DWARF5 | 19 通过 / 0 失败 | 03:25:15 完成200轮；03:30:54 用最终 DWTTRAP 判据再跑20轮。两次均有1次经确认的误停恢复（SWD 10 MHz） |
+| Og / DWARF5 | 19 通过 / 0 失败 | 03:25 完成200轮、03:30 用最终 DWTTRAP 判据再跑20轮（SWD 10 MHz）；06:48 在 SWD 5 MHz 完成200轮同频复测。各轮中均有1次证据完整的 M7 误停恢复 |
 
 Os/DWARF4、Os/DWARF5 与 Og/DWARF4 的 200 轮结果均逐项比较 Web 局部变量和 GDB 对照，检查调用者易失寄存器、递归同名变量、位置迁移、作用域/优化标记、寄存器和栈只读性、FPB 比较器无泄漏，以及写操作、单步、继续、重载 ELF、复位和断开后的旧帧/缓存清理。三组均为变量差异0，无意外复位、无隐藏传输重试。测试使用匹配固件和 oracle：Os/DWARF4 ELF SHA-256 为 `4c5205678f420bde77906aa6bf5a208a0f00858e7aa9b7e8cbcdffb9081f7f37`，Os/DWARF5 为 `c09ec44878298c72b915b624fe93de0af72245a76e1d50422782afb1e75292f6`，Og/DWARF4 为 `18172a408ed01865794af2eae02d2643165bd84d06ac43a08af4d480f22f52f4`；原始报告分别为 `tmp/dbg-frame-h743-os-dw4-200-5mhz.json`、`tmp/dbg-frame-h743-os-dw5-200-5mhz.json` 与 `tmp/dbg-frame-h743-og-dw4-200-5mhz.json`。首次 Os/DWARF4 的 10 MHz 尝试在第80轮遇到2次 WebUSB `transferOut` 网络错误，因此不计通过；确认目标仍为 H743 后降到 5 MHz 完整重跑。三组完整 200 轮测试都在 5 MHz 完成。
 
@@ -128,6 +128,8 @@ Og/DWARF5 的早期 20 轮复测曾在一个检查点误停到 `SysTick_Handler`
 最终 DWTTRAP 判据对应的20轮复归报告是 `tmp/dbg-frames-h743-final-guard.json`。
 递归压力中的 M7 误停恢复次数保存在报告 `frameResults[0].pressureM7ErratumRecoveries` 字段；两次均为1次，
 保存的事件 PC 是 `SysTick_Handler`，DFSR.BKPT、目标 FPB 和异常栈保存的检查点地址均匹配。
+
+2026-10-06 06:48:48（北京时间）再次用 H743 `Og / DWARF5` 固件和匹配的 GDB oracle，在 SWD 5 MHz 下完成严格 200 轮复测：7 个检查点逐项对照，19 通过 / 0 失败；递归压力中的一次 M7 误停满足异常栈 PC、DFSR.BKPT 和活动 FPB 证据后恢复。变量差异为0，回溯未修改目标寄存器或栈，无比较器泄漏、意外复位或隐藏传输重试。ELF SHA-256 仍为 `c559f42988cfc43359ed07e897a895816dcf2b5b9c3d36b1647b0b9baee50153`，原始报告为 `tmp/dbg-frame-h743-og-dw5-200-5mhz-audit.json`。至此 H743 的 Og/Os × DWARF4/5 四种组合均有匹配 oracle 的 200 轮硬件验收；本次结束后已恢复并读回校验标准 Os/DWARF4 固件。
 
 ## 2026-10-06 补充：F103CB ARM 构建矩阵
 
