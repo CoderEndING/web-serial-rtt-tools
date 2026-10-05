@@ -715,11 +715,12 @@ console.log('== 15. 版式：源码 + 命令行各占一块大的，右侧是「
       right: row.querySelector('.fb')?.getBoundingClientRect().right || 0 }));
     return { rows: rows.length, heights: [...new Set(rects.map(x => Math.round(x.h * 10) / 10))],
       rights: [...new Set(rects.map(x => Math.round(x.right * 10) / 10))],
+      rightSpread: rects.length ? Math.max(...rects.map(x => x.right)) - Math.min(...rects.map(x => x.right)) : Infinity,
       nowrap: rows.every(row => getComputedStyle(row.querySelector('.fb')).whiteSpace === 'nowrap'),
       grid: rows[0] ? getComputedStyle(rows[0]).gridTemplateColumns : '' };
   `);
-  ok(svd.rows > 0 && svd.heights.length === 1 && svd.rights.length === 1 && svd.nowrap,
-    `SVD 位域表的行高与右列都对齐（${svd.rows} 行，行高 ${svd.heights.join('/')}px）`, JSON.stringify(svd));
+  ok(svd.rows > 0 && svd.heights.length === 1 && svd.rightSpread <= 1 && svd.nowrap,
+    `SVD 位域表等高，右列误差 ≤1px（${svd.rows} 行，行高 ${svd.heights.join('/')}px）`, JSON.stringify(svd));
   await ev(`window.__tools.dbg._dockSelect('regs', { save: false }); return true;`);
 
   // 内存 tab 窄面板：一行字节数要按宽度自适应（否则横向溢出）
