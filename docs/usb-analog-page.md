@@ -1,6 +1,6 @@
 # USB 示波器 / DAC 预留（待板测）
 
-入口 `index.html#analog`。HID 控制保持 64-byte 报告、4 ms 轮询。
+入口 `index.html#analog`。页面以 ADC 示波器和 DAC 信号发生器两个独立子标签组织，连接/断开状态栏常驻；HID 控制保持 64-byte 报告、4 ms 轮询。
 ADC 数据复用 SPI/QSPI 的 WebUSB IN 0x8B；两者互斥，不新增端点。
 首次采集需授权与 HID 同一台探针的 WebUSB。
 
@@ -70,7 +70,8 @@ END 传输完成且硬件恢复之后才释放资源，不用整机 USB reset �
 - model：纯波形/电平/LUT 数学；adc-protocol / dac-protocol：协议与能力校验。
 - transport：共享 USB lease、单个原生请求、严格块解码；session：任务生命周期与统一资源管理。
 - scope-store：固定容量历史和软件触发；view：控件/绘图，不直接收发硬件。
-- ADC/DAC 使用统一 analog 会话，并登记已有 spi-bulk 等资源，没有第二套协调器。
+- ADC/DAC 使用统一 analog 会话，并登记已有 spi-bulk 等资源，没有第二套协调器。子标签只切换视图，不断开设备、不重建会话。
+- `make test-offline` 内的浏览器 UI 自测会验证点击与方向键切换、ARIA 选中状态、隐藏面板和共享会话连续性。
 - 连接在异步授权/能力查询后检查取消；HID 关闭失败保留句柄和管理器故障供断开重试。
 - 原生 SPI OUT 未完成时保留占用，禁止重复退场；ADC STOP 不释放 DAC 任务。
 - DAC BEGIN 应答丢失通过 STATUS 恢复，失败保留占用；缺少 ADC 能力不会禁用可用 DAC。

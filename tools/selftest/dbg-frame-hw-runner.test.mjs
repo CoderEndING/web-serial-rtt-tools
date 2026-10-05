@@ -9,7 +9,7 @@ function rig({wrongValue=false,mutate=false,badFlash=false,m7Erratum=false,uncon
  const stackBytes=(n,pc=checkpoint)=>{const b=new Uint8Array(n),v=new DataView(b.buffer);if(n>=32){v.setUint32(24,unconfirmedErratum==='stack'?pc+4:pc,true);v.setUint32(28,0x01000000,true);}return b;};
  const rows=()=>[{name:'test',value:wrongValue?'8':'7',argument:false}];
  const frames=()=>[{pc:checkpoint,lookup:checkpoint,sp,loc:{file:'dbg_frames.c',line:10},regs:Array(16).fill(0),known:[0]}];
- const session={connected:true,halted:true,pc:checkpoint,_frames:null,bps:[],caps:{numCode:8,rev:1},
+ const session={connected:true,halted:true,pc:checkpoint,_frames:null,bps:[],arch:{name:'arm'},caps:{numCode:8,rev:1},
   probe:{_readWord:async a=>a===0xe000ed00?0x410fc271:a===0xe000ed30?(unconfirmedErratum==='dfsr'?0:unconfirmedErratum==='dwt'?6:2):a===0xe0002000?0x80:
    a===0xe0002008?(((checkpoint&0x1ffffffc)|(((checkpoint&2)?2:1)<<30)|1)>>>0):0},
   dwt:{async haltReason(){return null;}},

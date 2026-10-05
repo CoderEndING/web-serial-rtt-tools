@@ -64,7 +64,7 @@ export async function evaluateLocation(bytes,ctx,{frameBase=false}={}){
   const r=new Reader(bytes),stack=[];let direct=false,steps=0;
   const push=v=>{if(!Number.isInteger(v)||v<0||v>0xffffffff)throw new Error('位置表达式地址溢出');stack.push(v);if(stack.length>64)throw new Error('位置栈过深');};
   const pop=()=>{if(!stack.length)throw new Error('位置栈为空');return stack.pop();};
-  const reg=n=>{if(n>15||!ctx.known?.has(n))throw new Error('该帧寄存器 R'+n+' 不可恢复');return ctx.regs[n];};
+  const reg=n=>{if(n>(ctx.maxRegister??15)||!ctx.known?.has(n))throw new Error(`该帧寄存器 ${ctx.registerPrefix??'R'}${n} 不可恢复`);return ctx.regs[n];};
   while(r.p<r.end){
     if(stack.length>64)throw new Error('位置栈过深');
     if(++steps>256)throw new Error('位置表达式过长');const op=r.u8();
@@ -106,7 +106,8 @@ export async function frameLocals(session,frame,{signal}={}){
   const cancel=()=>{if(signal?.())throw Object.assign(new Error('局部变量读取已中断'),{cancelled:true});};
   let budget=8192;
   const read=async(a,n)=>{cancel();if(!Number.isInteger(a)||a<0||a+n>0x100000000||n>512||n<1||(budget-=n)<0)throw new Error('局部变量读取超出限额');const b=await session.memRead(a,n);if(b.length!==n)throw new Error('局部变量短读');return b;};
-  const ctx={regs:frame.regs,known:new Set(frame.known),cfa:frame.cfa,read};
+  const riscv=session.arch?.name==='riscv';
+  const ctx={regs:frame.regs,known:new Set(frame.known),cfa:frame.cfa,read,maxRegister:riscv?32:15,registerPrefix:riscv?'x':'R'};
   const matches=functions(d).filter(r=>inScope(d,r,frame.lookup)===true);
   const fn=matches.filter(r=>r.tag===0x2e).sort((a,b)=>b.depth-a.depth)[0];
   if(!fn)return {rows:[],reason:'当前帧没有匹配的函数调试信息'};

@@ -148,7 +148,15 @@ Og/DWARF5 的早期 20 轮复测曾在一个检查点误停到 `SysTick_Handler`
 
 2026-10-06 06:56–07:02（北京时间），HPM6800EVK 的 `make full_flow_6800evk` 完成；固定 RISC-V 调试压力 57/0，随机切换中的调试阶段 53/0。固定流程覆盖源码定位、断点、单步、复位、内存读写和 40 轮停—走—停；另有 RISC-V GDB 指令单步/行断点对照。详细数据见[真机测试记录](validation/2026-10-05-hardware-test-results.md)。
 
-这不等价于本文件中 H743 的栈帧验收：当前 `app/dbg/backtrace.js` 对非 ARM 架构会明确返回“仅支持 Cortex-M DWARF CFI / EHABI”，RISC-V 的 `bt` 只能用 `bt scan` 查看候选地址。因而 RISC-V 尚未验证可靠 CFI 展开、递归栈帧局部变量和优化位置迁移，也未构建/验收 Og/Os × DWARF4/5 矩阵。后续需先补 RISC-V DWARF CFI 与寄存器位置解析，再为 HPM 固件构建每个配置、采集匹配的 RISC-V GDB oracle，最后逐项进行板上压力测试；在此之前只报告已经通过的基本调试器压力结果。
+在该次基础测试时，这不等价于本文件中 H743 的栈帧验收：`app/dbg/backtrace.js` 对非 ARM 架构明确返回“仅支持 Cortex-M DWARF CFI / EHABI”，RISC-V 的 `bt` 只能用 `bt scan` 查看候选地址。那时 RISC-V 尚未验证可靠 CFI 展开、递归栈帧局部变量和优化位置迁移，也未构建/验收 Og/Os × DWARF4/5 矩阵。后续实现进度和当前验收边界见紧随其后的收工记录；不得把基本调试器压力结果或合成测试外推为硬件矩阵通过。
+
+## 2026-10-06 补充：RISC-V CFI 实现进度与收工边界
+
+约 07:34（北京时间）继续实现了 RISC-V CFI/局部变量路径：回溯按 x0–x31 与独立 PC 列解析 DWARF CFI，CFA 使用 x2/SP，返回列使用 x1/RA；仅传递 ABI 保留寄存器，位置表达式支持扩展寄存器 `DW_OP_regx` / `DW_OP_bregx`。合成 ELF/会话测试覆盖 CFI 恢复、两帧展开、寄存器有效性与局部变量诊断；`node tools/selftest/dbg-frame-riscv.test.mjs` 的合成部分通过，已有 ARM CFI/EHABI 与局部变量测试也通过。
+
+HPM 调试固件现在包含通用帧检查点，并可隔离构建 `Og/Os × DWARF4/5`。本次只成功构建了 `Og / DWARF4`，ELF SHA-256 为 `54c380cceb7954a201e237c5fc647fc49f5b4947999de1927ab2f01b598a8723`；没有烧录该镜像，也没有采集对应 GDB oracle 或执行任何 HPM 栈帧硬件轮次。用此 ELF 做真实 `.debug_frame` 集成检查时，`dbg_frame_recursive_checkpoint` 未能解析出 CFI 行，说明当前实机 ELF 覆盖仍有未解决问题；不能将合成测试结果外推为 HPM 支持完成。
+
+为了使 `make test-offline` 不受本地是否残留某个 HPM 构建产物影响，真实 ELF 检查现需显式设置 `HPM_DBG_FRAME_ELF=<路径>`；设置后任何缺符号或无 CFI 行仍会使测试失败。剩余 Og/Os × DWARF4/5 构建、真实 ELF 解析修复、四组 GDB oracle、HPM 实板压力和完整 RISC-V 局部变量验收均待后续完成。最近一次 HPM 真机测试仍是上文 06:56–07:02 的基础 `full_flow_6800evk`。
 
 ## 离线检查及验证边界
 

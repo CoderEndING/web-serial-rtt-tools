@@ -84,7 +84,8 @@ export async function unwindFrame(input,ops,readWord,validSp,context=null){
   return r;
 }
 function decorate(s,pc,sp,kind,returned=false){
-  const address=even(pc), lookup=returned&&address>=2?address-2:address;
+  const address=even(pc), rewind=s.arch.name==='riscv'?1:2;
+  const lookup=returned&&address>=rewind?address-rewind:address;
   return {pc:address,sp:sp>>>0,kind,lookup,name:s.sym?.nameOf?.(lookup)||'',loc:s.sym?.at?.(lookup)||null};
 }
 function executable(elf,pc){ return elf?.sections().some(sec=>(sec.flags&4)&&pc>=sec.addr&&pc<sec.addr+sec.size); }
@@ -106,7 +107,8 @@ export async function backtrace(s,{depth=16,scan=false,stackBytes=4096,signal}={
     const candidate=async(value,slot)=>{
       cancel(); if(frames.length>=depth) return;
       const a=even(value);
-      if((s.arch.name==='arm'&&!(value&1))||!executable(elf,a-2)) return;
+      const rewind=s.arch.name==='riscv'?1:2;
+      if((s.arch.name==='arm'&&!(value&1))||!executable(elf,a-rewind)) return;
       const target=await s.arch.callEndingAt(async(a,n)=>elf.bytesAt(a,n,{ro:true}),value);
       if(target!=null) frames.push({...decorate(s,value,slot??sp,'candidate',true),slot});
     };
@@ -134,28 +136,35 @@ export async function backtrace(s,{depth=16,scan=false,stackBytes=4096,signal}={
     } catch(e){if(e.cancelled) throw e; reason+='；扫描停止：'+e.message;}
     return {frames,reason,scan:true};
   }
-  if(s.arch.name!=='arm') return {frames,reason:'当前 bt 展开仅支持 Cortex-M DWARF CFI / EHABI；RISC-V 可使用 bt scan 查看候选地址',scan:false};
   if(!elf) return {frames,reason:'请载入与目标固件一致的 ELF（需要 .debug_frame 或 .ARM.exidx）',scan:false};
   const {cfiRow,unwindCfi}=await import('./cfi.js');
-  const r=new Uint32Array(16);
-  for(let i=0;i<13;i++){cancel();r[i]=await s.readReg('R'+i);}
-  r[13]=sp;r[14]=await s.readReg('LR');r[15]=pc;
-  let state=r, returned=false, known=new Set(Array.from({length:16},(_,i)=>i));
+  const riscv=s.arch.name==='riscv',registerCount=riscv?33:16,pcReg=riscv?32:15,spReg=riscv?2:13;
+  const preservedRegisters=riscv?[8,9,...Array.from({length:10},(_,i)=>i+18)]:Array.from({length:8},(_,i)=>i+4);
+  const r=new Uint32Array(registerCount);
+  if(riscv){
+    for(let i=0;i<32;i++){cancel();r[i]=i===0?0:await s.readReg('x'+i);}
+  }else{
+    for(let i=0;i<13;i++){cancel();r[i]=await s.readReg('R'+i);}
+    r[14]=await s.readReg('LR');
+  }
+  r[spReg]=sp;r[pcReg]=pc;
+  let state=r, returned=false, known=new Set(Array.from({length:registerCount},(_,i)=>i));
   frames[0].regs=Array.from(r);frames[0].known=[...known];
   const seen=new Set([`${pc}:${sp}`]);
   try {
     while(frames.length<=depth){
       cancel();
-      const at=even(state[15])-(returned?2:0);
+      const at=even(state[pcReg])-(returned?(riscv?1:2):0);
       if(!executable(elf,at)) throw new Error('PC 不在 ELF 的可执行段中');
-      const previousSp=state[13];
+      const previousSp=state[spReg];
       let kind='cfi';
-      const row=cfiRow(elf,at);
+      const row=cfiRow(elf,at,{maxRegister:riscv?32:15});
       if(row){
-        const next=await unwindCfi(state,known,row,readWord,valid);
+        const next=await unwindCfi(state,known,row,readWord,valid,{registerCount,pcReg,spReg,preservedRegisters});
         frames[frames.length-1].cfa=next.cfa;
         state=next.regs;known=next.known;
       }else{
+        if(riscv)throw new Error('ELF 缺少当前函数的 RISC-V DWARF CFI 展开行');
         kind='ehabi';
         const entry=exidxEntry(elf,at);
         if(!returned && even(state[15])===entry.start) throw new Error('停在函数入口，序言尚未执行；请单步到函数体后重试');
@@ -167,8 +176,8 @@ export async function backtrace(s,{depth=16,scan=false,stackBytes=4096,signal}={
         known=context.output;
       }
       if(frames.length>=depth)break;
-      if(state[13]<previousSp) throw new Error('调用者 SP 倒退，栈或展开信息不一致');
-      if(exceptionReturn(state[15])){
+      if(state[spReg]<previousSp) throw new Error('调用者 SP 倒退，栈或展开信息不一致');
+      if(!riscv&&exceptionReturn(state[pcReg])){
         // MSP uses the unwound handler SP; PSP is a separate bounded stack region.
         const base=(state[15]&4)?await s.readReg('PSP'):state[13];
         const offset=(state[15]&16)?0:72;
@@ -186,12 +195,13 @@ export async function backtrace(s,{depth=16,scan=false,stackBytes=4096,signal}={
         frames.push({...decorate(s,state[15],state[13],kind),regs:Array.from(state),known:[0,1,2,3,12,13,14,15]});
         reason='已恢复异常硬件帧；跨栈后停止（当前读取边界属于原栈）'; break;
       }
-      if(!state[15] || state[15]===0xffffffff) {reason='到达栈末端';break;}
-      if(!(state[15]&1)) throw new Error('返回地址缺少 Thumb 位');
-      const key=`${state[15]}:${state[13]}`;
+      if(!state[pcReg] || state[pcReg]===0xffffffff) {reason='到达栈末端';break;}
+      if(!riscv&&!(state[pcReg]&1)) throw new Error('返回地址缺少 Thumb 位');
+      if(riscv&&(state[pcReg]&1))throw new Error('RISC-V 返回地址未按指令边界对齐');
+      const key=`${state[pcReg]}:${state[spReg]}`;
       if(seen.has(key)) throw new Error('回溯没有进展或栈形成循环'); seen.add(key);
-      if(!executable(elf,even(state[15])-2)) throw new Error('返回地址不在 ELF 代码段');
-      frames.push({...decorate(s,state[15],state[13],kind,true),regs:Array.from(state),known:[...known]}); returned=true;
+      if(!executable(elf,even(state[pcReg])-(riscv?1:2))) throw new Error('返回地址不在 ELF 代码段');
+      frames.push({...decorate(s,state[pcReg],state[spReg],kind,true),regs:Array.from(state),known:[...known]}); returned=true;
     }
   } catch(e){if(e.cancelled) throw e;reason=e.message;}
   return {frames,reason,scan:false};

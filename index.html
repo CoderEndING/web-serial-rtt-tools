@@ -1922,58 +1922,75 @@
 
 
 <section class="panel" id="tab-analog">
-  <div class="ws">
-    <aside class="side">
-      <fieldset><legend>ADC · USB 示波器</legend>
-        <div class="row btnrow"><button id="an-connect" class="primary">连接探针</button><button id="an-disconnect">断开</button></div>
-        <p id="an-channel">连接后查询可用输入；查看引脚图前请确认板型</p>
-        <div class="row btnrow"><button id="an-pinmap-btn" title="先确认板型，再查看 ADC 输入、GND 与 QSPI 共脚说明">引脚分配图 / 接线</button></div>
-        <p class="hint">配置走 HID；数据与 SPI/QSPI 共用 Bulk 0x8B 和缓冲，互斥使用。首次采集请在 WebUSB 授权框中选择同一台探针（桌面 Chrome/Edge）。</p>
-        <label class="row"><span>ADC 分辨率</span><select id="an-bits"><option>8</option><option>10</option><option>12</option><option selected>16</option></select></label>
-        <p class="hint">单通道 PB14 / ADC0.6（EVKLite J3[10]），定时器硬件触发 + DMA。停止后归还 QSPI 引脚和共享缓冲。</p>
-        <label class="row"><span>采样率 Sa/s</span><input id="an-rate" type="number" min="1" max="2000000" step="1" value="1000000"></label>
-        <label class="row"><span>记录点数（0=连续）</span><input id="an-count" type="number" min="0" max="4294967295" value="0"></label>
-        <label class="row"><span>ADC 参考 V</span><input id="an-reference" type="number" min="0.01" max="10" step="0.001" value="3.3"></label>
-        <p class="hint">硬件时基来自 probe；最高请求 2 MSa/s，实际速率由定时器时钟量化。输入须在 0–VREFH 范围内，信号地接板卡 GND。高速档需低阻抗驱动；请断开 QSPI 外设对 PB14 的驱动。</p>
-        <div class="row btnrow"><button id="an-once">单次捕获</button><button id="an-start" class="primary">运行</button><button id="an-stop">停止</button></div>
-        <label class="row"><span>时基 / div</span><select id="an-time"><option value="0.0000005">500 ns</option><option value="0.000001">1 μs</option><option value="0.00001">10 μs</option><option value="0.0001" selected>100 μs</option><option value="0.001">1 ms</option><option value="0.01">10 ms</option><option value="0.1">100 ms</option></select></label>
-        <label class="row"><span>垂直 / div</span><select id="an-volts"><option value="0.01">10 mV</option><option value="0.1">100 mV</option><option value="0.5" selected>500 mV</option><option value="1">1 V</option></select></label>
-        <label class="row"><span>垂直中心 V</span><input id="an-offset" type="number" step="0.01" value="1.65"></label>
-        <label class="row"><span>触发模式</span><select id="an-trigger"><option value="auto">自动</option><option value="normal">正常（未触发保持）</option></select></label>
-        <label class="row"><span>触发边沿</span><select id="an-edge"><option value="rising">上升沿</option><option value="falling">下降沿</option></select></label>
-        <label class="row"><span>触发电平 V</span><input id="an-level" type="number" min="0" max="3.3" step="0.01" value="1.65"></label>
-        <label class="chk"><input id="an-freeze" type="checkbox">冻结显示（采集继续）</label>
-        <p class="hint">触发为网页软件触发，25% 预触发显示；单次捕获为有限 DMA 记录，不是硬件触发捕获。显示与导出保留最近 65536 点。</p>
-        <button id="an-adc-export">导出 ADC CSV</button>
-      </fieldset>
-      <fieldset><legend>DAC 信号发生器</legend>
-        <p class="hint">设置波形后可离线预览、导出。连接具备 DAC 能力的探针后可启动输出；当前固件尚未提供物理 DAC 输出。</p>
-        <label class="row"><span>DAC 通道</span><select id="an-dac-channel" disabled><option value="0">等待支持 DAC 的固件</option></select></label>
-        <label class="row"><span>波形</span><select id="an-wave"></select></label>
-        <label class="row"><span>信号频率 Hz</span><input id="an-frequency" type="number" min="0.001" step="any" value="100"></label>
-        <label class="row"><span>幅度 Vp（峰值）</span><input id="an-amplitude" type="number" min="0" step="any" value="1"></label>
-        <label class="row"><span>峰峰值 Vpp</span><input id="an-vpp" type="number" min="0" step="any" value="2"></label>
-        <label class="row"><span>共模 / Offset V</span><input id="an-dac-offset" type="number" step="any" value="1.65"></label>
-        <label class="row"><span>最大电压 V</span><input id="an-max" type="number" step="any" value="2.65"></label>
-        <label class="row"><span>最小电压 V</span><input id="an-min" type="number" step="any" value="0.65"></label>
-        <p class="hint">最大/最小与幅度、共模双向联动：Vmax = Vcm + Vp，Vmin = Vcm − Vp，Vpp = 2Vp。直流电平由共模设置。</p>
-        <label class="row"><span>初相位 °</span><input id="an-phase" type="number" step="any" value="0"></label>
-        <label class="row"><span>满量程 V</span><input id="an-dac-reference" type="number" min="0.01" step="0.01" value="3.3"></label>
-        <label class="row"><span>脉冲占空比 %</span><input id="an-duty" type="number" min="0.01" max="99.99" step="any" value="50"></label>
-        <label class="row"><span>量化位宽</span><select id="an-dac-bits"><option>8</option><option selected>12</option><option>16</option></select></label>
-        <label class="row"><span>DAC 更新率 Sa/s</span><input id="an-update" type="number" min="1" max="10000000" step="1" value="10000"></label>
-        <label class="row"><span>噪声表点数</span><input id="an-points" type="number" min="8" max="65535" value="1024"></label>
-        <p class="hint">周期波形生成完整一周期表，每周期至少 8 点；实际频率取决于更新率和整数点数。噪声为可重复循环的伪随机表。修改设置仅更新预览；运行中请先停止再启动。</p>
-        <div class="row btnrow"><button id="an-preview">刷新预览</button><button id="an-wave-export">导出波形表 CSV</button></div>
-        <div class="row btnrow"><button id="an-dac-start" class="primary" disabled>输出 ON</button><button id="an-dac-stop" disabled>输出 OFF</button><button id="an-dac-status" disabled>查询输出</button></div>
-        <p id="an-dac-state" role="status">DAC 已预留，当前固件不支持</p>
-      </fieldset>
-    </aside>
-    <div class="work" style="min-width:0;overflow:auto;padding:16px">
-      <p id="an-state" role="status" aria-live="polite">未连接</p>
-      <fieldset><legend>ADC 示波器 · CH1</legend><p id="an-value">— V</p><p id="an-stats">等待采集</p><canvas id="an-adc-canvas" width="1000" height="260" style="width:100%;height:260px" aria-label="ADC 波形、时基和触发电平"></canvas></fieldset>
-      <fieldset><legend>信号发生器 · 波形表预览</legend><p id="an-generator-summary" role="status"></p><canvas id="an-dac-canvas" width="1000" height="260" style="width:100%;height:260px" aria-label="信号发生器电压与时间预览"></canvas><p id="an-wave-state"></p></fieldset>
+  <div class="an-shell">
+    <div class="an-toolbar">
+      <div class="row btnrow"><button id="an-connect" class="primary">连接探针</button><button id="an-disconnect">断开</button><p id="an-state" role="status" aria-live="polite">未连接</p></div>
+      <nav class="seg docktabs an-tabs" id="an-dock-tabs" role="tablist" aria-label="ADC / DAC 工具">
+        <button id="an-tab-adc" type="button" role="tab" aria-controls="an-panel-adc" aria-selected="true" tabindex="0" data-an-tab="adc" class="on">ADC 示波器</button>
+        <button id="an-tab-dac" type="button" role="tab" aria-controls="an-panel-dac" aria-selected="false" tabindex="-1" data-an-tab="dac">DAC 信号发生器</button>
+      </nav>
     </div>
+    <section id="an-panel-adc" class="an-page on" role="tabpanel" aria-labelledby="an-tab-adc" data-an-page="adc">
+      <div class="ws">
+        <aside class="side">
+          <fieldset><legend>ADC · USB 示波器</legend>
+            <p id="an-channel">连接后查询可用输入；查看引脚图前请确认板型</p>
+            <div class="row btnrow"><button id="an-pinmap-btn" title="先确认板型，再查看 ADC 输入、GND 与 QSPI 共脚说明">引脚分配图 / 接线</button></div>
+            <p class="hint">配置走 HID；数据与 SPI/QSPI 共用 Bulk 0x8B 和缓冲，互斥使用。首次采集请在 WebUSB 授权框中选择同一台探针（桌面 Chrome/Edge）。</p>
+            <label class="row"><span>ADC 分辨率</span><select id="an-bits"><option>8</option><option>10</option><option>12</option><option selected>16</option></select></label>
+            <p class="hint">单通道 PB14 / ADC0.6（EVKLite J3[10]），定时器硬件触发 + DMA。停止后归还 QSPI 引脚和共享缓冲。</p>
+            <label class="row"><span>采样率 Sa/s</span><input id="an-rate" type="number" min="1" max="2000000" step="1" value="1000000"></label>
+            <label class="row"><span>记录点数（0=连续）</span><input id="an-count" type="number" min="0" max="4294967295" value="0"></label>
+            <label class="row"><span>ADC 参考 V</span><input id="an-reference" type="number" min="0.01" max="10" step="0.001" value="3.3"></label>
+            <p class="hint">硬件时基来自 probe；最高请求 2 MSa/s，实际速率由定时器时钟量化。输入须在 0–VREFH 范围内，信号地接板卡 GND。高速档需低阻抗驱动；请断开 QSPI 外设对 PB14 的驱动。</p>
+            <div class="row btnrow"><button id="an-once">单次捕获</button><button id="an-start" class="primary">运行</button><button id="an-stop">停止</button></div>
+            <label class="row"><span>时基 / div</span><select id="an-time"><option value="0.0000005">500 ns</option><option value="0.000001">1 μs</option><option value="0.00001">10 μs</option><option value="0.0001" selected>100 μs</option><option value="0.001">1 ms</option><option value="0.01">10 ms</option><option value="0.1">100 ms</option></select></label>
+            <label class="row"><span>垂直 / div</span><select id="an-volts"><option value="0.01">10 mV</option><option value="0.1">100 mV</option><option value="0.5" selected>500 mV</option><option value="1">1 V</option></select></label>
+            <label class="row"><span>垂直中心 V</span><input id="an-offset" type="number" step="0.01" value="1.65"></label>
+            <label class="row"><span>触发模式</span><select id="an-trigger"><option value="auto">自动</option><option value="normal">正常（未触发保持）</option></select></label>
+            <label class="row"><span>触发边沿</span><select id="an-edge"><option value="rising">上升沿</option><option value="falling">下降沿</option></select></label>
+            <label class="row"><span>触发电平 V</span><input id="an-level" type="number" min="0" max="3.3" step="0.01" value="1.65"></label>
+            <label class="chk"><input id="an-freeze" type="checkbox">冻结显示（采集继续）</label>
+            <p class="hint">触发为网页软件触发，25% 预触发显示；单次捕获为有限 DMA 记录，不是硬件触发捕获。显示与导出保留最近 65536 点。</p>
+            <button id="an-adc-export">导出 ADC CSV</button>
+          </fieldset>
+        </aside>
+        <div class="work" style="min-width:0;overflow:auto;padding:16px">
+          <fieldset><legend>ADC 示波器 · CH1</legend><p id="an-value">— V</p><p id="an-stats">等待采集</p><canvas id="an-adc-canvas" width="1000" height="260" style="width:100%;height:260px" aria-label="ADC 波形、时基和触发电平"></canvas></fieldset>
+        </div>
+      </div>
+    </section>
+    <section id="an-panel-dac" class="an-page" role="tabpanel" aria-labelledby="an-tab-dac" data-an-page="dac" hidden>
+      <div class="ws">
+        <aside class="side">
+          <fieldset><legend>DAC 信号发生器</legend>
+            <p class="hint">设置波形后可离线预览、导出。连接具备 DAC 能力的探针后可启动输出；当前固件尚未提供物理 DAC 输出。</p>
+            <label class="row"><span>DAC 通道</span><select id="an-dac-channel" disabled><option value="0">等待支持 DAC 的固件</option></select></label>
+            <label class="row"><span>波形</span><select id="an-wave"></select></label>
+            <label class="row"><span>信号频率 Hz</span><input id="an-frequency" type="number" min="0.001" step="any" value="100"></label>
+            <label class="row"><span>幅度 Vp（峰值）</span><input id="an-amplitude" type="number" min="0" step="any" value="1"></label>
+            <label class="row"><span>峰峰值 Vpp</span><input id="an-vpp" type="number" min="0" step="any" value="2"></label>
+            <label class="row"><span>共模 / Offset V</span><input id="an-dac-offset" type="number" step="any" value="1.65"></label>
+            <label class="row"><span>最大电压 V</span><input id="an-max" type="number" step="any" value="2.65"></label>
+            <label class="row"><span>最小电压 V</span><input id="an-min" type="number" step="any" value="0.65"></label>
+            <p class="hint">最大/最小与幅度、共模双向联动：Vmax = Vcm + Vp，Vmin = Vcm − Vp，Vpp = 2Vp。直流电平由共模设置。</p>
+            <label class="row"><span>初相位 °</span><input id="an-phase" type="number" step="any" value="0"></label>
+            <label class="row"><span>满量程 V</span><input id="an-dac-reference" type="number" min="0.01" step="0.01" value="3.3"></label>
+            <label class="row"><span>脉冲占空比 %</span><input id="an-duty" type="number" min="0.01" max="99.99" step="any" value="50"></label>
+            <label class="row"><span>量化位宽</span><select id="an-dac-bits"><option>8</option><option selected>12</option><option>16</option></select></label>
+            <label class="row"><span>DAC 更新率 Sa/s</span><input id="an-update" type="number" min="1" max="10000000" step="1" value="10000"></label>
+            <label class="row"><span>噪声表点数</span><input id="an-points" type="number" min="8" max="65535" value="1024"></label>
+            <p class="hint">周期波形生成完整一周期表，每周期至少 8 点；实际频率取决于更新率和整数点数。噪声为可重复循环的伪随机表。修改设置仅更新预览；运行中请先停止再启动。</p>
+            <div class="row btnrow"><button id="an-preview">刷新预览</button><button id="an-wave-export">导出波形表 CSV</button></div>
+            <div class="row btnrow"><button id="an-dac-start" class="primary" disabled>输出 ON</button><button id="an-dac-stop" disabled>输出 OFF</button><button id="an-dac-status" disabled>查询输出</button></div>
+            <p id="an-dac-state" role="status">DAC 已预留，当前固件不支持</p>
+          </fieldset>
+        </aside>
+        <div class="work" style="min-width:0;overflow:auto;padding:16px">
+          <fieldset><legend>信号发生器 · 波形表预览</legend><p id="an-generator-summary" role="status"></p><canvas id="an-dac-canvas" width="1000" height="260" style="width:100%;height:260px" aria-label="信号发生器电压与时间预览"></canvas><p id="an-wave-state"></p></fieldset>
+        </div>
+      </div>
+    </section>
   </div>
 </section>
 

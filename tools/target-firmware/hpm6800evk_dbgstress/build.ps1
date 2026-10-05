@@ -1,41 +1,71 @@
-# Build the HPM6800EVK debugger stress fixture (HPM6880, RISC-V) with the HPM SDK env.
-#
-#   pwsh -File build.ps1                # 默认 flash_xip
-#   pwsh -File build.ps1 -BuildType ram # 需要时换构建类型
-#
-# 产物：build\<build_type>\output\demo.elf（SDK 统一叫 demo.elf；末尾会把它复制成
-#      本目录的 fw.elf，方便直接烧/直接喂给调试器页）
-$ErrorActionPreference = 'Stop'
+param(
+    [ValidateSet('flash_xip', 'ram')][string]$BuildType = 'flash_xip',
+    [ValidateSet('Og', 'Os')][string]$Optimization,
+    [ValidateSet(4, 5)][int]$Dwarf = 4,
+    [switch]$Matrix,
+    [switch]$NoCopy
+)
 
+# HPM6800EVK debugger fixture. The matrix builds are isolated by optimization/DWARF
+# and carry a SHA-bound manifest beside the ELF for the GDB/Web acceptance scripts.
+$ErrorActionPreference = 'Stop'
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $sdkEnv = if ($env:HPM_SDK_ENV_DIR) { $env:HPM_SDK_ENV_DIR } else { 'E:\sdk_env_v1.11.0' }
-$buildType = 'flash_xip'
-for ($i = 0; $i -lt $args.Count; $i++) {
-    if ($args[$i] -eq '-BuildType' -and $i + 1 -lt $args.Count) { $buildType = $args[$i + 1] }
-}
+$isMatrix = $Matrix -or $PSBoundParameters.ContainsKey('Optimization') -or $PSBoundParameters.ContainsKey('Dwarf')
+if ($isMatrix -and -not $Optimization) { $Optimization = 'Os' }
 
 $env:PATH = "$sdkEnv\tools\python3;$sdkEnv\tools\cmake\bin;$sdkEnv\tools\ninja;$env:PATH"
 $env:HPM_SDK_BASE = "$sdkEnv\hpm_sdk"
 $env:GNURISCV_TOOLCHAIN_PATH = "$sdkEnv\toolchains\rv32imac_zicsr_zifencei_multilib_b_ext-win"
 $env:HPM_SDK_TOOLCHAIN_VARIANT = 'gcc'
 
-$bdir = Join-Path $here "build\$buildType"
-Write-Output "building $buildType -> $bdir"
-# ⚠️ 参数必须**加引号**：PowerShell 7 把以 `-` 开头的裸 token 当参数名，里面的
-#    $buildType 不做变量展开（原样传给 cmake，SDK 会报 invalid HPM_BUILD_TYPE: $buildtype）。
-& cmake -G Ninja "-DBOARD=hpm6800evk" "-DHPM_BUILD_TYPE=$buildType" "-DCMAKE_BUILD_TYPE=debug" -B $bdir -S $here
+if ($isMatrix) {
+    $bdir = Join-Path $here "build\matrix-$Optimization-dw$Dwarf"
+} else {
+    $bdir = Join-Path $here "build\$BuildType"
+}
+Write-Output "building $BuildType -> $bdir"
+$cmakeArgs = @('-G', 'Ninja', '-DBOARD=hpm6800evk', "-DHPM_BUILD_TYPE=$BuildType", '-DCMAKE_BUILD_TYPE=debug', '-B', $bdir, '-S', $here)
+if ($isMatrix) {
+    $optFlag = "-$Optimization"
+    $cmakeArgs += "-DHPM_FRAME_OPT=$optFlag"
+    $cmakeArgs += "-DHPM_FRAME_DWARF=$Dwarf"
+}
+& cmake @cmakeArgs
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 & cmake --build $bdir
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 $elf = Join-Path $bdir 'output\demo.elf'
-$out = Join-Path $here 'fw.elf'
-if (Test-Path $elf) {
+if (-not (Test-Path $elf)) { throw "构建没有生成 ELF：$elf" }
+$sdkCompilerBin = "$sdkEnv\toolchains\rv32imac_zicsr_zifencei_multilib_b_ext-win\bin"
+$nm = Join-Path $sdkCompilerBin 'riscv32-unknown-elf-nm.exe'
+Write-Output ""
+Write-Output '关键符号（调试器页/压测脚本按这些名字下断点）：'
+& $nm -S $elf | Select-String 'g_model|g_ticks|g_loops|g_stage|g_checksum|g_seq_slot|engine_|deep_l|is_even|is_odd|fn_|model_|dbg_frame_|g_frame_result'
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+if ($isMatrix) {
+    $hash = (Get-FileHash -LiteralPath $elf -Algorithm SHA256).Hash.ToLowerInvariant()
+    $sharedSource = Join-Path (Split-Path -Parent $here) 'common\dbg_frames.c'
+    $sourceHashes = @{
+        'dbg_frames.c' = (Get-FileHash -LiteralPath $sharedSource -Algorithm SHA256).Hash.ToLowerInvariant()
+        'main.c' = (Get-FileHash -LiteralPath (Join-Path $here 'src\main.c') -Algorithm SHA256).Hash.ToLowerInvariant()
+    }
+    $flags = @("-$Optimization", '-g3', "-gdwarf-$Dwarf", '-fasynchronous-unwind-tables')
+    $manifest = @{
+        schema = 1; board = '6800evk'; optimization = $Optimization; dwarf = $Dwarf
+        flags = $flags; compiler = (Join-Path $sdkCompilerBin 'riscv32-unknown-elf-gcc.exe')
+        sources = $sourceHashes; elfSha256 = $hash
+    }
+    $manifestPath = Join-Path (Split-Path -Parent $elf) 'build-info.json'
+    $manifest | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $manifestPath -Encoding utf8
+    Write-Output "Build manifest: $manifestPath"
+    Write-Output "ELF SHA-256: $hash"
+}
+
+if (-not $NoCopy) {
+    $out = Join-Path $here 'fw.elf'
     Copy-Item $elf $out -Force
-    $nm = "$sdkEnv\toolchains\rv32imac_zicsr_zifencei_multilib_b_ext-win\bin\riscv32-unknown-elf-nm.exe"
-    Write-Output ""
-    Write-Output "关键符号（调试器页/压测脚本按这些名字下断点）："
-    & $nm -S $elf | Select-String 'g_model|g_ticks|g_loops|g_stage|g_checksum|g_seq_slot|engine_|deep_l|is_even|is_odd|fn_|model_'
-    Write-Output ""
-    Write-Output ("已复制给用户下载/烧录： {0}" -f $out)
+    Write-Output "已复制给用户下载/烧录： $out"
 }

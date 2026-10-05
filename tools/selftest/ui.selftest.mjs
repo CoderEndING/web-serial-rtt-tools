@@ -231,6 +231,10 @@ export async function runUiSelfTest(tools){
     if (!/不涨|抢/.test($('h-state').textContent)) throw new Error('状态行没提示：' + $('h-state').textContent);
     tools.hid.mock.stall = false;
 
+    // 目标类型是全局状态，转发运行时页面会拒绝切换；先结束会话，再验证 SWD/JTAG 路由。
+    $('h-stop').click();
+    await until(() => !tools.hid.summary().running, 100, '切目标前转发停掉');
+
     // ⑤ 目标类型切换（HID 0x31 action 10）：切到 RISC-V/JTAG 后 SWD 时钟档要置灰
     //    （RTT-over-JTAG 就是靠这个全局开关；J-Scope 采样器的后端也跟着它走）
     $('h-target').value = 'riscv';
@@ -241,9 +245,6 @@ export async function runUiSelfTest(tools){
     await tools.hid.applyTargetType();
     if (tools.hid.mock.riscv) throw new Error('切回 SWD 没生效');
     if ($('h-clock').disabled) throw new Error('切回 SWD 后时钟档该恢复可用');
-
-    $('h-stop').click();
-    await until(() => !tools.hid.summary().running, 100, '转发停掉');
 
     await session.close();
     return `收到 ${got} B · 本页共 ${tools.stream.summary().bytes} B`;
@@ -362,6 +363,23 @@ export async function runUiSelfTest(tools){
     $('r-range').value = keepRange;
     if ($('r-reset').disabled && keepTarget === 'swd') throw new Error('切回 SWD 后「复位目标」该恢复可用');
     return `下拉 ${vals.join('/')} · 芯片合并成一个（ARM ${groups.arm.length} 项 + RISC-V ${groups.riscv.length} 项）· 跨组自动切目标类型、组内各记各的`;
+  });
+
+  await step('ADC / DAC 子标签切换与共享会话', async () => {
+    const analog=tools.analog,session=analog?.session;
+    if(!session)throw new Error('AnalogView 没有共享 AnalogSession');
+    document.querySelector('#tabs .tab[data-tab="analog"]').click();
+    const adc=$('an-tab-adc'),dac=$('an-tab-dac'),adcPage=$('an-panel-adc'),dacPage=$('an-panel-dac');
+    if(!adc||!dac||!adcPage||!dacPage)throw new Error('ADC / DAC 独立标签或页面容器缺失');
+    if(adc.getAttribute('role')!=='tab'||dac.getAttribute('role')!=='tab'||adc.getAttribute('aria-selected')!=='true'||adcPage.hidden||!dacPage.hidden)
+      throw new Error('初始 ADC 标签的 ARIA 状态错误');
+    dac.click();
+    if(dac.getAttribute('aria-selected')!=='true'||!adcPage.hidden||dacPage.hidden||analog.session!==session)
+      throw new Error('切到 DAC 后页面可见性、选中态或会话连续性错误');
+    dac.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowLeft',bubbles:true}));
+    if(adc.getAttribute('aria-selected')!=='true'||adcPage.hidden||!dacPage.hidden||analog.session!==session)
+      throw new Error('键盘切回 ADC 后页面状态或会话连续性错误');
+    return '点击/方向键切换通过；两页共用同一 AnalogSession';
   });
 
   return out;

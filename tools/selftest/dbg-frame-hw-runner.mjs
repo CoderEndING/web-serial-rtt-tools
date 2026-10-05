@@ -1,6 +1,6 @@
 /** Hardware runner used by the existing stress entry point. No retries hide mismatches. */
 import {FRAME_CASES,webVariables,compareFrames} from './dbg-frame-contract.mjs';
-async function captureCheckpoint(address,ramEnd,board){
+async function captureCheckpoint(address,ramStart,ramEnd,board){
  const d=window.__tools.dbg,s=d.session;
  const cmd=async line=>{const r=await d.runLine(line);if(r.error||r.cancelled)throw new Error(line+': '+(r.error||'cancelled'));return r;};
  await cmd('bd all');await cmd('b 0x'+address.toString(16));
@@ -51,10 +51,17 @@ async function captureCheckpoint(address,ramEnd,board){
  });
  if(pcNow()!==address)throw new Error('暂停 PC 不等于检查点: actual=0x'+pcNow().toString(16)+' expected=0x'+(address>>>0).toString(16));
  const snapshot=()=>s.exclusive(async()=>{
-  const registers=[];for(let i=0;i<16;i++)registers.push(await s.readReg('R'+i));
-  for(const name of ['MSP','PSP','XPSR','CONTROL','PRIMASK','BASEPRI','FAULTMASK'])registers.push(await s.readReg(name));
-  const sp=registers[13],length=Math.min(512,ramEnd-sp);
-  if(sp<0x20000000||length<4)throw new Error('暂停栈不在测试板 RAM 范围');
+  const registers=[];let sp;
+  if(s.arch.name==='riscv'){
+   for(let i=0;i<32;i++)registers.push(await s.readReg('x'+i));
+   registers.push(await s.readReg('pc'));sp=registers[2];
+  }else{
+   for(let i=0;i<16;i++)registers.push(await s.readReg('R'+i));
+   for(const name of ['MSP','PSP','XPSR','CONTROL','PRIMASK','BASEPRI','FAULTMASK'])registers.push(await s.readReg(name));
+   sp=registers[13];
+  }
+  const length=Math.min(512,ramEnd-sp);
+  if(sp<ramStart||sp>=ramEnd||length<4)throw new Error('暂停栈不在测试板 RAM 范围');
   return {registers,stack:[...await s.memRead(sp,length)]};
  });
  const before=await snapshot(),bt=await cmd('bt 16'),frames=[];
@@ -79,7 +86,8 @@ async function staleChecks(){
  const d=window.__tools.dbg,s=d.session,failures=[];
  const bt=async()=>{const r=await d.runLine('bt 16');if(r.error)throw new Error(r.error);};
  // Same-PC same-value writes must invalidate caches, without altering test inputs.
- await bt();await s.exclusive(async()=>s.writeReg('R0',await s.readReg('R0')));
+ const writable=s.arch.name==='riscv'?'x8':'R0';
+ await bt();await s.exclusive(async()=>s.writeReg(writable,await s.readReg(writable)));
  if(s._frames)failures.push('写寄存器未清缓存');
  await bt();await s.exclusive(async()=>{const sp=await s.readReg('SP');await s.memWrite(sp,await s.memRead(sp,4));});
  if(s._frames)failures.push('写内存未清缓存');
@@ -97,8 +105,11 @@ async function staleChecks(){
  await bt();await d.disconnect();if(s._frames)failures.push('断开未清缓存');
  return failures;
 }
-export async function runFrameStress({cdp,oracle,board,rounds=200,code,ok,log}){
- const ramEnd=board==='h743'?0x20020000:board==='f103cb'?0x20005000:0x20010000;
+export async function runFrameStress({cdp,oracle,board,rounds=200,code,ok,log,disconnectOnFinish=true}){
+ const profile=board==='6800evk'?{ramStart:0x00084000,ramEnd:0x00088000,entry:'riscv'}:
+  board==='h743'?{ramStart:0x20000000,ramEnd:0x20020000,entry:'arm'}:
+  board==='f103cb'?{ramStart:0x20000000,ramEnd:0x20005000,entry:'arm'}:
+  {ramStart:0x20000000,ramEnd:0x20010000,entry:'arm'};
  const results=[];
  try{
   if(!code?.some(s=>s.name==='.text'))throw new Error('缺少目标代码验证');
@@ -111,16 +122,21 @@ export async function runFrameStress({cdp,oracle,board,rounds=200,code,ok,log}){
   }
   ok(true,'Web 独立核对板上 Flash 与当前 ELF 一致');
   // Establish the same first visit to each checkpoint as the GDB collector.
-  const reset=await cdp.json(`window.__S.resetToFirmware(${board==='f103ze'})`);
-  if(reset.error)throw new Error(reset.error);
+   if(profile.entry==='riscv'){
+    const reset=await cdp.json(`window.__tools.dbg.runLine('reset halt')`);
+    if(reset.error)throw new Error(reset.error);
+   }else{
+    const reset=await cdp.json(`window.__S.resetToFirmware(${board==='f103ze'})`);
+    if(reset.error)throw new Error(reset.error);
+   }
   for(const c of FRAME_CASES){
    const expected=oracle.cases[c.id],start=Date.now();
-   const captured=await cdp.json(`(${captureCheckpoint.toString()})(${expected.pc},${ramEnd},${JSON.stringify(board)})`);
+    const captured=await cdp.json(`(${captureCheckpoint.toString()})(${expected.pc},${profile.ramStart},${profile.ramEnd},${JSON.stringify(board)})`);
    const actual=captured.frames.map(f=>({...f,variables:webVariables(f.rows)}));
    // GDB may report a caller-saved parameter from a live volatile register
    // even when the leaf frame's CFI does not preserve it. Keep the web
    // unwinder fail-closed; the volatile stack copy remains compared exactly.
-   const conservative=c.id==='leaf'?[{frame:1,name:'seed',reasonPattern:/^该帧寄存器 R[0-3] 不可恢复$/}]:[];
+    const conservative=profile.entry==='arm'&&c.id==='leaf'?[{frame:1,name:'seed',reasonPattern:/^该帧寄存器 R[0-3] 不可恢复$/}]:[];
    const differences=compareFrames(actual,expected.frames,{allowConservativeUnavailable:conservative});
    const note=conservative.length?'（CFI 未保留调用者易失参数，网页按不可恢复处理）':'';
    ok(differences.length===0,`GDB 对照 ${c.id}: ${actual.length} 帧，逐帧参数/局部值${note}`,differences.join('；'));
@@ -129,7 +145,7 @@ export async function runFrameStress({cdp,oracle,board,rounds=200,code,ok,log}){
   const c=oracle.cases.recursive;
   let m7ErratumRecoveries=0;
   for(let i=0;i<rounds;i++){
-   const captured=await cdp.json(`(${captureCheckpoint.toString()})(${c.pc},${ramEnd},${JSON.stringify(board)})`);
+    const captured=await cdp.json(`(${captureCheckpoint.toString()})(${c.pc},${profile.ramStart},${profile.ramEnd},${JSON.stringify(board)})`);
    m7ErratumRecoveries+=captured.m7ErratumRecoveries.length;
    const actual=captured.frames.map(f=>({...f,variables:webVariables(f.rows)})),diff=compareFrames(actual,c.frames);
    if(diff.length)throw new Error(`压力轮${i+1}: `+diff.join('；'));
@@ -142,7 +158,7 @@ export async function runFrameStress({cdp,oracle,board,rounds=200,code,ok,log}){
   ok(!stale.length,'写操作/单步/继续/重载 ELF/复位/断开清除旧帧和局部值',stale.join('；'));
  }catch(error){ok(false,'栈帧/局部变量硬件压力流程',error.message);results.push({error:error.message});}
  finally{
-  await cdp.eval(`const d=window.__tools.dbg;if(d.session.connected){await d.session.exclusive(async()=>{await d.session.halt();await d.session.bpClear();});await d.disconnect();}return true;`).catch(e=>ok(false,'压力测试收尾',e.message));
+   await cdp.eval(`const d=window.__tools.dbg;if(d.session.connected){await d.session.exclusive(async()=>{await d.session.halt();await d.session.bpClear();});if(${JSON.stringify(disconnectOnFinish)})await d.disconnect();}return true;`).catch(e=>ok(false,'压力测试收尾',e.message));
  }
  return results;
 }

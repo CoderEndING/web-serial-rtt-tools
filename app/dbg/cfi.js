@@ -26,7 +26,7 @@ function entries(elf){
       if(![1,3,4].includes(version)||augmentation)throw new Error('暂不支持该 CFI version/augmentation');
       if(version===4&&(q.u8()!==4||q.u8()!==0))throw new Error('CFI 地址格式不是32位平坦地址');
       const ca=q.leb(),da=q.leb(true),ra=version===1?q.u8():q.leb();
-      if(ca<1||ra>15)throw new Error('CFI 对齐/返回寄存器无效');
+      if(ca<1||ra>63)throw new Error('CFI 对齐/返回寄存器无效');
       cies.set(offset,{ca,da,ra,ops:q.bytes(end-q.p)});
     }else{
       const cie=cies.get(id);if(!cie)throw new Error('CFI 引用不存在的 CIE');
@@ -38,15 +38,15 @@ function entries(elf){
   cache.set(elf,out);return out;
 }
 const clone=s=>({reg:s.reg,offset:s.offset,rules:new Map(s.rules)});
-function program(ops,cie,state,initial,start,pc){
+function program(ops,cie,state,initial,start,pc,maxRegister=15){
   const r=new Reader(ops),saved=[];let loc=start,steps=0;
-  const register=()=>{const n=r.leb();if(n>15)throw new Error('CFI 非核心寄存器规则');return n;};
+  const register=()=>{const n=r.leb();if(n>maxRegister)throw new Error('CFI 非核心寄存器规则');return n;};
   while(r.p<r.end){
     if(++steps>16384)throw new Error('CFI 指令过多');
     const op=r.u8(),primary=op&0xc0,n=op&63;
     if(primary===0x40){const next=loc+n*cie.ca;if(pc<next)break;loc=next;continue;}
-    if(primary===0x80){if(n>15)throw new Error('CFI 非核心寄存器');state.rules.set(n,{kind:'offset',v:r.leb()*cie.da});continue;}
-    if(primary===0xc0){if(n>15)throw new Error('CFI 非核心寄存器');if(initial.rules.has(n))state.rules.set(n,initial.rules.get(n));else state.rules.delete(n);continue;}
+    if(primary===0x80){if(n>maxRegister)throw new Error('CFI 非核心寄存器');state.rules.set(n,{kind:'offset',v:r.leb()*cie.da});continue;}
+    if(primary===0xc0){if(n>maxRegister)throw new Error('CFI 非核心寄存器');if(initial.rules.has(n))state.rules.set(n,initial.rules.get(n));else state.rules.delete(n);continue;}
     if(op>=1&&op<=4){const next=op===1?r.uint(4):loc+r.uint(2**(op-2))*cie.ca;if(next<loc)throw new Error('CFI PC 倒退');if(pc<next)break;loc=next;continue;}
     switch(op){
       case 0:break;
@@ -71,19 +71,27 @@ function program(ops,cie,state,initial,start,pc){
   }
   return state;
 }
-export function cfiRow(elf,pc){
+export function cfiRow(elf,pc,{maxRegister=15}={}){
+  if(!Number.isInteger(maxRegister)||maxRegister<0||maxRegister>63)throw new Error('CFI 寄存器上限无效');
   const f=entries(elf).find(f=>pc>=f.start&&pc<f.end);if(!f)return null;
   const empty={reg:null,offset:0,rules:new Map()};
-  const initial=program(f.cie.ops,f.cie,clone(empty),empty,0,Infinity);
-  const row=program(f.ops,f.cie,clone(initial),initial,f.start,pc);
+  const initial=program(f.cie.ops,f.cie,clone(empty),empty,0,Infinity,maxRegister);
+  const row=program(f.ops,f.cie,clone(initial),initial,f.start,pc,maxRegister);
   return {...row,ra:f.cie.ra};
 }
-export async function unwindCfi(regs,known,row,readWord,valid){
+export async function unwindCfi(regs,known,row,readWord,valid,options={}){
+  const registerCount=options.registerCount??16,pcReg=options.pcReg??15,spReg=options.spReg??13;
+  const preservedRegisters=options.preservedRegisters??Array.from({length:8},(_,i)=>i+4);
+  const raFallback=options.raFallback??true;
+  if(!Number.isInteger(registerCount)||registerCount<1||registerCount>64||
+     !Number.isInteger(pcReg)||pcReg<0||pcReg>=registerCount||!Number.isInteger(spReg)||spReg<0||spReg>=registerCount)
+    throw new Error('CFI 架构寄存器布局无效');
+  if(!Number.isInteger(row.ra)||row.ra<0||row.ra>=registerCount||row.reg>=registerCount)throw new Error('CFI 架构寄存器超出范围');
   if(row.reg==null||!known.has(row.reg))throw new Error('CFA 寄存器不可用');
-  const cfa=regs[row.reg]+row.offset;if(!valid(cfa,0))throw new Error('CFA 超出栈边界');
-  const out=new Uint32Array(16),available=new Set();
-  // ARM preserved registers only. Volatile caller registers are unknown unless restored.
-  for(let n=4;n<=11;n++)if(known.has(n)){out[n]=regs[n];available.add(n);}
+  const cfa=regs[row.reg]+row.offset;if(!Number.isInteger(cfa)||!valid(cfa,0))throw new Error('CFA 超出栈边界');
+  const out=new Uint32Array(registerCount),available=new Set();
+  // Only ABI-preserved values may flow to a caller without an explicit CFI rule.
+  for(const n of preservedRegisters){if(!Number.isInteger(n)||n<0||n>=registerCount)throw new Error('CFI 保留寄存器布局无效');if(known.has(n)){out[n]=regs[n];available.add(n);}}
   for(const [n,rule]of row.rules){
     available.delete(n);
     if(rule.kind==='undefined')continue;
@@ -95,8 +103,8 @@ export async function unwindCfi(regs,known,row,readWord,valid){
     available.add(n);
   }
   // ABI leaf functions may keep return address in LR without emitting an explicit rule.
-  if(!row.rules.has(row.ra)&&known.has(row.ra)){out[row.ra]=regs[row.ra];available.add(row.ra);}
+  if(raFallback&&!row.rules.has(row.ra)&&known.has(row.ra)){out[row.ra]=regs[row.ra];available.add(row.ra);}
   if(!available.has(row.ra))throw new Error('返回地址不可用');
-  out[15]=out[row.ra];out[13]=cfa;available.add(15);available.add(13);
+  out[pcReg]=out[row.ra];out[spReg]=cfa;available.add(pcReg);available.add(spReg);
   return {regs:out,known:available,cfa};
 }

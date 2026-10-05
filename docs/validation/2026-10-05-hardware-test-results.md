@@ -158,6 +158,15 @@ H743 的 3 变量 @2 µs J-Scope 实测约 73.5–84.8 kHz，并伴随大量探�
 
 ## 2026-10-06 收工状态
 
+以下为约 07:02 的阶段性状态；后续代码和离线验证进度见下一节。
+
 修正后的 `akalink-all-changes-20261005-final.zip` 已与 akaLinkPro 和 Web 当前源码复核；包内相关修改已在仓库现有实现中，没有额外源码差异需要应用。本次收工没有在补丁包复核后再执行板上测试，因此最近一次 HPM6800EVK 真机判决仍是上文记录的 2026-10-06 06:56–07:02 full flow。
 
-HPM6800EVK 当前已验证 RISC-V 基础调试、随机切换和 full flow；网页端 RISC-V CFI 栈回溯及所选栈帧局部变量仍未实现/验收，Og/Os × DWARF4/5 板上矩阵尚未完成。后续若继续，应先补齐该支持，再按每个匹配 ELF 与 GDB oracle 逐组合验证；本记录不将现有 smoke 结果外推为该矩阵通过。
+截至该阶段，HPM6800EVK 已验证 RISC-V 基础调试、随机切换和 full flow；网页端 RISC-V CFI 栈回溯及所选栈帧局部变量仍未实现/验收，Og/Os × DWARF4/5 板上矩阵尚未完成。后续进度见下一节；本记录不将基础 smoke 结果外推为该矩阵通过。
+
+## 2026-10-06 补充：页面整理与 RISC-V 栈帧实现收尾
+
+- **时间：**约 07:34–07:38（北京时间）。本次只做代码、离线与浏览器自测，没有重跑板上 `full_flow`；HPM6800EVK 最近一次真机结论仍为上文 06:56–07:02 的基础流程。
+- **页面：**ADC 与 DAC 已整理为并列子标签，共用同一个 AnalogSession。方向键切换、ARIA 选中状态、面板显隐及共享会话检查通过；`make test-ui` 为 20/20，`make test-offline` 退出码 0。
+- **RISC-V 栈帧：**已增加 x0–x31/PC 的 CFI 展开、x2/SP CFA、x1/RA 返回列、ABI 保留寄存器传播和扩展寄存器局部变量位置解析。合成 RISC-V 测试以及既有 ARM CFI/EHABI 测试通过。这些是离线逻辑验证，不是 HPM 板上验收。
+- **未完成项：**仅构建了 HPM `Og / DWARF4` 调试镜像；真实 `.debug_frame` 集成检查无法为 `dbg_frame_recursive_checkpoint` 找到 CFI 行。该镜像没有烧录，未生成匹配 GDB oracle，HPM CFI 解析修复和 Og/Os × DWARF4/5 四组合的板上压力均未完成。详细进度和限制见[栈帧压力测试记录](../debug-frame-stress.md)。

@@ -18,9 +18,12 @@
  *   · 靶子里没有中断（HPM 的 MCHTMR 走 SDK 的中断分发，留给下一轮），所以没有"ISR 里下断点"这一节。
  */
 import { Cdp, sleep, DEV_RE } from './cdp-lib.mjs';
-import { writeFileSync, existsSync, readFileSync, readdirSync } from 'node:fs';
-import { relative, resolve, sep } from 'node:path';
+import { writeFileSync, existsSync, readFileSync, readdirSync, mkdirSync } from 'node:fs';
+import { dirname, relative, resolve, sep } from 'node:path';
 import { artifact, repoRoot } from './board-matrix.mjs';
+import { Elf } from '../../app/elf/elf.js';
+import { readJson, validateOracle } from './dbg-frame-contract.mjs';
+import { runFrameStress } from './dbg-frame-hw-runner.mjs';
 
 const argv = process.argv.slice(2);
 const arg = (k, d = null) => { const h = argv.find(a => a.startsWith('--' + k + '=')); return h ? h.split('=').slice(1).join('=') : (argv.includes('--' + k) ? true : d); };
@@ -30,6 +33,9 @@ const ELF = String(arg('elf', '/' + artifact('6800evk', 'dbgstress')));
 const SRCDIR = String(arg('src', resolve(repoRoot, 'tools', 'target-firmware', 'hpm6800evk_dbgstress', 'src')));
 const ORACLE = String(arg('oracle', 'tmp/rv-gdb-oracle.json'));
 const JSON_OUT = String(arg('out', 'tmp/rv-stress-page.json'));
+const FRAME_ONLY=!!arg('frames-only',false),FRAME_ORACLE=arg('frame-oracle');
+const FRAME_ROUNDS=Number(arg('frame-rounds',200));
+if(!Number.isInteger(FRAME_ROUNDS)||FRAME_ROUNDS<1||FRAME_ROUNDS>2000)throw new Error('--frame-rounds 必须为1..2000');
 /**
  * 页面侧拿源码只能走**静态服务**（8899 的根 = 仓库根），所以把磁盘路径换算成 URL 路径。
  * 为什么要这么绕：见下面"源码目录"那段的 🚨。
@@ -39,6 +45,15 @@ const SRC_REL = relative(ROOT, resolve(SRCDIR));
 if (SRC_REL.startsWith('..')) throw new Error('--src 必须指向仓库里的目录（页面是通过 8899 静态服务取源码的）：' + SRCDIR);
 const SRC_HTTP = '/' + SRC_REL.split(sep).join('/');
 const SRC_NAMES = readdirSync(resolve(SRCDIR)).filter(f => /\.(c|h)$/i.test(f)).sort();
+let frameOracle=null,frameBuild=null,frameCode=[];
+if(FRAME_ONLY){
+  if(!FRAME_ORACLE)throw new Error('栈帧验收必须指定 --frame-oracle');
+  const elfDisk=resolve(ROOT,ELF.replace(/^\//,'')),bytes=readFileSync(elfDisk),buildPath=String(arg('build',join(dirname(elfDisk),'build-info.json')));
+  frameBuild=readJson(buildPath);frameOracle=readJson(String(FRAME_ORACLE));validateOracle(frameOracle,frameBuild,bytes,'6800evk');
+  const image=new Elf(new Uint8Array(bytes));
+  frameCode=image.sections().filter(s=>(s.flags&2)&&!(s.flags&1)&&s.type===1&&s.addr>=0x80000000&&s.addr<0x81000000)
+    .map(s=>({name:s.name,addr:s.addr,bytes:[...image.data(s.name)]}));
+}
 setTimeout(() => { console.error('[WATCHDOG] 25 分钟'); process.exit(9); }, 1500000);
 
 const engLines = readFileSync(SRCDIR + '\\engine.c', 'utf8').split(/\r?\n/);
@@ -141,6 +156,11 @@ const elfInfo = await cdp.json(`(async () => {
       if (!rr.ok) return { err: '源码 ' + n + ' 取不到：HTTP ' + rr.status + '（' + ${JSON.stringify(SRC_HTTP)} + '，检查 --src 是否在仓库里）' };
       files.push(new File([await rr.text()], n));
     }
+    if(${JSON.stringify(FRAME_ONLY)}){
+      const rr=await fetch('/tools/target-firmware/common/dbg_frames.c?t='+Date.now());
+      if(!rr.ok)return {err:'共享栈帧源码读取失败：HTTP '+rr.status};
+      files.push(new File([await rr.text()],'dbg_frames.c'));
+    }
     await d._indexSrcFiles(files);
     const be = document.getElementById('d-backend');
     be.value = 'riscv'; be.dispatchEvent(new Event('change'));
@@ -173,6 +193,20 @@ ok(env.caps.numCode >= 4, `硬件断点（触发器）可用：${env.caps.numCod
 ok(env.halted, '能停住目标');
 ok(env.leak.used === 0 && env.leak.bps === 0, '干净起点：没有触发器被占', JSON.stringify(env.leak));
 ok(/\.c:\d+|\+\d/.test(env.pos || ''), 'PC 能映射到源码位置：' + env.pos);
+
+if(FRAME_ONLY){
+  sec('== RISC-V CFI / DWARF 局部变量：GDB oracle 对照与严格压力 ==');
+  const frameResults=await runFrameStress({cdp,oracle:frameOracle,code:frameCode,board:'6800evk',rounds:FRAME_ROUNDS,ok,log,disconnectOnFinish:false});
+  const finalLeak=await cdp.json(`(async()=>{const d=window.__tools.dbg;await d.session.bpClear();return await window.__S.leak();})()`);
+  ok(finalLeak.used===0&&finalLeak.bps===0&&finalLeak.extra===0,'栈帧检查点全部清理后触发器为空',JSON.stringify(finalLeak));
+  const recov=await cdp.eval('return window.__S.recoveries || [];');
+  ok(recov.length===0,'严格栈帧验收期间没有目标意外复位/自动恢复',JSON.stringify(recov));
+  mkdirSync(dirname(resolve(JSON_OUT)),{recursive:true});
+  writeFileSync(JSON_OUT,JSON.stringify({at:new Date().toISOString(),board:'6800evk',elf:ELF,elfSha256:frameOracle.elfSha256,build:frameBuild,pass,fail,failures,frameResults},null,2));
+  await cdp.eval(`if(window.__tools.dbg.session.connected)await window.__tools.dbg.disconnect();return true;`).catch(()=>{});
+  log(`\n== RISC-V 栈帧汇总：${pass} 通过 / ${fail} 失败 ==`);
+  cdp.close();process.exit(fail?1:0);
+}
 
 const oracle = { elf: ELF, arch: 'riscv', linear: [], bpAddr: {}, struct: {}, steps: {} };
 

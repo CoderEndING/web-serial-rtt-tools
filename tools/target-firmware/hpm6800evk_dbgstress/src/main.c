@@ -12,7 +12,7 @@
  *      不依赖中断（ISR 那条留到需要时再加，见 README 的"还没做"一节）；
  *   ③ 启动一律走 SDK 的 `board_init()`，不自己碰时钟（压测要的是确定性，不是主频）。
  *
- * 11 段流水线：每轮把每一段都跑一遍，`g_stage` 就是"现在在第几段" —— 任何一段下断点
+ * 12 段流水线：每轮把每一段都跑一遍，`g_stage` 就是"现在在第几段" —— 任何一段下断点
  * 都会每轮必命中，停下来一眼能看出停在哪。
  */
 #include <stdint.h>
@@ -26,12 +26,14 @@
 #include "model.h"
 
 #define TICK_HZ     10000u             /* 主循环节拍（MCHTMR） */
-#define STAGE_COUNT 11u
+#define STAGE_COUNT 12u
+
+uint32_t engine_frame_stage(void);
 
 /* ---- 非缓存区的观测变量（探针 SBA 直读得到当前值）---- */
 ATTR_PLACE_AT_NONCACHEABLE_BSS volatile uint32_t g_ticks;        /* 主循环节拍计数 */
 ATTR_PLACE_AT_NONCACHEABLE_BSS volatile uint32_t g_loops;        /* 主循环轮数 */
-ATTR_PLACE_AT_NONCACHEABLE_BSS volatile uint32_t g_stage;        /* 当前在第几段（0..10） */
+ATTR_PLACE_AT_NONCACHEABLE_BSS volatile uint32_t g_stage;        /* 当前在第几段（0..11） */
 ATTR_PLACE_AT_NONCACHEABLE_BSS volatile uint32_t g_last_result;  /* 上一段返回值 */
 ATTR_PLACE_AT_NONCACHEABLE_BSS volatile uint32_t g_checksum;     /* 每轮算一次：代码真的在跑 */
 ATTR_PLACE_AT_NONCACHEABLE_BSS_WITH_ALIGNMENT(16) volatile uint32_t g_seq_slot[8];
@@ -69,7 +71,8 @@ static uint32_t stage_run(uint32_t s)
     case 7:  return engine_branchy(g_loops);                           /* 分支/循环/switch */
     case 8:  return engine_uses_inline(g_loops);                       /* 内联 */
     case 9:  model_bitfield_touch(g_loops); return g_model.flags.word; /* 位域 */
-    default: return model_update(g_loops);                             /* 结构体全量更新 */
+    case 10: return model_update(g_loops);                             /* 结构体全量更新 */
+    default: return engine_frame_stage();                              /* CFI / 递归局部变量检查点 */
   }
 }
 

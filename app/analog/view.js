@@ -4,8 +4,9 @@ import { WAVES, dacTable, signalLevels, waveCsv } from './model.js';
 import { AdcScopeStore, envelope } from './scope-store.js';
 import { PinMap } from '../ui/pin-map.js';
 export class AnalogView {
-  constructor(){ this.session = new AnalogSession(); this.store = new AdcScopeStore(); this.wave = []; this._raf = null; this.total = 0; }
+  constructor(){ this.session = new AnalogSession(); this.store = new AdcScopeStore(); this.wave = []; this._raf = null; this.total = 0; this.page='adc'; }
   init(){
+    this.initTabs();
     this.pinMap=new PinMap({buttonId:'an-pinmap-btn',feature:'adc',state:()=>({connected:this.session.connected,connectionKey:this.session.hid?.device||this.session.hid,supported:!!this.session.caps})});
     this.pinMap.init();
     const bind = (id, fn) => $(id).addEventListener('click', () => { Promise.resolve().then(fn).catch(e => this.status(e.message, true)); });
@@ -39,6 +40,35 @@ export class AnalogView {
     this.session.onDisconnect = () => {this.updateDacControls();this.status('探针已掉线；采集已请求取消', true);};
     for(const id of ['an-time','an-volts','an-offset','an-trigger','an-level','an-edge','an-freeze'])$(id).addEventListener('change',()=>this.renderAdc());
     this.updateDacControls(); this.preview(); this.renderAdc();
+  }
+  initTabs(){
+    const tabs=[...document.querySelectorAll('#an-dock-tabs [data-an-tab]')];
+    for(const tab of tabs){
+      tab.addEventListener('click',()=>this.selectTab(tab.dataset.anTab));
+      tab.addEventListener('keydown',event=>{
+        if(!['ArrowLeft','ArrowRight','Home','End'].includes(event.key))return;
+        event.preventDefault();
+        const current=tabs.indexOf(tab),next=event.key==='Home'?0:event.key==='End'?tabs.length-1:
+          (current+(event.key==='ArrowRight'?1:tabs.length-1))%tabs.length;
+        this.selectTab(tabs[next].dataset.anTab,{focus:true});
+      });
+    }
+    this.selectTab(this.page);
+  }
+  selectTab(name,{focus=false}={}){
+    if(!['adc','dac'].includes(name))return;
+    this.page=name;
+    for(const tab of document.querySelectorAll('#an-dock-tabs [data-an-tab]')){
+      const active=tab.dataset.anTab===name;
+      tab.classList.toggle('on',active);tab.setAttribute('aria-selected',String(active));tab.tabIndex=active?0:-1;
+      if(active&&focus)tab.focus();
+    }
+    for(const panel of document.querySelectorAll('#tab-analog [data-an-page]')){
+      const active=panel.dataset.anPage===name;
+      panel.classList.toggle('on',active);panel.hidden=!active;
+    }
+    if(name==='adc')this.renderAdc();
+    else if(this.wave.length===0)this.preview();
   }
   status(text, error = false){ $('an-state').textContent = text; $('an-state').style.color = error ? '#f85149' : '';this.pinMap?.refresh(); }
   async acquire(count){
