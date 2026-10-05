@@ -5,25 +5,41 @@ import { withTimeout } from '../rtt/dap-webusb.js';
 import { DacClient } from './dac-protocol.js';
 import { dacTable } from './model.js';
 import { AdcTransport } from './transport.js';
+import { ADC_ACT, decodeReply, streamCaps } from './adc-protocol.js';
+export { decodeReply, streamCaps } from './adc-protocol.js';
 export class AnalogSession {
   constructor(){ this.hid = null; this.caps = null; this.dac = null; this.busy = false; this.usingMock = false; }
   get connected(){ return !!this.hid?.connected; }
   setBusy(value){ this.busy = value; }
   async connect(){
     if (this._connectPromise) return this._connectPromise;
-    this._connectPromise = runProbeOperation(this, 'analog', async () => {
-      if (this.connected) return this.caps;
+    this._connectPromise = runProbeOperation(this, 'analog', async lease => {
+      const alive=()=>lease?.assert();alive();
+      if(this._connectCleanupError)throw Error('上次 HID 连接清理未完成，请先断开重试');
+      if (this.connected) return this.caps || {supported:false};
       const hid = new AkaLinkHid();
       try {
         await hid.request();
-        const r = await hid.xfer(0x38, Uint8Array.of(9));
-        const caps = streamCaps(decodeReply(r,9));
+        alive();
+        let caps;
+        try{caps=streamCaps(decodeReply(await hid.xfer(0x38,Uint8Array.of(ADC_ACT.CAPS)),ADC_ACT.CAPS),{allowUnsupported:true});}
+        catch(e){if(![1,4].includes(e.code))throw e;caps={supported:false};}
         const dac = new DacClient((cmd,data)=>hid.xfer(cmd,data));
         await dac.capabilities();
-        this.caps = caps; this.hid = hid; this.dac = dac;
+        alive();
+        if(!caps.supported&&!dac.caps.supported)throw Error('当前固件没有可用的 ADC DMA 或 DAC 输出能力');
+        this.caps = caps.supported?caps:null; this.hid = hid; this.dac = dac;
         hid.onDisconnect = () => { this._adcAbort?.abort(); this._dacStart?.controller.abort();  this.onDisconnect?.(); };
         return caps;
-      } catch (e){ await hid.close(); throw e; }
+      } catch (e){
+        try{await hid.close();}
+        catch(cleanup){
+          this.hid=hid;this._connectCleanupError=cleanup;
+          const error=new AggregateError([e,cleanup],'模拟接口连接失败且 HID 清理未确认，请重试断开');
+          this.probeManager?.fail('analog',error);throw error;
+        }
+        throw e;
+      }
     }, { reason: 'ADC 页面要使用探针', recovery: true });
     try { return await this._connectPromise; } finally { this._connectPromise = null; }
   }
@@ -36,8 +52,9 @@ export class AnalogSession {
     finally { this._adcRun = null; this._adcAbort = null; }
   }
   async _acquire({bits,rate,count=0},onBlock,signal){
-    if(!this.connected||!this.caps)throw Error('先连接探针');
+    if(!this.connected)throw Error('先连接探针');
     if(this.busy)throw Error('ADC 已有采集在进行');
+    if(!this.caps)throw Error('当前固件未提供 ADC DMA 能力');
     if(![8,10,12,16].includes(bits)||!Number.isInteger(rate)||rate<1||rate>this.caps.maxRate ||
        !Number.isInteger(count)||count<0||count>0xffffffff)throw Error('ADC 位宽、采样率或长度无效');
     this.setBusy(true);
@@ -45,7 +62,7 @@ export class AnalogSession {
     const abort=()=>{this._sendStop().catch(e=>{this._adcStopError=e;});};
     try{
       if(!this.transport)this.transport=await AdcTransport.request(this.hid.device);
-      const caps=streamCaps(await this.streamCommand(9));
+      const caps=streamCaps(await this.streamCommand(ADC_ACT.CAPS));
       if(caps.flags&2)throw Error('SPI/QSPI 尚未退场，不能接管共享缓冲');
       if(caps.flags&1)await this.transport.retireSpiOut();
       if(signal.aborted)return;
@@ -53,7 +70,7 @@ export class AnalogSession {
       v.setUint32(1,rate,true);v.setUint32(5,count,true);
       this._openUncertain=true;
       let b;
-      try{b=await this.streamCommand(10,args);}
+      try{b=await this.streamCommand(ADC_ACT.OPEN,args);}
       catch(e){if(e.code!=null)this._openUncertain=false;throw e;}
       if(b.length!==4)throw Error('ADC OPEN 应答长度错误');
       this._streamToken=new DataView(b.buffer,b.byteOffset,b.byteLength).getUint32(0,true);
@@ -61,7 +78,7 @@ export class AnalogSession {
       this._adcStopError=null;
       this.transport.start(this._streamToken,{bits,onBlock,onFault:abort});
       signal.addEventListener('abort',abort,{once:true});
-      if(signal.aborted)abort();else await this.streamCommand(13);
+      if(signal.aborted)abort();else await this.streamCommand(ADC_ACT.START);
       await this.transport.pending;
       if(this.transport.error)throw this.transport.error;
       if(this._adcStopError)throw this._adcStopError;
@@ -78,12 +95,14 @@ export class AnalogSession {
     if(this._streamToken==null)return;
     // Coalesce a live STOP, but permit retries after an error/timeout.
     if(this._stopCommand)return this._stopCommand;
-    this._stopCommand=this.streamCommand(11);
+    this._stopCommand=this.streamCommand(ADC_ACT.END);
     try{await this._stopCommand;}finally{this._stopCommand=null;}
   }
   async _cleanupAdc(){
+    // A timed-out OUT is still owned by native USB. Do not clear busy/retry it.
+    if(this.transport?.flush)await withTimeout(this.transport.flush,2000,'等待 SPI OUT 退场');
     if(this._openUncertain){
-      const b=await this.streamCommand(14);
+      const b=await this.streamCommand(ADC_ACT.STATUS);
       if(b.length!==24)throw Error('ADC 状态应答长度错误');
       if(b[20]){
         this._streamToken=new DataView(b.buffer,b.byteOffset,b.byteLength).getUint32(0,true);
@@ -99,7 +118,7 @@ export class AnalogSession {
     await this._sendStop();await this.transport.drain();
     const deadline=performance.now()+3000;
     for(;;){
-      try{await this.streamCommand(12);break;}
+      try{await this.streamCommand(ADC_ACT.CLOSE);break;}
       catch(e){if(e.code!==2||performance.now()>=deadline)throw e;await waitMs(5);}
     }
     this._streamToken=null;this._adcCleanupError=null;
@@ -140,6 +159,7 @@ export class AnalogSession {
     return s;
   }
   async stopAdc(){
+    if(this._dacStart||this.dac?.owned)throw Error('DAC 仍占用会话，请使用输出 OFF');
     this._adcAbort?.abort();
     try{
       await this._sendStop();
@@ -155,22 +175,8 @@ export class AnalogSession {
     try {
       await this.stop(); await this.transport?.close(); this.transport = null;
       await this.hid?.close(); this.hid = null; this.caps = null; this.dac = null;
+      this._connectCleanupError=null;
       this.probeManager?.forget('analog');
     } catch (e){ this.probeManager?.fail('analog', e); throw e; }
   }
-}
-
-export function decodeReply(r,action){
-  if(!r||r.length<7||r[0]<8||r[0]>r.length+1||r[1]!==0x38||r[2]!==action)throw Error('ADC DMA 固件响应无效');
-  const rc=new DataView(r.buffer,r.byteOffset,r.byteLength).getUint32(3,true);
-  if(rc){const e=Error(`ADC DMA 控制失败：${rc}`);e.code=rc;throw e;}
-  return r.subarray(7,r[0]-1);
-}
-export function streamCaps(b){
-  if(b.length!==20||String.fromCharCode(...b.subarray(0,4))!=='ADB2'||b[4]!==0x8b||b[5]!==2||b[6]!==15||b[7]!==6)
-    throw Error('需要 SPI/ADC 共享 DMA 配套固件');
-  const v=new DataView(b.buffer,b.byteOffset,b.byteLength),maxRate=v.getUint32(8,true),reference=v.getUint16(18,true)/1000;
-  if(v.getUint16(12,true)!==4096||v.getUint16(14,true)!==4096||maxRate<1||maxRate>2000000||reference<=0)throw Error('ADC DMA 能力信息无效');
-  if(b[17]!==1)throw Error('当前板卡未支持共享 SPI 端点的 ADC DMA；此版本支持 HPM5301EVKLite PB14');
-  return {channel:6,nativeBits:16,gain:1,reference,maxRate,flags:b[16]};
 }

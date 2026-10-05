@@ -40,6 +40,7 @@ export class AdcTransport {
     }catch(e){try{await t.lease.close();}catch(cleanup){t.lease.abandon();e.message+=`；USB 清理失败：${cleanup.message}`;}throw e;}
   }
   async retireSpiOut(){
+    if(this.flush)throw Error('上一笔 SPI OUT 退场请求尚未结束');
     // Only called when HID CAPS reports disabled SPI with exactly one OUT still armed.
     const native=Promise.resolve().then(()=>this.device.transferOut(11,new Uint8Array()));
     this.flush=native.finally(()=>{this.flush=null;});this.flush.catch(()=>{});

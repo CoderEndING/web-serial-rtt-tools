@@ -55,8 +55,8 @@ export const PROBE_FEATURES = Object.freeze([
     release: async t => { t.i2c?.runner?.stop(); await t.i2c.session.disconnect(); },
   },
   {
-    id: 'analog', label: 'ADC', client: t => t.analog?.session, view: t => t.analog, usbKind: 'analog',
-    resources: ['analog-engine', 'spi-stream', 'spi-pins', 'target-engine', 'periodic-engine'],
+    id: 'analog', label: 'ADC/DAC', client: t => t.analog?.session, view: t => t.analog, usbKind: 'analog',
+    resources: ['analog-engine', 'spi-bulk', 'spi-pins', 'target-engine', 'periodic-engine'],
     active: t => !!t.analog?.session?.connected,
     release: t => t.analog?.session?.disconnect(),
     guarded: t => !!t.analog?.session?.busy,

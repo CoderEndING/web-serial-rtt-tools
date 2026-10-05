@@ -15,7 +15,7 @@ function fixture(){
   switch(a){
    case ACT.CAPS:return reply(a,caps());
    case ACT.CONFIG:f.channel=b[0];f.config={rate:view(b).getUint32(2,true)};return reply(a,b);
-   case ACT.BEGIN:f.points=view(b).getUint16(1,true);f.loaded=0;f.codes=[];f.generation++;{const r=new Uint8Array(4);view(r).setUint32(0,f.generation,true);return reply(a,r);}
+   case ACT.BEGIN:f.points=view(b).getUint16(1,true);f.loaded=0;f.codes=[];f.generation++;{const r=new Uint8Array(4);view(r).setUint32(0,f.generation,true);if(f.lostBegin)throw Error('BEGIN response lost');return reply(a,r);}
    case ACT.WRITE:assert.equal(view(b).getUint32(1,true),f.generation);assert.equal(view(b).getUint16(5,true),f.loaded);for(let i=0;i<b[7];i++)f.codes.push(view(b).getUint16(8+i*2,true));f.loaded+=b[7];await f.onWrite?.();{const r=new Uint8Array(2);view(r).setUint16(0,f.loaded+(f.badAck?1:0),true);return reply(a,r);}
    case ACT.START:assert.equal(f.loaded,f.points);assert.equal(view(b).getUint32(1,true),f.generation);f.running=true;await f.onStart?.();{const r=new Uint8Array(4);view(r).setUint32(0,f.config.rate,true);return reply(a,r);}
    case ACT.STOP:assert.equal(view(b).getUint32(1,true),f.generation);if(f.stopFails-->0)throw Error('STOP transport failure');f.running=false;return reply(a,f.status());
@@ -34,6 +34,9 @@ assert.throws(()=>writeData(0,1,0,[-1]),/分片/);
 const boundary=writeData(0,0x12345678,100,Array(25).fill(4095));assert.equal(boundary.length,58);assert.equal(view(boundary).getUint32(1,true),0x12345678);assert.equal(view(boundary).getUint16(5,true),100);
 const options={shape:'sine',rate:3200,frequency:100,amplitude:1,offset:1.65,points:1024};
 const c=parseCaps(caps()),table=dacTable(options,c);assert.equal(table.codes.length,32);assert.equal(table.actualFrequency,100);
+const short=fixture(),shortClient=new DacClient(short.xfer);await shortClient.capabilities();
+await assert.rejects(shortClient.startLut({channel:0,bits:12,rate:3200},Array(7).fill(0)),/超出/);
+assert.deepEqual(short.calls,[ACT.CAPS],'invalid LUT cannot modify CONFIG or reserve BEGIN');
 assert.equal(dacTable({...options,frequency:99},c).actualFrequency,100);
 assert.throws(()=>dacTable({...options,frequency:1},c),/点数/);
 assert.equal(dacTable({...options,rate:800,frequency:100},c).codes.length,8);
@@ -48,3 +51,13 @@ for(const stage of ['onWrite','onStart']){
  if(stage==='onWrite')assert.ok(!f.calls.includes(ACT.START));
 }
 console.log('DAC reservation: capabilities, legacy fallback, HID sizes, coherent LUT, chunk ACK, STOP retry and cancellation during upload/START PASS');
+
+const lost=fixture(),lostClient=new DacClient(lost.xfer);await lostClient.capabilities();lost.lostBegin=true;
+await assert.rejects(lostClient.startLut({channel:0,bits:12,rate:3200},table.codes),/BEGIN response lost/);
+assert.ok(lost.calls.includes(ACT.STATUS)&&lost.calls.includes(ACT.STOP));assert.equal(lostClient.owned,false);
+const unknown=fixture(),unknownClient=new DacClient(unknown.xfer);await unknownClient.capabilities();unknown.lostBegin=true;
+const base=unknown.xfer;unknownClient.xfer=async(c,d)=>{if(d[0]===ACT.STATUS)throw Error('STATUS transport failure');return base(c,d);};
+await assert.rejects(unknownClient.startLut({channel:0,bits:12,rate:3200},table.codes),/停止未确认/);
+assert.ok(unknownClient.owned&&unknownClient.beginUncertain);
+unknownClient.xfer=base;await unknownClient.stop();assert.equal(unknownClient.owned,false);
+console.log('DAC uncertain BEGIN: lost ACK recovered by STATUS/STOP, failed recovery retains ownership for retry PASS');

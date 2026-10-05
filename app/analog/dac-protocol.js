@@ -67,15 +67,18 @@ export class DacClient {
     const alive=()=>{if(signal?.aborted){const e=Error('DAC 启动已取消');e.name='AbortError';throw e;}};alive();
     this.requireChannel(config.channel);const c=this.caps;
     if(this.owned)throw Error('先停止当前 DAC 波形');
-    if(config.bits!==c.bits||config.rate>c.maxRate||codes.length>c.maxPoints||Array.from(codes).some(n=>!Number.isInteger(n)||n<0||n>=2**c.bits))throw Error('DAC 波形超出固件能力');
+    if(config.bits!==c.bits||config.rate>c.maxRate||codes.length<8||codes.length>c.maxPoints||Array.from(codes).some(n=>!Number.isInteger(n)||n<0||n>=2**c.bits))throw Error('DAC 波形超出固件能力');
     const args=configData(config);
     const accepted=parseConfig(await this.command(ACT.CONFIG,args));
     if(accepted.channel!==config.channel||accepted.bits!==config.bits||accepted.rate>config.rate||accepted.idleCode!==(config.idleCode||0))throw Error('DAC 配置应答不匹配');
     alive();
-    const b=await this.command(ACT.BEGIN,beginData(config.channel,codes.length));
-    if(b.length!==4||!v(b).getUint32(0,true))throw Error('DAC 波形预备应答错误');
-    this.channel=config.channel;this.token=v(b).getUint32(0,true);this.owned=true;
+    this.channel=config.channel;this.beginUncertain=true;this.owned=true;
     try {
+      let b;
+      try{b=await this.command(ACT.BEGIN,beginData(config.channel,codes.length));}
+      catch(e){if(e instanceof DacError){this.beginUncertain=false;this.owned=false;}throw e;}
+      if(b.length!==4||!v(b).getUint32(0,true))throw Error('DAC 波形预备应答错误');
+      this.token=v(b).getUint32(0,true);this.beginUncertain=false;
       for(let off=0;off<codes.length;off+=CHUNK_POINTS){
         alive();
         const chunk=codes.slice(off,off+CHUNK_POINTS),r=await this.command(ACT.WRITE,writeData(this.channel,this.token,off,chunk));
@@ -90,6 +93,13 @@ export class DacClient {
   async stop(){
     if(!this.owned)return;
     try {
+      if(this.beginUncertain){
+        const s=await this.status();
+        // BEGIN never starts playback. Do not stop an unexpected running task.
+        if(s.running||s.cleanup)throw Error('DAC BEGIN 状态未确认，保留占用');
+        if(!s.token){this.owned=false;this.beginUncertain=false;this.stopError=null;return;}
+        this.token=s.token;this.beginUncertain=false;
+      }
       let s=parseStatus(await this.command(ACT.STOP,stopData(this.channel,this.token)));
       const deadline=performance.now()+3000;
       for(;;){

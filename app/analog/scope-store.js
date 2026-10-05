@@ -18,7 +18,7 @@ export class AdcScopeStore {
     const size=Math.min(wanted,this.length,this.capacity),oldest=this.total-this.length;
     let start=this.total-size,triggerIndex=null;
     const threshold=level/reference*(2**this.bits-1),pre=Math.floor(size*pretrigger),post=size-pre;
-    for(let i=this.total-post;i>oldest+pre;i--){
+    for(let i=this.total-post;i>=Math.max(oldest+1,oldest+pre);i--){
       const a=this.code(i-1),b=this.code(i);
       if(edge==='falling'?(a>threshold&&b<=threshold):(a<threshold&&b>=threshold)){start=i-pre;triggerIndex=i;break;}
     }

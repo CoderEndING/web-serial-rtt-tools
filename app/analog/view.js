@@ -8,12 +8,11 @@ export class AnalogView {
     const bind = (id, fn) => $(id).addEventListener('click', () => { Promise.resolve().then(fn).catch(e => this.status(e.message, true)); });
     bind('an-connect', async () => {
       const c = await this.session.connect(); if (!c) return;
-      $('an-channel').textContent = 'CH1 · PB14 / ADC0.6 · EVKLite J3[10]（与 QSPI IO2 互斥）';
-      $('an-rate').max=c.maxRate;
-      $('an-reference').value = c.reference;
+      $('an-channel').textContent=c.supported?'CH1 · PB14 / ADC0.6 · EVKLite J3[10]（与 QSPI IO2 互斥）':'当前固件未提供 ADC DMA；DAC 可独立使用';
+      if(c.supported){$('an-rate').max=c.maxRate;$('an-reference').value=c.reference;}
       this.updateDacControls();
       try{this.preview();}catch(e){$('an-wave-state').textContent=e.message;}
-      this.status(this.session.dac.caps.supported?'ADC 已连接；DAC 固件能力已识别':'ADC 已连接；当前固件未支持 DAC');
+      this.status(c.supported?(this.session.dac.caps.supported?'ADC/DAC 已连接':'ADC 已连接；当前固件未支持 DAC'):'DAC 信号发生器已连接');
     });
     bind('an-disconnect', async () => { await this.session.disconnect(); this.updateDacControls(); this.status('ADC 已断开'); });
     bind('an-once', () => this.acquire(Math.max(32,Math.min(65536,Math.round(Number($('an-rate').value)*10*Number($('an-time').value)))))); bind('an-start', () => this.acquire(Number($('an-count').value)));

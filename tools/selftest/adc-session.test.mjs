@@ -25,3 +25,12 @@ r=rig({lostOpen:true});await assert.rejects(r.s.acquire({bits:16,rate:1000,count
 r=rig({continuous:true});const run=r.s.acquire({bits:16,rate:1000,count:0});await new Promise(resolve=>setTimeout(resolve,0));await r.s.stopAdc();await run;assert.equal(r.s.busy,false);assert.equal(r.readers,0);
 r=rig({continuous:true,stopFailure:true});const active=r.s.acquire({bits:16,rate:1000,count:0});await new Promise(resolve=>setTimeout(resolve,0));await assert.rejects(r.s.stopAdc(),/STOP response lost/);assert.equal(r.s.busy,true);await r.s.stopAdc();await active.catch(()=>{});assert.equal(r.s.busy,false);
 console.log('ADC session: USB reader before START, finite/continuous stop, lost OPEN recovery, deferred CLOSE, failed STOP ownership/retry PASS');
+// ADC STOP must never unlock a DAC task on this shared session.
+const dacBusy=new AnalogSession();dacBusy.dac={owned:true};dacBusy.busy=true;
+await assert.rejects(dacBusy.stopAdc(),/DAC/);assert.equal(dacBusy.busy,true);
+// Native SPI OUT cleanup is part of ownership even before ADC OPEN.
+const beforeOpen=new AnalogSession();let finishOut;
+beforeOpen.transport={flush:new Promise(resolve=>finishOut=resolve)};beforeOpen.busy=true;
+let cleanupDone=false;const cleanup=beforeOpen._cleanupAdc().then(()=>cleanupDone=true);
+await Promise.resolve();assert.equal(cleanupDone,false);finishOut();await cleanup;
+console.log('ADC ownership: DAC cannot be unlocked by ADC STOP; native SPI OUT drains before cleanup PASS');

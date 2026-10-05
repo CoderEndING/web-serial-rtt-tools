@@ -9,4 +9,6 @@ assert.deepEqual(Array.from({length:12},(_,i)=>s.code(12+i)),Array.from({length:
 assert.equal(s.csv().split('\n').length,17);
 const points=new Uint16Array(10000);points[5555]=65535;assert.equal(Math.max(...envelope(points,100).map(p=>p.max)),65535);
 s.reset();assert.equal(s.frame({timeDiv:.001}),null);
+s.append({codes:Uint16Array.from([0,0,60000,60000,60000,60000,60000,60000,60000,60000]),rate:1000,bits:16});
+assert.equal(s.frame({timeDiv:.001,trigger:'normal',level:1.65}).start,0,'earliest valid pretrigger crossing is included');
 console.log('ADC scope: bounded history/ring wrap, rising trigger/pretrigger, normal hold, CSV, pixel spike envelope PASS');

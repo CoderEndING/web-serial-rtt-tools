@@ -20,3 +20,10 @@ queue=[packet(3,0,0,[1]),packet(3,2,1,[2]),packet(3,3,2)];t.start(3,{bits:16});a
 queue=[packet(4,0,0)];t.start(4,{bits:16});await t.drain();assert.equal(t.error,null);
 queue=[packet(5,0,0,[1]),packet(5,1,1)];t.start(5,{bits:16,onBlock(){throw Error('view failure');}});await t.drain();assert.match(t.error.message,/view failure/);
 console.log('ADC shared Bulk: compact blocks, strict token/size/config, one native reader, fault/malformed block draining, END/restart PASS');
+let finishOut,outs=0;
+const flushing=new AdcTransport({vendorId:2,productId:3,transferOut(){outs++;return new Promise(resolve=>finishOut=resolve);}});
+const flush=flushing.retireSpiOut();await Promise.resolve();
+await assert.rejects(flushing.retireSpiOut(),/上一笔/);assert.equal(outs,1);
+await assert.rejects(flushing.close(),/USB 请求/);finishOut({status:'ok'});await flush;
+assert.equal(flushing.flush,null);
+console.log('ADC SPI handoff: one native OUT only, close guarded until native completion PASS');

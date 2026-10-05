@@ -64,3 +64,16 @@ END 传输完成且硬件恢复之后才释放资源，不用整机 USB reset �
 `make test` 包含 ADS2 严格解码、单挂起 USB 读取、序号故障排空、停止失败重试、
 丢失 OPEN 应答恢复、CLOSE BUSY、环形历史、软件触发与像素尖峰保留等回归。
 发布前需目标完整编译/板测，以及 ADC 关闭时 RTT/JScope 吞吐对比。
+
+## 复审后的模块边界与恢复规则
+
+- model：纯波形/电平/LUT 数学；adc-protocol / dac-protocol：协议与能力校验。
+- transport：共享 USB lease、单个原生请求、严格块解码；session：任务生命周期与统一资源管理。
+- scope-store：固定容量历史和软件触发；view：控件/绘图，不直接收发硬件。
+- ADC/DAC 使用统一 analog 会话，并登记已有 spi-bulk 等资源，没有第二套协调器。
+- 连接在异步授权/能力查询后检查取消；HID 关闭失败保留句柄和管理器故障供断开重试。
+- 原生 SPI OUT 未完成时保留占用，禁止重复退场；ADC STOP 不释放 DAC 任务。
+- DAC BEGIN 应答丢失通过 STATUS 恢复，失败保留占用；缺少 ADC 能力不会禁用可用 DAC。
+
+已覆盖上述异常路径及 ADC 最早可用触发边界的主机回归。仍未完成目标编译、
+真实浏览器硬件验收与 RTT/JScope 吞吐比较；未来 DAC 驱动尚未实现。
