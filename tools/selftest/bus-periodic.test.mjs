@@ -6,7 +6,6 @@ import { join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { BusPeriodicClient, BUS, program, delayRecord, runSessionPeriodic, stopSessionPeriodic } from '../../app/core/bus-periodic.js';
-import { AnalogSession } from '../../app/analog/session.js';
 import { buildRequest } from '../../app/hid/probe.js';
 import { actXfer } from '../../app/i2c/protocol.js';
 import * as SPI from '../../app/spi/protocol.js';
@@ -58,32 +57,15 @@ try {
     assert.equal((await client.status()).active, 0);
   }
   await send('R'); auto = false;
-  const analog = new AnalogSession();
-  let adcAdvanced = false;
-  analog.hid = { connected:true, async xfer(cmd,data){
-    if(cmd===0x38){
-      const payload=data[0]===9?Uint8Array.of(65,68,66,49,0x8c,1,0,2):data[0]===10?Uint8Array.of(1,0,0,0):new Uint8Array();
-      return Uint8Array.of(8+payload.length,cmd,data[0],0,0,0,0,...payload);
-    }
-    if(data[0]===6 && !adcAdvanced){adcAdvanced=true;await send('T 25');}
+  const samples=[];let adcAdvanced=false;
+  const adc=new BusPeriodicClient(async(cmd,data)=>{
+    if(data[0]===6&&!adcAdvanced){adcAdvanced=true;await send('T 25');}
     return xfer(cmd,data);
-  }};
-  analog.caps = {channel:3,nativeBits:16,gain:1,reference:3.3,maxRate:1000};
-  // Simulated bulk sink fed by production periodic records; physical producer is
-  // covered separately by adc_stream_host_test.py (HID READ is forbidden there).
-  const adcClient=new BusPeriodicClient(xfer);
-  analog.transport={rows:[],done:false,start(){this.done=false;},async read(){
-    if(!adcAdvanced){adcAdvanced=true;await send('T 25');}
-    const r=await adcClient.read();
-    if(!r){const s=await adcClient.status();this.done=!s.active&&!s.queued;}
-    return r;
-  },async drain(){this.done=true;}};
-  const samples=[];
-  await analog.acquire({bits:16,rate:100,count:3},r=>samples.push(r));
+  });
+  await adc.run(BUS.ADC,[{period:10,count:3,records:[{kind:BUS.ADC,data:Uint8Array.of(3,16)}]}],{onResult:r=>samples.push(r)});
   assert.deepEqual(samples.map(r=>r.cycle),[1,2,3]);
   assert.deepEqual(samples.map(r=>r.timeMs-samples[0].timeMs),[0,10,20]);
-  assert.ok(samples.every(r=>r.code===0x1234&&r.data.length===2));
-  assert.equal(analog.busy,false);assert.equal(analog._periodic,null);
+  assert.ok(samples.every(r=>r.data.length===2&&r.data[0]===0x34));
   await send('R'); auto = true;
   const rows = [];
   await new BusPeriodicClient(xfer).run(BUS.I2C, [0,1].map(() => ({ period: 10, count: 2, records: [i2c] })), { onResult: r => rows.push(r) });

@@ -56,7 +56,7 @@ export const PROBE_FEATURES = Object.freeze([
   },
   {
     id: 'analog', label: 'ADC', client: t => t.analog?.session, view: t => t.analog, usbKind: 'analog',
-    resources: ['analog-engine', 'adc-stream', 'spi-pins', 'target-engine', 'periodic-engine'],
+    resources: ['analog-engine', 'spi-stream', 'spi-pins', 'target-engine', 'periodic-engine'],
     active: t => !!t.analog?.session?.connected,
     release: t => t.analog?.session?.disconnect(),
     guarded: t => !!t.analog?.session?.busy,

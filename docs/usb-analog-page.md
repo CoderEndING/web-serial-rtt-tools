@@ -1,61 +1,53 @@
-# USB→ADC / DAC 页面（2026-10-05，待板测）
+# USB 示波器 / DAC 预留（待板测）
 
-入口：`index.html#analog`，复用工具箱的探针资源管理和 HID 会话。
+入口 `index.html#analog`。HID 控制保持 64-byte 报告、4 ms 轮询。
+ADC 数据复用 SPI/QSPI 的 WebUSB IN 0x8B；两者互斥，不新增端点。
+首次采集需授权与 HID 同一台探针的 WebUSB。
 
-## 已实现：ADC
+## ADC
 
-- 单次、有限次数和连续采集；周期由 probe GPTMR1 通道 1 驱动，网页只取结果。
-- 输出位宽 8/10/12/16 bit。硬件保持 16 bit，较低位宽截取高位；这是输出量化，**没有实现硬件转换分辨率切换**。避免改变 akaLinkPro 共用的 VREF 检测配置。
-- 目标速率 1/60–1000 Sa/s，周期四舍五入为整数毫秒。控制走 HID，样本走专用 WebUSB Bulk IN 0x8C（HS MPS 512），不再逐样本通过 HID READ/ACK。1000 Sa/s 仍是调度上限，持续吞吐必须板测。首次采集需要授权同一台探针的 WebUSB。
-- EVKLite：PB11 / ADC0.3，复用 SPI2 引脚。采样期间固件禁止 SPI 重配；ADC 开始时要求 SPI 已关闭，网页协调器释放 SPI 会话。
-- akaLinkPro：PB10 / ADC0.2，**现有 VREF 的 10k/10k 分压输入**，换算乘二。不是新开放的通用 ADC 引脚，不能把 LED、电源控制或调试脚当 ADC 输入。
-- ADC 内部满量程参考默认 3.3 V，可输入实测参考值作电压换算；这不改变硬件参考，也不扩大允许输入范围。
-- 实时曲线、probe 时间戳、实测速率、跳过数、CSV。保留最近 10000 条供导出，曲线显示最近 512 条。
-- Stop 失败沿用周期引擎的占用保留和重试规则，不假报停止成功。
-- 没有新增主循环轮询或常驻定时中断。RTT/J-Scope 活跃时辅助采集让路。
-- EVK ADC 初始化只开 ADC 时钟组/配置 ADC 时钟源，**没有调用会修改 CPU 时钟的 board init_adc0_bus_clock()**；单次采集临时切 PB11 到模拟模式，完成后恢复 FUNC_CTL。
+- 当前高速模式为 HPM5301 EVKLite PB14 / ADC0.6，J3[10]，与 QSPI IO2 共脚。
+  输入限于 0–VREFH，必须共地并断开外部 QSPI 驱动，宜使用低阻源。
+  无 SPI bridge 且 VREF/LED 共用 ADC 的 akaLinkPro 板型明确返回不支持此模式。
+- GPTMR1 通道 2 经 TRGM 硬件触发 ADC 自带 DMA，无逐样本中断。
+  8/10/12/16-bit 为硬件转换分辨率；请求整数速率 1–2,000,000 Sa/s。
+  以返回的实际定时器速率建立横轴。最高请求速率、持续 USB 吞吐和有效精度待板测。
+- 固件复用 SPI OUT 16 KiB DMA 环形缓冲和 IN 8 KiB 双发送块；慢主机时停止并报溢出，
+  不静默覆盖。ADC 占用时固件拒绝 SPI、周期任务和 RTT/JScope 新启动。
+- 单次按钮采集一个设定时窗，点数限制 32–65536；可设置有限记录或 0=连续。
+  示波器提供时间/电压刻度、垂直偏移、自动/正常触发、上升/下降沿、触发电平和显示冻结。
+  触发为网页软件触发，约 25% 预触发；单次按钮是有限 DMA 记录，不是硬件触发捕获。
+- 固定 Uint16 环形历史保留最近 65536 点。绘图按像素保留最小/最大值，避免抹掉窄脉冲。
+  记录不足时仅绘制实际时长，不拉伸改变横轴；正常触发未找到交越时保持上一帧。
+  CSV 导出保留历史，时间以实际采样率换算；这不是无限长完整记录文件。
+- USB 解析与绘图分开，单个挂起 IN 读取，逐块处理，不创建逐样本对象。
+  停止等待 END、CLOSE 与硬件清理；失败保留占用供重试。冻结仅停止显示，采集仍运行。
 
-## 已实现：DAC 波形数据；尚未实现：物理输出
+## 协议和生命周期
 
-官方 HPM5300 数据手册的型号资源表明确 HPM5301 为 1×16 bit ADC、无通用 DAC：
-https://www.hpmicro.com/Public/Uploads/uploadfile/files/20250205/HPM5300DSV011.pdf
+0x38 action 9 查询 ADB2：EP=0x8B、版本 2、位宽掩码、通道、最大速率、DMA/块大小、
+占用 flags、支持标志、参考电压。action 10 OPEN 携带位宽/速率/点数；
+13 START，11 END，12 CLOSE，14 STATUS。OPEN 不启动采集，先挂起读取再 START。
 
-页面提供正弦、方波、三角、上/下锯齿、脉冲、直流和伪随机噪声的预览与 CSV。
-可调更新率、波形频率、峰值幅度、offset、满量程、量化位宽、脉冲占空比和预览点数。
-幅度是峰值，Vpp=2×幅度；越过 0–满量程时拒绝生成，不静默削顶。周期波形每周期至少 8 点。
-CSV 只是数据文件，不代表硬件已输出，也不是已验证的循环 LUT；非整数周期的表直接循环会有接缝。
+启动前由共享资源协调器释放 SPI/周期/目标引擎。CAPS bit1 忙则拒绝；
+只有 bit1=0 且 bit0 表示旧 SPI OUT 仍挂起时，才发 OUT 0x0B 零长度包使其完成。
+固件确认端点和缓冲空闲才授予 ADC。OPEN 应答丢失时用 STATUS 恢复任务代数并结束。
 
-当前按 ADC 可用、DAC 预留推进。DAC 网页协议已完成：能力查询、配置、表上传、启动、停止和状态。
-0x38 action 1 返回版本化 DAC1 能力；当前 HPM5301 宣告 0 通道，其他 DAC 动作回 UNSUPPORTED。
-未来支持 DAC 的 HPM 型号接入驱动并广告能力后，网页按通道数、位宽、满量程、速率和表长启用输出，
-不在网页硬编码芯片型号。详细 ABI 见 [usb-analog-dac-hid.md](usb-analog-dac-hid.md)。
+ADS2 为 32-byte 头加最多 2031 个 u16 码值：版本/type/bits/flags、token、块序号、
+首样本索引、实际速率、数量、通道、stride、fault。最大 4094-byte 短包。
+网页校验长度、码值范围、连续块序号/索引和任务代数；解析错误后仍尝试停止并排空 END。
+END 传输完成且硬件恢复之后才释放资源，不用整机 USB reset 取消读取。
+原 HID 低速 ADC 和 SPI/I²C 周期协议保留供旧客户端使用；新示波器不经过周期结果队列。
 
-当前不会启动任何 DAC 时钟、DMA、定时器或额外主循环轮询。
-未来驱动负责 probe 端播放；网页不逐点发 USB。周期输出使用完整一周期 LUT，更新率若被硬件量化，
-界面显示实际频率。停止等待在飞 START 和硬件 cleanup，失败保留占用供重试。
+## DAC
 
-## 固件契约
+仍为未来硬件预留。页面提供正弦、方波、三角、锯齿、脉冲、直流和噪声预览/CSV，
+速率、幅度（峰值）、offset 可调。0x38 的 DAC 能力/上传/启动/停止/状态协议已保留，
+当前 HPM5301 固件宣告 0 通道，输出按钮禁用；不会启动 DAC 定时器或 DMA。
+未来驱动广告能力后界面按能力启用，详见 [usb-analog-dac-hid.md](usb-analog-dac-hid.md)。
 
-- HID 0x38，action 0（CAPS），请求标准 req[1]=2。
-- HID 最大包长仍为 64 bytes，报告 ID 保持 1/2/3；HS bInterval=6（4 ms），非 4 个微帧。RTT/JScope 端点不变。
-- 0x38 action 9/10/11/12：Bulk CAPS/OPEN/END/CLOSE。OPEN 返回 u32 任务代数；先开始 USB 读取再启动周期程序，停止时先停止周期程序，再 END、读完 END 包、CLOSE。未确认停止保留资源占用。
-- Bulk 帧：`ADC1`、version:u8=1、type:u8（1 DATA/2 END）、count:u8、stride:u8=26、token:u32 LE、fault:u32 LE。DATA 后接最多 19 条记录，沿用周期结果的 24 字节元信息，再接 2 字节 ADC 码值。END count=0。最长 510 bytes，短包结束 USB 读取，不需额外 ZLP。
-- 固件沿用 32 条结果队列；DMA 完成后才移除记录，满时停止且报错，不覆盖。网页单个挂起读取，校验任务代数与连续序号，缓冲上限 2048 条。新增 Windows WinUSB 接口绑定和 EP0 描述符缓冲容量。
-- 响应长度 res[1]=20，res[4..7] u32 状态（0 成功，1 参数错误）。
-- res[8..19]：ANA1 ASCII，channel:u8、native_bits:u8=16、input_gain:u8、physical_dac:u8=0、reference_mv:u16、max_requested_rate:u16=1000。
-- HID 0x37 周期程序扩展 bus/kind=4（ADC）；payload 为 channel:u8、output_bits:u8。结果为右对齐 u16 LE 码值。
-- 0x37 原 SPI/I²C wire 格式、BPT1 CAPS 和既有行为保持兼容；ADC 能力通过 0x38 action 0 单独识别；DAC 通过 action 1 独立协商。
+## 验证
 
-## 验证与发布门槛
-
-```sh
-node tools/selftest/analog.test.mjs
-node tools/selftest/bus-periodic.test.mjs
-make test
-```
-
-已有虚拟时间生产 C/JS 跨仓库测试增加 ADC 路径（单次布局、三拍自主采集、时间戳和码值换算）。
-新增数学测试覆盖预置波形、上下限、过采样点数要求、种子可重复噪声、采样周期量化和 CSV。
-固件两板型 ADC 模块对官方 SDK 头文件做主机语法检查。
-
-发布前仍需完整固件编译/链接和板测：DC 零点/半量程/满量程，ADC 参考与输入衰减，采样节拍，SPI/ADC 模式切换、停止/USB 复位，RTT/J-Scope 旧→新→旧对比。
+`make test` 包含 ADS2 严格解码、单挂起 USB 读取、序号故障排空、停止失败重试、
+丢失 OPEN 应答恢复、CLOSE BUSY、环形历史、软件触发与像素尖峰保留等回归。
+发布前需目标完整编译/板测，以及 ADC 关闭时 RTT/JScope 吞吐对比。

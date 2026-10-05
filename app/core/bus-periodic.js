@@ -73,7 +73,7 @@ export class BusPeriodicClient {
     await this.command(ACT.ACK, ack); // Remove only the exact record we reconstructed.
     return r;
   }
-  async run(bus, groups, { signal, shouldStop = () => false, onResult = () => {}, resultSource = null } = {}){
+  async run(bus, groups, { signal, shouldStop = () => false, onResult = () => {} } = {}){
     const stopped = () => signal?.aborted || shouldStop();
     if (!groups.length || groups.length > 8) throw Error('probe 周期采集支持 1–8 个任务组');
     const plans = groups.map(g => {
@@ -110,7 +110,7 @@ export class BusPeriodicClient {
       while (!stopped()){
         // Bounded UI work per drain; polling cadence does not control acquisition.
         for (let n = 0; n < 32 && !stopped(); n++){
-          const r = await (resultSource ? resultSource.read() : this.read()); if (!r) break;
+          const r = await this.read(); if (!r) break;
           const g = groups[r.slot];
           if (!g || g.epoch !== r.epoch || r.step >= g.records.length) throw Error('probe 周期结果任务身份不匹配');
           if (!stopped()) onResult(r, g);
@@ -118,7 +118,7 @@ export class BusPeriodicClient {
         if (stopped()) break;
         const s = await this.status();
         if (s.fault) throw Error(`probe 周期采集已停止：${errors[s.fault] || s.fault}，数据未被静默覆盖`);
-        if (!s.active && !s.queued && !s.cleanup && (!resultSource || (resultSource.done && !resultSource.rows.length))) break;
+        if (!s.active && !s.queued && !s.cleanup) break;
         await waitMs(5);
       }
     } finally { await this.stop(); }

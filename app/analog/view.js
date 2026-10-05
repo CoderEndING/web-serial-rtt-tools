@@ -1,21 +1,23 @@
 import { $ } from '../ui/dom.js';
 import { AnalogSession } from './session.js';
-import { WAVES, waveform, adcCsv, waveCsv } from './model.js';
+import { WAVES, waveform, waveCsv } from './model.js';
+import { AdcScopeStore, envelope } from './scope-store.js';
 export class AnalogView {
-  constructor(){ this.session = new AnalogSession(); this.rows = []; this.wave = []; this._raf = null; this.total = 0; }
+  constructor(){ this.session = new AnalogSession(); this.store = new AdcScopeStore(); this.wave = []; this._raf = null; this.total = 0; }
   init(){
     const bind = (id, fn) => $(id).addEventListener('click', () => { Promise.resolve().then(fn).catch(e => this.status(e.message, true)); });
     bind('an-connect', async () => {
       const c = await this.session.connect(); if (!c) return;
-      $('an-channel').textContent = c.gain === 2 ? 'PB10 / ADC0.2 · VREF 分压输入（×2）' : 'PB11 / ADC0.3 · 与 SPI2 互斥';
+      $('an-channel').textContent = 'CH1 · PB14 / ADC0.6 · EVKLite J3[10]（与 QSPI IO2 互斥）';
+      $('an-rate').max=c.maxRate;
       $('an-reference').value = c.reference;
       this.updateDacControls();
       this.status(this.session.dac.caps.supported?'ADC 已连接；DAC 固件能力已识别':'ADC 已连接；当前固件未支持 DAC');
     });
     bind('an-disconnect', async () => { await this.session.disconnect(); this.updateDacControls(); this.status('ADC 已断开'); });
-    bind('an-once', () => this.acquire(1)); bind('an-start', () => this.acquire(Number($('an-count').value)));
+    bind('an-once', () => this.acquire(Math.max(32,Math.min(65536,Math.round(Number($('an-rate').value)*10*Number($('an-time').value)))))); bind('an-start', () => this.acquire(Number($('an-count').value)));
     bind('an-stop', async () => { await this.session.stopAdc(); this.status('已确认 ADC 停止'); });
-    bind('an-adc-export', () => this.download('adc.csv', adcCsv(this.rows)));
+    bind('an-adc-export', () => this.download('adc.csv', this.store.csv(Number($('an-reference').value))));
     bind('an-wave-export', () => { this.preview(); this.download('waveform-preview.csv', waveCsv(this.wave)); });
     bind('an-preview', () => this.preview());
     bind('an-dac-start', async () => {
@@ -26,33 +28,56 @@ export class AnalogView {
     bind('an-dac-stop', async () => {if(!this.session.dac?.owned&&!this.session._dacStart)throw Error('本会话没有 DAC 输出任务，请先查询输出状态');await this.session.stopDac();$('an-dac-state').textContent='DAC 已确认停止';});
     bind('an-dac-status', async () => {const s=await this.session.dacStatus(Number($('an-dac-channel').value));$('an-dac-state').textContent=`DAC ${s.running?'运行':'停止'} · 已完成 ${s.cycles} 周期 · ${s.actualRate} Sa/s`;});
     $('an-wave').innerHTML = Object.entries(WAVES).map(([key, label]) => `<option value="${key}">${label}</option>`).join('');
-    for (const id of ['an-wave', 'an-update', 'an-frequency', 'an-amplitude', 'an-offset', 'an-dac-reference', 'an-duty', 'an-points', 'an-dac-bits']) $(id).addEventListener('change', () => {
+    for (const id of ['an-wave', 'an-update', 'an-frequency', 'an-amplitude', 'an-dac-offset', 'an-dac-reference', 'an-duty', 'an-points', 'an-dac-bits']) $(id).addEventListener('change', () => {
       try { this.preview(); } catch (e){ this.wave = []; this.plot('an-dac-canvas', []); $('an-wave-state').textContent = e.message; }
     });
     this.session.onDisconnect = () => {this.updateDacControls();this.status('探针已掉线；采集已请求取消', true);};
-    this.updateDacControls(); this.preview();
+    for(const id of ['an-time','an-volts','an-offset','an-trigger','an-level','an-edge','an-freeze'])$(id).addEventListener('change',()=>this.renderAdc());
+    this.updateDacControls(); this.preview(); this.renderAdc();
   }
   status(text, error = false){ $('an-state').textContent = text; $('an-state').style.color = error ? '#f85149' : ''; }
   async acquire(count){
-    if (this.session.busy) throw Error('先停止当前采集');
-    const options = { bits: Number($('an-bits').value), rate: Number($('an-rate').value), count, reference: Number($('an-reference').value) };
-    if (!Number.isFinite(options.reference) || options.reference <= 0 || options.reference > 10) throw Error('参考电压需为 0–10 V 范围内的正数');
-    this.range = options.reference * (this.session.caps?.gain || 1);
-    this.rows = []; this.total = 0; this.status(count === 1 ? '单次采集…' : 'probe 定时采集中…');
-    await this.session.acquire(options, row => {
-      this.rows.push(row); this.total++; if (this.rows.length > 10000) this.rows.shift();
-      if (this._raf === null) this._raf = requestAnimationFrame(() => { this._raf = null; this.renderAdc(); });
+    if(this.session.busy)throw Error('先停止当前采集');
+    const options={bits:Number($('an-bits').value),rate:Number($('an-rate').value),count};
+    const reference=Number($('an-reference').value);
+    if(!Number.isFinite(reference)||reference<=0||reference>10)throw Error('参考电压需为 0–10 V 范围内的正数');
+    this.store.reset();this.total=0;this.lastFrame=null;$('an-freeze').checked=false;
+    this.status(count?'单次/有限记录采集中…':'连续 DMA 采集中…');
+    await this.session.acquire(options,block=>{
+      this.store.append(block);this.total=this.store.total;
+      if(this._raf===null)this._raf=requestAnimationFrame(()=>{this._raf=null;this.renderAdc();});
     });
-    this.renderAdc(); this.status(`采集结束，共 ${this.total} 条；导出保留最近 ${this.rows.length} 条`);
+    this.renderAdc();this.status(`采集停止，共 ${this.total} 点；保留最近 ${this.store.length} 点可导出`);
   }
   renderAdc(){
-    const last = this.rows.at(-1);
-    if (!last) return;
-    $('an-value').textContent = `${last.volts.toFixed(5)} V · code ${last.code}`;
-    const first = this.rows[0], span = (last.timeMs - first.timeMs) >>> 0;
-    const rate = span ? (this.rows.length - 1) * 1000 / span : 0;
-    $('an-stats').textContent = `${this.total} 条 · probe 实测 ${rate.toFixed(2)} Sa/s · 累计跳过 ${last.skipped} · 最近 ${this.rows.length} 条可导出`;
-    this.plot('an-adc-canvas', this.rows.slice(-512).map(r => r.volts), this.range || 3.3);
+    if($('an-freeze').checked)return;
+    const reference=Number($('an-reference').value),timeDiv=Number($('an-time').value);
+    const voltsDiv=Number($('an-volts').value),offset=Number($('an-offset').value),level=Number($('an-level').value);
+    if(!Number.isFinite(offset)||!Number.isFinite(level)||!Number.isFinite(reference)||reference<=0||!(timeDiv>0)||!(voltsDiv>0))return;
+    const frame=this.store.frame({timeDiv,reference,trigger:$('an-trigger').value,level,edge:$('an-edge').value});
+    if(frame)this.lastFrame=frame;
+    const last=this.store.length?this.store.code(this.store.total-1):null;
+    if(last!==null)$('an-value').textContent=`${(last/(2**this.store.bits-1)*reference).toFixed(5)} V · code ${last}`;
+    $('an-stats').textContent=`${this.total} 点 · 硬件时基 ${(this.store.rate/1000).toFixed(3)} kSa/s · 最近 ${this.store.length} 点可导出 · ${frame?.triggered?'已触发':$('an-trigger').value==='normal'?'等待触发':'自动扫描'}${frame?.limited?' · 当前时窗超过记录长度':''}`;
+    if(!frame&&this.lastFrame)return; // Normal trigger holds last complete frame.
+    const canvas=$('an-adc-canvas'),ctx=canvas.getContext('2d');if(!ctx)return;
+    const w=canvas.width,h=canvas.height;ctx.fillStyle='#090f17';ctx.fillRect(0,0,w,h);
+    ctx.strokeStyle='#26384a';ctx.lineWidth=1;
+    for(let i=0;i<=10;i++){ctx.beginPath();ctx.moveTo(i*w/10,0);ctx.lineTo(i*w/10,h);ctx.stroke();}
+    for(let i=0;i<=8;i++){ctx.beginPath();ctx.moveTo(0,i*h/8);ctx.lineTo(w,i*h/8);ctx.stroke();}
+    const y=v=>h/2-(v-offset)/voltsDiv*h/8;
+    ctx.setLineDash([5,5]);ctx.strokeStyle='#df9c42';ctx.beginPath();ctx.moveTo(0,y(level));ctx.lineTo(w,y(level));ctx.stroke();ctx.setLineDash([]);
+    ctx.fillStyle='#d4e2f1';ctx.font='14px monospace';
+    ctx.fillText(`CH1 PB14   ${voltsDiv} V/div   ${timeDiv<0.001?(timeDiv*1e6)+' us/div':(timeDiv*1000)+' ms/div'}`,12,20);
+    if(!frame)return;
+    const span=timeDiv*10*frame.rate;
+    const traceWidth=Math.min(w,Math.max(1,Math.ceil(frame.codes.length/span*w)));
+    const points=envelope(frame.codes,traceWidth),scale=reference/(2**frame.bits-1);
+    ctx.strokeStyle='#ffd15c';ctx.lineWidth=1.2;ctx.beginPath();
+    if(frame.codes.length>traceWidth){
+      for(const p of points){const x=p.x*frame.codes.length/span*w/points.length;ctx.moveTo(x,y(p.min*scale));ctx.lineTo(x,y(p.max*scale));}
+    }else frame.codes.forEach((code,i)=>{const x=i/span*w;if(i)ctx.lineTo(x,y(code*scale));else ctx.moveTo(x,y(code*scale));});
+    ctx.stroke();
   }
   preview(){
     this.wave = [];
@@ -61,7 +86,7 @@ export class AnalogView {
     $('an-wave-state').textContent = `${this.wave.length} 点预览；幅度为峰值（Vpp = 2 × 幅度）。预览本身不启动输出；实际输出以固件能力和状态为准。`;
   }
   waveOptions(){
-    return {shape:$('an-wave').value,rate:Number($('an-update').value),frequency:Number($('an-frequency').value),amplitude:Number($('an-amplitude').value),offset:Number($('an-offset').value),reference:Number($('an-dac-reference').value),bits:Number($('an-dac-bits').value),duty:Number($('an-duty').value),points:Number($('an-points').value)};
+    return {shape:$('an-wave').value,rate:Number($('an-update').value),frequency:Number($('an-frequency').value),amplitude:Number($('an-amplitude').value),offset:Number($('an-dac-offset').value),reference:Number($('an-dac-reference').value),bits:Number($('an-dac-bits').value),duty:Number($('an-duty').value),points:Number($('an-points').value)};
   }
   updateDacControls(){
     const c=this.session.dac?.caps,enabled=this.session.connected && !!c?.supported;
