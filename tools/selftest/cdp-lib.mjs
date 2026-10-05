@@ -34,6 +34,7 @@ export class Cdp {
   _dispatch(m){
     if (m.id && this.pending.has(m.id)){
       const p = this.pending.get(m.id); this.pending.delete(m.id);
+      clearTimeout(p.timer);
       m.error ? p.rej(new Error(m.error.message)) : p.res(m.result);
       return;
     }
@@ -61,9 +62,19 @@ export class Cdp {
   _call(ws, method, params){
     const id = ++this.seq;
     return new Promise((res, rej) => {
-      this.pending.set(id, { res, rej });
-      ws.send(JSON.stringify({ id, method, params }));
-      setTimeout(() => { if (this.pending.delete(id)) rej(new Error(`CDP ${method} 超时`)); }, this.callTimeout);
+      const pending={res,rej,timer:null};
+      this.pending.set(id,pending);
+      pending.timer=setTimeout(()=>{
+        if(this.pending.get(id)!==pending)return;
+        this.pending.delete(id);
+        rej(new Error(`CDP ${method} 超时`));
+      },this.callTimeout);
+      try{ws.send(JSON.stringify({id,method,params}));}
+      catch(error){
+        if(this.pending.get(id)===pending)this.pending.delete(id);
+        clearTimeout(pending.timer);
+        rej(error);
+      }
     });
   }
   async eval(expr, userGesture = false){
@@ -95,7 +106,10 @@ export class Cdp {
       await sleep(200);
     }
   }
-  close(){ try { this.ws.close(); } catch {} try { this.browserWs.close(); } catch {} }
+  close(){
+    for(const [id,p] of this.pending){clearTimeout(p.timer);p.rej(new Error('CDP client closed'));this.pending.delete(id);}
+    try { this.ws.close(); } catch {} try { this.browserWs.close(); } catch {}
+  }
 }
 
 /** 页面里的源码目录要**真文件**：用 CDP 把 <input webkitdirectory> 填上真路径 */

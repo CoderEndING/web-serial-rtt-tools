@@ -659,11 +659,19 @@ test-analog:
 	$(NODE) tools/selftest/dac-protocol.test.mjs
 	$(NODE) tools/selftest/dac-generator.test.mjs
 
+# ADC 真机矩阵：4 种转换位宽 × 多档时基，有限/连续/环回采集与安全收尾。
+# 需要 HPM5301 EVKLite 探针、USB ADC 页面和授权的 Chrome/Edge；生成 tmp/JSON 报告。
+.PHONY: test-adc-hw
+test-adc-hw: page-prep
+	$(NODE) tools/selftest/adc-hw-stress.mjs $(ARGS)
+
 .PHONY: test-analog-wire
 test-analog-wire:
 	$(NODE) tools/selftest/analog-wire.test.mjs
 
 # Selected-frame/locals release gate: a matching independently collected GDB oracle is required.
+# H743 only: a SysTick/FPB coincident halt is resumed only when CPUID, DFSR, DWT, active FPB
+# and the exception-stacked checkpoint PC all agree; every other wrong-PC stop remains a failure.
 FRAME_BOARD ?= f103cb
 FRAME_ELF ?= /tools/target-firmware/stm32f103_dbgstress/build-cb-og/fw.elf
 FRAME_ORACLE ?= tmp/frame-oracle-$(FRAME_BOARD).json
