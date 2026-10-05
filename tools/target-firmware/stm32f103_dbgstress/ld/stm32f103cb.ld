@@ -18,6 +18,12 @@ SECTIONS
     . = ALIGN(4);
     _etext = .;
   } > FLASH
+  .ARM.extab : { KEEP(*(.ARM.extab* .gnu.linkonce.armextab.*)) } > FLASH
+  .ARM.exidx : {
+    __exidx_start = .;
+    KEEP(*(.ARM.exidx* .gnu.linkonce.armexidx.*))
+    __exidx_end = .;
+  } > FLASH
   _sidata = LOADADDR(.data);
   .data : {
     . = ALIGN(4);
