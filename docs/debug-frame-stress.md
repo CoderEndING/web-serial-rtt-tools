@@ -94,7 +94,38 @@ pwsh -File tools/target-firmware/stm32h743_dbgstress/build.ps1 -Optimization Og
 高优化构建也采用严格对照。如果 GDB 能恢复而 Web 不支持，则验收失败并显示对应变量；
 不自动豁免 entry_value、分片位置等当前尚未支持的表达式。先定位并修复，或明确调整发布范围。
 
-## 离线检查及本次验证边界
+## Cortex-M7 同步异常与断点误停
+
+H743 的 Cortex-M7 可能触发 Arm erratum 3092511：异步异常与硬件断点同时发生时，调试器报告的
+PC 会落在异常处理入口，而断点地址保存在异常栈帧中。此前 H743 Og/DWARF5 的递归压力因此偶发
+显示 `SysTick_Handler`，不能据此当作栈帧值错误，也不能无条件重试。
+
+压力脚本仅对 H743/Cortex-M7 做严格确认：当前 PC 必须在 `SysTick_Handler`；DFSR 必须有 BKPT 位，
+DWT 不能报告观察点命中；用户断点及活动 FPB 比较器必须指向本轮检查点；当前异常号必须为 SysTick；
+异常栈帧必须是线程态、Thumb 状态，且保存的 PC 与检查点完全一致。全部吻合后才恢复运行并等待
+精确 FPB 停点，每个检查点最多恢复4次；任何证据缺失、地址不符或重复误停都仍然失败。
+Arm 的 errata notice：[Cortex-M7 Software Developer Errata Notice，3092511](https://documentation-service.arm.com/static/665dff778ad83c4754308908)。
+
+## 已执行验证
+
+2026-10-06（Asia/Shanghai），H743 实板，SWD 10 MHz，FPB 8 个比较器/rev2：
+
+| 配置 | 结果 | 说明 |
+|---|---:|---|
+| Os / DWARF4 | 19 通过 / 0 失败 | 7 个 GDB 检查点及 20 轮压力通过（02:57） |
+| Os / DWARF5 | 19 通过 / 0 失败 | 7 个 GDB 检查点及 20 轮压力通过（02:59） |
+| Og / DWARF5 | 19 通过 / 0 失败 | 03:25:15；7 个检查点与 GDB 逐项一致，200 轮递归/正反切帧通过；严格确认并恢复1次误停 |
+
+Og/DWARF5 的早期 20 轮复测曾在一个检查点误停到 `SysTick_Handler`，PC 为 `0x080000f4`，
+目标检查点为 `0x08000a3a`。加入上述证据核验后，H743 实板完整 200 轮通过，变量差异为0，
+寄存器/栈未被回溯修改，FPB 无泄漏，写操作/单步/继续/重载 ELF/复位/断开后的旧缓存检查通过，
+也没有意外复位或隐藏传输重试。此次执行使用 Og/DWARF5 ELF SHA-256
+`c559f42988cfc43359ed07e897a895816dcf2b5b9c3d36b1647b0b9baee50153`，报告为
+`tmp/dbg-stress-page.json`，GDB oracle 为 `tmp/frame-oracle-h743-og-dw5.json`。
+递归压力中的 M7 误停恢复次数也保存在报告 `frameResults[0].pressureM7ErratumRecoveries` 字段；本次为1次，
+保存的事件 PC 是 `SysTick_Handler`，DFSR.BKPT、目标 FPB 和异常栈保存的检查点地址均匹配。
+
+## 离线检查及验证边界
 
 - `make test-dbg-features`：真实既有 ARM ELF解析、变量/帧命令、对照契约和错误答案检测；浏览器/会话替身还检查压力流程、
   只读性、错误目标拒绝和失败收尾，不冒充硬件验证。
@@ -103,9 +134,10 @@ pwsh -File tools/target-firmware/stm32h743_dbgstress/build.ps1 -Optimization Og
 - `make test-dbg-frame-gdb`：Python GDB API替身，覆盖复合字段、同名作用域、不可用值和帧边界；
   不是实际 ARM GDB对照。
 
-当前执行环境未连接用户板卡，也没有 ARM GCC/GDB 或 PowerShell。
-本次已运行上面的离线检查；尚未生成新的 ARM ELF，也未执行板上 Web/GDB验收。
-原入库 ELF保持不变，避免把未验证产物冒充新测试固件。
+本次本地也通过 `node tools/selftest/dbg-frame-contract.test.mjs` 和
+`node tools/selftest/dbg-frame-hw-runner.test.mjs`；后者覆盖 M7 误停证据完整时恢复，
+以及异常栈 PC 或 DFSR 证据不完整时拒绝恢复。板上验收仅覆盖本节所列 H743 构建，
+F103CB 等其他板型仍需按上面的流程各自构建、采集 GDB oracle 和实测。
 
 GDB API依据：
 [Frames](https://sourceware.org/gdb/current/onlinedocs/gdb.html/Frames-In-Python.html)、

@@ -72,9 +72,12 @@ FRAME_FN uint32_t engine_frame_stage(void)
 {
     volatile uint32_t stage_cookie = 0x13579bdu;
     volatile uint32_t result = 0u;
+    volatile uint32_t register_arg = 23u;
     result = engine_frame_recursive(4u, 1000u);
     result ^= engine_frame_shadow(50u);
-    result ^= engine_frame_register(23u);
+    /* Keep the register-location check dynamic under -Os; a literal here may
+     * become DW_OP_entry_value instead of a live register location. */
+    result ^= engine_frame_register(register_arg);
     result ^= engine_frame_migrate(70u);
     g_frame_result = result + stage_cookie;
     return g_frame_result;

@@ -1,5 +1,6 @@
 """Test GDB collector helpers with API doubles; this is not a live GDB run."""
 import pathlib
+import json
 import sys
 import types
 import unittest
@@ -87,6 +88,13 @@ def symbol(name, argument=False):
 
 
 class CollectorTests(unittest.TestCase):
+    def test_python2_compatible_json_and_byte_helpers(self):
+        value = {'quote': 'a"b', 'slash': 'a\\b', 'control': 'one\ntwo', 'count': 7,
+                 'flags': [True, False, None], 'nested': {'unicode': 'F103'}}
+        self.assertEqual(json.loads(namespace['json_dumps'](value)), value)
+        self.assertEqual(namespace['from_hex']('01020304'), bytes.fromhex('01020304'))
+        self.assertEqual(namespace['u32le'](bytes.fromhex('78563412')), 0x12345678)
+
     def test_aggregate_and_signed(self):
         array = Value([Value(21), Value(34)], Type(fake.TYPE_CODE_ARRAY))
         struct = Value({'tag': Value(0x12345678), 'signed_value': Value(-17), 'pair': array},

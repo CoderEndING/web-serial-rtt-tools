@@ -1,15 +1,55 @@
 /** Hardware runner used by the existing stress entry point. No retries hide mismatches. */
 import {FRAME_CASES,webVariables,compareFrames} from './dbg-frame-contract.mjs';
-async function captureCheckpoint(address,ramEnd){
+async function captureCheckpoint(address,ramEnd,board){
  const d=window.__tools.dbg,s=d.session;
  const cmd=async line=>{const r=await d.runLine(line);if(r.error||r.cancelled)throw new Error(line+': '+(r.error||'cancelled'));return r;};
  await cmd('bd all');await cmd('b 0x'+address.toString(16));
- await s.exclusive(async()=>{
-  await s.cont();const end=Date.now()+8000;
+ const erratumRecoveries=[];
+ const pcNow=()=>s.pc&0xfffffffe;
+ const waitForStop=async timeoutMs=>{
+  const end=Date.now()+timeoutMs;
   do{await new Promise(r=>setTimeout(r,20));await s.refresh();if(s.halted)break;}while(Date.now()<end);
   if(!s.halted)throw new Error('检查点暂停超时');
+ };
+ const confirmedM7BreakpointRace=async()=>{
+  if(board!=='h743'||d.sym.funcAt(s.pc)?.name!=='SysTick_Handler')return null;
+  const cpuid=(await s.probe._readWord(0xe000ed00).catch(()=>0))>>>0;
+  if(((cpuid>>>4)&0xfff)!==0xc27)return null;
+  const dfsr=(await s.probe._readWord(0xe000ed30).catch(()=>0))>>>0;
+  if(!(dfsr&2)||await s.dwt.haltReason().catch(()=>true))return null;
+  if(!s.bps?.some(bp=>((bp&0xfffffffe)>>>0)===address))return null;
+  const ctrl=(await s.probe._readWord(0xe0002000).catch(()=>0))>>>0;
+  const count=Math.min(s.caps?.numCode||0,16),rev=1+((ctrl>>>28)&15);
+  let fpbMatch=false;
+  for(let i=0;i<count;i++){
+   const comp=(await s.probe._readWord(0xe0002008+4*i).catch(()=>0))>>>0;
+   if(!(comp&1))continue;
+   const match=rev===2?(comp&0xfffffffe)>>>0:(((comp&0x1ffffffc)|((((comp>>>30)&3)===2)?2:0))>>>0);
+   if(match===address){fpbMatch=true;break;}
+  }
+  if(!fpbMatch)return null;
+  const xpsr=(await s.readReg('XPSR'))>>>0;
+  if((xpsr&0x1ff)!==15)return null; // current exception must be SysTick
+  const sp=(await s.readReg('SP'))>>>0,stack=await s.memRead(sp,32);
+  if(stack.length!==32)return null;
+  const dv=new DataView(stack.buffer,stack.byteOffset,stack.byteLength),stackedPc=dv.getUint32(24,true),stackedXpsr=dv.getUint32(28,true);
+  if((stackedPc&0xfffffffe)!==address||!(stackedXpsr&0x01000000)||(stackedXpsr&0x1ff)!==0)return null;
+  return {pc:s.pc>>>0,dfsr,stackedPc:stackedPc>>>0,fpbAddress:address};
+ };
+ await s.exclusive(async()=>{
+  await s.cont();await waitForStop(8000);
+  while(pcNow()!==address){
+   const race=await confirmedM7BreakpointRace();
+   if(!race)break;
+   erratumRecoveries.push(race);
+   if(erratumRecoveries.length>4)throw new Error('Cortex-M7 3092511 连续误停超过 4 次，拒绝继续掩盖异常');
+   // Arm erratum 3092511 can report the pending exception entry as the halt PC
+   // even though the requested FPB breakpoint is stacked in the exception frame.
+   // Resume only after the active comparator and the exact stacked PC agree.
+   await s.run();await waitForStop(2000);
+  }
  });
- if((s.pc&0xfffffffe)!==address)throw new Error('暂停 PC 不等于检查点');
+ if(pcNow()!==address)throw new Error('暂停 PC 不等于检查点: actual=0x'+pcNow().toString(16)+' expected=0x'+(address>>>0).toString(16));
  const snapshot=()=>s.exclusive(async()=>{
   const registers=[];for(let i=0;i<16;i++)registers.push(await s.readReg('R'+i));
   for(const name of ['MSP','PSP','XPSR','CONTROL','PRIMASK','BASEPRI','FAULTMASK'])registers.push(await s.readReg(name));
@@ -33,7 +73,7 @@ async function captureCheckpoint(address,ramEnd){
  if(JSON.stringify(before)!==JSON.stringify(after))throw new Error('只读回溯/切帧修改了寄存器或栈');
  const leak=await window.__S.leak();
  if(leak.used!==1||leak.bps!==1||leak.extra!==0)throw new Error('栈帧压力期间硬件断点泄漏');
- return {pc:s.pc,frames,reason:bt.backtrace.reason,leak};
+ return {pc:s.pc,frames,reason:bt.backtrace.reason,leak,m7ErratumRecoveries:erratumRecoveries};
 }
 async function staleChecks(){
  const d=window.__tools.dbg,s=d.session,failures=[];
@@ -75,20 +115,29 @@ export async function runFrameStress({cdp,oracle,board,rounds=200,code,ok,log}){
   if(reset.error)throw new Error(reset.error);
   for(const c of FRAME_CASES){
    const expected=oracle.cases[c.id],start=Date.now();
-   const captured=await cdp.json(`(${captureCheckpoint.toString()})(${expected.pc},${ramEnd})`);
+   const captured=await cdp.json(`(${captureCheckpoint.toString()})(${expected.pc},${ramEnd},${JSON.stringify(board)})`);
    const actual=captured.frames.map(f=>({...f,variables:webVariables(f.rows)}));
-   const differences=compareFrames(actual,expected.frames);
-   ok(differences.length===0,`GDB 对照 ${c.id}: ${actual.length} 帧，逐帧参数/局部值`,differences.join('；'));
-   results.push({id:c.id,elapsedMs:Date.now()-start,frames:actual,differences});
+   // GDB may report a caller-saved parameter from a live volatile register
+   // even when the leaf frame's CFI does not preserve it. Keep the web
+   // unwinder fail-closed; the volatile stack copy remains compared exactly.
+   const conservative=c.id==='leaf'?[{frame:1,name:'seed',reasonPattern:/^该帧寄存器 R[0-3] 不可恢复$/}]:[];
+   const differences=compareFrames(actual,expected.frames,{allowConservativeUnavailable:conservative});
+   const note=conservative.length?'（CFI 未保留调用者易失参数，网页按不可恢复处理）':'';
+   ok(differences.length===0,`GDB 对照 ${c.id}: ${actual.length} 帧，逐帧参数/局部值${note}`,differences.join('；'));
+   results.push({id:c.id,elapsedMs:Date.now()-start,frames:actual,differences,m7ErratumRecoveries:captured.m7ErratumRecoveries});
   }
   const c=oracle.cases.recursive;
+  let m7ErratumRecoveries=0;
   for(let i=0;i<rounds;i++){
-   const captured=await cdp.json(`(${captureCheckpoint.toString()})(${c.pc},${ramEnd})`);
+   const captured=await cdp.json(`(${captureCheckpoint.toString()})(${c.pc},${ramEnd},${JSON.stringify(board)})`);
+   m7ErratumRecoveries+=captured.m7ErratumRecoveries.length;
    const actual=captured.frames.map(f=>({...f,variables:webVariables(f.rows)})),diff=compareFrames(actual,c.frames);
    if(diff.length)throw new Error(`压力轮${i+1}: `+diff.join('；'));
    if((i+1)%20===0)log(`   栈帧压力 ${i+1}/${rounds}，无变量差异/寄存器或栈修改/比较器泄漏`);
   }
-  ok(true,`${rounds} 轮递归栈回溯、正反切帧及 GDB 对照`);
+  const recursiveResult=results.find(result=>result.id==='recursive');
+  if(recursiveResult){recursiveResult.pressureRounds=rounds;recursiveResult.pressureM7ErratumRecoveries=m7ErratumRecoveries;}
+  ok(true,`${rounds} 轮递归栈回溯、正反切帧及 GDB 对照`,m7ErratumRecoveries?`按 Cortex-M7 断点/异常栈证据恢复 ${m7ErratumRecoveries} 次`:undefined);
   const stale=await cdp.json(`(${staleChecks.toString()})()`);
   ok(!stale.length,'写操作/单步/继续/重载 ELF/复位/断开清除旧帧和局部值',stale.join('；'));
  }catch(error){ok(false,'栈帧/局部变量硬件压力流程',error.message);results.push({error:error.message});}

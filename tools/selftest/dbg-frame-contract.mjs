@@ -13,6 +13,10 @@ export const FRAME_CASES=[
 export const sha256=b=>createHash('sha256').update(b).digest('hex');
 export const readJson=p=>JSON.parse(readFileSync(p,'utf8').replace(/^\uFEFF/,''));
 export const frameSourceHash=()=>sha256(readFileSync(new URL('../target-firmware/common/dbg_frames.c',import.meta.url)));
+const stableJson=value=>JSON.stringify(value,(_key,item)=>{
+ if(!item||typeof item!=='object'||Array.isArray(item))return item;
+ return Object.fromEntries(Object.keys(item).sort().map(key=>[key,item[key]]));
+});
 export function validateBuild(build,elfBytes,board){
  if(build.schema!==1||build.board!==board||build.elfSha256!==sha256(elfBytes))throw new Error('构建信息 board/ELF SHA-256 不匹配');
  if(build.sources?.['dbg_frames.c']!==frameSourceHash())throw new Error('测试源代码已修改，请重新构建 ELF 并采集 GDB 对照');
@@ -20,7 +24,7 @@ export function validateBuild(build,elfBytes,board){
 }
 export function validateOracle(oracle,build,bytes,board){
  validateBuild(build,bytes,board);
- if(oracle.schema!==1||oracle.board!==board||oracle.elfSha256!==sha256(bytes)||JSON.stringify(oracle.build)!==JSON.stringify(build))throw new Error('GDB 对照与当前 ELF/构建参数不匹配');
+ if(oracle.schema!==1||oracle.board!==board||oracle.elfSha256!==sha256(bytes)||stableJson(oracle.build)!==stableJson(build))throw new Error('GDB 对照与当前 ELF/构建参数不匹配');
  if(!oracle.codeVerified||!oracle.tool?.includes('gdb'))throw new Error('对照未验证目标代码或不是 GDB 采集');
  for(const c of FRAME_CASES){
   const item=oracle.cases?.[c.id];if(!item?.frames?.length||!Number.isInteger(item.pc))throw new Error('对照缺少检查点 '+c.id);
@@ -47,8 +51,23 @@ export function validateOracle(oracle,build,bytes,board){
  for(const id of ['before-call','after-call']){expect(id,'arg',70);expect(id,'stack_value',79);}
  expect('after-call','result',346);
  const before=oracle.cases['before-call'].frames[0].variables.find(v=>v.name==='arg'),after=oracle.cases['after-call'].frames[0].variables.find(v=>v.name==='arg');
- if(before.address!=null||!Number.isInteger(after.address))throw new Error('该构建没有覆盖参数从寄存器迁移到栈');
+ const beforeLocation=dwarfLocationAt(before?.location,oracle.cases['before-call'].pc);
+ const afterLocation=dwarfLocationAt(after?.location,oracle.cases['after-call'].pc);
+ if(before.address!=null||!/(?:variable in \$r\d+|DW_OP_reg\d+)/.test(beforeLocation)||
+    !/(?:DW_OP_fbreg|DW_OP_breg\d+).*DW_OP_stack_value/s.test(afterLocation))
+  throw new Error('该构建没有覆盖参数从寄存器迁移到栈');
 
+}
+export function dwarfLocationAt(output,pc){
+ if(typeof output!=='string'||!Number.isInteger(pc))return '';
+ const ranges=[];let current=null;
+ for(const line of output.split(/\r?\n/)){
+  const match=line.match(/(?:^|\s)Range\s+(0x[\da-f]+)\s*-\s*(0x[\da-f]+):\s*(.*)$/i);
+  if(match){if(current)ranges.push(current);current={start:Number(match[1]),end:Number(match[2]),text:match[3]};}
+  else if(current&&line.trim()!=='.')current.text+='\n'+line.trim();
+ }
+ if(current)ranges.push(current);
+ return ranges.find(range=>pc>=range.start&&pc<range.end)?.text||'';
 }
 const number=text=>{
  const m=String(text).trim().match(/^(?:→\s*)?(-?0x[\da-f]+|-?\d+)(?:\s|$)/i);
@@ -73,7 +92,7 @@ export function webVariables(rows){
  });
 }
 const variableKey=v=>`${v.name}#${v.occurrence}`;
-export function compareFrames(actual,expected){
+export function compareFrames(actual,expected,{allowConservativeUnavailable=[]}={}){
  const failures=[];
  if(actual.length!==expected.length)failures.push(`帧数 ${actual.length} != ${expected.length}`);
  for(let i=0;i<Math.min(actual.length,expected.length);i++){
@@ -82,7 +101,13 @@ export function compareFrames(actual,expected){
   const av=new Map((a.variables||[]).map(v=>[variableKey(v),v])),ev=new Map((e.variables||[]).map(v=>[variableKey(v),v]));
   for(const key of new Set([...av.keys(),...ev.keys()])){
    const x=av.get(key),y=ev.get(key);if(!x||!y){failures.push(`${prefix} ${key} 作用域/变量缺失`);continue;}
-   if(x.argument!==y.argument||x.status!==y.status){failures.push(`${prefix} ${key} 参数/可用状态不一致 (${x.reason||''})`);continue;}
+   if(x.argument!==y.argument||x.status!==y.status){
+    const conservative=allowConservativeUnavailable.some(rule=>rule.frame===i&&rule.name===x.name&&
+     (rule.occurrence??0)===x.occurrence&&x.status==='unavailable'&&y.status==='ok'&&
+     rule.reasonPattern?.test(x.reason||''));
+    if(conservative)continue;
+    failures.push(`${prefix} ${key} 参数/可用状态不一致 (${x.reason||''})`);continue;
+   }
    if(y.status==='ok'){
     if(x.address!==y.address)failures.push(`${prefix} ${key} 位置地址不一致: ${x.address} != ${y.address}`);
     const fields=v=>Object.fromEntries(v.fields.map(f=>[f.path,f.value]));

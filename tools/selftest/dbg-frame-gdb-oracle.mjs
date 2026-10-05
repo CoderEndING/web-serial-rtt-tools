@@ -7,6 +7,11 @@ import {fileURLToPath} from 'node:url';
 import {Elf} from '../../app/elf/elf.js';
 import {FRAME_CASES,sha256,readJson,validateBuild,validateOracle} from './dbg-frame-contract.mjs';
 const args=process.argv.slice(2),arg=(key,def)=>args.find(a=>a.startsWith('--'+key+'='))?.slice(key.length+3)??def;
+const pyLiteral=value=>value===null?'None':typeof value==='boolean'?(value?'True':'False'):
+ typeof value==='number'?String(value):typeof value==='string'?'u'+JSON.stringify(value):
+ Array.isArray(value)?'['+value.map(pyLiteral).join(',')+']':
+ value&&typeof value==='object'?'{'+Object.entries(value).map(([k,v])=>'u'+JSON.stringify(k)+':'+pyLiteral(v)).join(',')+'}':
+ (()=>{throw new Error('不能注入 GDB 配置值：'+typeof value)})();
 if(args.includes('--help')){console.log('node tools/selftest/dbg-frame-gdb-oracle.mjs --elf=.../fw.elf --board=f103cb --remote=127.0.0.1:3333 --out=tmp/frame-oracle.json [--gdb=arm-none-eabi-gdb]');process.exit(0);}
 const elfPath=arg('elf');if(!elfPath)throw new Error('--elf 必须明确指定最终构建 ELF');
 const board=arg('board','f103cb'),remote=arg('remote','127.0.0.1:3333');
@@ -26,10 +31,12 @@ mkdirSync(dirname(out),{recursive:true});
 rmSync(out,{force:true});
 const temp=mkdtempSync(join(tmpdir(),'akalink-frame-oracle-'));
 try{
- const config=join(temp,'config.json'),script=join(temp,'run.gdb'),py=fileURLToPath(new URL('./dbg-frame-gdb.py',import.meta.url));
- writeFileSync(config,JSON.stringify({board,remote,build,elfSha256:sha256(bytes),cases,code,out}));
- writeFileSync(script,`python\nexec(compile(open(${JSON.stringify(py)}, encoding="utf-8").read(), ${JSON.stringify(py)}, "exec"))\nend\n`);
- const child=spawn(arg('gdb','arm-none-eabi-gdb'),['-q','-nx','-batch',resolve(elfPath),'-x',script],{stdio:'inherit',env:{...process.env,AKALINK_GDB_FRAME_CONFIG:config}});
+ const script=join(temp,'run.gdb'),py=fileURLToPath(new URL('./dbg-frame-gdb.py',import.meta.url));
+ const config={board,remote,build,elfSha256:sha256(bytes),cases,code,out};
+ // Keep the collector independent of a separately installed Python stdlib: some
+ // embedded cross-GDB builds expose only their _gdb extension and builtins.
+ writeFileSync(script,`python\nCONFIG = ${pyLiteral(config)}\nexec(compile(open(${JSON.stringify(py)}).read(), ${JSON.stringify(py)}, "exec"))\nend\n`);
+ const child=spawn(arg('gdb','arm-none-eabi-gdb'),['-q','-nx','-batch',resolve(elfPath),'-x',script],{stdio:'inherit',env:{...process.env}});
  const timeout=setTimeout(()=>child.kill(),180000);
  const status=await new Promise((res,rej)=>{child.once('error',rej);child.once('exit',res);}).finally(()=>clearTimeout(timeout));
  if(status!==0)throw new Error('GDB 采集失败；需要支持 Python 的 GDB，且目标/连接不能被其他工具占用');
