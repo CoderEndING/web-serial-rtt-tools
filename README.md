@@ -88,7 +88,7 @@ RTT 转发 · J-Scope 波形 · SPI/QSPI 桥 · SPI/QSPI 屏（含**局部刷新
 make check                  # 语法与文档模板
 make test-offline           # 全部离线逻辑回归
 make rebuild-all-examples   # 清理旧生成目录并重建四块活动板卡
-make full_flow_f103cb       # 当前 F103CB：认板 → 基准 → 调试压力
+make full_flow_f103cb       # 当前 F103CB：认板 → 基准 → 调试压力 → 随机顺序压力
 ```
 
 只清固件生成目录用 `make clean-firmware`；`make clean` 还会清理临时采集文件，但会保留
@@ -288,9 +288,13 @@ F103ZE 的 609～616 KB/s 与 F103CB 当前约 445～465 KB/s 不属于同一板
 
 ```powershell
 make full_flow_f103ze
+make full_flow_f103cb
 make full_flow_h743
 make full_flow_6800evk
 ```
+
+F103CB、H743 和 HPM6800EVK 的全流程还会按固定随机种子交错执行两轮功能基准与一轮调试压力；
+每一步结果单独保存，失败时停止后续场景。F103ZE 保留原有固定顺序流程。
 
 1. **狂发固件要用 ZE 版**：`pwsh -File tools/target-firmware/stm32f103_rtt_speed/build.ps1 -Board ze`
    → `build-ze/fw.elf`（96 MHz + RTT 32 KB 缓冲）。仓库里曾长期躺着一份**旧简化版**

@@ -44,6 +44,7 @@ const FW = {
 const COM = (arg('com') || '--com=COM5').split('=')[1];
 const CYCLES = argN('cycles', 2);
 const ALT = argN('alt', 5);
+const OUT = arg('out') ? arg('out').split('=').slice(1).join('=') : 'tmp/hpm-campaign-result.json';
 const KEEP_GOING = has('keep-going');
 const RECORD_ONLY = has('record');
 const VIEWER_SECS = 8;
@@ -267,7 +268,7 @@ await cdp.send('Page.navigate', { url: APP });
 await cdp.waitFor('window.__tools?.flash && window.__tools?.hid && window.__tools?.stream', 25000, '页面模块加载');
 
 const report = { startedAt: new Date().toISOString(), board: CHIP, app: APP, cycles: [], alt: [], errors: [], spec: SPEC };
-const dump = () => { try { fs.writeFileSync('tmp/hpm-campaign-result.json', JSON.stringify(report, null, 1)); } catch {} };
+const dump = () => { try { fs.writeFileSync(OUT, JSON.stringify(report, null, 1)); } catch {} };
 
 /** 开跑前校准：芯片 = HPM6800EVK、后端 webusb、**目标类型 = RISC-V**、SWD 时钟清 0 */
 async function preflight(){
@@ -915,7 +916,7 @@ dump();
 printSummary({ ...report, boardLabel: 'HPM6800EVK（HPM6880 / RISC-V + JTAG）' });
 console.log(`\n判决：${pass} 通过 / ${fail} 失败`);
 if (report.errors.length) console.log('错误：' + JSON.stringify(report.errors));
-console.log('结果已写 tmp/hpm-campaign-result.json');
+console.log('结果已写 ' + OUT);
 clearTimeout(WD);
 try { cdp?.ws?.close(); } catch {}
 try { cdp?.browserWs?.close(); } catch {}

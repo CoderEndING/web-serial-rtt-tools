@@ -71,12 +71,19 @@ make full_flow_h743
 make full_flow_6800evk
 ```
 
-每条流程都按“认板 → 构建 → 场景基准 → 烧调试靶子 → 调试器压力”执行，并固定使用本地
-页面。完整流程会覆盖 RTT 转发、RTT Viewer、J-Scope、烧录、断点、单步、复位和新加入的
-BT/DWT Watch 压力项。
+每条流程都按“认板 → 构建 → 场景基准 → 调试器压力”执行，并固定使用本地页面。
+F103CB、H743 和 HPM6800EVK 会继续按固定随机种子交错运行两轮功能基准与一轮调试压力，
+覆盖 RTT 转发、RTT Viewer、J-Scope、烧录、断点、单步、复位、BT/DWT Watch 和跨功能切换。
+每个随机步骤有独立日志和 JSON；出错后默认停止后续场景。想单独复现或换顺序可用：
+
+```powershell
+make hw-random-flow-f103cb ARGS="--seed=20261005 --rounds=3"
+make hw-random-flow-h743 ARGS="--seed=7 --rounds=4"
+make hw-random-flow-6800evk ARGS="--seed=7 --rounds=4"
+```
 
 ## 90. 诊断与历史脚本
 
-`rtt-speed*.mjs`、`flash-timing.mjs`、`dbg-step-hw.mjs`、`hw-random-flow.mjs`、
-`probe-hid-diag.py` 等是针对单一问题的诊断工具，不作为默认回归入口。它们仍保留，
+`rtt-speed*.mjs`、`flash-timing.mjs`、`dbg-step-hw.mjs`、`probe-hid-diag.py` 等是针对
+单一问题的诊断工具，不作为默认回归入口。它们仍保留，
 但默认固件路径已经指向板卡清单；需要跑时先看脚本头注释和对应历史记录。

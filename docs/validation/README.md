@@ -7,6 +7,7 @@
 | --- | --- | --- |
 | 2026-10-04 | [`2026-10-04-f103cb.md`](2026-10-04-f103cb.md) | F103CB 多轮真机验证、调试压力和随机场景 |
 | 2026-10-05 | [`2026-10-05-rtt-viewer-comparison.md`](2026-10-05-rtt-viewer-comparison.md) | F103ZE 609–616 KB/s 基线与 F103CB 杜邦线差异 |
+| 2026-10-05 | [`2026-10-05-hardware-test-results.md`](2026-10-05-hardware-test-results.md) | F103CB、H743、HPM6800EVK 历史与本次真机结果 |
 | 2026-10-05 | [`../真机基准测试.md`](../真机基准测试.md) | 活动板卡场景基准的长期判据和历史数据 |
 
 ## 当前推荐顺序
@@ -15,7 +16,7 @@
 2. `make test-offline`
 3. `make rebuild-all-examples`
 4. 当前板卡对应的 `make board-check-*`
-5. `make hw-campaign-*` 或 `make full_flow_*`
+5. `make hw-campaign-*` 或 `make full_flow_*`；F103CB / H743 / HPM6800EVK 的 full flow 会附带随机顺序压力阶段
 
 活动板卡、例程和唯一 ELF 路径见 [`tools/target-firmware/CONTRACT.md`](../../tools/target-firmware/CONTRACT.md)。
 真机结果写入 `tmp/`，提交时只把经过复核的判决和原因整理到日期记录中。

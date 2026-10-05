@@ -29,7 +29,7 @@ FW_DIR   = tools/target-firmware/stm32f103
 LA       = tools/la/kingst_la.py
 
 .DEFAULT_GOAL := help
-.PHONY: help serve serve-dev serve-stop browser open page-prep spi-flash-hw idcode board-check-f103ze board-check-f103cb board-check-h743 board-check-6800evk test test-offline test-board-matrix test-ui test-gen test-gen-page gen-embed samples-anim test-hid test-dwarf test-scope test-scope-page test-scope-render test-spi test-read test-spi-page test-hw test-record test-bridge test-bridge-gate test-hpm test-image test-all test-dbg test-dbg-page test-dbg-hw test-dbg-stress test-dbg-stress-f103ze test-dbg-stress-f103cb flash-dbgstress-f103ze flash-dbgstress-f103cb flash-dbgstress-h743 flash-dbgstress-6800evk test-dbg-riscv test-idcode test-dsl test-flash flash-timing hw-campaign hw-campaign-f103ze hw-campaign-f103cb hw-campaign-h743 hw-campaign-hpm hw-campaign-riscv build-f103ze-examples build-f103cb-examples build-h743-examples build-6800evk-examples build-all-examples rebuild-all-examples clean-firmware campaign-summary full_flow_f103ze full_flow_f103cb full_flow_h743 full_flow_6800evk \
+.PHONY: help serve serve-dev serve-stop browser open page-prep spi-flash-hw idcode board-check-f103ze board-check-f103cb board-check-h743 board-check-6800evk test test-offline test-board-matrix test-random-flow test-ui test-gen test-gen-page gen-embed samples-anim test-hid test-dwarf test-scope test-scope-page test-scope-render test-spi test-read test-spi-page test-hw test-record test-bridge test-bridge-gate test-hpm test-image test-all test-dbg test-dbg-page test-dbg-hw test-dbg-stress test-dbg-stress-f103ze test-dbg-stress-f103cb flash-dbgstress-f103ze flash-dbgstress-f103cb flash-dbgstress-h743 flash-dbgstress-6800evk test-dbg-riscv test-idcode test-dsl test-flash flash-timing hw-campaign hw-campaign-f103ze hw-campaign-f103cb hw-campaign-h743 hw-campaign-hpm hw-campaign-riscv hw-random-flow-f103cb hw-random-flow-h743 hw-random-flow-6800evk build-f103ze-examples build-f103cb-examples build-h743-examples build-6800evk-examples build-all-examples rebuild-all-examples clean-firmware campaign-summary full_flow_f103ze full_flow_f103cb full_flow_h743 full_flow_6800evk \
         bridge bridge-stop fw-build fw-flash fw-restore fw-h7-build fw-h7-flash \
         algo-check flash-plan la-info la-capture git-status git-log check clean spi-hw spi-flow i2c-hw spi-partial-hw dbg-step-hw probe-diag
 
@@ -78,7 +78,7 @@ grant:
 	$(NODE) tools/selftest/serial-grant.mjs $(ARGS)
 
 # ---------------------------------------------------------------- 自测
-test: test-stability test-dbg-features test-board-matrix
+test: test-stability test-dbg-features test-board-matrix test-random-flow
 	$(NODE) tools/selftest/rtt.test.mjs
 	$(NODE) tools/selftest/gen-parity.mjs
 	$(NODE) tools/selftest/hid-proto.test.mjs
@@ -109,6 +109,9 @@ test-offline: check test
 # 板卡/例程唯一清单的静态检查；发现路径漂移时在进入真机流程前就失败。
 test-board-matrix:
 	$(NODE) tools/selftest/board-matrix.test.mjs
+
+test-random-flow:
+	$(NODE) tools/selftest/hw-random-flow.test.mjs
 
 # USB→I2C 页的协议层 + 假探针 + 假器件（AT24C02/MPU6050/ADS1115/Si5351）—— 不需要硬件
 test-i2c:
@@ -425,6 +428,20 @@ build-6800evk-examples:
 # 别名（用户口径叫"RISC-V 那条"）：就是上面 hw-campaign-hpm（脚本名按探针/芯片叫 hpm）
 hw-campaign-riscv: hw-campaign-hpm
 
+# 多轮随机顺序压力：交错完整功能基准与调试压力，并为每一步保留独立 JSON。
+#   make hw-random-flow-f103cb ARGS="--seed=20261005 --rounds=3"
+#   make hw-random-flow-h743 ARGS="--seed=7 --rounds=4"
+#   make hw-random-flow-6800evk ARGS="--seed=7 --rounds=4"
+# 固定种子可以复现顺序；默认 3 轮包含 2 个功能场景和 1 个调试场景。
+hw-random-flow-f103cb: page-prep board-check-f103cb build-f103cb-examples
+	$(NODE) tools/selftest/hw-random-flow.mjs --board=f103cb $(ARGS)
+
+hw-random-flow-h743: page-prep board-check-h743 build-h743-examples
+	$(NODE) tools/selftest/hw-random-flow.mjs --board=h743 $(ARGS)
+
+hw-random-flow-6800evk: page-prep board-check-6800evk build-6800evk-examples
+	$(NODE) tools/selftest/hw-random-flow.mjs --board=6800evk $(ARGS)
+
 # 四块活动板卡的全量固件构建。每个例程的唯一产物见 board-matrix.json。
 build-all-examples: build-f103cb-examples build-f103ze-examples build-h743-examples build-6800evk-examples
 	REQUIRE_BUILDS=1 $(NODE) tools/selftest/board-matrix.test.mjs
@@ -458,14 +475,15 @@ board-check-6800evk: page-prep
 	$(NODE) tools/selftest/read-idcode.mjs --board=6800evk
 
 # ---------------------------------------------------------------- 全流程（一块板一条命令）
-# 每条 =「认板子」+「真机场景基准」+（把调试压测靶子固件烧进去）+「调试器真机压测」。
+# 当前三块活动板的流程在固定验收后再随机交错运行功能基准与调试压测；
+# 每条 =「认板子」+「真机场景基准」+「调试器真机压测」+「随机顺序压力」。
 # 中间那一步不能省：跑完基准的板子上是狂发/scope 固件，不换靶子压测必然连不上；
 # 烧录走 tools/selftest/flash-elf.mjs（以前藏在 tmp/ 里，新克隆没有）。
 #
 #   make full_flow_f103ze     探针挂 STM32F103ZE 时用：hw-campaign + test-dbg-stress-f103ze
-#   make full_flow_f103cb     探针挂 STM32F103CB 时用：CB 容量固件 + 同一套网页流程
-#   make full_flow_h743       换阿波罗 H743 之后用：  hw-campaign-h743 + 烧靶子 + test-dbg-stress
-#   make full_flow_6800evk    换 HPM6800EVK 之后用：  hw-campaign-hpm + 烧靶子 + test-dbg-riscv
+#   make full_flow_f103cb     探针挂 STM32F103CB 时用：CB 容量固件 + 固定及随机场景压力
+#   make full_flow_h743       换阿波罗 H743 之后用：  hw-campaign-h743 + ARM 调试与随机压力
+#   make full_flow_6800evk    换 HPM6800EVK 之后用：  hw-campaign-hpm + RISC-V 调试与随机压力
 #
 # 🚨 **流程一律打本地页面**（下面每条都带 `FLOW_LOCAL = --local`）。
 #    为什么：流程验的是**工作区这棵树**，而线上 GitHub Pages 是"最后一次 push 的快照"——
@@ -473,22 +491,25 @@ board-check-6800evk: page-prep
 #    转发跑到 2.9 MB/s 时整页被冻住，于是"打开 CDC 串口"那步超时，看着像串口/探针坏了。
 #    想故意打线上（例如验收线上版本）就 `make full_flow_f103ze FLOW_LOCAL=`。
 #
-# 四条都会把结果写进 tmp/（campaign-result.json / dbg-stress-page*.json），出错**立刻停**；
+# 四条都会把结果写进 tmp/；出错**立刻停**。三块活动板的随机结果按板卡及步骤分开保存；
 # 想只跑其中一段就单独叫那一条（ARGS 照样透传）。
+# 真机步骤共享探针和 USB 资源；即使传 `-j`，每条 full_flow 也按依赖顺序串行执行。
+.NOTPARALLEL: full_flow_f103cb full_flow_h743 full_flow_6800evk hw-random-flow-f103cb hw-random-flow-h743 hw-random-flow-6800evk
+
 full_flow_f103ze: FLOW_LOCAL = --local
 full_flow_f103ze: board-check-f103ze hw-campaign-f103ze test-dbg-stress-f103ze
 	pwsh -NoProfile -Command "Write-Host 'full flow (f103ze) done'"
 
 full_flow_f103cb: FLOW_LOCAL = --local
-full_flow_f103cb: board-check-f103cb build-f103cb-examples hw-campaign-f103cb test-dbg-stress-f103cb
+full_flow_f103cb: board-check-f103cb build-f103cb-examples hw-campaign-f103cb test-dbg-stress-f103cb hw-random-flow-f103cb
 	pwsh -NoProfile -Command "Write-Host 'full flow (f103cb) done'"
 
 full_flow_h743: FLOW_LOCAL = --local
-full_flow_h743: board-check-h743 hw-campaign-h743 flash-dbgstress-h743 test-dbg-stress
+full_flow_h743: board-check-h743 hw-campaign-h743 flash-dbgstress-h743 test-dbg-stress hw-random-flow-h743
 	pwsh -NoProfile -Command "Write-Host 'full flow (h743) done'"
 
 full_flow_6800evk: FLOW_LOCAL = --local
-full_flow_6800evk: board-check-6800evk hw-campaign-hpm flash-dbgstress-6800evk test-dbg-riscv
+full_flow_6800evk: board-check-6800evk hw-campaign-hpm flash-dbgstress-6800evk test-dbg-riscv hw-random-flow-6800evk
 	pwsh -NoProfile -Command "Write-Host 'full flow (6800evk) done'"
 
 # 把基准结果打成小结表（跑完会自动打；这里是对着历史 JSON 重打，不用碰硬件）

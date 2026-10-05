@@ -1,18 +1,25 @@
 /**
- * F103CB 多轮随机场景编排。
+ * 多轮随机场景编排：功能基准（RTT Viewer / 转发 / J-Scope）与调试压力交错运行。
  *
- * 每个 feature 场景都包含：烧录狂发固件、RTT Viewer、60 MHz RTT 转发与 10 s
- * 记录、烧录 scope 固件，以及 J-Scope 的 1/3 变量 × 2/20 µs 四组采样。
- * debug 场景则重新烧录调试靶子并执行完整的真机调试压测（含 bt / DWT）。
- * 场景顺序由固定种子打乱，便于复现；每一轮都会明确记录实际顺序和结果。
+ * 每个 feature 场景执行一轮对应板卡的完整功能基准，并可随机加入一次固件交替烧录；
+ * debug 场景先烧入该板卡的调试靶子，再执行 ARM 或 RISC-V 专用真机压力测试。
+ * 固定 seed 让顺序与报告可复现。每板单独写汇总，每一步也保留自己的 JSON 结果。
  *
- *   node tools/selftest/hw-random-flow.mjs --seed=20261005 --rounds=3
- *   node tools/selftest/hw-random-flow.mjs --seed=7 --rounds=4 --keep-going
+ *   node tools/selftest/hw-random-flow.mjs --board=f103cb --seed=20261005 --rounds=3
+ *   node tools/selftest/hw-random-flow.mjs --board=h743 --seed=7 --rounds=4 --keep-going
+ *   node tools/selftest/hw-random-flow.mjs --board=6800evk
  */
 import { spawn } from 'node:child_process';
 import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  debugCommands,
+  featureCommand,
+  getRandomFlowBoard,
+  makeRandomFlowPlan,
+  randomFlowResultPath,
+} from './hw-random-flow-plan.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const arg = (name, fallback) => {
@@ -20,52 +27,41 @@ const arg = (name, fallback) => {
   return p ? p.slice(name.length + 3) : fallback;
 };
 const has = name => process.argv.includes(`--${name}`);
-const BOARD = String(arg('board', 'f103cb'));
+const BOARD_ID = String(arg('board', 'f103cb'));
+const BOARD = getRandomFlowBoard(BOARD_ID);
 const SEED = Number(arg('seed', '20261005')) >>> 0;
 const ROUNDS = Math.max(1, Math.min(8, Number(arg('rounds', '3')) || 3));
 const KEEP_GOING = has('keep-going');
-const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-const LOG = resolve(ROOT, 'tmp', `hw-random-flow-${stamp}.log`);
+const RUN_ID = new Date().toISOString().replace(/[:.]/g, '-');
+const LOG = resolve(ROOT, 'tmp', `hw-random-flow-${BOARD_ID}-${RUN_ID}.log`);
+const RESULT = resolve(ROOT, randomFlowResultPath(BOARD_ID));
+const PLAN = makeRandomFlowPlan(SEED, ROUNDS);
+
 mkdirSync(resolve(ROOT, 'tmp'), { recursive: true });
-writeFileSync(LOG, `seed=${SEED} board=${BOARD} rounds=${ROUNDS}\n`);
+writeFileSync(LOG, `seed=${SEED} board=${BOARD_ID} rounds=${ROUNDS}\n`);
+console.log(`== ${BOARD.label} 随机场景压力 == seed=${SEED} · ${ROUNDS} 轮`);
+console.log('计划：' + PLAN.map(x => `${x.step}:${x.kind}(cycles=${x.cycles},alt=${x.alt})`).join(' → '));
 
-function rand(state){
-  // xorshift32：固定种子、无外部随机源，报告可以完全复现。
-  let x = state.value >>> 0;
-  x ^= x << 13; x ^= x >>> 17; x ^= x << 5;
-  state.value = x >>> 0;
-  return state.value;
-}
-function shuffle(list, state){
-  const out = [...list];
-  for (let i = out.length - 1; i > 0; i--){
-    const j = rand(state) % (i + 1);
-    [out[i], out[j]] = [out[j], out[i]];
-  }
-  return out;
-}
+const report = {
+  startedAt: new Date().toISOString(),
+  board: BOARD_ID,
+  seed: SEED,
+  rounds: ROUNDS,
+  log: LOG,
+  plan: PLAN,
+  results: [],
+};
 
-const state = { value: SEED || 1 };
-const base = Array.from({ length: ROUNDS }, (_, i) => ({
-  kind: i === 0 ? 'feature' : (i === 1 ? 'debug' : 'feature'),
-  cycles: 1,
-  alt: i === 0 ? 1 : 0,
-}));
-for (const item of base){
-  // 后续 feature 场景随机加入一次狂发↔scope 交替烧录，避免每轮都只有同一顺序。
-  if (item.kind === 'feature' && rand(state) % 2) item.alt = 1;
-}
-const plan = shuffle(base, state).map((x, i) => ({ ...x, step: i + 1 }));
-const report = { startedAt: new Date().toISOString(), board: BOARD, seed: SEED, rounds: ROUNDS, log: LOG, plan, results: [] };
-console.log(`== F103CB 随机场景压力 == seed=${SEED} · ${ROUNDS} 轮`);
-console.log('计划：' + plan.map(x => `${x.step}:${x.kind}(cycles=${x.cycles},alt=${x.alt})`).join(' → '));
-
-function run(command, args){
+function run(script, args) {
   return new Promise(resolveRun => {
     const started = Date.now();
-    console.log(`\n--- 场景 ${command} ${args.join(' ')} ---`);
-    appendFileSync(LOG, `\n$ ${command} ${args.join(' ')}\n`);
-    const child = spawn(command, args, { cwd: ROOT, env: { ...process.env }, stdio: ['ignore', 'pipe', 'pipe'] });
+    console.log(`\n--- 场景命令 ${script} ${args.join(' ')} ---`);
+    appendFileSync(LOG, `\n$ ${script} ${args.join(' ')}\n`);
+    const child = spawn(process.execPath, [script, ...args], {
+      cwd: ROOT,
+      env: { ...process.env },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
     child.stdout.on('data', b => { process.stdout.write(b); appendFileSync(LOG, b); });
     child.stderr.on('data', b => { process.stderr.write(b); appendFileSync(LOG, b); });
     child.on('error', error => resolveRun({ code: 1, error: String(error), ms: Date.now() - started }));
@@ -73,37 +69,31 @@ function run(command, args){
   });
 }
 
-function nodeArgs(script, ...args){ return [script, ...args]; }
-function featureArgs(item){
-  return nodeArgs('tools/selftest/hw-campaign.mjs', `--board=${BOARD}`, '--local',
-    `--cycles=${item.cycles}`, `--alt=${item.alt}`, '--keep-going');
-}
-function debugArgs(){
-  return nodeArgs('tools/selftest/dbg-hw-stress.mjs', `--board=${BOARD}`, '--oracle=tmp/no-f103cb-oracle.json');
-}
-
-for (const item of plan){
-  let r;
-  if (item.kind === 'feature'){
-    r = await run(process.execPath, featureArgs(item));
+for (const item of PLAN) {
+  let result;
+  if (item.kind === 'feature') {
+    const command = featureCommand(BOARD_ID, item, RUN_ID);
+    result = await run(command.script, command.args);
   } else {
-    // 调试压测前必须换回 dbgstress 靶子；它自己通过页面烧录，随后仍在同一浏览器会话中测试。
-    const flash = await run(process.execPath, nodeArgs('tools/selftest/flash-elf.mjs', `--board=${BOARD}`));
-    if (flash.code !== 0){
-      r = { code: flash.code, ms: flash.ms, error: '调试靶子烧录失败' };
+    const [flash, test] = debugCommands(BOARD_ID, item, RUN_ID);
+    const flashResult = await run(flash.script, flash.args);
+    if (flashResult.code !== 0) {
+      result = { code: flashResult.code, ms: flashResult.ms, error: '调试靶子烧录失败' };
     } else {
-      r = await run(process.execPath, debugArgs());
+      const testResult = await run(test.script, test.args);
+      result = { ...testResult, ms: flashResult.ms + testResult.ms };
     }
   }
-  const result = { step: item.step, kind: item.kind, cycles: item.cycles, alt: item.alt, ...r };
-  report.results.push(result);
-  console.log(`--- 场景 ${item.step} ${item.kind}：${r.code === 0 ? 'PASS' : 'FAIL'} · ${(r.ms / 1000).toFixed(1)} s ---`);
-  if (r.code !== 0 && !KEEP_GOING) break;
+
+  const row = { step: item.step, kind: item.kind, cycles: item.cycles, alt: item.alt, ...result };
+  report.results.push(row);
+  console.log(`--- 场景 ${item.step} ${item.kind}：${row.code === 0 ? 'PASS' : 'FAIL'} · ${(row.ms / 1000).toFixed(1)} s ---`);
+  if (row.code !== 0 && !KEEP_GOING) break;
 }
 
-writeFileSync(resolve(ROOT, 'tmp', 'hw-random-flow-result.json'), JSON.stringify(report, null, 2));
+writeFileSync(RESULT, JSON.stringify(report, null, 2));
 console.log('\n================ 随机压力汇总 ================');
-for (const r of report.results) console.log(`第 ${r.step} 步 ${r.kind}：${r.code === 0 ? 'PASS' : 'FAIL'} · ${(r.ms / 1000).toFixed(1)} s`);
+for (const row of report.results) console.log(`第 ${row.step} 步 ${row.kind}：${row.code === 0 ? 'PASS' : 'FAIL'} · ${(row.ms / 1000).toFixed(1)} s`);
 console.log(`日志：${LOG}`);
-console.log('结果：tmp/hw-random-flow-result.json');
-process.exit(report.results.some(r => r.code !== 0) || report.results.length !== plan.length ? 1 : 0);
+console.log(`结果：${RESULT}`);
+process.exitCode = report.results.some(r => r.code !== 0) || report.results.length !== PLAN.length ? 1 : 0;

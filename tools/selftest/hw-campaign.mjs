@@ -11,6 +11,7 @@
  *   make hw-campaign                          （等价：node tools/selftest/hw-campaign.mjs）
  *   make hw-campaign ARGS="--keep-going"      # 出错也把剩下的跑完（长稳用）
  *   make hw-campaign-h743                     # 换 H743 靶子（= --board=h743）
+ *   make hw-campaign-h743 ARGS="--out=tmp/one-off-h743.json" # 指定结果 JSON
  *   node tools/selftest/hw-campaign.mjs --local   # 用本地 8899 页面（默认走线上，因为授权在线上来源）
  *
  * 靶子（芯片）由 `--board=` 选，芯片相关的东西全在下面的 BOARDS 表里：固件路径、
@@ -119,6 +120,7 @@ const COM = argV('com', 'COM5');
 const CHIP = argV('chip', BOARD.chip);
 const CYCLES = argN('cycles', 2);
 const ALT = argN('alt', 5);
+const OUT = argV('out', 'tmp/campaign-result.json');
 const KEEP_GOING = has('keep-going');
 const CLOCK = '60000000';                 // 60 MHz（值就是 Hz，见文件头 ①）
 const RTT_SECS = 6;                       // RTT Viewer 测速窗口
@@ -388,7 +390,7 @@ await cdp.waitFor('window.__tools?.flash && window.__tools?.hid && window.__tool
 await ensureSerialGrant();
 
 const report = { startedAt: new Date().toISOString(), app: APP, board: BOARD_ID, com: COM, chip: CHIP, clock: CLOCK, cycles: [], alt: [], errors: [] };
-const dump = () => { try { fs.writeFileSync('tmp/campaign-result.json', JSON.stringify(report, null, 1)); } catch {} };
+const dump = () => { try { fs.writeFileSync(OUT, JSON.stringify(report, null, 1)); } catch {} };
 
 /** 开跑前校准：芯片/后端/地址格/目标类型/时钟（下拉是 store 绑定的，会被上一次测试带偏） */
 async function preflight(){
@@ -940,7 +942,7 @@ printSummary({
 });
 console.log(`\n判决：${pass} 通过 / ${fail} 失败`);
 if (report.errors.length) console.log('错误：' + JSON.stringify(report.errors));
-console.log('结果已写 tmp/campaign-result.json');
+console.log('结果已写 ' + OUT);
 clearTimeout(WD);
 /**
  * 🚨 **必须把 CDP 的 WebSocket 关掉再退**：它们一开着，node 的事件循环就一直有活干 ——
