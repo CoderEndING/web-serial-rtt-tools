@@ -177,3 +177,18 @@ GDB API依据：
 [Frames](https://sourceware.org/gdb/current/onlinedocs/gdb.html/Frames-In-Python.html)、
 [Blocks](https://sourceware.org/gdb/current/onlinedocs/gdb.html/Blocks-In-Python.html)、
 [Values](https://sourceware.org/gdb/current/onlinedocs/gdb.html/Values-From-Inferior.html)。
+
+## 2026-10-06 收工记录：HPM RISC-V `.eh_frame` 与板上矩阵进度
+
+约 07:40–08:00（北京时间）继续处理 HPM6800EVK 的真实固件 CFI。GNU RISC-V 工具链生成的应用帧信息位于 `.eh_frame`，使用 `zR` augmentation 和 PC-relative `sdata4` FDE 地址；先前只读 `.debug_frame` 因而无法覆盖应用检查点。现在解析器在 RISC-V 寄存器上限显式设为 32 时，优先沿用 `.debug_frame`，找不到时再解析 `.eh_frame` 的 `zR`、`udata4`/`sdata4` 以及 `pcrel`/绝对地址形式。新增合成 pcrel `.eh_frame` 用例。
+
+HPM6800EVK 的 `Og/Os × DWARF4/5` 四种调试 ELF 均构建成功，并分别通过真实 ELF 的七个检查点 CFI 行解析检查；新增 RISC-V 合成展开/局部变量测试与既有 ARM CFI/EHABI 测试通过，`make test-offline` 退出码为 0。构建矩阵如下：
+
+| 配置 | ELF SHA-256 |
+|---|---|
+| Og / DWARF4 | `54c380cceb7954a201e237c5fc647fc49f5b4947999de1927ab2f01b598a8723` |
+| Os / DWARF4 | `85ba8c0e876f04ae9b5228ea23d5fd61e09cf886becaa8c2766ce7d0a14c2a25` |
+| Og / DWARF5 | `160b9633434c58dfbd94d5e1fb4fdd3cb06b07297f187f0803742ceb7b4f555a` |
+| Os / DWARF5 | `8fdc0a4074b768ea12e35b0711c66cbbb8faf4faaba292d094266c226b14ef80` |
+
+本轮只把 Og/DWARF4 固件烧入 HPM6800EVK，并逐字节读回验证 44,488/44,488 B。由于收工时停止了板上矩阵，尚未为这四个精确 ELF 分别采集匹配的 GDB oracle，也未运行 Web 侧 200 轮局部变量/帧压力；不得将真实 ELF 静态 CFI 检查记作板上栈帧验收。此前 07:46–07:53 的 `make full_flow_6800evk` 已完成，独立记录见[真机测试结果](validation/2026-10-05-hardware-test-results.md)。

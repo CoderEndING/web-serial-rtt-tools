@@ -24,6 +24,18 @@ assert.deepEqual(row.rules.get(1),{kind:'offset',v:-8});
 assert.deepEqual(row.rules.get(18),{kind:'offset',v:-12},'extended CFI registers above x15 are retained');
 assert.throws(()=>cfiRow(elf,0x1000),/非核心寄存器/,'ARM register ceiling still rejects RISC-V CFI unless opted in');
 
+// GCC's RISC-V async unwind tables use .eh_frame with a zR/pcrel-sdata4 CIE.
+const ehBase=0x80001000,ehCie=record([...u32(0),3,0x7a,0x52,0,1,0x7c,1,1,0x1b,0x0c,2,16,0x81,1]);
+const ehFdeOffset=ehCie.length,ehPc=0x80001100,ehLocField=ehFdeOffset+8;
+const ehFde=record([...u32(ehFdeOffset+4),...u32(ehPc-(ehBase+ehLocField)),...u32(0x40),0]);
+const ehBytes=Uint8Array.from([...ehCie,...ehFde]);
+const ehElf={section:name=>name==='.eh_frame'?{addr:ehBase}:null,data:name=>name==='.eh_frame'?ehBytes:null,sections:()=>[code]};
+const ehRow=cfiRow(ehElf,ehPc+4,{maxRegister:32});
+assert.equal(ehRow.reg,2,'RISC-V .eh_frame CFA uses x2/sp');
+assert.equal(ehRow.offset,16);
+assert.equal(ehRow.ra,1);
+assert.deepEqual(ehRow.rules.get(1),{kind:'offset',v:-4},'.eh_frame resolves pcrel FDE addresses and signed data alignment');
+
 const sp=0x8800,regs=new Uint32Array(33);
 regs[1]=0x1010;regs[2]=sp;regs[8]=0x8888;regs[9]=0x9999;regs[18]=0x1818;regs[32]=0x1000;
 const words=new Map([[sp+8,0x1010],[sp+4,0x1818]]);
