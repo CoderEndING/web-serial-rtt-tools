@@ -364,15 +364,60 @@ export class RiscvDebugSession extends DebugSession {
         }
         return b;
       }
+      /**
+       * 🚨 **没兜底到也绝不退回 SBA**（2026-10 用户现场定因）。
+       *
+       * 现场：监视一个地址落在 flash 窗口的变量，`memRead(0x80000500, 512)` —— 这 512 B
+       * **跨出了 ELF 的只读段**（`codeBytes()` 要求整段都在一个可读段里，于是返回 null），
+       * 老代码就退回 SBA；而 SBA 读 XIP 会把事务**永久挂住**：`sbcs` 从此常驻
+       * `sbbusy|sbbusyerror`（实测 0x20758407），接着**每一次内存读都失败** ——
+       * 用户看到的就是「选了几个变量、点复位并停之后，全变读失败」。
+       * 这里改成：**一块一块地用 ELF 覆盖**，覆盖不到的地方补 0，并如实说清楚；
+       * 无论如何都不去碰 SBA（这条链路的代价是整颗 DM 变砖，不是一个变量读不到）。
+       */
+      const out = new Uint8Array(n);
+      let filled = 0;
+      for (let i = 0; i < n;){
+        const part = this.sym?.codeBytes?.((a + i) >>> 0, n - i);
+        if (part && part.length){
+          const take = Math.min(part.length, n - i);
+          out.set(part.subarray(0, take), i);
+          filled += take; i += take;
+        } else {
+          i += 1;                                  // 这一字节不在 ELF 只读段里 → 保持 0
+        }
+      }
+      if (!this._xipPartialLogged){
+        this._xipPartialLogged = true;
+        this._log(`读 0x${a.toString(16)}（${n} B）：这段**不在** ELF 的只读段里，`
+          + `已用 ELF 覆盖 ${filled}/${n} B、其余补 0；不去读 SBA —— 这颗芯片上 SBA 读 flash 窗口`
+          + '会把调试模块卡死（之后所有内存读都会失败）。要看真实值请把变量放到 RAM，'
+          + '或用右侧「内存」页手填 RAM 地址。', 'warn');
+      }
+      return out;
     }
     try {
-      return await withTimeout(this.dm.readMem(a, n, 1500), Math.max(4000, Math.ceil(n / 4) * 60), `SBA 读 ${n} 字节`);
+      const got = await withTimeout(this.dm.readMem(a, n, 1500), Math.max(4000, Math.ceil(n / 4) * 60), `SBA 读 ${n} 字节`);
+      /**
+       * 读成功 = 链路是好的：记下"这个地址能读"（自愈时拿它当探针，别拿一个目标上根本没有的
+       * 地址去探），并**重新武装自愈**（下一次真卡死还能救）。
+       */
+      this._lastGoodAddr = a;
+      this._sbaHealTried = false;
+      return got;
     } catch (e){
       if (this._sbaRetry) throw useElf(e?.message || e) || e;
       this._sbaRetry = true;
       const wasHalted = this.halted;
       try {
         this._log(`读 0x${a.toString(16)}（${n} B）失败：${e.message} —— 复位 DM 后重试一次`, 'warn');
+        /**
+         * 先清 SBA 的 sticky 错误位（写 1 清零：sberror / sbbusyerror）再复位 DM。
+         * 只 `init()` 有时解不开——上面那种"总线事务挂死"会让 sbbusy 常驻，之后每次读都失败；
+         * 清错误位 + 重初始化两道一起上，能救回来的比例高得多（真机现场：只 init 时下一次读照样报
+         * `sbcs=0x20758407`）。
+         */
+        try { await this.dm.sbaClearErrors(); } catch { /* 清不掉就继续走 init */ }
         await this.dm.init();
         /**
          * 🚨 `dm.init()` 头一件事是写 `dmcontrol = 0`（复位 DM）—— 这一笔会让**核重新跑起来**：
@@ -386,6 +431,31 @@ export class RiscvDebugSession extends DebugSession {
         }
         return await this.dm.readMem(a, n, 1500);
       } catch (e2){
+        /**
+         * 二次还是失败 ⇒ 多半是"SBA 上挂着一个永远不完成的事务"（`sbcs` 常驻 `sbbusy|sbbusyerror`，
+         * 实测 0x20758407）。仓库里早有成熟的分级自愈（`app/flash/hpm/riscv-dm.js` 的
+         * `sbaHealthCheck`：清错误位 → DM 复位 → **系统复位 ndmreset**），烧录页与 RTT Viewer
+         * 都在用它，**调试页以前一直没接** —— 于是 2026-10 用户现场看到的是"选了变量、点复位并停，
+         * 之后每次内存读都失败"（变量面板整片"读失败"，只 `dm.init()` 解不开）。
+         * 这里补上这一级（每会话最多自动救一次，救成功就重读；会如实告知目标可能被复位过）。
+         */
+        if (!this._sbaHealTried && this.dm?.sbaHealthCheck){
+          this._sbaHealTried = true;
+          const h = await this.dm.sbaHealthCheck({ allowSystemReset: true,
+                                                   peekAddr: this._lastGoodAddr || 0x01200000 })
+                             .catch(() => null);
+          if (h?.ok){
+            this.halted = false;                       // ndmreset 那一级会让目标重新跑起来
+            this._log(`SBA 卡死 → 自愈成功（${h.level}：${h.note}）。`
+              + '注意：自愈过程可能复位/重启过目标（现在在运行），要接着调试请再「暂停」一次；'
+              + '重新读一次那个地址。', 'warn');
+            const again = await this.dm.readMem(a, n, 1500);
+            this._sbaHealTried = false;                // 已经修好，下次再卡还能救
+            return again;
+          }
+          this._log('SBA 自愈失败：' + (h?.note || '未知')
+            + ' —— 建议断开重连探针（顺手检查目标供电与接线）', 'err');
+        }
         throw useElf(e2?.message || e2) || e2;
       } finally { this._sbaRetry = false; }
     }
