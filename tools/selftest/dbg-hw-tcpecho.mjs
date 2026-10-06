@@ -110,9 +110,60 @@ try {
 
   let st = await probe();
   rec('0', '连接后能读到 DM 状态', typeof st.dmstatus === 'string' && /^0x/.test(st.dmstatus), JSON.stringify(st));
+
+  /**
+   * 不变量 oracle：每做完一段就拿**硬件真值**核一遍会话状态，别让"状态漂移"溜过去。
+   *
+   * 这是这一轮压测最要紧的补充 —— 之前只验"操作没抛异常"，于是"界面说停着、硬件在跑"
+   * 这类漂移能一路混到用户手里（复位后按继续报 cmderr=4 就是这么来的）。四条不变量：
+   *   ① session.halted 必须等于 dmstatus 的 halted 位；
+   *   ② 停住时 session.pc 必须等于硬件当场读回的 PC（**不先 refresh** —— 先刷新
+   *      再比就成了自己跟自己比，什么都抓不到）；
+   *   ③ abstractcs.cmderr 必须为 0（没有残留的抽象命令错误）；
+   *   ④ sbcs 必须干净（没有挂住/出错的 SBA 事务）。
+   * 读不到寄存器本身也算失败 —— "读不出来"和"读出来不对"都是要抓的。
+   *
+   * 注意：这颗 DM 的 `dpc` **不能**用 `dmiRead(0x7b1)` 取（实测恒为 0 —— 本工程里
+   * `dpc` 一直是抽象命令读 PC 的别名，见 riscv.js 的 regno 映射）。所以这里用
+   * `S.readReg('PC')`，与产线路径同源。
+   */
+  const oracle = async label => {
+    const v = await run(`(async () => {
+      const S = window.__tools.dbg.session, dm = S.dm;
+      return await S.exclusive(async () => {
+        const rd = async a => { try { return (await dm.dmiRead(a)) >>> 0; } catch (e){ return 'ERR ' + (e?.message || e); } };
+        const cached = { halted: !!S.halted, pc: S.pc >>> 0 };
+        const dmstatus = await rd(0x11);
+        let hwPc = null;
+        if (typeof dmstatus === 'number' && (dmstatus & 0x300) === 0x300){
+          try { hwPc = (await S.readReg('PC')) >>> 0; } catch (e){ hwPc = 'ERR ' + (e?.message || e); }
+        }
+        return { cached, dmstatus, hwPc, abstractcs: await rd(0x16), sbcs: await rd(0x38) };
+      });
+    })()`);
+    const num = x => typeof x === 'number';
+    const bad = [];
+    if (!num(v.dmstatus)) bad.push('dmstatus 读不到（' + v.dmstatus + '）');
+    else {
+      const hwHalted = (v.dmstatus & 0x300) !== 0;
+      if (hwHalted !== v.cached.halted)
+        bad.push(`halted 漂移：会话=${v.cached.halted} dmstatus=0x${v.dmstatus.toString(16)}`);
+      if (v.cached.halted && num(v.hwPc) && v.hwPc !== v.cached.pc)
+        bad.push(`pc 漂移：会话=0x${v.cached.pc.toString(16)} 硬件=0x${v.hwPc.toString(16)}`);
+      if (v.cached.halted && !num(v.hwPc)) bad.push('停住时读不到 PC（' + v.hwPc + '）');
+    }
+    if (num(v.abstractcs) && ((v.abstractcs >> 8) & 7)) bad.push(`残留 cmderr=${(v.abstractcs >> 8) & 7}`);
+    if (num(v.sbcs)) {
+      if ((v.sbcs >> 21) & 3) bad.push(`SBA 不干净 sbcs=0x${v.sbcs.toString(16)}`);
+      if ((v.sbcs >> 12) & 7) bad.push(`sberror=${(v.sbcs >> 12) & 7}`);
+    }
+    rec('不变式', label, bad.length === 0, bad.length ? bad.join('；') : 'halted/pc/cmderr/SBA 与硬件一致');
+  };
+
   const baseOk = await run(`(async () => { const S = window.__tools.dbg.session;
     return await S.exclusive(async () => { await S.halt(); const b = await S.memRead(${A.ram}, 4); return { halted: !!S.halted, pc: '0x' + (S.pc>>>0).toString(16), ram: Array.from(b).map(x=>x.toString(16).padStart(2,'0')).join(' ') }; }); })()`);
   rec('0', '连接即可停 + 读 RAM（SBA 干净）', baseOk.halted && baseOk.ram.length === 11, JSON.stringify(baseOk));
+  await oracle('§0 连接/载入/停住之后');
 
   /* ---------------------------------------------------------------- 1. 连接循环 */
   sec('1. 连接 / 断连 循环');
@@ -153,6 +204,7 @@ try {
   const pcs = ctl.filter(r => r.pc).map(r => parseInt(r.pc, 16));
   const pcSane = pcs.every(p => p >= 0x80000000 || p === 0);
   rec('2', 'PC 都落在 ELF 代码区（0x80xxxxxx）', pcSane, pcs.slice(0, 3).map(p => '0x' + p.toString(16)).join(' '));
+  await oracle('§2 运行控制穷举之后');
 
   /* ---------------------------------------------------------------- 3. 内存读 */
   sec('3. 内存读穷举（RAM / flash / 未映射 / 边界 / 大块 / 连打）');
@@ -209,6 +261,7 @@ try {
       `各次耗时 ${bad5.ms.map(x => Math.abs(x) + 'ms').join(' ')} | 首次：${bad5.firstErr}`);
   rec('3', '连读坏地址之后 RAM 仍可读、SBA 干净', !/ERR/.test(bad5.ram) && !/ERR/.test(String(bad5.sba)),
       `RAM=${bad5.ram} SBA=${bad5.sba}`);
+  await oracle('§3 内存读穷举（含未映射地址自愈）之后');
 
   /* ---------------------------------------------------------------- 4. 断点 */
   sec('4. 硬件断点穷举（1..8 / 重复 / 删 / 清 / 复位后重下发 / 命中后单步继续）');
@@ -238,6 +291,7 @@ try {
   rec('4', '删断点', /deleted=true/.test(String(bp.del)), String(bp.del));
   rec('4', '复位并跑（有断点）：不报 cmderr', bp.resetRun === 'ok', bp.resetRun);
   rec('4', '清空断点', bp.cleared === 0, '剩 ' + bp.cleared);
+  await oracle('§4 断点穷举（含复位并跑）之后');
 
   /* ---------------------------------------------------------------- 5. 回栈 */
   sec('4b. 用户那条路：b main → reset（复位并停）→ c（继续）');
@@ -256,6 +310,7 @@ try {
   })()`);
   rec('4b', 'b main → 复位并停 → 继续：全程不报 cmderr', userPath.bp === 'ok' && userPath.reset === 'ok' && userPath.cont === 'ok' && !/ERR/.test(userPath.after),
       JSON.stringify(userPath));
+  await oracle('§4b 用户路径 b main → reset → c 之后');
 
   sec('5. 回栈 bt（停住后）');
   const bt = await run(`(async () => {
@@ -274,14 +329,23 @@ try {
   rec('5', 'bt 要么给帧、要么给清楚的原因', bt.ok && (bt.n > 0 || !!bt.reason), bt.reason || `${bt.n} 帧`);
   const alive = await probe();
   rec('5', 'bt 之后链路仍然活着', /^0x/.test(alive.dmstatus), JSON.stringify(alive));
+  await oracle('§5 回栈 bt 之后');
 
   /* ---------------------------------------------------------------- 6. RTT 同屏 */
   sec('6. RTT 同屏（定位 / 泵 / 与调试动作交替）');
   const rtt = await run(`(async () => {
     const d = window.__tools.dbg, S = d.session, out = {};
-    try { out.start = await d.rttStart() ? 'ok' : 'fail'; } catch (e){ out.start = 'ERR ' + String(e?.message || e).slice(0, 120); }
-    const rdOff = async () => await S.exclusive(async () => { const b = await S.memRead(${A.rtt} + 40, 4); return (b[0] | (b[1] << 8) | (b[2] << 16) | (b[3] << 24)) >>> 0; });
+    /* 定位 RTT 控制块要求**目标真的跑过 RTT 初始化**：上一节把核停在 main 上，
+     * 那时 _SEGGER_RTT 还没被初始化，扫描必然失败。所以先让它跑起来再找，
+     * 找不到就等一会儿重试一次 —— 这是测试时序，不是产品行为。 */
     try { await S.exclusive(async () => { if (S.halted) await S.cont(); }); } catch {}
+    await new Promise(r => setTimeout(r, 500));
+    try { out.start = await d.rttStart() ? 'ok' : 'fail'; } catch (e){ out.start = 'ERR ' + String(e?.message || e).slice(0, 120); }
+    if (out.start !== 'ok'){
+      await new Promise(r => setTimeout(r, 800));
+      try { out.start = await d.rttStart() ? 'ok' : 'fail(retry)'; } catch (e){ out.start = 'ERR(retry) ' + String(e?.message || e).slice(0, 120); }
+    }
+    const rdOff = async () => await S.exclusive(async () => { const b = await S.memRead(${A.rtt} + 40, 4); return (b[0] | (b[1] << 8) | (b[2] << 16) | (b[3] << 24)) >>> 0; });
     const a = await rdOff();
     for (let i = 0; i < 6; i++){ await new Promise(r => setTimeout(r, 400)); await S.tryExclusive(() => d._rttPump()).catch(() => {}); }
     const b = await rdOff();
@@ -298,6 +362,7 @@ try {
   rec('6', '定位 RTT 成功', rtt.start === 'ok', String(rtt.start));
   rec('6', 'RTT 环在被消费（字节推进）', rtt.consumed >= 0, `消耗 ${rtt.consumed} B，面板 ${rtt.panel} 字`);
   rec('6', 'RTT 与 暂停/单步/继续 交替不出错', !rtt.stepErr, rtt.stepErr || rtt.stepPc);
+  await oracle('§6 RTT 与调试动作交替之后');
 
   /* ---------------------------------------------------------------- 7. 复位组合 */
   sec('7. 复位组合（每次复位后立刻读 RAM + RTT）');
@@ -314,6 +379,7 @@ try {
     const ok = r.resetHalt === 'ok' && r.resetRun === 'ok' && !/ERR/.test(r.ramAfterHalt) && !/ERR/.test(r.ramAfterRun);
     rec('7', `第 ${i} 轮 复位并停/并跑 后 RAM 可读`, ok, JSON.stringify(r));
   }
+  await oracle('§7 复位组合之后');
 
   /* ---------------------------------------------------------------- 8. 随机混合压测 */
   sec(`8. 随机混合压测（${MIX} 步，固定种子）`);
@@ -346,6 +412,7 @@ try {
   rec('8', `${mix.n} 步混合操作无异常`, mix.errs.length === 0, mix.errs.length ? JSON.stringify(mix.errs.slice(0, 4)) : '全通');
   const post = await probe();
   rec('8', '压测后 DM/SBA 仍然健康', /^0x/.test(post.dmstatus), JSON.stringify(post));
+  await oracle('§8 随机混合压测之后');
 
   /* ---------------------------------------------------------------- 9. 收尾 */
   sec('9. 收尾');
