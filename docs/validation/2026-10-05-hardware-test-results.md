@@ -180,3 +180,10 @@ H743 的 3 变量 @2 µs J-Scope 实测约 73.5–84.8 kHz，并伴随大量探�
 - **页面：**ADC 与 DAC 已整理为并列子标签，共用同一个 AnalogSession。方向键切换、ARIA 选中状态、面板显隐及共享会话检查通过；`make test-ui` 为 20/20，`make test-offline` 退出码 0。
 - **RISC-V 栈帧：**已增加 x0–x31/PC 的 CFI 展开、x2/SP CFA、x1/RA 返回列、ABI 保留寄存器传播和扩展寄存器局部变量位置解析。合成 RISC-V 测试以及既有 ARM CFI/EHABI 测试通过。这些是离线逻辑验证，不是 HPM 板上验收。
 - **未完成项：**仅构建了 HPM `Og / DWARF4` 调试镜像；真实 `.debug_frame` 集成检查无法为 `dbg_frame_recursive_checkpoint` 找到 CFI 行。该镜像没有烧录，未生成匹配 GDB oracle，HPM CFI 解析修复和 Og/Os × DWARF4/5 四组合的板上压力均未完成。详细进度和限制见[栈帧压力测试记录](../debug-frame-stress.md)。
+
+## 2026-10-06 补充：HPM6800EVK 复电后 full_flow 与栈帧矩阵
+
+- **时间与目标：**北京时间约 10:31–11:08，probe 与 HPM6800EVK 复电后重新在线，读取 IDCODE `0x1000563d`。重新执行的 `make full_flow_6800evk` 退出码 0。
+- **full_flow：**固定功能 20/0、RISC-V 调试压力 57/0；固定种子 `20261005` 的随机顺序 feature → debug → feature，3/3 场景通过（调试 53/0）。两轮 RTT Viewer 为 78.8/78.7 KB/s，错位读/溢出均为 0；RTT 转发为 1.379/1.380 MB/s，10.2 秒存盘一致性为 99.61%/99.78%。J-Scope 低速档 50.00/33.33 kHz，探针跳拍、USB 丢样、缺口全为 0；高速 @2 µs 仍是链路上限压力项，探针跳拍分别约 65 万（1 变量）和 134 万（3 变量），不能视为无损。
+- **RISC-V 栈帧：**HPM6800EVK 的 Og/Os × DWARF4/5 四种精确固件分别烧录、Flash 读回校验，并采集各自 GDB oracle；四组网页压力各 200 轮，均为 20/0。完整 ELF 指纹、完成时间、报告和缓存失效修复细节见[栈帧压力测试记录](../debug-frame-stress.md)。
+- **修复与回归：**验收中发现 RISC-V 寄存器写和内存写未使旧栈帧缓存失效；修复后 Og/DWARF4 重跑通过。`make test-offline` 完整回归退出码 0。原始测试 JSON、GDB oracle 与日志留在本地 `tmp/`，不纳入 Git。

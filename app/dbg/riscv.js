@@ -165,6 +165,7 @@ export class RiscvDebugSession extends DebugSession {
   }
 
   async disconnect(){
+    this.clearFrames();
     const dm = this.dm, p = this.probe;
     try { if (dm) for (let i = 0; i < 8; i++){ await dm.writeReg(CSR.tselect, i); if ((await dm.readReg(CSR.tdata1)) !== 0x21800000) await dm.writeReg(CSR.tdata1, 0); } } catch {}
     try { await dm?.sbaClearErrors(); } catch {}
@@ -285,6 +286,7 @@ export class RiscvDebugSession extends DebugSession {
   }
 
   async writeReg(name, value){
+    this.clearFrames();
     const r = rvRegno(name);
     if (!r) throw new Error(`不认识的寄存器「${name}」`);
     if (r.regno === 0x1000) throw new Error('x0 是硬连 0，写不进去');
@@ -390,6 +392,7 @@ export class RiscvDebugSession extends DebugSession {
   }
 
   async memWrite(addr, bytes){
+    this.clearFrames();
     return await withTimeout(this.dm.writeMem(addr >>> 0, bytes), Math.max(4000, Math.ceil(bytes.length / 4) * 60), `SBA 写 ${bytes.length} 字节`);
   }
 

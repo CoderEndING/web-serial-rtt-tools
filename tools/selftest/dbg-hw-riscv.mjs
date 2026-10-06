@@ -197,7 +197,7 @@ ok(/\.c:\d+|\+\d/.test(env.pos || ''), 'PC 能映射到源码位置：' + env.po
 if(FRAME_ONLY){
   sec('== RISC-V CFI / DWARF 局部变量：GDB oracle 对照与严格压力 ==');
   const frameResults=await runFrameStress({cdp,oracle:frameOracle,code:frameCode,board:'6800evk',rounds:FRAME_ROUNDS,ok,log,disconnectOnFinish:false});
-  const finalLeak=await cdp.json(`(async()=>{const d=window.__tools.dbg;await d.session.bpClear();return await window.__S.leak();})()`);
+  const finalLeak=await cdp.json(`(async()=>{const d=window.__tools.dbg;if(!d.session.connected)await d.connect();await d.session.bpClear();return await window.__S.leak();})()`);
   ok(finalLeak.used===0&&finalLeak.bps===0&&finalLeak.extra===0,'栈帧检查点全部清理后触发器为空',JSON.stringify(finalLeak));
   const recov=await cdp.eval('return window.__S.recoveries || [];');
   ok(recov.length===0,'严格栈帧验收期间没有目标意外复位/自动恢复',JSON.stringify(recov));

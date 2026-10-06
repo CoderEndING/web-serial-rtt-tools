@@ -208,3 +208,19 @@ HPM6800EVK 的 `Og/Os × DWARF4/5` 四种调试 ELF 均构建成功，并分别�
 - **认板脚本：**首次失败暴露了正式脚本直接调用 `readIdcode()` 的用户手势问题。已改为在 `#flash` 页通过 CDP 鼠标输入实际点击“读 IDCODE”，并只从授权列表选择 akaLink/DAP。无 probe 时用 `IDCODE_WAIT_MS=3500 make board-check-6800evk` 复核，确认不再出现 Chromium 的“Must be handling a user gesture”错误；实际读数因 USB 设备缺失而超时，现如实判为“没读到 IDCODE”，不会误报成另一种板卡。该空载检查不是硬件通过。
 - **矩阵预检：**Og/DWARF4、Os/DWARF4、Og/DWARF5、Os/DWARF5 的 ELF 均与各自 `build-info.json` 的 HPM6800EVK 标识和 SHA-256 相符；四个真实 ELF 分别通过 `dbg-frame-riscv.test.mjs` 的静态 CFI/寄存器规则检查。此项只确认构建/CFI 数据完整，尚无四份板上 GDB oracle 或 200 轮 Web 压力结果。
 - **待办边界：**探针重新被 Windows 和 WebUSB 识别后，先重跑 `make full_flow_6800evk`；随后逐一烧录四种配置、采集精确 ELF 对应的 GDB oracle，并按 H743 的方法各跑 200 轮帧/局部变量验收。之前 Og/DWARF4 的 80/200 断连记录仍不算通过。
+
+### 2026-10-06 10:31–11:08 HPM6800EVK full_flow 与栈帧矩阵通过
+
+- **供电恢复后 full_flow：**10:31 板卡重新上线，`board-check-6800evk` 读到 RISC-V IDCODE `0x1000563d`。第一次恢复后的 full_flow 中断于 RTT 转发控制块检查；确认掉电后状态未完整恢复，重新认板并完整重跑后，`make full_flow_6800evk` 于约 10:44 退出码 0。固定功能判决 20/0、固定 RISC-V 调试 57/0、随机切换 3/3（feature → debug → feature；调试 53/0）。
+- **功能数据：**两轮 RTT Viewer 为 78.8/78.7 KB/s，错位读与溢出丢失均为 0；RTT 转发为 1.379/1.380 MB/s；约 10.2 秒存盘一致性 99.61%/99.78%，积压 108/72 KB。狂发/Scope 交替烧录 5 组完成，均值 2.37/2.44 秒。J-Scope 高速 1/3 变量 @2 µs 为 281.5/281.6 kHz 与 52.0/51.8 kHz，但探针跳拍很多（1 变量约 654k 次、3 变量约 1.34M 次/3 秒）；高速档是吞吐上限压力项，不代表无损。低速 1 变量 @20 µs 与 3 变量 @30 µs 分别为 50.00/33.33 kHz，探针/USB/序列缺口均为 0。
+- **新发现并修复：**Og/DWARF4 首次 200 轮主体全部通过，但末尾失效检查发现 RISC-V `writeReg()`、`memWrite()` 没有清除缓存栈帧；之后测试器在已经断开的会话上无条件读硬件触发器，报 `dmiWrite` 空引用。RISC-V 两个写入口现在与 ARM 后端一致，写前清除帧缓存；断开也清缓存。测试收尾在断开后重新连接，再读取硬件触发器确认干净状态。修复后的 Og/DWARF4 完整重跑通过。
+- **四配置实板矩阵：**每个配置均烧入对应 ELF 并逐字节校验 Flash；用 WCH RISC-V GDB 对同一 ELF 采集并验证 7 个 GDB 检查点 oracle；Web 侧按匹配 oracle 完成 200 轮递归/切帧/局部变量压力。各组都检查读回值、同名变量作用域与位置迁移、寄存器和栈只读性、写操作/单步/继续/重载 ELF/复位/断开后的缓存失效及触发器清理。全部 20 项通过、0 失败：
+
+| 配置 | 完成时间（北京时间） | ELF SHA-256 | Web 报告 |
+|---|---:|---|---|
+| Og / DWARF4 | 10:55:43 | `54c380cceb7954a201e237c5fc647fc49f5b4947999de1927ab2f01b598a8723` | `tmp/dbg-frame-6800evk-og-dw4-200-rerun.json` |
+| Og / DWARF5 | 11:00:03 | `160b9633434c58dfbd94d5e1fb4fdd3cb06b07297f187f0803742ceb7b4f555a` | `tmp/dbg-frame-6800evk-og-dw5-200.json` |
+| Os / DWARF4 | 11:04:13 | `85ba8c0e876f04ae9b5228ea23d5fd61e09cf886becaa8c2766ce7d0a14c2a25` | `tmp/dbg-frame-6800evk-os-dw4-200.json` |
+| Os / DWARF5 | 11:08:16 | `8fdc0a4074b768ea12e35b0711c66cbbb8faf4faaba292d094266c226b14ef80` | `tmp/dbg-frame-6800evk-os-dw5-200.json` |
+
+四份匹配 oracle 分别为 `tmp/frame-oracle-6800evk-{og-dw4,og-dw5,os-dw4,os-dw5}.json`。离线全回归 `make test-offline` 也以退出码 0 完成。原始 oracle、JSON、日志保留在本地 `tmp/`，不纳入 Git。
