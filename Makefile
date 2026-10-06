@@ -109,6 +109,7 @@ test: test-stability test-dbg-features test-board-matrix test-random-flow
 	$(NODE) tools/selftest/spi-flash.test.mjs
 	$(NODE) tools/selftest/stm32-devid.test.mjs
 	$(NODE) tools/selftest/dbg-core.test.mjs
+	$(NODE) tools/selftest/dbg-riscv-reset.test.mjs
 	$(NODE) tools/selftest/i2c-proto.test.mjs
 	$(NODE) tools/selftest/i2c-dsl.test.mjs
 	$(NODE) tools/selftest/i2c-registers.test.mjs

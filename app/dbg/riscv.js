@@ -647,18 +647,34 @@ export class RiscvDebugSession extends DebugSession {
   }
 
   /**
-   * 复位并运行：**先在"按住复位"的状态下把断点写回去，再放开**（见 `_rearmBpsAfterReset`）。
-   * 走一遍 `dm.resetRun()` 的话就晚了 —— 核已经跑起来，抽象命令写不进触发器（cmderr=4）。
+   * 复位并运行：复位 → 停在复位向量 → **这时才把触发器写回去** → 放开 haltreq 让它跑。
+   *
+   * 🚨 2026-10 真机定因（HPM6800EVK + tcpecho，用户现场"复位并跑报抽象命令出错"）：
+   *    老写法是"拉 ndmreset+haltreq → 等 50 ms → 直接写触发器 → 放开 ndmreset"，**写触发器时
+   *    ndmreset 还按着** —— 核在复位态、`dmstatus` 既不报 halted，抽象命令于是全部 `cmderr=4`：
+   *      `复位后重新下发断点失败：抽象命令出错（cmderr=4，abstractcs=0x80004004）`
+   *    而 `_rearmBpsAfterReset` 只在"本来就有断点"时才跑，所以这个坑是"先 b main、再复位并跑"必踩。
+   *    正确顺序（`riscv-dm.js` 的 `_haltByReset` 早就是这么做的，还带 ndmreset 放开复验）：
+   *      ① ndmreset+haltreq 按住 → ② **放开 ndmreset、保持 haltreq** → ③ 等真的 halted
+   *      → ④ 写触发器（此时抽象命令合法）→ ⑤ 放 haltreq 开跑。
    */
   async resetRun(){
     const DMC = 0x10;
-    await this.dm.dmiWrite(DMC, this.dm._ctl(0, DMCONTROL.ndmreset | DMCONTROL.haltreq));
-    await waitMs(50);
-    this.halted = true;                       // 复位按住 + haltreq：核确实停着
+    // ①②③：复位 + 停在复位向量（ndmreset 放开与否由 dm 侧复验，见那里的"血案"注释）
+    await this.dm._haltByReset(0);
+    this.halted = true;
+    // ④：现在核确实停着、且 ndmreset 已放开 —— 抽象命令写触发器才写得进去
     await this._rearmBpsAfterReset();
-    await this.dm.dmiWrite(DMC, this.dm._ctl(0));   // 放开 ndmreset（haltreq 保持 0 → 核开跑）
+    /**
+     * ⑤ 让它跑：**必须写 `resumereq`** —— RISC-V 里"清 haltreq"**不会**让核跑起来。
+     *    2026-10 真机实测（HPM6800EVK）：只清 haltreq 的话核一直停在复位向量，
+     *    `dpc=0x80003000`（`_start`）、`dcsr.cause=3`（haltreq）—— 现象就是"复位并跑了但没动"。
+     *    老实现之所以看着能跑，是因为它清的是 **ndmreset**（放开复位本身就会开始执行）；
+     *    现在流程改成"复位 → 停住 → 写触发器 → resume"，就必须显式 resume。
+     */
+    await this.run();
     await waitMs(10);
-    this.halted = false;
+    await this.refresh();
     return '系统复位（ndmreset）+ 运行';
   }
 
