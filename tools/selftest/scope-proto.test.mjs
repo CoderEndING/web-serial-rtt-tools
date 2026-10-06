@@ -271,6 +271,9 @@ console.log('== 5. HID 0x32 控制面 ==');
   ok(P.scopeRcText(-100).includes('启动中'), '-100 = "启动中"而不是错误');
   ok(P.scopeRcText(-3).includes('变量表'), '-3 的文案指向"变量表为空"');
   ok(P.scopeRcText(0) === '正常', 'rc=0 正常');
+  // 同一个 -2，SWD 与 RISC-V/JTAG 不是同一件事（2026-10 真机被"SWD 初始化失败"带偏过）
+  ok(P.scopeRcText(-2, false).includes('SWD 初始化失败') && P.scopeRcText(-2, true).includes('JTAG/DMI'),
+     '-2 的文案按后端分家');
   ok(P.START_PENDING === -100, '哨兵值 = -100（与固件一致）');
   ok(P.triggerData({ channel: 2, mode: S.TRIG.RISING, level: 1.5, pre: 100, post: 200 }).length === 15,
      '触发配置报文 15 B（action+ch+mode+level+pre+post）');

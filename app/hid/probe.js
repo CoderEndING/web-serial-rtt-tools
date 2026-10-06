@@ -121,15 +121,29 @@ export function parseStatus(bytes){
   };
 }
 
-/** 启动返回码 → 人话（固件：-1 SWJ_Clock 失败 / -2 SWD 初始化失败 / -3 没找到控制块） */
-export function startRcText(rc){
+/**
+ * 启动返回码 → 人话（固件：-1 SWJ_Clock 失败 / -2 初始化失败 / -3 没找到控制块 / -4 该档链路不可用）。
+ *
+ * 🚨 `riscv` 这个入参不是装饰：同一个 `-2`，SWD 与 RISC-V/JTAG 下**不是同一件事** ——
+ *    SWD 走 `swd_init_debug()`（JTAG2SWD + DP 上电），RISC-V 走 `riscv_jtag_open()`
+ *    （开 TAP + 载 IR=DMI + 唤醒 DM）。老文案一律写「SWD 初始化失败（查接线 / 目标供电 / 复位）」，
+ *    于是 2026-10 真机上一条 JTAG 故障被当成接线问题查了半天 —— 实际根因是探针的粘性目标类型
+ *    被别处打回 SWD（见 app/hid/view.js 的启动前补发）。
+ */
+export function startRcText(rc, riscv = false){
   switch (rc){
     case 0: return '正常';
     case -100: return '启动中（探针还在排队，结果没出来）';   // 固件里 s_start_rc 的初值 = -100
-    case -1: return 'SWD 时钟设置失败（换低一档试试）';
-    case -2: return 'SWD 初始化失败（查接线 / 目标供电 / 复位）';
-    case -3: return '没找到 RTT 控制块（地址区间不对？Cortex-M7 要给 AXI SRAM）';
-    case -4: return '该档位链路不可用';
+    case -1: return riscv
+      ? 'JTAG 时序参数设置失败（DMI delay / idle 字段非法）'
+      : 'SWD 时钟设置失败（换低一档试试）';
+    case -2: return riscv
+      ? 'JTAG/DMI 初始化失败（TAP 无应答）：查目标有没有被停住 / 另一路会话占着 TAP / 探针输出模式要 SWD+JTAG'
+      : 'SWD 初始化失败（查接线 / 目标供电 / 复位）';
+    case -3: return riscv
+      ? '没找到 RTT 控制块：RISC-V 请点「载入 ELF…」按 _SEGGER_RTT 定位（HPM 上盲目大范围搜搜不到）'
+      : '没找到 RTT 控制块（地址区间不对？Cortex-M7 要给 AXI SRAM）';
+    case -4: return riscv ? '该档位链路不可用（DMI 无应答）' : '该档位链路不可用';
     default: return `未知返回码 ${rc}`;
   }
 }

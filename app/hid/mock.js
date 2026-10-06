@@ -139,7 +139,7 @@ export class MockAkaLinkHid {
       chunkBytes: this.chunkBytes,
       discard: this.discard,
       swdMhz: this.clockMhz,
-      rcText: startRcText(this.startRc),
+      rcText: startRcText(this.startRc, this.riscv),
     };
   }
 }

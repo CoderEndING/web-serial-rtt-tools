@@ -246,6 +246,36 @@ export async function runUiSelfTest(tools){
     if (tools.hid.mock.riscv) throw new Error('切回 SWD 没生效');
     if ($('h-clock').disabled) throw new Error('切回 SWD 后时钟档该恢复可用');
 
+    /**
+     * ⑥ 目标类型必须是**三页共用**的全局键（本页 #h-target / RTT Viewer #r-target / J-Scope #sc-target）。
+     *    历史 bug：本页写 `hid.target`、另两页写 `rtt.target` → 两页各存各的、各自往探针写，
+     *    谁最后写谁生效，另一页仍显示旧值（2026-10 现场：页面写 RISC-V、探针里是 SWD → -2）。
+     */
+    const stKey = 'serial-rtt-tools:v1';
+    const stored = () => { try { return JSON.parse(localStorage.getItem(stKey) || '{}'); } catch { return {}; } };
+    // 走一次真实用户动作（change）—— 程序化改 value 不会触发 store.bind 落盘，这是设计如此
+    $('h-target').value = 'swd';
+    $('h-target').dispatchEvent(new Event('change'));
+    await until(() => stored()['rtt.target'] === 'swd', 60, '目标类型落到共用的 rtt.target');
+    if (stored()['rtt.target'] !== 'swd') throw new Error('目标类型没落到共用的 rtt.target：' + JSON.stringify(stored()));
+    if ('hid.target' in stored()) throw new Error('老键 hid.target 还赖在存储里（会与共用键分家）');
+
+    /**
+     * ⑦ 启动前**每次**都要补发目标类型（探针侧是粘性状态，别处一复位就回 SWD，
+     *    桥若按 SWD 去握手会回 -2「SWD 初始化失败」，看着像接线坏了）。
+     *    断言 HID 调用序列里 target:* 出现在 start:* 之前。
+     */
+    tools.hid.mock.calls.length = 0;
+    $('h-start').click();
+    await until(() => tools.hid.summary().running, 100, '再次启动（验补发顺序）');
+    const seq = tools.hid.mock.calls.slice();
+    const at = seq.findIndex(c => c.startsWith('target:'));
+    const st = seq.findIndex(c => c.startsWith('start:') || c === 'autostart');
+    if (at < 0) throw new Error('启动前没补发目标类型：' + seq.join(' | '));
+    if (st < 0 || at > st) throw new Error('补发目标类型必须排在 start 之前：' + seq.join(' | '));
+    $('h-stop').click();
+    await until(() => !tools.hid.summary().running, 100, '补发顺序验证后收尾停止');
+
     await session.close();
     return `收到 ${got} B · 本页共 ${tools.stream.summary().bytes} B`;
   });

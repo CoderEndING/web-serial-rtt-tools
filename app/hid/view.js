@@ -56,10 +56,22 @@ export class RttCdcView {
     store.bind($('h-size'), 'hid.size');
     store.bind($('h-chan'), 'hid.chan');
     store.bind($('h-clock'), 'hid.clock');
-    store.bind($('h-target'), 'hid.target');
+    /**
+     * 目标类型是**探针侧的全局粘性开关**，三个入口（本页 `#h-target` / RTT Viewer `#r-target` /
+     * J-Scope `#sc-target`）必须是**同一个键**。历史遗留：本页原来用 `hid.target`，另两页用
+     * `rtt.target` —— 于是两页各存各的、各自往探针写，谁最后写谁生效，另一页仍显示旧值。
+     * 2026-10 真机现场：本页显示 RISC-V/JTAG，探针里却是 SWD → 启动转发回 -2「SWD 初始化失败」。
+     * 老键的值一次性搬过来，别丢用户已经选过的档。
+     */
+    if (store.get('rtt.target') === undefined && store.get('hid.target') !== undefined){
+      store.set('rtt.target', store.get('hid.target'));
+    }
+    store.set('hid.target', undefined);          // 老键退休：本页不再写它，免得两页又分家
+    store.bind($('h-target'), 'rtt.target');
     this._targetRiscv = this.isRiscv;
     // 目标类型是**全局**的（粘性）：RISC-V/JTAG 下 SWD 时钟档无意义（探针忽略 action 7 的 Hz，
     // 只有 <256 的值会被当成 DMI 的 idle 周期数），所以直接置灰并说明
+    this._applyTargetUi();
     $('h-target').addEventListener('change', () => this.applyTargetType());
 
     $('h-connect').addEventListener('click', () => this.connect());
@@ -191,15 +203,12 @@ export class RttCdcView {
     const scope = globalThis.__tools?.scope;
     if (this.last?.running || this._starting || scope?.running || scope?._starting){
       $('h-target').value = this._targetRiscv ? 'riscv' : 'swd';
-      store.set('hid.target', $('h-target').value);
+      store.set('rtt.target', $('h-target').value);
       toast('先停止 RTT 转发和采样，再切目标类型', 'warn');
       return;
     }
     const riscv = this.isRiscv;
-    $('h-clock').disabled = riscv;
-    $('h-clock').title = riscv
-      ? 'RISC-V/JTAG 下必须留 0：这个字段在 JTAG 下是 DMI idle/delay 覆盖值，给成大数字会让探针读不到目标内存'
-      : '运行时调参（HID 0x31 action 7），改完立刻生效';
+    this._applyTargetUi();
     /**
      * 切到 RISC-V 时别自作聪明改地址：**HPM 上"盲目大范围搜控制块"不可靠**
      * （2026-10 真机实测：窗口给 0x01200000 + 256 KB 时读错数一直涨、就是搜不到；
@@ -226,6 +235,37 @@ export class RttCdcView {
       await this.refresh();
       }, { mock: !!this.mock, reason: 'RTT 转发要切换目标类型', policy: 'reject' });
     } catch (e){ toast('切目标类型失败：' + (e?.message || e), 'err'); }
+  }
+
+  /**
+   * 目标类型那格的界面部分：RISC-V/JTAG 下 SWD 时钟档无意义，直接置灰并说明为什么。
+   * 抽出来是为了让"对账"（syncTargetTypeFromStore）也能刷这一格，而不用伪造一次切换动作。
+   */
+  _applyTargetUi(){
+    const riscv = this.isRiscv;
+    $('h-clock').disabled = riscv;
+    $('h-clock').title = riscv
+      ? 'RISC-V/JTAG 下必须留 0：这个字段在 JTAG 下是 DMI idle/delay 覆盖值，给成大数字会让探针读不到目标内存'
+      : '运行时调参（HID 0x31 action 7），改完立刻生效';
+  }
+
+  /**
+   * 切到本页时对账一次"别页改过全局目标类型"。
+   *
+   * RTT Viewer（`#r-target`）与 J-Scope（`#sc-target`）都绑**同一个键** `rtt.target`，
+   * 它们改过之后本页下拉可能还停在上一次的值 —— 而"显示与探针实际状态不一致"正是
+   * 2026-10 那条 -2 故障的起点（页面上写着 RISC-V，探针里是 SWD）。
+   * 这里**只刷界面，不往探针写**：写由启动前补发负责（见 _startBridgeNow），
+   * 因为切换要避开引擎运行中（固件会回 -7）。
+   */
+  syncTargetTypeFromStore(){
+    const saved = store.get('rtt.target', '');
+    if (saved !== 'riscv' && saved !== 'swd') return false;
+    this._targetRiscv = saved === 'riscv';
+    if ($('h-target').value === saved) return false;
+    $('h-target').value = saved;
+    this._applyTargetUi();
+    return true;
   }
 
   // ---------------------------------------------------------------- 启停
@@ -283,6 +323,23 @@ export class RttCdcView {
       }
       if (!await this._ensure() || g !== this._engineGen) return;
       const p = this.params();
+      /**
+       * 🚨 **启动前每次都补发目标类型**（2026-10 真机定因，别删）。
+       *
+       * 目标类型是探针侧的**粘性**状态，但烧录/复位、J-Scope 页、参考脚本都会把它打回 SWD；
+       * 而本页按用户的意图显示 RISC-V —— 于是桥按 SWD 去握手，回 **-2「SWD 初始化失败」**，
+       * 看着像接线/供电坏了。实测（HPM6800EVK + akaLinkPro，同一块板同一支探针）：
+       *   · 目标类型=SWD → startRc=-2、控制块找不到、moved=0
+       *   · 补发成 RISC-V 后再启动 → startRc=0、控制块 0x4C0003C0、moved=32768、读错 0
+       * 固件在引擎运行时会拒绝切换（rc=-7）—— 那不算错，状态本来就该是它，所以这里不抛。
+       * 重连分支里还有一处补发（见 _ensure，2026-09 为"烧完固件切过来"加的），两处都留着。
+       */
+      if (!this.last?.running){
+        try {
+          await this.dev.setTargetType(this.isRiscv);
+        } catch { /* 补发失败不阻断启动：真失败会由 start 的 rc 报出来 */ }
+        if (g !== this._engineGen) return;
+      }
       if (!auto && (p.clockHz || this.isRiscv) && !this.mock) await this.dev.configure({ clockHz: p.clockHz });
       if (g !== this._engineGen) return;
       const before = this.last?.startRc ?? 0;
@@ -294,7 +351,7 @@ export class RttCdcView {
       if (g !== this._engineGen) return;
       if (response?.rc < 0 && response.rc !== START_PENDING){
         this._bridgeRequested = false;
-        throw new Error(startRcText(response.rc));
+        throw new Error(startRcText(response.rc, this.isRiscv));
       }
       this.persist();
       await this._settle(before, 3000, g);
@@ -337,7 +394,7 @@ export class RttCdcView {
   async _sendStopNow(){
     try {
       const r = await this.dev.stop();
-      if (r?.rc < 0 && r.rc !== START_PENDING) throw new Error(startRcText(r.rc));
+      if (r?.rc < 0 && r.rc !== START_PENDING) throw new Error(startRcText(r.rc, this.isRiscv));
       this.last = r.status;
       const deadline = Date.now() + 3000;
       while (this.last?.running || this.last?.startRc === START_PENDING){
@@ -431,9 +488,11 @@ export class RttCdcView {
       toast(`转发已启动 · 控制块 ${hex(st.cbAddr)} · 档位 ${st.swdMhz} MHz`, 'ok', 5000);
       this._armAutoRefresh();
     }
-    else if (st?.running) toast(`桥跑起来了，但还没找到控制块（读错 ${st.rdErr}）—— 地址窗口 / SWD 接线 / 目标供电检查一下`, 'warn', 8000);
+    else if (st?.running) toast(this.isRiscv
+      ? `桥跑起来了，但还没找到控制块（读错 ${st.rdErr}）—— 地址窗口（按 _SEGGER_RTT 填）/ JTAG 接线 / 目标是否被停住，逐项看`
+      : `桥跑起来了，但还没找到控制块（读错 ${st.rdErr}）—— 地址窗口 / SWD 接线 / 目标供电检查一下`, 'warn', 8000);
     else if (st?.startRc === START_PENDING) toast('启动还在排队（探针还没给出结果，稍后点「刷新状态」看看）', 'warn', 6000);
-    else if (st?.startRc) toast('启动失败：' + startRcText(st.startRc), 'err', 6000);
+    else if (st?.startRc) toast('启动失败：' + startRcText(st.startRc, this.isRiscv), 'err', 6000);
   }
 
   // ---------------------------------------------------------------- ELF
@@ -514,7 +573,7 @@ export class RttCdcView {
     } else if (st.startRc === START_PENDING){
       setStatus(el, '正在启动…（探针还在排队搜控制块）', '');
     } else if (st.startRc){
-      setStatus(el, `未运行 · 上次启动失败：${startRcText(st.startRc)}`, 'err');
+      setStatus(el, `未运行 · 上次启动失败：${startRcText(st.startRc, this.isRiscv)}`, 'err');
     } else {
       setStatus(el, '未运行（点「启动转发」或「自动搜控制块」）', '');
     }

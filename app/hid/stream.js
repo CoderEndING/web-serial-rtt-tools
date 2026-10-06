@@ -131,6 +131,13 @@ export class RttCdcStreamView {
   onShow(){
     if (this.ansiOn){ try { this.fit?.fit(); } catch {} }
     this._stats();
+    /**
+     * 目标类型是三个页面共用的全局粘性开关（本页 `#h-target` / RTT Viewer `#r-target` /
+     * J-Scope `#sc-target`，同一个 store 键 `rtt.target`）。别页刚改过就切过来时，
+     * 本页下拉得跟上 —— 显示与探针实际状态不一致正是 2026-10 那条 -2 的起点。
+     * （视图是对的：hid 面板由 RttCdcView 持有，这里只借它刷一格界面，不碰探针。）
+     */
+    globalThis.__tools?.hid?.syncTargetTypeFromStore?.();
   }
 
   // ---------------- 端口 ----------------

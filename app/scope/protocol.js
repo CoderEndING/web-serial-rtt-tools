@@ -488,14 +488,20 @@ export function parseScopeStatus(bytes){
   };
 }
 
-/** 启动返回码 → 人话（-100 = 固件里"排队中"的哨兵，不是错误）*/
+/**
+ * 启动返回码 → 人话（-100 = 固件里"排队中"的哨兵，不是错误）。
+ * `riscv` 同 app/hid/probe.js 的 startRcText：同一个 -2 在两条后端上不是同一件事，
+ * 别把 JTAG/DMI 的故障写成"SWD 初始化失败"（2026-10 真机就是这么被带偏的）。
+ */
 export const START_PENDING = -100;
-export function scopeRcText(rc){
+export function scopeRcText(rc, riscv = false){
   switch (rc){
     case 0: return '正常';
     case -100: return '启动中（探针还在排队，结果没出来）';
-    case -1: return 'SWD 时钟设置失败（换低一档试试）';
-    case -2: return 'SWD 初始化失败（查接线 / 目标供电 / 复位）';
+    case -1: return riscv ? 'JTAG 时序参数设置失败（DMI delay / idle 字段非法）' : 'SWD 时钟设置失败（换低一档试试）';
+    case -2: return riscv
+      ? 'JTAG/DMI 初始化失败（TAP 无应答）：查目标有没有被停住 / 另一路会话占着 TAP / 探针输出模式要 SWD+JTAG'
+      : 'SWD 初始化失败（查接线 / 目标供电 / 复位）';
     /**
      * 🚨 -3 有两个来源，别只写"你没选变量"（2026-10 代码审查）：
      *    ① 真的一个变量都没选；② **上一次 CONFIG 被拒**（-6）—— 固件会顺手清空变量表，
@@ -503,7 +509,7 @@ export function scopeRcText(rc){
      *    现在页面在 CONFIG 之后就当场读 rc、把 -6 的原因先报出来（见 scope/view.js）。
      */
     case -3: return '变量表为空：要么左边没选变量，要么**上一次配置被拒**（见 -6：变量宽度非法 / 地址取不到）';
-    case -4: return '该档位链路不可用';
+    case -4: return riscv ? '该档位链路不可用（DMI 无应答）' : '该档位链路不可用';
     /* 固件里 -5 是**标定**路上的"没有空闲包缓冲"（等主机把 0x83 读走），不是"周期非法"
      * ——周期非法是在 CONFIG 阶段被拒（-6）。这里以前写反了（2026-10 代码审查）。 */
     case -5: return '探针没有空闲的包缓冲（主机没把 0x83 的数据读走）—— 标定/采集卡住时先确认读循环在跑';

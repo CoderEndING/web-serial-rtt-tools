@@ -76,6 +76,14 @@ console.log('== 2. 状态字解析 ==');
   ok(startRcText(0) === '正常', 'rc=0 文案');
   ok(/没找到 RTT 控制块/.test(startRcText(-3)), 'rc=-3 文案');
   ok(/SWD 时钟/.test(startRcText(-1)) && /SWD 初始化/.test(startRcText(-2)), 'rc=-1/-2 文案');
+  /**
+   * 同一串返回码，两条后端要分开说人话（2026-10 真机：-2 被一律写成"SWD 初始化失败"，
+   * 结果一条 JTAG/DMI 故障被当成接线问题查了半天）。
+   */
+  ok(/SWD 时钟/.test(startRcText(-1, false)) && /JTAG 时序/.test(startRcText(-1, true)), 'rc=-1 文案按后端分家');
+  ok(/SWD 初始化/.test(startRcText(-2, false)) && /JTAG\/DMI/.test(startRcText(-2, true)), 'rc=-2 文案按后端分家');
+  ok(/AXI SRAM/.test(startRcText(-3, false)) && /_SEGGER_RTT/.test(startRcText(-3, true)), 'rc=-3 文案按后端分家');
+  ok(/该档位链路不可用$/.test(startRcText(-4, false)) && /DMI 无应答/.test(startRcText(-4, true)), 'rc=-4 文案按后端分家');
 }
 
 console.log('== 3. 字符串回包 ==');

@@ -841,7 +841,7 @@ export class ScopeView {
       const cfgRc = this.signed(cfgRes?.[2]);
       if (cfgRc < 0 && cfgRc !== P.START_PENDING){
         this._capturing = false;
-        this.setStatusText('采样配置被拒：' + P.scopeRcText(cfgRc), 'err');
+        this.setStatusText('采样配置被拒：' + P.scopeRcText(cfgRc, this.targetRiscv), 'err');
         return;
       }
 
@@ -880,7 +880,7 @@ export class ScopeView {
       }
       if (rc < 0 && rc !== P.START_PENDING){
         this._capturing = false;
-        this.setStatusText('探针启动失败：' + P.scopeRcText(rc), 'err');
+        this.setStatusText('探针启动失败：' + P.scopeRcText(rc, this.targetRiscv), 'err');
         return;
       }
       if (rc === P.START_PENDING) throw new Error('探针启动超时（仍在排队）');
