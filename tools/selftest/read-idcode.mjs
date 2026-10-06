@@ -76,7 +76,7 @@ if (BOARD) console.log(`   该板档案：芯片下拉 ${BOARD.chip} · 目标�
 
 const cdp = new Cdp(CDP);
 await cdp.connect();
-await cdp.send('Page.navigate', { url: APP + '?idcode=' + Date.now() });
+await cdp.send('Page.navigate', { url: APP + '?idcode=' + Date.now() + '#flash' });
 for (let i = 0; i < 100; i++){ await sleep(300); if (await cdp.eval('return !!window.__tools?.flash;').catch(() => false)) break; }
 if (!await cdp.eval('return !!window.__tools?.flash;')) throw new Error('页面没起来（8899 服务 + 9333 浏览器在跑吗？见 make page-prep）');
 try { await cdp.send('Page.bringToFront'); } catch {}
@@ -97,17 +97,42 @@ const pre = await cdp.json(`(() => {
   })()`);
 console.log(`   芯片 ${pre.before.chip || '(空)'} → ${pre.chip} · 后端 ${pre.backend} · 目标类型 ${pre.target}`);
 
-/** 点按钮（与用户手点同一条路）。⚠️ 这里必须用 `json()`（它把表达式 await 掉并回传值）；
- *  用 `eval()` 的话 cdp-lib 会再包一层 async 函数 —— 内层 promise 没人 await，拿到的是 undefined。 */
+/** 必须派发真实 CDP 鼠标输入，而不是直接调用 readIdcode() 或 HTMLElement.click()：
+ * WebUSB.requestDevice 只允许从真实用户手势打开授权框。此处和页面中的按钮点击走同一条路径。 */
+const point = await cdp.json(`(() => {
+  const b = document.getElementById('f-idcode');
+  if (!b) throw new Error('找不到读 IDCODE 按钮');
+  b.scrollIntoView({block:'center'});
+  const r = b.getBoundingClientRect();
+  if (!r.width || !r.height) throw new Error('读 IDCODE 按钮当前不可见');
+  return {x:r.x+r.width/2,y:r.y+r.height/2};
+})()`);
+await cdp.send('Input.dispatchMouseEvent', { type:'mouseMoved', x:point.x, y:point.y });
+await cdp.send('Input.dispatchMouseEvent', { type:'mousePressed', x:point.x, y:point.y, button:'left', clickCount:1 });
+await cdp.send('Input.dispatchMouseEvent', { type:'mouseReleased', x:point.x, y:point.y, button:'left', clickCount:1 });
+
 const t0 = Date.now();
-const r = await cdp.json(`(async () => { try { await window.__tools.flash.readIdcode(); return 'ok'; }
-                                          catch (e){ return 'ERR: ' + (e?.message || e); } })()`).catch(e => 'ERR: ' + e.message);
-// 等页面那个「读完」标记（readIdcode 内部最后一行日志），别抢在它前面读日志
-for (let i = 0; i < 100; i++){
-  const t = await cdp.eval(`return document.getElementById('f-log').textContent || '';`).catch(() => '');
-  if (/──── 读完|❌|NO ACK|FAULT/.test(t)) break;
-  await sleep(200);
+let picked = null, actionError = '';
+let finished = false;
+const waitMs = Math.max(1000, Number(process.env.IDCODE_WAIT_MS) || 60000);
+const deadline = t0 + waitMs;
+while (Date.now() < deadline){
+  if (cdp.prompts.length){
+    const prompt = cdp.prompts.shift();
+    const device = prompt.devices.find(d => DEV_RE.test(d.name));
+    if (!device){
+      actionError = `USB 授权列表没有匹配的 akaLink/DAP 探针（可见 ${prompt.devices.length} 个设备）`;
+      await cdp.sendBrowser('DeviceAccess.cancelPrompt', { id:prompt.id }).catch(() => {});
+      break;
+    }
+    await cdp.sendBrowser('DeviceAccess.selectPrompt', { id:prompt.id, deviceId:device.id });
+    picked = device.name;
+  }
+  const log = await cdp.eval(`return document.getElementById('f-log')?.textContent || '';`).catch(() => '');
+  if (/──── 读完|── 出错 ──|❌|NO ACK|FAULT/.test(log)){ finished = true; break; }
+  await sleep(150);
 }
+if (!finished && !actionError) actionError = `等待 IDCODE 读取结束超时（${waitMs} ms）`;
 const ms = Date.now() - t0;
 const text = await cdp.eval(`return document.getElementById('f-log').textContent;`).catch(() => '') || '';
 
@@ -115,14 +140,15 @@ const lines = String(text).split('\n').map(s => s.trim()).filter(Boolean);
 const body = lines.filter(l => /^[①②③④⑤]|⇒ 判读|────/.test(l));
 console.log(`\n---- 页面日志（读身份那段，用时 ${ms} ms）----`);
 for (const l of body) console.log('   ' + l);
-if (r !== 'ok') console.log(`   （按钮返回 ${r}）`);
+if (picked) console.log(`   USB 授权：${picked}`);
+if (actionError) console.log(`   （认板操作中止：${actionError}）`);
 
 const all = lines.join('\n');
 const gotIdcode = /DP IDCODE|TAP IDCODE|IDCODE/i.test(all);
 const idcodeOk = BOARD ? BOARD.idcode.test(all) : gotIdcode;
 const devOk = BOARD?.dev ? BOARD.dev.test(all) : true;
 const flashOk = BOARD?.flash ? BOARD.flash.test(all) : true;
-const errish = /NO ACK|FAULT|读失败|连不上|超时/.test(all) && !gotIdcode;
+const errish = !gotIdcode && (!!actionError || /NO ACK|FAULT|读失败|连不上|超时|── 出错 ──/.test(all));
 
 clearTimeout(WD);
 cdp.close();

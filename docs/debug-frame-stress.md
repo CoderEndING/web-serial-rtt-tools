@@ -201,3 +201,10 @@ HPM6800EVK 的 `Og/Os × DWARF4/5` 四种调试 ELF 均构建成功，并分别�
 - **探针状态：**中断后浏览器 USB/HID 设备枚举中已无 akaLink；Windows 将相应端口列为“未知 USB 设备（端口重置失败）”。执行 `pnputil /scan-devices` 后故障仍在，无法继续板测。当前 Og/DWARF4 状态为**GDB 对照通过、网页 80/200 后因探针 USB 断连而未通过验收**；需重新插拔 probe 并重新认板后再重跑完整 200 轮。原始失败终端输出在本次任务记录中，半途报告文件不可作为成功结果。
 
 本次修复已通过 `node tools/selftest/dbg-frame-contract.test.mjs`。四配置矩阵尚未完成：仅 Og/DWARF4 完成 GDB oracle 和部分网页轮次，Os/DWARF4、Og/DWARF5、Os/DWARF5 仍待实板验收。
+
+### 2026-10-06 09:21–09:25 HPM full flow 重试与矩阵预检
+
+- **Full flow：**执行 `make full_flow_6800evk`，流程到 `board-check-6800evk` 即停止；未进入 `hw-campaign-hpm`、调试固件烧录或随机顺序压力。浏览器 `navigator.usb.getDevices()` 返回空，Windows 仍枚举到 `USB\VID_0000&PID_0001`“未知 USB 设备（端口重置失败）”。因此本次没有烧录，也不计 full flow 通过。
+- **认板脚本：**首次失败暴露了正式脚本直接调用 `readIdcode()` 的用户手势问题。已改为在 `#flash` 页通过 CDP 鼠标输入实际点击“读 IDCODE”，并只从授权列表选择 akaLink/DAP。无 probe 时用 `IDCODE_WAIT_MS=3500 make board-check-6800evk` 复核，确认不再出现 Chromium 的“Must be handling a user gesture”错误；实际读数因 USB 设备缺失而超时，现如实判为“没读到 IDCODE”，不会误报成另一种板卡。该空载检查不是硬件通过。
+- **矩阵预检：**Og/DWARF4、Os/DWARF4、Og/DWARF5、Os/DWARF5 的 ELF 均与各自 `build-info.json` 的 HPM6800EVK 标识和 SHA-256 相符；四个真实 ELF 分别通过 `dbg-frame-riscv.test.mjs` 的静态 CFI/寄存器规则检查。此项只确认构建/CFI 数据完整，尚无四份板上 GDB oracle 或 200 轮 Web 压力结果。
+- **待办边界：**探针重新被 Windows 和 WebUSB 识别后，先重跑 `make full_flow_6800evk`；随后逐一烧录四种配置、采集精确 ELF 对应的 GDB oracle，并按 H743 的方法各跑 200 轮帧/局部变量验收。之前 Og/DWARF4 的 80/200 断连记录仍不算通过。
