@@ -365,9 +365,20 @@ console.log('== 9. RTT 同屏（模拟目标里有一个合法的 RTT 控制块�
     document.getElementById('d-halt').click();
     await new Promise(r => setTimeout(r, 400));
     return { rtt: d.rtt ? { addr: '0x' + d.rtt.addr.toString(16), maxUp: d.rtt.maxUp } : null,
+             wired: d.rtt ? { sameProbe: d.rtt.mem === d.session.probe,
+                              hasRead: typeof d.rtt.mem?.readMem === 'function',
+                              hasWrite: typeof d.rtt.mem?.writeMem === 'function' } : null,
              text: document.getElementById('d-rtt').textContent.slice(0, 200),
              info: document.getElementById('d-rtt-info').textContent };`);
   ok(r.rtt && r.rtt.addr === '0x20000100' && r.rtt.maxUp === 1, 'RTT 控制块定位成功', JSON.stringify(r.rtt));
+  /**
+   * 🚨 给 `Rtt` 的必须是**后端感知的内存访问器**（session.memRead/memWrite），不能是 `session.probe`：
+   *    ARM 后端 probe 是 SWD/AHB-AP 还能用，RISC-V 后端 probe 只是 WebUSB 壳子，传它就会按 SWD
+   *    去读 0x4C0003C0 → `SWD FAULT`，而且会把 DM 的 SBA 打脏（之后静默读到全 0，要 dm.init() 才恢复）。
+   *    真机现场 2026-10（HPM6800EVK + tcpecho）：定位 RTT 失败 → 之后调试读什么都变味了。
+   */
+  ok(r.wired && r.wired.sameProbe === false && r.wired.hasRead && r.wired.hasWrite,
+     'RTT 走的是后端自己的内存访问器（不是直接抓 session.probe）', JSON.stringify(r.wired));
   ok(/tick|dbg/.test(r.text), 'RTT 输出窗里真的出现了目标打印的内容', r.text.slice(0, 80));
 }
 
