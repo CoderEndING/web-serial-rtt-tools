@@ -326,6 +326,19 @@ export class RiscvDebugSession extends DebugSession {
   async memRead(addr, len){
     if (!len) return new Uint8Array(0);
     const a = addr >>> 0, n = len >>> 0;
+    /**
+     * 🚨 **同一个坏地址短期"记仇"**（2026-10 用户现场）：监视面板（以及"运行中也刷新"）会**每 2 s
+     *    重读同一批地址**，而这块板子上"读一个没映射的地址"会把 SBA 的 sticky 错误位挂上 ——
+     *    于是每一轮刷新都要"两次 SBA + dm.init() + 自愈"，日志一直在滚、链路一直在被搞脏。
+     *    这里把刚失败过的地址记 15 秒：这段时间内直接抛同样的错（不碰链路），
+     *    读成功一次、或过了 15 秒，就自动解除 —— 既不反复自伤，也不会永久屏蔽。
+     */
+    if (!this._badAddrs) this._badAddrs = new Map();
+    const bad = this._badAddrs.get(a);
+    if (bad && Date.now() - bad.at < 15000){
+      throw new Error(bad.msg + '（这个地址刚失败过：15 秒内不再重试，免得反复把 SBA 搞脏；'
+        + '读成功一次或等一会儿会自动解除）');
+    }
     const inXip = a >= 0x80000000 && a < 0x90000000;         // HPM 的 XIP/Flash 窗口（代码与 const 都在这儿）
     const fromElf = () => {
       const b = this.sym?.codeBytes?.(a, n);
@@ -404,6 +417,7 @@ export class RiscvDebugSession extends DebugSession {
        */
       this._lastGoodAddr = a;
       this._sbaHealTried = false;
+      this._badAddrs.delete(a);                                // 这个地址现在读得动了，解除记仇
       return got;
     } catch (e){
       if (this._sbaRetry) throw useElf(e?.message || e) || e;
@@ -456,6 +470,7 @@ export class RiscvDebugSession extends DebugSession {
           this._log('SBA 自愈失败：' + (h?.note || '未知')
             + ' —— 建议断开重连探针（顺手检查目标供电与接线）', 'err');
         }
+        this._badAddrs.set(a, { msg: String(e2?.message || e2), at: Date.now() });
         throw useElf(e2?.message || e2) || e2;
       } finally { this._sbaRetry = false; }
     }

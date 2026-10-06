@@ -231,6 +231,12 @@ flash-dbgstress-6800evk:
 test-dbg-riscv: page-prep
 	$(NODE) tools/selftest/dbg-hw-riscv.mjs $(ARGS)
 
+# HPM6800EVK + lwip_tcpecho 例程专用的调试器真机压测（穷举运行控制/内存/断点/回栈/RTT/复位组合）
+#   make test-dbg-tcpecho            # 全量
+#   make test-dbg-tcpecho ARGS=--quick
+test-dbg-tcpecho: page-prep
+	$(NODE) tools/selftest/dbg-hw-tcpecho.mjs $(ARGS)
+
 # 目标身份解码（「读 IDCODE」按钮）：DP IDCODE / CPUID / STM32 DBGMCU DEV_ID → 型号
 test-idcode:
 	$(NODE) tools/selftest/stm32-devid.test.mjs
