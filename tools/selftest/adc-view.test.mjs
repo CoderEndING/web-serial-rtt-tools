@@ -16,6 +16,21 @@ for(const [,id,body] of html.matchAll(/<select\b[^>]*\bid="(an-[^"]+)"[^>]*>([\s
   elements.get(id).options=options;elements.get(id).value=(options.find(o=>o.selected)??options[0])?.value??'';
 }
 elements.get('an-wave').value='sine';
+/**
+ * 时基档位：1-2-5 系列（2026-10-07 反馈"按 10 倍变化跨度太大，加 2/5 档"）。
+ * 两端各有硬边界，所以档位不是随便加的：
+ *   · 短档下限 500 ns —— 硬件封顶 2 MSa/s，500 ns/div 的一屏(5 µs)本来就只有 10 个点；
+ *   · 长档上限 100 ms —— 有界记录 65536 点，10 ms/div 的一屏(100 ms)已要求 ≤ 6.5 kSa/s。
+ * 断言"相邻档位只能是 ×2 或 ×2.5"，避免以后有人手滑插进一个 3 µs 把整条序列搅乱。
+ */
+{
+  const timeDivs=elements.get('an-time').options.map(o=>Number(o.value));
+  assert.deepEqual(timeDivs,[...timeDivs].sort((a,b)=>a-b),'时基档位必须递增');
+  for(const want of [2e-6,5e-6,2e-5,5e-5,2e-3,5e-3,1e-6,1e-4,1e-3,1e-2,1e-1])
+    assert.ok(timeDivs.includes(want),`时基档位缺 ${want} s/div`);
+  assert.ok(timeDivs[0]>=5e-7,'最短档不得低于 500 ns（2 MSa/s 上限下一屏已只剩 10 点）');
+  timeDivs.forEach((v,i)=>{ if(i) assert.ok([2,2.5].includes(+(v/timeDivs[i-1]).toFixed(4)),`时基档位 ${timeDivs[i-1]}→${v} 不是 1-2-5 步进`); });
+}
 let trace=false,coordinates=[];
 /**
  * 假 canvas 的 2D 上下文要跟得上 view.js 真正用到的 API：`canvasMetrics()` 会
@@ -59,4 +74,4 @@ elements.get('an-time').value='.01';view.renderAdc();
 assert.ok(coordinates.length);assert.equal(Math.max(...coordinates.map(p=>p[0])),90,'10 samples at 1kSa/s span 9ms, not an entire 100ms screen');
 assert.match(elements.get('an-stats').textContent,/当前时窗超过记录长度/);
 coordinates=[];elements.get('an-freeze').checked=true;view.renderAdc();assert.equal(coordinates.length,0);
-console.log('Analog page: HTML binding, ADC/DAC tab keyboard/accessibility, linked generator levels, coherent LUT, DC controls, clipping rejection, ADC partial-record time axis/freeze PASS');
+console.log('Analog page: HTML binding, ADC/DAC tab keyboard/accessibility, linked generator levels, coherent LUT, DC controls, clipping rejection, 1-2-5 time/div series, ADC partial-record time axis/freeze PASS');
