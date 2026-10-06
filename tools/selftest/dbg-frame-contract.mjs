@@ -53,7 +53,7 @@ export function validateOracle(oracle,build,bytes,board){
  const before=oracle.cases['before-call'].frames[0].variables.find(v=>v.name==='arg'),after=oracle.cases['after-call'].frames[0].variables.find(v=>v.name==='arg');
  const beforeLocation=dwarfLocationAt(before?.location,oracle.cases['before-call'].pc);
  const afterLocation=dwarfLocationAt(after?.location,oracle.cases['after-call'].pc);
- if(before.address!=null||!/(?:variable in \$r\d+|DW_OP_reg\d+)/.test(beforeLocation)||
+ if(before.address!=null||!/(?:variable in \$(?:r\d+|a[0-7]|x\d+)|DW_OP_reg(?:x\d+|\d+))/i.test(beforeLocation)||
     !/(?:DW_OP_fbreg|DW_OP_breg\d+).*DW_OP_stack_value/s.test(afterLocation))
   throw new Error('该构建没有覆盖参数从寄存器迁移到栈');
 

@@ -192,3 +192,12 @@ HPM6800EVK 的 `Og/Os × DWARF4/5` 四种调试 ELF 均构建成功，并分别�
 | Os / DWARF5 | `8fdc0a4074b768ea12e35b0711c66cbbb8faf4faaba292d094266c226b14ef80` |
 
 本轮只把 Og/DWARF4 固件烧入 HPM6800EVK，并逐字节读回验证 44,488/44,488 B。由于收工时停止了板上矩阵，尚未为这四个精确 ELF 分别采集匹配的 GDB oracle，也未运行 Web 侧 200 轮局部变量/帧压力；不得将真实 ELF 静态 CFI 检查记作板上栈帧验收。此前 07:46–07:53 的 `make full_flow_6800evk` 已完成，独立记录见[真机测试结果](validation/2026-10-05-hardware-test-results.md)。
+
+### 2026-10-06 Og/DWARF4 首组实板验收进度
+
+- **时间与配置：**北京时间约 09:07–09:12，HPM6800EVK，Og/DWARF4；ELF SHA-256 为 `54c380cceb7954a201e237c5fc647fc49f5b4947999de1927ab2f01b598a8723`。重新烧录并逐字节校验 44,488/44,488 B。
+- **GDB oracle：**使用带 Python 3.10 的 WCH RISC-V GDB，七个检查点全部采集成功；ELF 代码逐字节核对通过，必测变量与固定输入契约通过，`arg` 从 `$a0` 寄存器迁移到栈的 DWARF 位置变化也得到确认。oracle 位于本地 `tmp/frame-oracle-6800evk-og-dw4.json`。
+- **网页端压力：**首轮因 RISC-V 寄存器名未纳入位置契约、测试 runner 缺少 `join` 导入及 PC 有符号表示问题而未进入有效轮次；修复后七个检查点逐帧对照全部通过。200 轮压力运行至 80 轮时仍无变量差异、寄存器/栈改写或触发器泄漏，随后 WebUSB `transferIn/transferOut` 报传输错误并中断。该次不计通过，也未完成 200 轮。
+- **探针状态：**中断后浏览器 USB/HID 设备枚举中已无 akaLink；Windows 将相应端口列为“未知 USB 设备（端口重置失败）”。执行 `pnputil /scan-devices` 后故障仍在，无法继续板测。当前 Og/DWARF4 状态为**GDB 对照通过、网页 80/200 后因探针 USB 断连而未通过验收**；需重新插拔 probe 并重新认板后再重跑完整 200 轮。原始失败终端输出在本次任务记录中，半途报告文件不可作为成功结果。
+
+本次修复已通过 `node tools/selftest/dbg-frame-contract.test.mjs`。四配置矩阵尚未完成：仅 Og/DWARF4 完成 GDB oracle 和部分网页轮次，Os/DWARF4、Og/DWARF5、Os/DWARF5 仍待实板验收。

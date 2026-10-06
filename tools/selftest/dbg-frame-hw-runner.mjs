@@ -5,7 +5,7 @@ async function captureCheckpoint(address,ramStart,ramEnd,board){
  const cmd=async line=>{const r=await d.runLine(line);if(r.error||r.cancelled)throw new Error(line+': '+(r.error||'cancelled'));return r;};
  await cmd('bd all');await cmd('b 0x'+address.toString(16));
  const erratumRecoveries=[];
- const pcNow=()=>s.pc&0xfffffffe;
+ const pcNow=()=>((s.pc>>>0)&0xfffffffe)>>>0;
  const waitForStop=async timeoutMs=>{
   const end=Date.now()+timeoutMs;
   do{await new Promise(r=>setTimeout(r,20));await s.refresh();if(s.halted)break;}while(Date.now()<end);

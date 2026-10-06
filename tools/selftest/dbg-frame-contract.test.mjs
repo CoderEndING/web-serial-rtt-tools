@@ -37,6 +37,11 @@ for(const modify of [o=>{o.elfSha256='stale';},o=>{o.board='h743';},o=>{o.build.
 }
 assert.equal(dwarfLocationAt(golden().cases['before-call'].frames[0].variables[0].location,0x08000aa6),'a variable in $r0');
 assert.match(dwarfLocationAt(golden().cases['after-call'].frames[0].variables[0].location,0x08000aae),/DW_OP_fbreg.*DW_OP_stack_value/s);
+const riscvBuild={...structuredClone(build),board:'6800evk'},riscvOracle=golden();
+riscvOracle.board='6800evk';riscvOracle.build=riscvBuild;
+riscvOracle.cases['before-call'].frames[0].variables[0].location=riscvOracle.cases['before-call'].frames[0].variables[0].location.replace('$r0','$a0');
+validateBuild(riscvBuild,bytes,'6800evk');validateOracle(riscvOracle,riscvBuild,bytes,'6800evk');
+assert.match(dwarfLocationAt(riscvOracle.cases['before-call'].frames[0].variables[0].location,0x08000aa6),/variable in \$a0/);
 const wrongLocation=golden();wrongLocation.cases['after-call'].frames[0].variables[0].location='Range 0x8000aae-0x8000ab0: a variable in $r0';
 assert.throws(()=>validateOracle(wrongLocation,build,bytes,'f103cb'),/寄存器迁移到栈/);
 const web=webVariables([{name:'arg',argument:true,value:'70'},{name:'object',address:0x20001010,children:[

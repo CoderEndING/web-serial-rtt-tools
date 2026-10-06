@@ -19,7 +19,7 @@
  */
 import { Cdp, sleep, DEV_RE } from './cdp-lib.mjs';
 import { writeFileSync, existsSync, readFileSync, readdirSync, mkdirSync } from 'node:fs';
-import { dirname, relative, resolve, sep } from 'node:path';
+import { dirname, join, relative, resolve, sep } from 'node:path';
 import { artifact, repoRoot } from './board-matrix.mjs';
 import { Elf } from '../../app/elf/elf.js';
 import { readJson, validateOracle } from './dbg-frame-contract.mjs';
