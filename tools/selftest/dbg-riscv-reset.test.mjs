@@ -81,3 +81,30 @@ console.log('dbg-riscv-reset: 复位并跑 = 先放开复位并停住 → 再写
 }
 
 console.log('dbg-riscv-reset: SBA 传输层拒绝 XIP 窗口（零 DMI 命令）PASS');
+
+/**
+ * `cont()` 要能容忍"界面说已停、硬件其实在跑"（SBA 自愈做过 ndmreset 之后就会这样）：
+ * 用户现场 `b main` → `reset` → `c` 报 `cmderr=4`（读 PC 的抽象命令要求先停住）就是这个。
+ * 修法：读 PC 失败 → 按 dmstatus 刷新一次 → 真在跑就把"继续"当已完成（返回 true），
+ * 仍然停着才把原错抛出去。
+ */
+{
+  const { DebugSession } = await import('../../app/dbg/session.js');
+  const mk = (after) => {
+    const s = Object.create(DebugSession.prototype);
+    Object.assign(s, {
+      halted: true, frames: null,
+      clearFrames(){}, run: async () => { throw new Error('不该走到 run()'); },
+      readReg: async () => { throw new Error('抽象命令出错（cmderr=4，abstractcs=0x80004004）'); },
+      refresh: async () => { s.halted = after; },
+      _bpAt: () => undefined,
+    });
+    return s;
+  };
+  const running = mk(false);
+  assert.equal(await running.cont(), true, '硬件其实在跑 → 继续视为已完成，不抛错');
+  const stillHalted = mk(true);
+  await assert.rejects(() => stillHalted.cont(), /cmderr=4/, '确实还停着 → 原错照抛（不掩盖真故障）');
+}
+
+console.log('dbg-riscv-reset: cont() 容忍"状态与硬件不一致"（自愈之后接着敲 c）PASS');

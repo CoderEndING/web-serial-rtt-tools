@@ -459,9 +459,16 @@ export class RiscvDebugSession extends DebugSession {
                                                    peekAddr: this._lastGoodAddr || 0x01200000 })
                              .catch(() => null);
           if (h?.ok){
-            this.halted = false;                       // ndmreset 那一级会让目标重新跑起来
+            /**
+             * 🚨 自愈会把目标复位/重启，**它现在在跑还是在停，得问 `dmstatus`，不能猜**。
+             *    2026-10 用户现场：猜"在跑"（halted=false）之后，紧接着的 `reset` 又把它设回 true，
+             *    于是界面上"已停止"、硬件其实在跑 —— 用户接着敲 `c`，`cont()` 第一件事就是读 PC
+             *    （抽象命令要求先停住）→ `cmderr=4` 报错。refresh() 一次就把真实状态摆正。
+             */
+            await this.refresh().catch(() => {});
             this._log(`SBA 卡死 → 自愈成功（${h.level}：${h.note}）。`
-              + '注意：自愈过程可能复位/重启过目标（现在在运行），要接着调试请再「暂停」一次；'
+              + `注意：自愈会复位/重启目标（现在${this.halted ? '已停住' : '在运行'}）——`
+              + '要接着调试请按需「暂停」/「继续」；'
               + '重新读一次那个地址。', 'warn');
             const again = await this.dm.readMem(a, n, 1500);
             this._sbaHealTried = false;                // 已经修好，下次再卡还能救

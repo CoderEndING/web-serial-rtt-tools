@@ -240,6 +240,23 @@ try {
   rec('4', '清空断点', bp.cleared === 0, '剩 ' + bp.cleared);
 
   /* ---------------------------------------------------------------- 5. 回栈 */
+  sec('4b. 用户那条路：b main → reset（复位并停）→ c（继续）');
+  const userPath = await run(`(async () => {
+    const S = window.__tools.dbg.session, out = {};
+    try { await S.exclusive(async () => { await S.bpClear(); await S.halt().catch(() => {}); await S.bpAdd(${A.code}, 'main'); }); out.bp = 'ok'; }
+    catch (e){ out.bp = 'ERR ' + String(e?.message || e).slice(0, 80); }
+    try { await S.exclusive(() => S.resetHalt()); out.reset = 'ok'; } catch (e){ out.reset = 'ERR ' + String(e?.message || e).slice(0, 100); }
+    // 复位并停之后紧接着继续 —— 这一条以前会报「抽象命令出错（cmderr=4）」
+    try { await S.exclusive(() => S.cont()); out.cont = 'ok'; } catch (e){ out.cont = 'ERR ' + String(e?.message || e).slice(0, 120); }
+    await new Promise(r => setTimeout(r, 1500));
+    try { await S.exclusive(async () => { await S.halt(); }); const b = await S.exclusive(() => S.memRead(${A.ram}, 4)); out.after = Array.from(b).map(x => x.toString(16)).join(' '); }
+    catch (e){ out.after = 'ERR ' + String(e?.message || e).slice(0, 100); }
+    try { await S.exclusive(async () => { await S.bpClear(); }); } catch {}
+    return out;
+  })()`);
+  rec('4b', 'b main → 复位并停 → 继续：全程不报 cmderr', userPath.bp === 'ok' && userPath.reset === 'ok' && userPath.cont === 'ok' && !/ERR/.test(userPath.after),
+      JSON.stringify(userPath));
+
   sec('5. 回栈 bt（停住后）');
   const bt = await run(`(async () => {
     const S = window.__tools.dbg.session;

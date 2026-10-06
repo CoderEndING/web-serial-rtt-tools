@@ -299,7 +299,20 @@ export class DebugSession {
   async cont(){
     this.clearFrames();
     if (!this.halted) { await this.run(); return false; }
-    const pc = align2(await this.readReg('PC'));
+    /**
+     * 🚨 状态可能与硬件不一致（典型：SBA 自愈做过 ndmreset、或别的会话把核放跑过）——
+     *    界面上写着"已停止"，硬件其实在跑。这时读 PC（抽象命令要求先停住）会得到 `cmderr=4`，
+     *    用户看到的就是「敲 c 报抽象命令出错」（2026-10 用户现场：b main → reset → c）。
+     *    先按真实状态刷新一次：真在跑，那"继续"这件事本来就已经达成了，直接返回。
+     */
+    let pc = 0;
+    try {
+      pc = align2(await this.readReg('PC'));
+    } catch (e){
+      await this.refresh?.().catch?.(() => {});
+      if (!this.halted) return true;
+      throw e;
+    }
     if (this._bpAt(pc) !== undefined){
       this._log(`PC 停在断点 0x${pc.toString(16)} 上：先单步跨过它再继续`, 'dim');
       await this.step();
