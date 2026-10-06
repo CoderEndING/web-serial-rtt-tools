@@ -1,6 +1,11 @@
 # 构建产物 / 临时文件
 build/
 tools/target-firmware/**/build*/
+# F103CB 的四个活动例程以 build-cb/fw.elf 作为容量匹配的发布文件；
+# 只放行 ELF，目录内的 .bin/.hex/.map 和其它生成结果仍忽略。
+!tools/target-firmware/stm32f103_*/build-cb/
+tools/target-firmware/stm32f103_*/build-cb/*
+!tools/target-firmware/stm32f103_*/build-cb/fw.elf
 node_modules/
 tmp/
 *.log
