@@ -51,3 +51,33 @@ assert.ok(lastVal & DMCONTROL.resumereq, '收尾必须 resumereq（清 haltreq �
 assert.equal(s.halted, false, 'resetRun 结束后页面状态是"运行中"');
 
 console.log('dbg-riscv-reset: 复位并跑 = 先放开复位并停住 → 再写触发器 → 再放 haltreq（顺序钉死）PASS');
+
+/**
+ * 传输层硬闸：**SBA 一律不许碰 XIP/flash 窗口**（0x8000_0000–0x9000_0000）。
+ *
+ * 2026-10 真机：这颗芯片上 SBA 读该窗口会把事务永久挂住（sbcs 常驻 sbbusy|sbbusyerror），
+ * 之后**每一次**内存读都失败，只 dm.init() 解不开。以前只在调试页 memRead 里挡，
+ * 任何别的调用路径（页面混旧 JS、以后新加的读者）都能把 DM 搞坏 —— 现在闸门在传输层，
+ * 要求：**抛错就走人，一个 DMI 命令都不许发**。
+ */
+{
+  const { RiscvTransport } = await import('../../app/flash/hpm/riscv-dm.js');
+  const sent = [];
+  const t = Object.create(RiscvTransport.prototype);
+  t.dmiWrite = async () => { sent.push('write'); };
+  t.dmiRead = async () => { sent.push('read'); return 0; };
+  let err = '';
+  try { await t.readMem(0x80000500, 512); } catch (e){ err = String(e?.message || e); }
+  assert.ok(/XIP\/flash 窗口/.test(err), 'SBA 读 flash 窗口必须当场报错：' + err);
+  assert.equal(sent.length, 0, '报错前不许发任何 DMI 命令（发了就说明还在试探）：' + JSON.stringify(sent));
+  // RAM 照旧放行（不然 flash 烧录的暂存区读写会被误伤）
+  const t2 = Object.create(RiscvTransport.prototype);
+  let touched = 0;
+  t2.sbaConfig = async () => { touched++; };
+  t2.dmiWrite = async () => { touched++; };
+  t2.dmiRead = async () => { touched++; return 0x4c03a2; };
+  await t2.readMem(0x4000b61c, 4).catch(() => {});
+  assert.ok(touched > 0, 'RAM 读必须照旧走 SBA（没有被闸门误伤）');
+}
+
+console.log('dbg-riscv-reset: SBA 传输层拒绝 XIP 窗口（零 DMI 命令）PASS');

@@ -37,8 +37,8 @@ export async function runUiSelfTest(tools){
    */
   await step('引导兜底脚本在位（模块加载失败时能提示怎么救）', async () => {
     if (!window.__bootGuardArmed) throw new Error('index.html 里那段引导兜底脚本没了 —— 卡住时用户只会看到转圈');
-    if ($('boot-mask')) throw new Error('引导结束时遮罩本该已经摘掉');
-    return '已装好，且遮罩已正常摘除';
+    // 注意：遮罩是 main.js 在 requestAnimationFrame 里摘的，跑得比这里的第一步还晚 —— 别在这断言它
+    return '已装好（8 秒兜底 + 第一条报错）';
   });
 
   await step('演示串口出现在端口列表', async () => {
