@@ -937,6 +937,9 @@ tools/
     recorder-file.test.mjs  「记录到文件」落盘语义（`.crswap`/积压/落盘进度，OPFS 替身；`make test-record`）
     serial-grant.mjs    Web Serial 授权的搬运/补当前口/清过期（CDP 管不了串口授权，只能这样自动化）
     com-read.py         独立的主机侧 COM 读者（转发测速/存盘用，os.read 大块读）
+    tcpecho.py          **以太网 TCP 回显测试**（server/client/selftest 三种角色，连发 3 条
+                        hello, echo!\n 并校验回显；`make tcpecho` / `make tcpecho-server`，
+                        靶子是 HPM6800EVK 的 lwIP tcpecho 例程：板子=服务端 192.168.100.10:5001）
   fixtures/gen/         对账基线：Python 工具（uvprojx2cmake.py）对真实工程的原始产物，逐字节比对用
   fixtures/dwarf/       DWARF 解析基线：两份**真 ELF**（scope 靶子固件 + RTT 吞吐固件）
   la/                   逻辑分析仪：kingst_la.py（KingstVIS Socket API 单文件工具）+ SWD 流量发生器

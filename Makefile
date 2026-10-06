@@ -27,9 +27,12 @@ TARGET  ?= stm32f103
 APP     ?= http://127.0.0.1:$(PORT)/index.html
 FW_DIR   = tools/target-firmware/stm32f103
 LA       = tools/la/kingst_la.py
+# 以太网回显靶子（HPM6800EVK 跑 lwIP tcpecho 例程时的默认地址）
+TCP_HOST ?= 192.168.100.10
+TCP_PORT ?= 5001
 
 .DEFAULT_GOAL := help
-.PHONY: help serve serve-dev serve-stop browser open page-prep spi-flash-hw idcode board-check-f103ze board-check-f103cb board-check-h743 board-check-6800evk test test-offline test-board-matrix test-random-flow test-ui test-gen test-gen-page gen-embed samples-anim test-hid test-dwarf test-scope test-scope-page test-scope-render test-spi test-read test-spi-page test-hw test-record test-bridge test-bridge-gate test-hpm test-image test-all test-dbg test-dbg-page test-dbg-hw test-dbg-stress test-dbg-stress-f103ze test-dbg-stress-f103cb flash-dbgstress-f103ze flash-dbgstress-f103cb flash-dbgstress-h743 flash-dbgstress-6800evk test-dbg-riscv test-idcode test-dsl test-flash flash-timing hw-campaign hw-campaign-f103ze hw-campaign-f103cb hw-campaign-h743 hw-campaign-hpm hw-campaign-riscv hw-random-flow-f103cb hw-random-flow-h743 hw-random-flow-6800evk build-f103ze-examples build-f103cb-examples build-h743-examples build-6800evk-examples build-all-examples rebuild-all-examples clean-firmware campaign-summary full_flow_f103ze full_flow_f103cb full_flow_h743 full_flow_6800evk \
+.PHONY: help serve serve-dev serve-stop browser open page-prep spi-flash-hw idcode board-check-f103ze board-check-f103cb board-check-h743 board-check-6800evk test test-offline test-board-matrix test-random-flow test-ui test-gen test-gen-page gen-embed samples-anim test-hid test-dwarf test-scope test-scope-page test-scope-render test-spi test-read test-spi-page test-hw test-record test-bridge test-bridge-gate test-hpm test-image test-all test-dbg test-dbg-page test-dbg-hw test-dbg-stress test-dbg-stress-f103ze test-dbg-stress-f103cb flash-dbgstress-f103ze flash-dbgstress-f103cb flash-dbgstress-h743 flash-dbgstress-6800evk test-dbg-riscv test-idcode test-dsl test-flash flash-timing hw-campaign hw-campaign-f103ze hw-campaign-f103cb hw-campaign-h743 hw-campaign-hpm hw-campaign-riscv hw-random-flow-f103cb hw-random-flow-h743 hw-random-flow-6800evk build-f103ze-examples build-f103cb-examples build-h743-examples build-6800evk-examples build-all-examples rebuild-all-examples clean-firmware campaign-summary full_flow_f103ze full_flow_f103cb full_flow_h743 full_flow_6800evk tcpecho tcpecho-server tcpecho-selftest \
         bridge bridge-stop fw-build fw-flash fw-restore fw-h7-build fw-h7-flash \
         algo-check flash-plan la-info la-capture git-status git-log check clean spi-hw spi-flow i2c-hw spi-partial-hw spi-periodic-hw dbg-step-hw probe-diag
 
@@ -378,6 +381,28 @@ page-prep:
 
 test-hw:
 	$(NODE) tools/selftest/browser-hw.test.mjs webusb
+
+# ---------------------------------------------------------------- 以太网：lwIP tcpecho
+# 被测例程是 SDK 的 samples/lwip/lwip_tcpecho（构建目录
+# E:\sdk_env_v1.11.0\work\lwip_lwip_tcpecho_hpm6800evk_flash_sdram_xip_debug）。
+# 例程里**板子是 TCP 服务端**：CMakeLists 里 -DLWIP_DHCP=0，地址取 netinfo.h 的
+# IP0_CONFIG = 192.168.100.10/24，tcp_echo.c 监听 TCP_LOCAL_PORT = 5001，收多少回多少。
+# 所以 PC 有线网卡要在 192.168.100.0/24（本机 .11），板子串口应打印
+# "IPv4 Address: 192.168.100.10" 和 "Link Status: Up"。不需要浏览器、探针、OpenOCD。
+#   make tcpecho                    # 连发 3 条 hello, echo!\n 并校验回显，PASS 退出码 0
+#   make tcpecho TCP_HOST=192.168.100.20 TCP_PORT=5002
+#   make tcpecho ARGS="--count 5 --payload PING\n"
+tcpecho:
+	$(PY) tools/selftest/tcpecho.py client --host $(TCP_HOST) --port $(TCP_PORT) $(ARGS)
+
+# PC 当 TCP 服务端（回显对照）：给改成客户端角色的板子当靶子，或配 nc / 网页工具验证
+#   make tcpecho-server ARGS="--no-greet --accept-timeout 120"
+tcpecho-server:
+	$(PY) tools/selftest/tcpecho.py server --port $(TCP_PORT) $(ARGS)
+
+# 不开硬件：本地 127.0.0.1 起服务端 + 客户端，自检脚本本身（带问候 / 纯回显各一轮）
+tcpecho-selftest:
+	$(PY) tools/selftest/tcpecho.py selftest $(ARGS)
 
 # 烧录耗时体检（真机：探针 + 目标板 + 8899/CDP 浏览器）：把"慢在哪一步"量出来。
 #   make flash-timing                        # 一轮时间线
