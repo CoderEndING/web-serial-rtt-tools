@@ -1082,6 +1082,15 @@ export class DbgView {
       this.sym = st;
       this.session.sym = st;
       this.elfName = name;
+      /**
+       * 把 ELF 的路径列表交给源码仓：如果已经选过目录，就**按这份列表按需索引**
+       * （只对 ELF 引用到的文件做 getFileHandle，不遍历目录树 —— 选 `hpm_sdk` 那种
+       *  33000+ 文件的目录也不用等）。索引完再刷一次建议行，报"能解析几个"。
+       */
+      Promise.resolve(this.src?.setExpectedPaths?.(st.lines?.paths || []))
+        .then(s => { if (this.src?.ready) this._out('源码：' + s, 'ok'); })
+        .catch(() => {})
+        .finally(() => this._renderSrcSuggest());
       const info = st.summary();
       const el = $('d-elf-info');
       if (el) el.textContent = `${name || 'ELF'}：${info}`;
@@ -1479,6 +1488,7 @@ export class DbgView {
       this._out('源码：' + sum, 'ok');
       this.srcShown = null;
       await this.renderSource();
+      this._renderSrcSuggest();          // 选完当场报"这份 ELF 里能解析出几个"
     } catch (e){
       if (e?.name === 'AbortError') return;                      // 用户点了取消
       this._out('✗ 选择源码目录失败：' + (e?.message || e), 'err');

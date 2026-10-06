@@ -8,7 +8,7 @@
  */
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { sourceRootSuggestions } from '../../app/dbg/source.js';
+import { sourceRootSuggestions, SourceStore, relUnderRoot } from '../../app/dbg/source.js';
 import { SymTab } from '../../app/dbg/symbols.js';
 
 // ---------- ① 合成：主簇里没有绝对多数分支 → 就停在簇根
@@ -56,4 +56,48 @@ import { SymTab } from '../../app/dbg/symbols.js';
                s.root.dir.toLowerCase(), '推荐目录必须落在主簇里');
 }
 
-console.log('dbg-src-suggest: 首选目录（沿最大分支钻）/ 跨机器簇标记 / 大小写去重 / 真 ELF PASS');
+// ---------- ⑥ 「ELF 路径 → 所选目录下的相对路径」
+{
+  const p = 'E:/sdk_env_v1.11.0/hpm_sdk/samples/lwip/lwip_tcpecho/src/lwip.c';
+  assert.equal(relUnderRoot(p, 'hpm_sdk'), 'samples/lwip/lwip_tcpecho/src/lwip.c', '选 hpm_sdk');
+  assert.equal(relUnderRoot(p, 'sdk_env_v1.11.0'), 'hpm_sdk/samples/lwip/lwip_tcpecho/src/lwip.c', '选它的父目录');
+  assert.equal(relUnderRoot(p, 'Samples'), 'lwip/lwip_tcpecho/src/lwip.c', '目录名大小写无关（选 samples 也对）');
+  assert.equal(relUnderRoot(p, 'NoSuchDir'), null, '名字完全对不上 → null');
+  assert.equal(relUnderRoot(p, ''), null);
+}
+
+// ---------- ⑦ 按需索引：只开 ELF 点名的文件（不遍历目录树）
+{
+  const files = new Map([['samples/lwip/src/lwip.c', 'int main(void){return 0;}']]);
+  const makeDir = (prefix) => ({
+    async getDirectoryHandle(seg){ return makeDir(prefix + seg + '/'); },
+    async getFileHandle(name){
+      const rel = prefix + name;
+      if (!files.has(rel)) throw new Error('NotFound: ' + rel);
+      return { getFile: async () => ({ text: async () => files.get(rel) }) };
+    },
+  });
+  const s = new SourceStore();
+  s.root = makeDir(''); s.rootName = 'hpm_sdk';
+  await s.setExpectedPaths(['E:/x/hpm_sdk/samples/lwip/src/lwip.c', '/home/builder/gcc/soft-fp/x.c']);
+  assert.equal(s.count, 1, '只索引"在这个目录里且被 ELF 引用"的文件');
+  assert.ok(/按需索引：1\/2/.test(s.summary()), '摘要要给覆盖数：' + s.summary());
+  assert.ok(s.resolve('E:/x/hpm_sdk/samples/lwip/src/lwip.c'), 'resolve 仍然命中');
+  assert.equal((await s.read('E:/x/hpm_sdk/samples/lwip/src/lwip.c')).slice(0, 7), 'int mai', 'read 取到内容');
+}
+
+// ---------- ⑧ FileList 兜底：按 ELF 的路径筛（光文件名的也要放行，自测脚本就这么造）
+{
+  const mk = (rel, text) => { const f = { name: rel.split('/').pop(), text: async () => text }; Object.defineProperty(f, 'webkitRelativePath', { value: rel }); return f; };
+  const s = new SourceStore();
+  s.expected = ['E:/x/samples/lwip/src/lwip.c'];
+  s.indexFileList([mk('samples/lwip/src/lwip.c', 'A'), mk('samples/other/junk.c', 'B')]);
+  assert.equal(s.count, 1, '无关文件被筛掉：' + s.summary());
+  const s2 = new SourceStore();
+  s2.expected = ['E:/x/samples/lwip/src/lwip.c'];
+  s2.indexFileList([{ name: 'lwip.c', text: async () => 'A' }]);        // 无 webkitRelativePath（自测脚本）
+  assert.equal(s2.count, 1, '光文件名（basename 命中）也要放行');
+}
+
+console.log('dbg-src-suggest: 首选目录（沿最大分支钻）/ 跨机器簇标记 / 大小写去重 / 真 ELF /'
+  + ' 按需索引（不遍历目录）/ FileList 筛选 PASS');

@@ -35,6 +35,24 @@ const isAbs = p => /^([A-Za-z]:\/|\/)/.test(p);
 const styleOf = p => (/^[A-Za-z]:\//.test(p) ? 'win' : 'posix');
 
 /**
+ * 「ELF 里的绝对路径」→「相对所选目录的路径」。
+ *
+ * 依据：用户在目录选择器里选中的那个目录，它的**名字**必定出现在 DWARF 路径里（选 hpm_sdk，
+ * 路径里就有 `…/hpm_sdk/…`；选它的父目录 `sdk_env_v1.11.0`，路径里也有）—— 取名字之后的那一截
+ * 就是这个文件在所选目录下的相对路径，直接拿去做 `getFileHandle` 即可，**不用遍历目录**。
+ * 名字对不上（工具链路径、编译机路径）就返回 null：那些文件本来也不在这个目录里。
+ */
+export function relUnderRoot(absPath, rootName){
+  const parts = normSlashes(absPath).split('/').filter(Boolean);
+  const want = String(rootName || '').trim().toLowerCase();
+  if (!want || parts.length < 2) return null;
+  for (let i = 0; i < parts.length - 1; i++){
+    if (parts[i].toLowerCase() === want) return parts.slice(i + 1).join('/');
+  }
+  return null;
+}
+
+/**
  * 从 ELF 的 DWARF 路径里推荐「该选哪个源码目录」。
  *
  * 为什么能做：`.debug_line` 里存的就是**编译时的路径**，这份 HPM6800EVK 的 ELF 实测 188 条
@@ -126,6 +144,8 @@ export class SourceStore {
     this.entries = [];
     this.text = new Map();           // 路径（小写）→ 文本
     this.note = '';
+    this.root = null;                // showDirectoryPicker 给的目录句柄（认得它就不用整棵遍历）
+    this.expected = null;            // ELF 里的完整路径列表 —— "按需索引"的唯一依据
   }
 
   static supported(){
@@ -144,6 +164,13 @@ export class SourceStore {
   clear(){
     this.byRel.clear(); this.byBase.clear(); this.entries = []; this.text.clear();
     this.rootName = ''; this.note = '';
+    this.root = null;                                   // ELF 路径列表跟着 ELF 走，不在这里清
+  }
+
+  /** 只清"索引"，保留目录句柄与 ELF 路径列表（重新索引时用） */
+  _resetEntries(){
+    this.byRel.clear(); this.byBase.clear(); this.entries = []; this.text.clear();
+    this.note = '';
   }
 
   _put(entry){
@@ -155,14 +182,71 @@ export class SourceStore {
     this.byBase.get(b).push(entry);
   }
 
-  /** 路径①：选目录（Chromium；必须由用户点击触发） */
+  /**
+   * 路径①：选目录（Chromium；必须由用户点击触发）。
+   *
+   * 🚨 **不再整棵遍历**（2026-10 用户现场：选 `E:\sdk_env_v1.11.0\hpm_sdk` 要等很久 ——
+   *    那棵树 33000+ 个文件，遍历几万个目录项当然慢）。现在只**记住句柄**：
+   *    ELF 的路径列表一到（`setExpectedPaths`），就只按那份列表去"要哪几个文件开哪几个"，
+   *    188 个文件就是 188 次 `getFileHandle`，毫秒级；`MAX_FILES` 只对下面 FileList 那条兜底路有效。
+   */
   async pick(){
     if (!SourceStore.supported()) throw new Error('这个浏览器不支持选目录（用「选择源码文件夹…」那个按钮，或换 Chrome/Edge）');
     const dir = await window.showDirectoryPicker({ id: 'dbg-src', mode: 'read' });
     this.clear();
+    this.root = dir;
     this.rootName = dir.name || '';
-    await this._walk(dir, '', 0);
+    if (this.expected?.length){ await this.indexFromExpected(); return this.summary(); }
+    this.note = '已记住这个目录：载入 .elf 后按 ELF 里的路径直接索引（不再整棵遍历）';
     return this.summary();
+  }
+
+  /** ELF 载入后把它的路径列表交进来：能立刻按需索引（有目录句柄的话），并报覆盖数 */
+  async setExpectedPaths(paths){
+    this.expected = [...new Set((paths || []).map(normSlashes).filter(Boolean))];
+    if (this.root){
+      await this.indexFromExpected();
+      return this.summary();
+    }
+    return this.note || '还没选源码目录';
+  }
+
+  /**
+   * 按 ELF 的路径列表**按需索引**：只对"这条路径在所选目录下的那一截"做 getFileHandle，
+   * 不做目录遍历、不看没被引用的文件。命中几个算几个，并如实报出覆盖数。
+   */
+  async indexFromExpected(){
+    this._resetEntries();
+    const list = this.expected || [];
+    let hit = 0, miss = 0;
+    for (const p of list){
+      const rel = relUnderRoot(p, this.rootName);
+      if (!rel) continue;
+      const fh = await this._openRel(rel).catch(() => null);
+      if (!fh){ miss++; continue; }
+      this._put({ rel, base: baseNameOf(rel), kind: 'handle', h: fh });
+      hit++;
+    }
+    this.note = `按 ELF 的路径按需索引：${hit}/${list.length} 个文件在这个目录里`
+      + (miss ? `（另外 ${miss} 条不在 —— 工具链/编译机路径居多）` : '');
+    /**
+     * 一条都没命中 ⇒ 多半是**选错了目录**（比如选了别处的同名文件夹），
+     * 这时退回"整棵遍历 + 后缀/同名兜底"那条老路 —— 慢，但至少可能找得到。
+     */
+    if (!hit && this.root){
+      this.note = '按 ELF 的路径一条都没命中（可能选错了目录）→ 退回整棵遍历再试一次';
+      await this._walk(this.root, '', 0);
+    }
+    return this.summary();
+  }
+
+  /** 打开"相对所选目录"的文件句柄（逐级 getDirectoryHandle，最后 getFileHandle） */
+  async _openRel(rel){
+    const parts = normSlashes(rel).split('/').filter(Boolean);
+    if (!this.root || !parts.length) return null;
+    let dir = this.root;
+    for (const seg of parts.slice(0, -1)) dir = await dir.getDirectoryHandle(seg);
+    return await dir.getFileHandle(parts[parts.length - 1]);
   }
 
   async _walk(dir, prefix, depth){
@@ -180,13 +264,29 @@ export class SourceStore {
 
   /** 路径②：`<input webkitdirectory>` / 拖进来的 FileList（老浏览器兜底） */
   indexFileList(list){
-    this.clear();
+    this._resetEntries();
     const arr = Array.from(list || []);
     this.rootName = (arr[0]?.webkitRelativePath || '').split('/')[0] || '（已选文件夹）';
+    /**
+     * 浏览器已经把整棵树列给我们的（这一步没法省），但**索引可以只留 ELF 用得上的那些**：
+     * 3 万个文件里通常只有一两百个是 DWARF 引用过的，只留它们，后面 resolve/read 也清爽。
+     */
+    const wanted = this.expected?.length
+      ? new Set(this.expected.map(p => relUnderRoot(p, this.rootName)).filter(Boolean).map(s => s.toLowerCase()))
+      : null;
+    // 兜底：喂进来的可能是"光文件名"的 File（自测脚本就这么造），按同名也放行
+    const wantedBase = this.expected?.length
+      ? new Set(this.expected.map(p => baseNameOf(p).toLowerCase()))
+      : null;
     for (const f of arr){
       if (this.entries.length >= MAX_FILES) break;
       const rel = normSlashes(f.webkitRelativePath || f.name).replace(/^[^/]+\//, '');
+      if (wanted && wanted.size && !wanted.has(rel.toLowerCase())
+          && !wantedBase.has(baseNameOf(rel).toLowerCase())) continue;
       this._put({ rel, base: baseNameOf(rel), kind: 'file', h: f });
+    }
+    if (wanted && wanted.size){
+      this.note = `按 ELF 的路径筛过：索引 ${this.entries.length} 个文件（ELF 引用 ${this.expected.length} 条）`;
     }
     return this.summary();
   }
