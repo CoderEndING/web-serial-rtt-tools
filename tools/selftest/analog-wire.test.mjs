@@ -1,7 +1,7 @@
 /** Real JS HID packet -> production analog C handler; no board needed. */
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -9,9 +9,11 @@ import { fileURLToPath } from 'node:url';
 import { buildRequest } from '../../app/hid/probe.js';
 import { DacClient, CMD, ACT, RC, DacError, configData, beginData, writeData, startData, stopData } from '../../app/analog/dac-protocol.js';
 const root=resolve(fileURLToPath(new URL('../../',import.meta.url)));
-const firmware=process.env.PROBE_FIRMWARE_REPO||resolve(root,'../5301evk_akaLinkPro');
+const candidates=['../akaLinkPro','../Share/github/akaLinkPro','../5301evk_akaLinkPro'].map(p=>resolve(root,p));
+const firmware=process.env.PROBE_FIRMWARE_REPO||candidates.find(p=>existsSync(join(p,'script_test/analog_host_test.py')));
+if(!firmware)throw Error('找不到探针固件仓库；请设置 PROBE_FIRMWARE_REPO');
 const dir=mkdtempSync(join(tmpdir(),'analog-wire-')),exe=join(dir,process.platform==='win32'?'wire.exe':'wire');
-execFileSync(process.env.PYTHON||'python3',[join(firmware,'script_test/analog_host_test.py'),'--wire',exe]);
+execFileSync(process.env.PYTHON||(process.platform==='win32'?'python':'python3'),[join(firmware,'script_test/analog_host_test.py'),'--wire',exe]);
 const child=spawn(exe,[],{stdio:['pipe','pipe','inherit']}),pending=[];
 createInterface({input:child.stdout}).on('line',line=>pending.shift()?.resolve(line));
 const exit=new Promise(resolve=>child.on('exit',code=>{pending.splice(0).forEach(p=>p.reject(Error(`C wire server exit ${code}`)));resolve(code);}));
@@ -28,5 +30,10 @@ try{
  const stream=await xfer(CMD,Uint8Array.of(9));assert.equal(stream[0],28);assert.equal(String.fromCharCode(...stream.subarray(7,11)),'ADB2');
  const open=await xfer(CMD,Uint8Array.of(10,16,0xf4,1,0,0,0,2,0,0));
  assert.equal(open[0],12);assert.equal(open[3],0);assert.deepEqual([...open.subarray(7,11)],[1,0,0,0]);
+ const pipeline=await xfer(CMD,Uint8Array.of(15));
+ assert.deepEqual([...pipeline.subarray(7,9)],[1,32]);
+ const pipedOpen=await xfer(CMD,Uint8Array.of(10,16,0xf4,1,0,0,0,2,0,0,32));
+ assert.equal(pipedOpen[3],0);assert.deepEqual([...pipedOpen.subarray(7,11)],[1,0,0,0]);
+ const invalidDepth=await xfer(CMD,Uint8Array.of(10,16,0xf4,1,0,0,0,2,0,0,33));assert.equal(invalidDepth[3],1);
  console.log('Analog production C/JS ABI: DAC reservations, ADC CAPS, JS-framed finite OPEN length/payload PASS');
 }finally{child.stdin.end();assert.equal(await exit,0);rmSync(dir,{recursive:true,force:true});}

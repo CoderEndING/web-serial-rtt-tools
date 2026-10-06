@@ -1,6 +1,8 @@
 import { UsbLease } from '../core/usb-device.js';
 import { withTimeout } from '../rtt/dap-webusb.js';
 export const ADC_EP=0x8b, ADC_BLOCK_BYTES=4096;
+export const ADC_MAX_INFLIGHT=32;
+const LITTLE_ENDIAN=new Uint8Array(Uint16Array.of(1).buffer)[0]===1;
 export function decodeAdcPacket(bytes,token){
   const v=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength);
   if(bytes.length<32 || String.fromCharCode(...bytes.subarray(0,4))!=='ADS2' ||
@@ -10,13 +12,117 @@ export function decodeAdcPacket(bytes,token){
   const count=v.getUint16(24,true),rate=v.getUint32(20,true);
   if(count>2031 || bytes.length!==32+2*count || (bytes[5]===2?count!==0:!count) ||
     (count && (!rate || rate>2000000))) throw Error('ADC DMA 数据长度或速率无效');
-  const codes=new Uint16Array(count);
-  for(let i=0;i<count;i++){
-    codes[i]=v.getUint16(32+2*i,true);
-    if(codes[i]>=2**bytes[6])throw Error('ADC DMA 码值超出位宽');
+  // WebUSB owns a distinct buffer per completed request. Keep its u16 view;
+  // the bounded scope history copies it once, without another decode allocation.
+  const aligned=(bytes.byteOffset+32)%2===0;
+  const codes=LITTLE_ENDIAN&&aligned?new Uint16Array(bytes.buffer,bytes.byteOffset+32,count):new Uint16Array(count);
+  if(!LITTLE_ENDIAN||!aligned||bytes[6]!==16)for(let i=0;i<count;i++){
+    if(!LITTLE_ENDIAN||!aligned)codes[i]=v.getUint16(32+2*i,true);
+    if(bytes[6]!==16&&codes[i]>=2**bytes[6])throw Error('ADC DMA 码值超出位宽');
   }
   return {codes,bits:bytes[6],rate,seq:v.getUint32(12,true),first:v.getUint32(16,true),
     fault:v.getUint32(28,true),done:bytes[5]===2};
+}
+class AdcWorkerTransport {
+  constructor(device,iface){
+    this.device=device;this.lease=new UsbLease(device,'analog');this.iface=iface;
+    this.done=false;this.error=null;this.pending=null;this._rpcId=0;this._rpcPending=new Map();
+    this.worker=new Worker(new URL('./adc-usb-worker.js',import.meta.url),{type:'module'});
+    this.worker.onmessage=event=>this._message(event.data);
+    this.worker.onerror=event=>this._workerError(event.message||'ADC Worker 异常');
+  }
+  _rpc(action,args={}){
+    const id=++this._rpcId;
+    return new Promise((resolve,reject)=>{
+      const timer=setTimeout(()=>{this._rpcPending.delete(id);reject(Error(`ADC Worker ${action} 超时`));},10000);
+      this._rpcPending.set(id,{resolve,reject,timer});this.worker.postMessage({id,action,...args});
+    });
+  }
+  _message(message){
+    if(message.id){
+      const p=this._rpcPending.get(message.id);if(!p)return;
+      this._rpcPending.delete(message.id);clearTimeout(p.timer);
+      if(message.ok)p.resolve(message);else{const e=Error(message.error||'ADC Worker 请求失败');e.code=message.code;p.reject(e);}
+      return;
+    }
+    if(message.event==='fault'){this.usbFailed=true;this._fault(Error(message.message||'ADC Worker USB 失败'));return;}
+    if(message.event==='packet'){this._packet(new Uint8Array(message.buffer),message.completedAt);return;}
+    if(message.event==='drained'){
+      this.done=!!message.complete;
+      this.metrics=message.metrics||null;
+      if(!this.done&&!this.error)this._fault(Error(`ADC USB 读取只退场 ${message.ends}/${message.expected} 笔`));
+      this._settled=true;const resolve=this._resolvePending;this._resolvePending=null;this.pending=null;resolve?.();
+    }
+  }
+  _workerError(message){
+    this.usbFailed=true;this._fault(Error(`ADC Worker 失败：${message}`));this.done=false;
+    this._settled=true;const resolve=this._resolvePending;this._resolvePending=null;this.pending=null;resolve?.();
+    for(const [id,p] of this._rpcPending){clearTimeout(p.timer);p.reject(Error(message));this._rpcPending.delete(id);}
+  }
+  static async request(device){
+    const config=device.configurations.find(c=>c.configurationValue===1)||device.configurations[0];
+    const iface=config?.interfaces.find(i=>i.alternates.some(a=>
+      a.endpoints.some(e=>e.endpointNumber===11&&e.direction==='in'&&e.type==='bulk')&&
+      a.endpoints.some(e=>e.endpointNumber===11&&e.direction==='out'&&e.type==='bulk')));
+    if(!iface)throw Error('当前板卡没有 SPI/ADC 共享数据接口');
+    let t;
+    try{t=new AdcWorkerTransport(device,iface.interfaceNumber);}catch{return null;}
+    try{
+      await t.lease.claimExternal(iface.interfaceNumber,[0x0b,ADC_EP]);
+      await t._rpc('open',{device:{vendorId:device.vendorId,productId:device.productId,
+        serialNumber:device.serialNumber,interfaceNumber:iface.interfaceNumber}});
+      t.workerOwned=true;return t;
+    }catch(e){
+      t.worker.terminate();try{await t.lease.close();}catch(cleanup){t.lease.abandon();e.message+=`；USB 清理失败：${cleanup.message}`;}
+      if(e.code==='WORKER_USB_UNSUPPORTED')return null;
+      throw e;
+    }
+  }
+  async retireSpiOut(){
+    if(this.flush)throw Error('上一笔 SPI OUT 退场请求尚未结束');
+    this.flush=this._rpc('out').then(r=>{if(r.status!=='ok')throw Error('SPI OUT 退场失败');})
+      .finally(()=>{this.flush=null;});
+    return await this.flush;
+  }
+  start(token,{bits,inFlight=1,onBlock,onFault}={}){
+    if(this.pending&&!this.done)throw Error('上一轮 ADC USB 读取尚未结束');
+    if(!Number.isInteger(inFlight)||inFlight<1||inFlight>ADC_MAX_INFLIGHT)throw Error('ADC USB 接收深度必须为 1–32');
+    this.token=token;this.expectedBits=bits;this.onBlock=onBlock;this.onFault=onFault;
+    this.done=false;this.error=null;this.seq=0;this.index=0;this.rate=null;this.ends=0;
+    this.inFlight=inFlight;this.usbFailed=false;this.discard=false;this._settled=false;
+    this.pending=new Promise(resolve=>{this._resolvePending=resolve;});
+    this._rpc('start',{token,inFlight}).catch(e=>{this._fault(e);this.done=false;this._settled=true;
+      const resolve=this._resolvePending;this._resolvePending=null;this.pending=null;resolve?.();});
+  }
+  _fault(e){if(!this.error){this.error=e;try{this.onFault?.(e);}catch{}}}
+  _packet(bytes,completedAt){
+    let p,valid=false;
+    try{
+      p=decodeAdcPacket(bytes,this.token);
+      if(p.done)this.ends++;
+      if(this.ends&&!p.done)throw Error('ADC END 后仍收到样本');
+      if(p.bits!==this.expectedBits||p.seq!==this.seq||p.first!==this.index||
+        (this.rate!==null&&p.rate!==this.rate))throw Error('ADC DMA 数据块不连续或配置变化');
+      this.seq=(this.seq+1)>>>0;this.index=(this.index+p.codes.length)>>>0;
+      if(p.codes.length)this.rate=p.rate;valid=true;
+    }catch(e){this.discard=true;this._fault(e);}
+    if(valid){p.completedAt=completedAt;p.mainReceivedAt=performance.now();}
+    if(valid&&p.codes.length&&!this.discard){try{this.onBlock?.(p);}catch(e){this.discard=true;this._fault(e);}}
+    if(valid&&p.fault)this._fault(Error(`ADC 已停止：${p.fault===5?'DMA 缓冲满':`硬件故障 ${p.fault}`}，未静默覆盖`));
+  }
+  async drain(){
+    if(this.usbFailed&&!this.pending)throw this.error;
+    if(!this.pending&&!this.done){
+      this.onBlock=null;this.start(this.token,{bits:this.expectedBits,inFlight:this.inFlight});
+    }
+    if(this.pending)await withTimeout(this.pending,3000,'等待 ADC END');
+    if(!this.done)throw this.error||Error('ADC 数据流停止未确认');
+  }
+  async close(){
+    if(this.pending&&!this.done||this.flush)throw Error('ADC USB 请求尚未退出，请先停止或拔插探针');
+    try{await this._rpc('close');}finally{this.worker.terminate();}
+    await this.lease.close();
+  }
 }
 export class AdcTransport {
   constructor(device){this.lease=new UsbLease(device,'analog');this.device=this.lease.device;this.done=false;}
@@ -29,6 +135,11 @@ export class AdcTransport {
       vendorId:hidDevice.vendorId,productId:hidDevice.productId,
       ...(hidDevice.serialNumber?{serialNumber:hidDevice.serialNumber}:{})}]});
     if(!same(device))throw Error('HID 和 ADC 不是同一台探针');
+    if(typeof Worker==='function'){
+      let workerTransport=null;
+      workerTransport=await AdcWorkerTransport.request(device);
+      if(workerTransport)return workerTransport;
+    }
     const t=new AdcTransport(device);
     try{
       await t.lease.open();
@@ -47,35 +158,59 @@ export class AdcTransport {
     const r=await withTimeout(this.flush,2000,'退场 SPI OUT');
     if(r.status!=='ok')throw Error('SPI OUT 退场失败');
   }
-  start(token,{bits,onBlock,onFault}={}){
-    if(this.pending)throw Error('上一轮 ADC USB 读取尚未结束');
+  start(token,{bits,inFlight=1,onBlock,onFault}={}){
+    if(this.pending||(this.token!=null&&!this.done))throw Error('上一轮 ADC USB 读取尚未结束');
+    if(!Number.isInteger(inFlight)||inFlight<1||inFlight>ADC_MAX_INFLIGHT)throw Error('ADC USB 接收深度必须为 1–32');
     this.token=token;this.expectedBits=bits;this.onBlock=onBlock;this.onFault=onFault;
     this.done=false;this.error=null;this.seq=0;this.index=0;this.rate=null;
+    this.inFlight=inFlight;this.usbFailed=false;this.discard=false;
     this._launch();
   }
-  _launch(){this.pending=this._pump().catch(e=>{this.error??=e;this.onFault?.(e);}).finally(()=>{this.pending=null;});}
+  _fault(e){if(!this.error){this.error=e;try{this.onFault?.(e);}catch{ /* Keep draining native IN requests. */ }}}
+  _launch(){this.pending=this._pump().catch(e=>this._fault(e)).finally(()=>{this.pending=null;});}
+  _read(){
+    // Attach rejection handlers at submission, including requests completed out
+    // of order. Process results in submission order, never Promise.race order.
+    try{return Promise.resolve(this.device.transferIn(11,ADC_BLOCK_BYTES)).then(result=>({result}),error=>({error}));}
+    catch(error){return Promise.resolve({error});}
+  }
   async _pump(){
-    while(!this.done){
-      const r=await this.device.transferIn(11,ADC_BLOCK_BYTES);
-      if(r.status!=='ok'||!r.data?.byteLength)throw Error(`ADC USB 读取失败：${r.status}`);
+    const queue=Array.from({length:this.inFlight},()=>this._read());
+    let ends=0;
+    while(queue.length){
+      const {result:r,error}=await queue.shift();
+      if(error||r.status!=='ok'||!r.data?.byteLength){
+        this.usbFailed=true;this._fault(error||Error(`ADC USB 读取失败：${r.status}`));
+        continue; // Retire other native requests before relinquishing ownership.
+      }
+      let p,valid=false;
       try{
-        const p=decodeAdcPacket(new Uint8Array(r.data.buffer,r.data.byteOffset,r.data.byteLength),this.token);
+        p=decodeAdcPacket(new Uint8Array(r.data.buffer,r.data.byteOffset,r.data.byteLength),this.token);
+        if(p.done)ends++;
+        if(ends&&!p.done)throw Error('ADC END 后仍收到样本');
         if(p.bits!==this.expectedBits || p.seq!==this.seq || p.first!==this.index ||
           (this.rate!==null&&p.rate!==this.rate))throw Error('ADC DMA 数据块不连续或配置变化');
         this.seq=(this.seq+1)>>>0;this.index=(this.index+p.codes.length)>>>0;
         if(p.codes.length)this.rate=p.rate;
-        this.done=p.done;
-        if(p.fault)throw Error(`ADC 已停止：${p.fault===5?'DMA 缓冲满':`硬件故障 ${p.fault}`}，未静默覆盖`);
-        if(!this.error&&p.codes.length)this.onBlock?.(p);
+        valid=true;
       }catch(e){
-        if(!this.error){this.error=e;this.onFault?.(e);}
-        // Continue reading to END, including after a malformed block. Match END by
-        // token even after a sequence fault; never abandon a native USB request.
-        try{const p=decodeAdcPacket(new Uint8Array(r.data.buffer,r.data.byteOffset,r.data.byteLength),this.token);if(p.done)this.done=true;}catch{}
+        this.discard=true;this._fault(e);
       }
+      // Refill before history/UI callbacks. Stop refilling at the first matched
+      // END; firmware sends one sequenced END per negotiated native reader.
+      if(!ends&&!this.usbFailed)queue.push(this._read());
+      if(valid&&p.codes.length&&!this.discard){
+        try{this.onBlock?.(p);}catch(e){this.discard=true;this._fault(e);}
+      }
+      // A hardware fault does not invalidate sequenced tail samples. Deliver
+      // them first and continue retaining subsequent valid DATA until END.
+      if(valid&&p.fault)this._fault(Error(`ADC 已停止：${p.fault===5?'DMA 缓冲满':`硬件故障 ${p.fault}`}，未静默覆盖`));
     }
+    this.done=ends===this.inFlight;
+    if(!this.done)throw Error('ADC USB 请求退场后未收到完整 END');
   }
   async drain(){
+    if(this.usbFailed&&!this.pending)throw this.error;
     if(!this.pending&&!this.done){this.onBlock=null;this._launch();}
     if(this.pending)await withTimeout(this.pending,3000,'等待 ADC END');
     if(!this.done)throw Error('ADC 数据流停止未确认');

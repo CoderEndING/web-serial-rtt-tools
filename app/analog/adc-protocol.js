@@ -1,5 +1,5 @@
 /** Shared ADC DMA HID ABI; pure parsing, no session or resource policy. */
-export const ADC_ACT=Object.freeze({CAPS:9,OPEN:10,END:11,CLOSE:12,START:13,STATUS:14});
+export const ADC_ACT=Object.freeze({CAPS:9,OPEN:10,END:11,CLOSE:12,START:13,STATUS:14,PIPELINE:15});
 
 export function decodeReply(r,action){
   if(!(r instanceof Uint8Array)||r.length<7||r[0]<8||r[0]>64||r[0]>r.length+1||r[1]!==0x38||r[2]!==action)throw Error('ADC DMA 固件响应无效');

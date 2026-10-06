@@ -25,7 +25,16 @@ const CONT_RATES = ints(arg('continuous-rates', '500000,1000000,2000000'));
 const MATRIX_ROUNDS = Number(arg('matrix-rounds', '2'));
 const FINITE_COUNT = Number(arg('finite-count', '2048'));
 const WRAP_COUNT = Number(arg('wrap-count', '8192'));
+const WRAP_RATE = Number(arg('wrap-rate', RATES.includes(100000)?'100000':String(RATES.at(-1))));
 const CONTINUOUS_MS = Number(arg('continuous-ms', '1500'));
+const CONTINUOUS_ROUNDS = Number(arg('continuous-rounds', '1'));
+const IN_FLIGHT = Number(arg('in-flight', '32'));
+const STALL_MS = Number(arg('stall-ms', '0'));
+const STALL_EVERY_MS = Number(arg('stall-every-ms', '100'));
+const EXPECT_OVERFLOW = process.argv.includes('--expect-overflow');
+const ALLOW_OVERFLOW = EXPECT_OVERFLOW||process.argv.includes('--allow-overflow');
+const SCREENSHOT = arg('screenshot', '');
+let screenshotWritten=false;
 const STATS_STRIDE = 64;
 const APP = process.env.APP || 'http://127.0.0.1:8899/index.html';
 const CDP = process.env.CDP || 'http://127.0.0.1:9333';
@@ -36,7 +45,11 @@ if (!CONT_RATES.length || CONT_RATES.some(x => !Number.isInteger(x) || x < 1 || 
 if (!Number.isInteger(MATRIX_ROUNDS) || MATRIX_ROUNDS < 1 || MATRIX_ROUNDS > 10) throw Error('--matrix-rounds 超出 1..10');
 if (!Number.isInteger(FINITE_COUNT) || FINITE_COUNT < 32 || FINITE_COUNT >= 4095) throw Error('--finite-count 必须为 32..4094');
 if (!Number.isInteger(WRAP_COUNT) || WRAP_COUNT < 4096 || WRAP_COUNT > 0xffffffff) throw Error('--wrap-count 必须至少 4096');
+if (!Number.isInteger(WRAP_RATE)||WRAP_RATE<1||WRAP_RATE>2000000)throw Error('--wrap-rate 超出 1..2000000');
 if (!Number.isInteger(CONTINUOUS_MS) || CONTINUOUS_MS < 250 || CONTINUOUS_MS > 60000) throw Error('--continuous-ms 必须为 250..60000');
+if (!Number.isInteger(CONTINUOUS_ROUNDS) || CONTINUOUS_ROUNDS<1 || CONTINUOUS_ROUNDS>20) throw Error('--continuous-rounds 必须为 1..20');
+if (!Number.isInteger(IN_FLIGHT) || IN_FLIGHT<1 || IN_FLIGHT>32) throw Error('--in-flight 必须为 1..32');
+if (!Number.isFinite(STALL_MS)||STALL_MS<0||STALL_MS>1000||STALL_EVERY_MS<=STALL_MS)throw Error('主线程停顿配置无效');
 
 let pass = 0, fail = 0, caps = null, topError = null, reportWritten = false;
 const rows = [];
@@ -47,9 +60,14 @@ const ok = (condition, label, extra = '') => {
 const cdp = new Cdp(CDP, 180000);
 
 function writeReport(){
-  const result={schema:1,createdAt:new Date().toISOString(),probe:'akaLinkPro/HPM5301 ADC DMA',caps,
+  const result={schema:2,createdAt:new Date().toISOString(),probe:'akaLinkPro/HPM5301 ADC DMA',caps,
     config:{bits:BITS,rates:RATES,matrixRounds:MATRIX_ROUNDS,finiteCount:FINITE_COUNT,wrapCount:WRAP_COUNT,
-      continuousRates:CONT_RATES,continuousMs:CONTINUOUS_MS},summary:{pass,fail,rows:rows.length,error:topError},rows};
+      continuousRates:CONT_RATES,continuousMs:CONTINUOUS_MS,continuousRounds:CONTINUOUS_ROUNDS,
+      wrapRate:WRAP_RATE,inFlight:IN_FLIGHT,stallMs:STALL_MS,stallEveryMs:STALL_EVERY_MS,
+      allowOverflow:ALLOW_OVERFLOW,expectOverflow:EXPECT_OVERFLOW,screenshot:SCREENSHOT||null},
+    summary:{pass,fail,rows:rows.length,error:topError,
+      sustained:rows.filter(r=>r.kind==='continuous'&&r.disposition==='sustained').length,
+      controlledOverflow:rows.filter(r=>r.disposition==='controlled-overflow').length},rows};
   const full=path.resolve(ROOT,OUT);
   fs.mkdirSync(path.dirname(full),{recursive:true});
   fs.writeFileSync(full,JSON.stringify(result,null,2)+'\n');
@@ -100,7 +118,8 @@ async function waitTask(timeoutMs){
 
 async function beginCapture({bits, rate, count}){
   const state = { bits, rate, count, done:false, ok:false, blocks:0, samples:0,
-    min:null, max:null, sum:0, unique:0, rateSet:[], started:0 };
+    min:null, max:null, sum:0, statsSamples:0, unique:0, rateSet:[], started:0,
+    maxCompletionGapMs:0,maxUiBlockGapMs:0,lastWorkerAt:0,lastUiAt:0 };
   const setup = `(()=>{
     const view=window.__tools.analog, session=view.session;
     const state=${JSON.stringify(state)};
@@ -109,6 +128,8 @@ async function beginCapture({bits, rate, count}){
     session.acquire=function(options,onBlock){
       return orig.call(this,options,packet=>{
         state.blocks++; state.samples+=packet.codes.length;
+        if(Number.isFinite(packet.completedAt)){if(state.lastWorkerAt)state.maxCompletionGapMs=Math.max(state.maxCompletionGapMs,packet.completedAt-state.lastWorkerAt);state.lastWorkerAt=packet.completedAt;}
+        if(Number.isFinite(packet.mainReceivedAt)){if(state.lastUiAt)state.maxUiBlockGapMs=Math.max(state.maxUiBlockGapMs,packet.mainReceivedAt-state.lastUiAt);state.lastUiAt=packet.mainReceivedAt;}
         if(!state.rateSet.includes(packet.rate))state.rateSet.push(packet.rate);
         for(let i=0;i<packet.codes.length;i+=${STATS_STRIDE}){
           const value=packet.codes[i];
@@ -118,7 +139,8 @@ async function beginCapture({bits, rate, count}){
         }
         state.unique=unique.size;
         onBlock?.(packet);
-      });
+      }).finally(()=>{state.workerMetrics=session.transport?.metrics||null;
+        if(state.workerMetrics){state.nativePeak=state.workerMetrics.nativePeak;state.nativeReads=state.workerMetrics.nativeReads;state.maxReadAwaitMs=state.workerMetrics.maxReadAwaitMs;state.maxCompletionGapMs=state.workerMetrics.maxCompletionGapMs;}});
     };
     window.__adcHwTaskState=state;
     document.getElementById('an-bits').value=String(${bits});
@@ -155,19 +177,23 @@ async function captureContinuous(bits, rate){
   console.log(`\n持续 DMA: ${bits}-bit @ ${rate} Sa/s, ${CONTINUOUS_MS} ms`);
   const start = `(()=>{
     const view=window.__tools.analog,session=view.session;
-    const state={bits:${bits},rate:${rate},count:0,done:false,ok:false,blocks:0,samples:0,min:null,max:null,sum:0,unique:0,rateSet:[],started:performance.now()};
+    const state={bits:${bits},rate:${rate},count:0,done:false,ok:false,blocks:0,samples:0,min:null,max:null,sum:0,unique:0,rateSet:[],started:performance.now(),stallCount:0,maxCompletionGapMs:0,maxUiBlockGapMs:0,lastWorkerAt:0,lastUiAt:0};
     const orig=session.acquire,unique=new Set();
     session.acquire=function(options,onBlock){return orig.call(this,options,packet=>{
       state.blocks++;state.samples+=packet.codes.length;if(!state.rateSet.includes(packet.rate))state.rateSet.push(packet.rate);
+      if(Number.isFinite(packet.completedAt)){if(state.lastWorkerAt)state.maxCompletionGapMs=Math.max(state.maxCompletionGapMs,packet.completedAt-state.lastWorkerAt);state.lastWorkerAt=packet.completedAt;}
+      if(Number.isFinite(packet.mainReceivedAt)){if(state.lastUiAt)state.maxUiBlockGapMs=Math.max(state.maxUiBlockGapMs,packet.mainReceivedAt-state.lastUiAt);state.lastUiAt=packet.mainReceivedAt;}
       for(let i=0;i<packet.codes.length;i+=${STATS_STRIDE}){const value=packet.codes[i];if(state.min===null||value<state.min)state.min=value;if(value>state.max)state.max=value;state.sum+=value;state.statsSamples=(state.statsSamples||0)+1;if(unique.size<4096)unique.add(value);}
       state.unique=unique.size;onBlock?.(packet);
-    });};
+    }).finally(()=>{state.workerMetrics=session.transport?.metrics||null;
+      if(state.workerMetrics){state.nativePeak=state.workerMetrics.nativePeak;state.nativeReads=state.workerMetrics.nativeReads;state.maxReadAwaitMs=state.workerMetrics.maxReadAwaitMs;state.maxCompletionGapMs=state.workerMetrics.maxCompletionGapMs;}});};
     window.__adcHwTaskState=state;
     document.getElementById('an-bits').value=String(${bits});
     document.getElementById('an-rate').value=String(${rate});
     document.getElementById('an-count').value='0';
+    const stall=${STALL_MS}?setInterval(()=>{if(!state.blocks)return;const end=performance.now()+${STALL_MS};while(performance.now()<end){}state.stallCount++;},${STALL_EVERY_MS}):null;
     window.__adcHwTask=view.acquire(0).then(()=>{state.ok=true;},e=>{state.error=e?.message||String(e);})
-      .finally(()=>{state.done=true;state.elapsedMs=performance.now()-state.started;state.mean=state.statsSamples?state.sum/state.statsSamples:null;session.acquire=orig;});
+      .finally(()=>{if(stall!==null)clearInterval(stall);state.done=true;state.elapsedMs=performance.now()-state.started;state.mean=state.statsSamples?state.sum/state.statsSamples:null;session.acquire=orig;});
     return true;
   })()`;
   await cdp.eval(start, true);
@@ -176,6 +202,11 @@ async function captureContinuous(bits, rate){
     await chooseProbePrompts();
     const current = await cdp.json('window.__adcHwTaskState || null').catch(()=>null);
     if(current?.done)break;
+    if(SCREENSHOT&&!screenshotWritten&&bits===16&&rate===2000000&&current?.samples>2000000){
+      const shot=await cdp.send('Page.captureScreenshot',{format:'png',captureBeyondViewport:false});
+      fs.mkdirSync(path.dirname(path.resolve(ROOT,SCREENSHOT)),{recursive:true});
+      fs.writeFileSync(path.resolve(ROOT,SCREENSHOT),Buffer.from(shot.data,'base64'));screenshotWritten=true;
+    }
     await sleep(75);
   }
   let current = await cdp.json('window.__adcHwTaskState || null');
@@ -193,17 +224,22 @@ async function captureContinuous(bits, rate){
   const controlledOverflow=current.done && /^ADC 已停止：DMA 缓冲满，未静默覆盖$/.test(current.error||'');
   const sustained=current.done && current.ok && !current.error && !current.stopError;
   const disposition=sustained?'sustained':controlledOverflow?'controlled-overflow':'failed';
-  ok((sustained||controlledOverflow)&&!current.stopError,
-    `持续 ${bits}-bit @ ${rate}: ${disposition}${controlledOverflow?'（DMA满后有明确保护停机）':'（无硬件故障）'}`, current.error||current.stopError||'');
+  ok((sustained||(ALLOW_OVERFLOW&&controlledOverflow))&&!current.stopError,
+    `持续 ${bits}-bit @ ${rate}: ${disposition}${controlledOverflow?'（保护停机，不算持续吞吐通过）':'（无溢出）'}`, current.error||current.stopError||'');
   ok(actualRate, `持续 ${bits}-bit @ ${rate}: ADS2 时基 ${current.rateSet.join('/')} Sa/s`);
+  if(EXPECT_OVERFLOW)ok(controlledOverflow,`主动超压 ${bits}-bit @ ${rate}: 明确触发 DMA 满保护`);
   const enoughSamples=controlledOverflow?current.samples>0&&current.blocks>0:
-    current.blocks>=10&&current.samples>=rate*CONTINUOUS_MS/2000;
+    current.blocks>=10&&current.samples>=rate*CONTINUOUS_MS*0.95/1000;
   ok(enoughSamples,
-    `持续 ${bits}-bit @ ${rate}: ${current.blocks} 块 / ${current.samples} 点${controlledOverflow?'（溢出前收到的数据已排空）':''}`);
+    `持续 ${bits}-bit @ ${rate}: ${current.blocks} 块 / ${current.samples} 点`);
   ok(current.statsSamples>0 && current.max !== null && current.max < 2 ** bits,
     `持续 ${bits}-bit @ ${rate}: 抽样码值未超位宽 [${current.min}, ${current.max}]`);
+  const status=await cdp.json('(async()=>{const b=await window.__tools.analog.session.streamCommand(14);const v=new DataView(b.buffer,b.byteOffset,b.byteLength);return {received:v.getUint32(8,true),sent:v.getUint32(12,true),fault:v.getUint32(16,true),owned:b[20],ended:b[22]};})()');
+  ok(status.sent===current.samples && status.received===status.sent,
+    `持续 ${bits}-bit @ ${rate}: 完整尾块 ${current.samples}/${status.sent}/${status.received}（主机/发送/采集）`);
+  ok(status.owned===0 && status.ended===1,`持续 ${bits}-bit @ ${rate}: END 和共享资源退场`);
   rows.push({...current,kind:'continuous',label:`continuous-${bits}-${rate}`,requestedRate:rate,actualRate:current.rateSet[0]??null,
-    disposition,statsStride:STATS_STRIDE,throughputSps:current.elapsedMs?current.samples*1000/current.elapsedMs:null});
+    disposition,firmwareStatus:status,statsStride:STATS_STRIDE,throughputSps:current.elapsedMs?current.samples*1000/current.elapsedMs:null});
 }
 
 try{
@@ -228,6 +264,22 @@ try{
   if(connectError)throw connectError;
   if(!connectValue?.supported)throw Error('探针没有通告高速 ADC DMA 能力：'+JSON.stringify(connectValue));
   caps=await cdp.json('window.__tools.analog.session.caps');
+  await cdp.eval(`
+    window.__tools.analog.session.adcInFlight=${IN_FLIGHT};
+    const {AdcTransport}=await import('./app/analog/transport.js');
+    const originalRead=AdcTransport.prototype._read;
+    AdcTransport.prototype._read=function(){
+      const s=window.__adcHwTaskState,start=performance.now();
+      if(s){s.nativeActive=(s.nativeActive||0)+1;s.nativePeak=Math.max(s.nativePeak||0,s.nativeActive);}
+      return originalRead.call(this).then(result=>{
+        if(s){const now=performance.now();s.nativeActive--;s.nativeReads=(s.nativeReads||0)+1;
+          s.maxReadAwaitMs=Math.max(s.maxReadAwaitMs||0,now-start);
+          if(s.lastCompletionAt)s.maxCompletionGapMs=Math.max(s.maxCompletionGapMs||0,now-s.lastCompletionAt);
+          s.lastCompletionAt=now;}
+        return result;
+      });
+    };
+  `);
   console.log(`ADC 已连接：通道 ${caps.channel} · ${caps.maxRate} Sa/s · ${caps.reference} V · DMA 4096 words`);
 
   const matrix=[];
@@ -241,8 +293,10 @@ try{
     for(const c of order)await captureFinite(c.bits,c.rate,FINITE_COUNT,`有限矩阵 ${round+1}/${MATRIX_ROUNDS}`);
   }
   // Deliberately exceed the 4096-word DMA ring to verify release/rearm across wrap.
-  await captureFinite(BITS.includes(16)?16:BITS.at(-1),RATES.includes(100000)?100000:RATES.at(-1),WRAP_COUNT,'DMA 环回');
-  for(const bits of BITS)for(const rate of CONT_RATES)await captureContinuous(bits,rate);
+  await captureFinite(BITS.includes(16)?16:BITS.at(-1),WRAP_RATE,WRAP_COUNT,'DMA 环回');
+  for(let round=0;round<CONTINUOUS_ROUNDS;round++)for(const bits of BITS)for(const rate of CONT_RATES){
+    console.log(`持续轮次 ${round+1}/${CONTINUOUS_ROUNDS}`);await captureContinuous(bits,rate);
+  }
 
   writeReport();
   console.log(`\nADC hardware matrix: ${pass} passed / ${fail} failed; report ${OUT}`);

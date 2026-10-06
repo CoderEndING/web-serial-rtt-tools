@@ -4,7 +4,7 @@ import { waitMs } from '../core/pace.js';
 import { withTimeout } from '../rtt/dap-webusb.js';
 import { DacClient } from './dac-protocol.js';
 import { dacTable } from './model.js';
-import { AdcTransport } from './transport.js';
+import { AdcTransport, ADC_MAX_INFLIGHT } from './transport.js';
 import { ADC_ACT, decodeReply, streamCaps } from './adc-protocol.js';
 export { decodeReply, streamCaps } from './adc-protocol.js';
 export class AnalogSession {
@@ -66,8 +66,19 @@ export class AnalogSession {
       if(caps.flags&2)throw Error('SPI/QSPI 尚未退场，不能接管共享缓冲');
       if(caps.flags&1)await this.transport.retireSpiOut();
       if(signal.aborted)return;
-      const args=new Uint8Array(9),v=new DataView(args.buffer);args[0]=bits;
+      const requestedDepth=this.adcInFlight??32;
+      if(!Number.isInteger(requestedDepth)||requestedDepth<1||requestedDepth>ADC_MAX_INFLIGHT)
+        throw Error('ADC USB 接收深度必须为 1–32');
+      let maxDepth=1;
+      try{
+        const p=await this.streamCommand(ADC_ACT.PIPELINE);
+        if(p.length!==2||p[0]!==1||p[1]<1||p[1]>ADC_MAX_INFLIGHT)throw Error('ADC USB 流水线能力无效');
+        maxDepth=p[1];
+      }catch(e){if(![1,4].includes(e.code))throw e;} // Legacy firmware rejects this additive query.
+      this._requestedInFlight=Math.min(requestedDepth,maxDepth);
+      const args=new Uint8Array(this._requestedInFlight>1?10:9),v=new DataView(args.buffer);args[0]=bits;
       v.setUint32(1,rate,true);v.setUint32(5,count,true);
+      if(args.length===10)args[9]=this._requestedInFlight;
       this._openUncertain=true;
       let b;
       try{b=await this.streamCommand(ADC_ACT.OPEN,args);}
@@ -76,7 +87,7 @@ export class AnalogSession {
       this._streamToken=new DataView(b.buffer,b.byteOffset,b.byteLength).getUint32(0,true);
       this._openUncertain=false;
       this._adcStopError=null;
-      this.transport.start(this._streamToken,{bits,onBlock,onFault:abort});
+      this.transport.start(this._streamToken,{bits,inFlight:this._requestedInFlight,onBlock,onFault:abort});
       signal.addEventListener('abort',abort,{once:true});
       if(signal.aborted)abort();else await this.streamCommand(ADC_ACT.START);
       await this.transport.pending;
@@ -106,7 +117,7 @@ export class AnalogSession {
       if(b.length!==24)throw Error('ADC 状态应答长度错误');
       if(b[20]){
         this._streamToken=new DataView(b.buffer,b.byteOffset,b.byteLength).getUint32(0,true);
-        this.transport.start(this._streamToken,{bits:this._requestedBits});
+        this.transport.start(this._streamToken,{bits:this._requestedBits,inFlight:this._requestedInFlight});
       }
       this._openUncertain=false;
     }

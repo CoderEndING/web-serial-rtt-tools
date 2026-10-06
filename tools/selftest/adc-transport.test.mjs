@@ -15,11 +15,36 @@ const t=new AdcTransport({vendorId:1,productId:2,async transferIn(ep,len){
 }});
 const blocks=[];queue=[packet(1,0,0,[1,2]),packet(1,1,2,[3]),packet(1,2,3)];t.start(1,{bits:16,onBlock:b=>blocks.push(b)});await t.drain();
 assert.equal(t.done,true);assert.equal(maxActive,1);assert.equal(reads,3);assert.equal(t.error,null);assert.equal(blocks.length,2);
-queue=[packet(2,0,0,[1],5),packet(2,1,1,[],5)];t.start(2,{bits:16});await t.drain();assert.match(t.error.message,/缓冲满/);assert.equal(t.done,true);
+const tail=[],order=[];
+queue=[packet(2,0,0,[1],5),packet(2,1,1,[2,3],5),packet(2,2,3,[],5)];
+t.start(2,{bits:16,onBlock:b=>{tail.push(...b.codes);order.push('data');},onFault:()=>order.push('fault')});
+await t.drain();assert.match(t.error.message,/缓冲满/);assert.equal(t.done,true);
+assert.deepEqual(tail,[1,2,3]);assert.deepEqual(order,['data','fault','data']);
 queue=[packet(3,0,0,[1]),packet(3,2,1,[2]),packet(3,3,2)];t.start(3,{bits:16});await t.drain();assert.match(t.error.message,/不连续/);assert.equal(t.done,true);
 queue=[packet(4,0,0)];t.start(4,{bits:16});await t.drain();assert.equal(t.error,null);
 queue=[packet(5,0,0,[1]),packet(5,1,1)];t.start(5,{bits:16,onBlock(){throw Error('view failure');}});await t.drain();assert.match(t.error.message,/view failure/);
 console.log('ADC shared Bulk: compact blocks, strict token/size/config, one native reader, fault/malformed block draining, END/restart PASS');
+let submissions=0,pipelineActive=0,pipelinePeak=0;
+const releases=[],pipelined=new AdcTransport({vendorId:4,productId:5,transferIn(){
+ const index=submissions++;pipelineActive++;pipelinePeak=Math.max(pipelinePeak,pipelineActive);
+ return new Promise(resolve=>{releases[index]=b=>{pipelineActive--;resolve({status:'ok',data:new DataView(b.buffer)});};});
+}});
+const pipedBlocks=[];pipelined.start(6,{bits:16,inFlight:3,onBlock:b=>pipedBlocks.push(...b.codes)});
+assert.equal(submissions,3);
+// Promise completion order may differ from endpoint submission order.
+releases[1](packet(6,1,2,[3]));releases[0](packet(6,0,0,[1,2]));
+await new Promise(resolve=>setImmediate(resolve));assert.equal(submissions,5);
+releases[2](packet(6,2,3));releases[3](packet(6,3,3));
+await new Promise(resolve=>setImmediate(resolve));assert.ok(pipelined.pending);
+await assert.rejects(pipelined.close(),/请求/);releases[4](packet(6,4,3));await pipelined.drain();
+assert.deepEqual(pipedBlocks,[1,2,3]);assert.equal(pipelinePeak,3);assert.equal(pipelineActive,0);
+assert.equal(submissions,5);assert.equal(pipelined.done,true);assert.equal(pipelined.error,null);
+assert.throws(()=>pipelined.start(7,{inFlight:0}),/深度/);
+const unplugged=new AdcTransport({vendorId:6,productId:7,transferIn:()=>Promise.reject(Error('device disconnected'))});
+unplugged.start(8,{bits:16,inFlight:3});await unplugged.pending;
+assert.equal(unplugged.pending,null);assert.equal(unplugged.done,false);await assert.rejects(unplugged.drain(),/disconnected/);
+assert.throws(()=>unplugged.start(9,{bits:16}),/上一轮/);
+console.log('ADC pipeline: FIFO despite out-of-order promises, counted END/close fence, tail delivery, native disconnect retirement PASS');
 let finishOut,outs=0;
 const flushing=new AdcTransport({vendorId:2,productId:3,transferOut(){outs++;return new Promise(resolve=>finishOut=resolve);}});
 const flush=flushing.retireSpiOut();await Promise.resolve();

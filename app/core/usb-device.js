@@ -22,6 +22,7 @@ export class UsbLease {
     this.owner = owner;
     this.timeoutMs = timeoutMs;
     this.claims = new Map();
+    this.externalIfaces = new Set();
   }
   _run(fn){
     const e = this.entry;
@@ -78,6 +79,8 @@ export class UsbLease {
     return this._run(async () => {
       await this._open();
       const e = this.entry;
+      if ([...e.interfaces.get(iface) || []].some(c => c.externalIfaces?.has(iface)))
+        throw new Error(`USB 接口 ${iface} 正由外部工作线程使用`);
       for (const c of e.clients){
         if (c === this) continue;
         for (const eps of c.claims.values()) if (endpoints.some(ep => eps.has(ep)))
@@ -92,14 +95,33 @@ export class UsbLease {
       this.claims.set(iface, new Set(endpoints));
     });
   }
+  /** Reserve an interface in this page while a dedicated worker owns the native USB handle. */
+  claimExternal(iface, endpoints){
+    return this._run(async () => {
+      const e = this.entry;
+      if (e.disconnected) throw new Error('USB 设备已拔出，请重新选择探针');
+      const owners = e.interfaces.get(iface);
+      if (owners?.size) throw new Error(`USB 接口 ${iface} 已被占用`);
+      for (const c of e.clients){
+        if (c === this) continue;
+        for (const eps of c.claims.values()) if (endpoints.some(ep => eps.has(ep)))
+          throw new Error(`USB 端点正在被 ${c.owner} 使用`);
+      }
+      e.clients.add(this); this.abandoned = false;
+      e.interfaces.set(iface, new Set([this]));
+      this.claims.set(iface, new Set(endpoints));
+      this.externalIfaces.add(iface);
+    });
+  }
   async _release(iface){
     const owners = this.entry.interfaces.get(iface);
     if (!owners?.has(this)) return;
-    if (owners.size === 1 && this.device.opened)
+    if (owners.size === 1 && this.device.opened && !this.externalIfaces.has(iface))
       await this._io(() => this.device.releaseInterface(iface));
     owners.delete(this);
     if (!owners.size) this.entry.interfaces.delete(iface);
     this.claims.delete(iface);
+    this.externalIfaces.delete(iface);
   }
   release(iface){ return this._run(() => this._release(iface)); }
   async _reset(){
@@ -123,7 +145,8 @@ export class UsbLease {
       if (!this.entry.clients.has(this)) return;
       if (dirty || this.entry.fault) await this._reset(); // Failure retains the lease and native requests.
       for (const iface of [...this.claims.keys()]) await this._release(iface);
-      if (this.entry.clients.size <= 1) await this._io(() => this.device.close());
+      if (this.entry.clients.size <= 1 && this.device.opened && !this.externalIfaces.size)
+        await this._io(() => this.device.close());
       this.entry.clients.delete(this);
     });
   }
