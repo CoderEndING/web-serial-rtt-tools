@@ -201,6 +201,28 @@ export class SymTab {
     try { return this.elf?.bytesAt?.(addr >>> 0, len >>> 0, { ro: true }) || null; } catch { return null; }
   }
 
+  /**
+   * 这个地址落在**当前 ELF 的已分配段**里吗（`SHF_ALLOC` + 有尺寸）。
+   *
+   * 用途只有一个：判断"上一次会话留下的地址还属不属于当前目标"。载入新 ELF 时，
+   * localStorage 里可能还躺着上一块板子的地址（真机现场：ARM 板留下的 `0x0800_0300`，
+   * 在 HPM 上没映射），自动刷新去读它就会触发 SBA 报错 → 自愈复位 DM → 把用户的目标状态搅掉。
+   * 注意它**只约束自动刷新**：手动输入的地址照样读 —— 外设寄存器、栈、堆都可能不在 ELF 里，
+   * 用"不在 ELF 就拒绝"去挡手动请求会挡住正常用法。
+   */
+  covers(addr){
+    const a = addr >>> 0;
+    let sections = [];
+    try { sections = this.elf?.sections?.() || []; } catch { return true; }   // 拿不到映射就放行（别误伤）
+    if (!sections.length) return true;
+    for (const s of sections){
+      if (!(s.flags & 2) || !s.size) continue;          // SHF_ALLOC 之外不占目标内存
+      const start = s.addr >>> 0;
+      if (a >= start && a < ((start + s.size) >>> 0)) return true;
+    }
+    return false;
+  }
+
   get size(){ return this.all.length; }
   get varCount(){ return this.vars.length; }
 

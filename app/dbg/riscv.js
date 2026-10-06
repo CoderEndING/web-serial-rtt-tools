@@ -663,6 +663,23 @@ export class RiscvDebugSession extends DebugSession {
   async _stepByDhcsr(){ throw new Error('RISC-V 没有 DHCSR —— 单步走 dcsr.step'); }
 
   async run(){
+    /**
+     * 🚨 第一步读 dcsr 是**抽象命令**，要求 hart 真的停着 —— 否则 `cmderr=4`，而且那条
+     *    cmderr 是 sticky 的，会把之后每一条抽象命令都带崩。真机现场（用户路径
+     *    b main → 复位并停 → c）报的就是 `抽象命令失败（读寄存器 0x7b0）：cmderr=4`。
+     *
+     *    而 `this.halted` 只是**缓存**：自愈（复位 DM）、外部复位、别处一次 resume 都可能
+     *    已经把核放跑。所以先按 **dmstatus 现场核一遍**（与 `readReg()` 同一条纪律）：
+     *    核已经在跑 ⇒ 根本不该去读 dcsr（读也读不到，"清 step"此时也没意义），
+     *    纠正缓存 + 补一次 resumereq（幂等）就收工，绝不把一条假的错误推给用户。
+     */
+    const live = await this._pollHalted().catch(() => null);
+    if (live === false){
+      if (this.halted) this._log('继续：目标其实在跑（dmstatus 说没停）—— 只纠正状态，不下发抽象命令', 'warn');
+      await this.dm.dmiWrite(0x10, this.dm._ctl(0, DMCONTROL.resumereq));
+      this.halted = false;
+      return;
+    }
     const d = (await this.dm.readReg(REGNO.DCSR)) >>> 0;
     if (d & DCSR_STEP) await this.dm.writeReg(REGNO.DCSR, (d & ~DCSR_STEP) >>> 0);   // 别带着 step 跑
     await this.dm.dmiWrite(0x10, this.dm._ctl(0, DMCONTROL.resumereq));
@@ -686,6 +703,7 @@ export class RiscvDebugSession extends DebugSession {
    */
   async step(){
     if (!this.halted) throw new Error('目标在运行 —— 先「暂停」再单步');
+    await this._ensureHalted('单步');   // 缓存说停着也得现场核一遍：抽象命令要求 hart 真的停着
     const pc = (await this.dm.readReg(REGNO.PC)) >>> 0;
     await this._withBpCleared(pc, async () => {
       const d = (await this.dm.readReg(REGNO.DCSR)) >>> 0;

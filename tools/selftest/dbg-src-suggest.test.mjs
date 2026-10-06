@@ -99,5 +99,28 @@ import { SymTab } from '../../app/dbg/symbols.js';
   assert.equal(s2.count, 1, '光文件名（basename 命中）也要放行');
 }
 
+// ---------- ⑦ `SymTab.covers()`：自动刷新不许碰"不属于当前目标"的陈旧地址
+/**
+ * 真机现场（2026-10，HPM6800EVK + tcpecho）：localStorage 里留着上一块 **ARM** 板的内存页地址
+ * `0x0800_0300`；在 RISC-V 那颗芯片上没映射，自动刷新一读它 → SBA 报错 → 触发自愈（复位 DM）
+ * → 用户紧接着按「继续」就撞上 `抽象命令失败（读寄存器 0x7b0）：cmderr=4`。
+ * `covers()` 就是"这个地址还属于当前目标吗"的判据（只约束自动刷新，手动输入照读）。
+ */
+{
+  const st = SymTab.fromBuffer(readFileSync('tools/fixtures/dwarf/riscv_dwarf5.elf'));
+  const alloc = st.elf.sections().filter(s => (s.flags & 2) && s.size);
+  assert.ok(alloc.length, 'fixture ELF 应当有已分配段');
+  for (const s of alloc){
+    const start = s.addr >>> 0;
+    assert.equal(st.covers(start), true, `段首 ${s.name}@0x${start.toString(16)} 必须在覆盖内`);
+    assert.equal(st.covers((start + s.size - 1) >>> 0), true, `段尾前最后一个字节 ${s.name} 必须在覆盖内`);
+  }
+  assert.equal(st.covers(0x08000300), false, '上一块 ARM 板留下的 0x0800_0300 不在 RISC-V 目标里');
+  assert.equal(st.covers(0x00000000), false, '空地址不算覆盖（别把 addr 忘填当合法）');
+  const gap = (alloc[0].addr >>> 0) - 0x10;
+  assert.equal(st.covers(gap), false, `段外空隙 0x${gap.toString(16)} 不算覆盖`);
+}
+
 console.log('dbg-src-suggest: 首选目录（沿最大分支钻）/ 跨机器簇标记 / 大小写去重 / 真 ELF /'
+  + ' 陈旧地址判据 covers() /'
   + ' 按需索引（不遍历目录）/ FileList 筛选 PASS');

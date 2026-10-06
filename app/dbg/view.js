@@ -28,6 +28,17 @@ import { DebugSession, DEFAULT_CLOCK_KHZ } from './session.js';
 import { RiscvDebugSession } from './riscv.js';
 import { runCmd } from './cmd.js';
 import { SymTab } from './symbols.js';
+/**
+ * 寄存器名**不分大小写**比。
+ *
+ * 🚨 2026-10 真机现场（HPM6800EVK + tcpecho）：ARM 后端推的寄存器名是 `'PC'`/`'LR'`，
+ *    RISC-V 后端推的是小写 `'pc'`（见 riscv.js 的寄存器表）。这里原来是 `r.name === 'PC'`
+ *    精确比，于是 RISC-V 上：① 页头永远显示 `PC 0x00000000`（`|| 0` 兜底）；② **内存跟随
+ *    PC 直接失效**（找不到 PC 就 return）——顺手让内存窗口一直停在上一块板子留下的
+ *    `0x0800_0300` 上，反复读它 → SBA 报错 → 触发自愈（复位 DM）→ 用户紧接着按「继续」
+ *    就撞上 `抽象命令失败（读寄存器 0x7b0）：cmderr=4`。一个大小写，串起两个症状。
+ */
+const regIs = (name, want) => String(name ?? '').toUpperCase() === want;
 import { WatchList, resolveWatch, formatWatchValue, treeRows, summarizeTree, TREE_LIMITS } from './watch.js';
 import { completeLine } from './complete.js';
 import { SourceStore, sourceRootSuggestions } from './source.js';
@@ -43,6 +54,7 @@ export class DbgView {
     this.session = new DebugSession();
     this.bus = null;                       // ProbeBus（由 main.js 注入，用来请别的页签让出探针）
     this.sym = null;
+    this._memAddrStale = false;      // 内存窗口里那个"上一块板子留下的地址"要不要停用自动读
     this.rtt = null;
     this.elfName = '';
     this.mem = new Uint8Array(0);
@@ -237,6 +249,7 @@ export class DbgView {
     if (ma){
       store.bind(ma, 'dbg.memAddr');
       ma.addEventListener('input', () => { this._memEditAddr = null; });      // 手改了地址就别再用"点字节"记下的那个
+      ma.addEventListener('input', () => { this._memAddrStale = false; });    // 手改了地址 = 明确要看那儿，自动读重新放行
       ma.addEventListener('keydown', e => { if (e.key === 'Enter'){ e.preventDefault(); this.readMem(); } });
     }
     const ml = $('d-mem-len');
@@ -531,7 +544,7 @@ export class DbgView {
     await this.session.refresh();
     if (this.session.halted) await this.session.refreshRegs();
     this.renderRegs();
-    await this._readMemLocked({ silent: true });
+    await this._readMemLocked({ silent: true, auto: true });
     this.renderBps();
     this._syncButtons(true);
     const cap = $('d-bp-cap');
@@ -610,7 +623,7 @@ export class DbgView {
       row.classList.toggle('chg', !!r.changed);
       if (note){
         let extra = '';
-        if (r.name === 'PC' || r.name === 'LR'){
+        if (regIs(r.name, 'PC') || regIs(r.name, 'LR')){
           const f = this.sym?.funcAt?.(r.value & 0xfffffffe);
           const loc = this.sym?.locText?.(r.value & 0xfffffffe) || '';
           if (f) extra = `→ ${f.name}+0x${f.off.toString(16)}${f.exact ? '' : '(?)'}${loc ? '  ' + loc : ''}`;
@@ -624,7 +637,7 @@ export class DbgView {
     });
     const pcRow = $('d-pc');
     if (pcRow){
-      const pc = list.find(r => r.name === 'PC')?.value || 0;
+      const pc = list.find(r => regIs(r.name, 'PC'))?.value || 0;
       const f = this.sym?.funcAt?.(pc & 0xfffffffe);
       pcRow.textContent = `PC ${hex32(pc)}${f ? ' ' + f.name + '+0x' + f.off.toString(16) : ''}`;
     }
@@ -649,7 +662,7 @@ export class DbgView {
       await this.session.refreshRegs();
       this.renderRegs();
       this._out(`${name} ← ${hex32(v)}`, 'ok');
-      if (name === 'PC') await this._followPc();
+      if (regIs(name, 'PC')) await this._followPc();
     });
   }
 
@@ -749,7 +762,13 @@ export class DbgView {
     return await this.session.exclusive(() => this._disconnecting ? false : this._readMemLocked(opts));
   }
 
-  async _readMemLocked({ silent = false } = {}){
+  async _readMemLocked({ silent = false, auto = false } = {}){
+    if (!auto) this._memAddrStale = false;      // 明确要读（按钮/回车）就一律放行
+    if (auto && this._memAddrStale){
+      this.mem = new Uint8Array(0);
+      this.renderMem('上限一次会话留下的地址不属于当前 ELF —— 已停用自动读取（改地址或点「读」即可）');
+      return false;
+    }
     const addr = parseNumSafe($('d-mem-addr')?.value) ?? 0;
     let len = parseNumSafe($('d-mem-len')?.value) ?? 128;
     if (len < 1) len = 1;
@@ -842,7 +861,7 @@ export class DbgView {
       const back = await this.session.memRead(addr, bytes.length);
       const same = back.length === bytes.length && back.every((b, i) => b === bytes[i]);
       this._out(`写 ${hex32(addr)} ← ${[...bytes].map(b => b.toString(16).padStart(2, '0')).join(' ')}${same ? '（回读一致）' : '（⚠ 回读不一致）'}`, same ? 'ok' : 'err');
-      await this._readMemLocked({ silent: true });
+      await this._readMemLocked({ silent: true, auto: true });
     });
   }
 
@@ -850,7 +869,8 @@ export class DbgView {
   async _followPc(){
     const fp = $('d-follow-pc');
     if (!fp?.checked) return;
-    const pc = this.session.regList().find(r => r.name === 'PC')?.value;
+    this._memAddrStale = false;                       // 跟着 PC 走的是当前 ELF 里的地址，重新放行自动读
+    const pc = this.session.regList().find(r => regIs(r.name, 'PC'))?.value;
     if (pc === undefined) return;
     const base = (pc & ~0xf) >>> 0;
     const ma = $('d-mem-addr');
@@ -1082,6 +1102,7 @@ export class DbgView {
       this.sym = st;
       this.session.sym = st;
       this.elfName = name;
+      this._retireStaleMemAddr(st);
       /**
        * 把 ELF 的路径列表交给源码仓：如果已经选过目录，就**按这份列表按需索引**
        * （只对 ELF 引用到的文件做 getFileHandle，不遍历目录树 —— 选 `hpm_sdk` 那种
@@ -1109,6 +1130,24 @@ export class DbgView {
       toast('解析 ELF 失败：' + (e?.message || e), 'err', 6000);
       return null;
     }
+  }
+
+  /**
+   * 载入新 ELF 时"退役"上一块板子留下的内存页地址。
+   *
+   * 🚨 2026-10 真机现场（HPM6800EVK + tcpecho，用户路径 b main → 复位并停 → c）：
+   *    localStorage 里还留着上一块 ARM 板的内存页地址 `0x0800_0300`，在这颗芯片上**没映射**；
+   *    自动刷新一读它 → SBA 报错 → 触发自愈（清位 → 复位 DM）→ 用户紧接着按「继续」，
+   *    抽象命令（读 dcsr）就撞上 `cmderr=4`。所以：**自动刷新只碰当前 ELF 覆盖得到的地址**，
+   *    手动输入的地址一律照读（用户就是想看那儿）。
+   */
+  _retireStaleMemAddr(st){
+    const ma = $('d-mem-addr');
+    if (!ma || typeof st?.covers !== 'function') return;
+    const a = parseNumSafe(ma.value);
+    if (a === null || st.covers(a)){ this._memAddrStale = false; return; }
+    this._memAddrStale = true;
+    this._out(`内存窗口里的 ${hex32(a)} 不属于当前 ELF —— 已停用它的自动读取（要看就改地址，或手动点「读」）`, 'warn');
   }
 
   // ================================================================ SVD 寄存器
