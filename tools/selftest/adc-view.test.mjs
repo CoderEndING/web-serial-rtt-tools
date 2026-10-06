@@ -17,12 +17,26 @@ for(const [,id,body] of html.matchAll(/<select\b[^>]*\bid="(an-[^"]+)"[^>]*>([\s
 }
 elements.get('an-wave').value='sine';
 let trace=false,coordinates=[];
-const context={fillRect(){},clearRect(){},beginPath(){},stroke(){},setLineDash(){},fillText(){},moveTo(x,y){if(trace)coordinates.push([x,y]);},lineTo(x,y){if(trace)coordinates.push([x,y]);},set strokeStyle(v){trace=v==='#ffd15c';}};
+/**
+ * 假 canvas 的 2D 上下文要跟得上 view.js 真正用到的 API：`canvasMetrics()` 会
+ * 读 `window.devicePixelRatio` 并调 `setTransform()`（a715b45 起），少一个就报
+ * "window is not defined / setTransform is not a function"，整条离线回归就断在这一条上。
+ */
+const context={fillRect(){},clearRect(){},beginPath(){},stroke(){},setLineDash(){},fillText(){},setTransform(){},moveTo(x,y){if(trace)coordinates.push([x,y]);},lineTo(x,y){if(trace)coordinates.push([x,y]);},set strokeStyle(v){trace=v==='#ffd15c';}};
 for(const id of ['an-adc-canvas','an-dac-canvas'])elements.get(id).getContext=()=>context;
 const makeClassList=()=>({values:new Set(),toggle(name,on){on?this.values.add(name):this.values.delete(name);}});
 const tabs=['adc','dac'].map(name=>({dataset:{anTab:name},classList:makeClassList(),attrs:{},setAttribute(k,v){this.attrs[k]=v;},addEventListener(event,fn){this.handlers??={};this.handlers[event]=fn;},focus(){}}));
 const panels=['adc','dac'].map(name=>({dataset:{anPage:name},classList:makeClassList(),hidden:false}));
 globalThis.document={getElementById(id){assert.ok(elements.has(id),`missing ${id}`);return elements.get(id);},querySelectorAll(selector){return selector==='#an-dock-tabs [data-an-tab]'?tabs:selector==='#tab-analog [data-an-page]'?panels:[];}};
+/**
+ * 浏览器 API 的桩（Node 里没有，浏览器里当然有）。a715b45 给 AnalogView 加了
+ * `getComputedStyle` 取等宽字体、`ResizeObserver` 跟着容器量画布、`canvasMetrics()` 读
+ * `devicePixelRatio` —— 这些没跟着补，`make test-offline` 就断在这一条上。
+ */
+globalThis.window={devicePixelRatio:1};
+globalThis.getComputedStyle=()=>({getPropertyValue:()=>'Menlo, monospace'});
+globalThis.ResizeObserver=class{constructor(fn){this.fn=fn;}observe(){}unobserve(){}disconnect(){}};
+globalThis.requestAnimationFrame=()=>1;   // 用例自己调 renderAdc()，这里不必真触发回调
 const view=new AnalogView();view.init();assert.equal(view.wave.length,100,'preview is the same complete-cycle LUT as output');
 assert.equal(view.page,'adc');assert.equal(tabs[0].attrs['aria-selected'],'true');assert.equal(panels[1].hidden,true);
 tabs[0].handlers.keydown({key:'ArrowRight',preventDefault(){}});assert.equal(view.page,'dac');assert.equal(tabs[1].attrs['aria-selected'],'true');assert.equal(panels[0].hidden,true);
