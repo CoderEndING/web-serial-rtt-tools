@@ -75,11 +75,14 @@ export class SpiBusView {
 
     // 下拉：SCLK / CS 策略 / 辅助脚
     for (const c of P.SCLK_CHOICES) $('sp-sclk').appendChild(new Option(c.label, String(c.hz)));
-    for (const c of P.CS_POLICY) $('sp-cs').appendChild(new Option(c.label, String(c.v)));
+    for (const c of P.CS_POLICY){
+      const option = new Option(c.short, String(c.v)); option.title = c.label; $('sp-cs').appendChild(option);
+    }
     for (const p of P.PADS){
-      const label = p.j3 ? `${p.name}（${p.j3}）` : p.name;
+      const label = p.j3 ? `${p.name} · ${p.j3.split('（')[0]}` : p.name;
       for (const id of ['sp-pad-dc', 'sp-pad-rst', 'sp-pad-bl']){
         const o = new Option(label, String(p.i));
+        o.title = `${p.name} ${p.j3}`;
         o.dataset.pad = String(p.i);
         const sel = $(id);
         if (sel) sel.appendChild(o);        // ⚠️ 混版（旧 index.html + 新 js）时可能没这个元素，别让初始化挂掉
@@ -94,8 +97,8 @@ export class SpiBusView {
     }
     this.refreshPads();
 
-    // 通用命令表（10 行，一行一条 XFER）
-    this.buildCmdRows(10);
+    // Start compact; adding a row preserves existing values/results and send order.
+    this.buildCmdRows(3);
 
     // flash 卡的下拉与语法速查
     for (const m of FL.READ_MODES) $('sp-fl-mode').appendChild(new Option(m.name, String(m.v)));
@@ -151,6 +154,7 @@ export class SpiBusView {
     // 通用命令表
     $('sp-cmd-send').addEventListener('click', () => this.cmdSendAll());
     $('sp-cmd-clear').addEventListener('click', () => this.cmdClearResults());
+    $('sp-cmd-add').addEventListener('click', () => this.buildCmdRows(1, { append:true }));
     $('sp-cmd-body').addEventListener('keydown', e => {
       // 表里敲回车 = 发送全部（比在几十个格子间找按钮顺手）
       if (e.key === 'Enter' && !e.shiftKey){ e.preventDefault(); this.cmdSendAll(); }
@@ -591,26 +595,28 @@ export class SpiBusView {
   // ==================================================================== 通用命令表
 
   /**
-   * 建 10 行命令表。每行的输入框用 `data-f` 标记字段（不给几十个元素起 id 了），
+   * 命令表按需增加行。每行的输入框用 `data-f` 标记字段，
    * 读的时候按行遍历 —— 行的顺序就是发送顺序。
    */
-  buildCmdRows(n){
+  buildCmdRows(n, { append = false } = {}){
     const body = $('sp-cmd-body');
+    if (!append) body.replaceChildren();
+    const start = body.children.length;
+    n = Math.max(0, Math.min(n, 24 - start));
     const cell = f => `<td><input data-f="${f}" class="cell"></td>`;
-    body.innerHTML = Array.from({ length: n }, (_, i) => `<tr data-row="${i + 1}">
-      <td class="idx">${i + 1}</td>
+    body.insertAdjacentHTML('beforeend', Array.from({ length: n }, (_, i) => `<tr data-row="${start + i + 1}">
+      <td class="idx">${start + i + 1}</td>
       ${cell('cmd')}${cell('lines')}${cell('addrLen')}${cell('addr')}${cell('dummy')}${cell('rx')}
-      <td><input data-f="tx" class="cell txcell" placeholder="如 AA BB" title="这条命令要发出去的数据（十六进制）。留空 = 只发 cmd / 地址相位"></td>
-      <td class="res" data-f="res"></td></tr>`).join('');
+      <td><input data-f="tx" class="cell txcell" placeholder="${start + i === 0 ? '如 AA BB' : ''}" title="这条命令要发出去的数据（十六进制）。留空 = 只发 cmd / 地址相位"></td>
+      <td class="res" data-f="res"></td></tr>`).join(''));
     // 线数是 1/2/4 三选一，用下拉比手输靠谱
-    for (const tr of body.querySelectorAll('tr')){
-      const inp = tr.querySelector('[data-f="lines"]');
+    for (const inp of body.querySelectorAll('input[data-f="lines"]')){
       const sel = document.createElement('select');
       sel.dataset.f = 'lines'; sel.className = 'cell';
       for (const v of [1, 2, 4]) sel.appendChild(new Option(String(v), String(v)));
       inp.replaceWith(sel);
     }
-    this.cmdClearResults();
+    $('sp-cmd-add').disabled = body.children.length >= 24;
   }
 
   /** 读一行 → XFER 帧；空行（所有字段都空）返回 null */
@@ -1102,9 +1108,9 @@ export class SpiBusView {
       const vr = await this.flRead(data.length, { quiet: true });
       const same = bytesEqual(vr.bytes, data);
       s.log(same ? 'g' : 'e', `写 + 校验：${data.length} B · ${dt.toFixed(0)} ms · ${rate(data.length, dt)} · ` +
-        (same ? '回读一致 ✔' : `回读**不一致**（前 16 B：${hexDump(vr.bytes.subarray(0, 16))}）`), this.tag);
+        (same ? '回读一致 ✔' : `回读不一致（前 16 B：${hexDump(vr.bytes.subarray(0, 16))}）`), this.tag);
       if (!same) s.log('w', `不一致的常见原因：` +
-        `① **读模式的线数 / dummy 与接线或器件不匹配**（当前 ${this.flMode().name}、dummy ${this.flDummy()}）—— ` +
+        `① 读模式的线数 / dummy 与接线或器件不匹配（当前 ${this.flMode().name}、dummy ${this.flDummy()}）—— ` +
         `四线档要 IO2/IO3 都接；dual 只用 IO0/IO1 能用，但 dummy 随器件不同（同一颗兼容片实测 0x3B 要 dummy=2）；` +
         `② 页间等 tPP 太短（现在 ${tpp} ms，试着加大）；③ 没先擦除（NOR 只能 1→0）；④ 地址写到了别处`, this.tag);
       this.flOut(`写 + 校验  ${data.length} B @0x${addr.toString(16)}\n${pages} 页 · ${dt.toFixed(0)} ms · ${rate(data.length, dt)}\n回读${same ? '一致 ✔' : '不一致 ✘'}` +

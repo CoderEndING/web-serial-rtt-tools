@@ -413,7 +413,7 @@ export class SpiSession {
     const dz = this.stream.takeDesync();
     if (dz){
       this.log('e', `数据流错位：${dz.why} —— 丢弃了 ${dz.dropped} B 缓冲。` +
-        `同一批里后面的应答也会跟着丢，所以接下来可能出现**一串"应答超时"：那是结果不是原因**（bulk 本身可靠，出现即说明两边对包的理解错位了）`);
+        `同一批里后面的应答也会跟着丢，所以接下来可能出现一串"应答超时"：那是结果不是原因（bulk 本身可靠，出现即说明两边对包的理解错位了）`);
     }
     for (const pkt of pkts){
       const r = P.parseRsp(pkt);

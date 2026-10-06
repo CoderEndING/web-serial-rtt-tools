@@ -463,7 +463,7 @@ export class DbgView {
     await this.session.exclusive(() => this.refreshAll());
     this._syncButtons(true);
     this.renderBps();
-    this._out(`目标${this.session.halted ? '处于**停止**状态' : '**正在运行**'}`, 'dim');
+    this._out(`目标${this.session.halted ? '处于停止状态' : '正在运行'}`, 'dim');
     if ($('d-rtt-on')?.checked) this.rttStart().catch(() => {});
     else if (!this.session.halted) this._startWatch();
     return true;

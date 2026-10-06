@@ -5,6 +5,8 @@
  */
 import { installProbeManager } from './core/probe-users.js';
 import { initTabs } from './ui/tabs.js';
+import { initProbeStatus } from './ui/probe-status.js';
+import { initEventLogs } from './ui/event-logs.js';
 import { SerialSession } from './serial/session.js';
 import { Assistant } from './serial/assistant.js';
 import { TerminalView } from './serial/terminal.js';
@@ -52,6 +54,8 @@ const analog = new AnalogView();
 const probeBus = new ProbeBus('page');
 const tools = { session, assistant, terminal, rtt, flash, gen, hid, stream, scope, spi, panel, dbg, i2c, analog, spiSession, probeBus, summary, errors };
 const probeManager = installProbeManager(tools, { bus: probeBus });
+initProbeStatus(tools);
+initEventLogs();
 window.__tools = tools;
 
 assistant.init();
@@ -150,7 +154,7 @@ document.body.appendChild(box);
   const stamp = document.createElement('span');
   stamp.id = 'build-stamp';
   stamp.title = '当前页面加载的代码版本（GitHub Pages 有 10 分钟 HTTP 缓存：推完修复要硬刷新才生效）';
-  stamp.style.cssText = 'margin-left:10px;opacity:.7;font-size:12px';
+  stamp.className = 'build-stamp';
   stamp.textContent = BUILD.split(' ')[0] + ' 版';
   (document.querySelector('.topright') || document.querySelector('header') || document.body).appendChild(stamp);
   (async () => {

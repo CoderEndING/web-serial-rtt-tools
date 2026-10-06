@@ -639,13 +639,13 @@ export class FlashView {
     if (sysMem){
       const vtor = await this.probe.readMem(0xE000ED08, 4).catch(() => null);
       const v = vtor ? (vtor[0] | (vtor[1] << 8) | (vtor[2] << 16) | (vtor[3] << 24)) >>> 0 : null;
-      this._log('⚠⚠ 复位后内核跑的是**系统存储区的 ROM bootloader**，不是刚烧进去的固件 —— ' +
+      this._log('⚠⚠ 复位后内核跑的是系统存储区的 ROM bootloader，不是刚烧进去的固件 —— ' +
         '现象就是"提示烧录成功、板子却一动不动"（RTT 不来、波形不动都是这么来的）。');
-      this._log('   启动模式落在了**系统存储器**（BOOT0=1 且 BOOT1=0）。两种常见情况：' +
-        '① **板子没接自己的电源**，BOOT0 悬空被读成高电平（本机实测就是这一条：只靠探针供电时必然这样）；' +
+      this._log('   启动模式落在了系统存储器（BOOT0=1 且 BOOT1=0）。两种常见情况：' +
+        '① 板子没接自己的电源，BOOT0 悬空被读成高电平（本机实测就是这一条：只靠探针供电时必然这样）；' +
         '② 板上 BOOT0 跳线/电阻真的把它拉高了。' +
         (v != null ? `　现场证据：VTOR=0x${v.toString(16)}（应指向 flash 的 0x${(algo.flash_start >>> 0).toString(16)} 向量表）` : ''));
-      this._log('   怎么办：**先确认板子接了自己的电源**，再上电/按复位试一次；' +
+      this._log('   怎么办：先确认板子接了自己的电源，再上电/按复位试一次；' +
         '如果还进 ROM，就把 BOOT0 跳到 0（或接地）后上电。烧录本身没问题，不需要重烧。');
     }
   }
@@ -883,7 +883,7 @@ export class FlashView {
         try { await this.probe?.reopen?.(); } catch (err){ this._log('   （重开失败：' + (err?.message || err) + '，建议拔插一次探针）'); }
       }
       throw new Error(`${e?.message || e}　—— 已尝试把目标复位回可用状态${wedge ? '，并重开了 USB 会话' : ''}；` +
-        '**直接再点一次「烧录」通常就过**（这条 JTAG/SBA 通路偶发丢拍）；' +
+        '直接再点一次「烧录」通常就过（这条 JTAG/SBA 通路偶发丢拍）；' +
         '连点两次都不过就先给板子断电重上电、并确认没有别的页签占着探针');
     }
   }

@@ -249,7 +249,7 @@ export class I2cSession {
       if (this.failStreak >= LOST_AFTER && !this.lost){
         this.lost = true;
         this.stopPoll();
-        this.log('e', `连续 ${this.failStreak} 次没响应 —— 探针可能已失联：先点「重连」，还不行就**拔插一次 USB**（已知现象，见 web-handoff §10）`);
+        this.log('e', `连续 ${this.failStreak} 次没响应 —— 探针可能已失联：先点「重连」，还不行就拔插一次 USB（已知现象，见 web-handoff §10）`);
         this._setState('探针失联：重连 / 拔插 USB', 'err');
       }
       throw e;
@@ -518,7 +518,7 @@ export class I2cSession {
     const addrs = P.scanBitmapToAddrs(data);
     this.log(addrs.length ? 'ok' : 'warn', addrs.length
       ? `扫描完成（${ms.toFixed(0)} ms）：` + addrs.map(a => `${P.addr7(a)}${P.guessDevice(a) ? '(' + P.guessDevice(a) + ')' : ''}`).join(' · ')
-      : `扫描完成（${ms.toFixed(0)} ms）：总线上**没有任何器件应答** —— 先跑「接线自检(PINTEST)」，再查供电/上拉/地址`);
+      : `扫描完成（${ms.toFixed(0)} ms）：总线上没有任何器件应答 —— 先跑「接线自检(PINTEST)」，再查供电/上拉/地址`);
     await this.readStatus({ quiet: true });
     return { addrs, ms };
   }
@@ -536,7 +536,7 @@ export class I2cSession {
       `接线自检：空闲 SDA=${v.idleSda} SCL=${v.idleScl} · 开内部上拉后 SDA=${v.pullupSda} SCL=${v.pullupScl} · ` +
       `事务中曾拉低 SCL=${v.droveScl} SDA=${v.droveSda}` +
       (v.problems.length ? ` · 问题：${v.problems.join('；')}` : ''));
-    if (v.bridgeOk) this.log('dim', 'bit16=1 且问题位图=0 ⇒ **桥这一侧没问题**，没 ACK 就往器件侧查（接线/供电/地址/上拉）');
+    if (v.bridgeOk) this.log('dim', 'bit16=1 且问题位图=0 ⇒ 桥这一侧没问题，没 ACK 就往器件侧查（接线/供电/地址/上拉）');
     this._emit('pintest', v);
     return v;
   }

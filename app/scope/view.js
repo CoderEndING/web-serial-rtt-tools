@@ -346,7 +346,7 @@ export class ScopeView {
       if (!connected){
         this.hid = null;
         this.setStatusText('连接探针失败：' + (lastErr || '浏览器里没有已授权的探针') +
-          ' —— 点「连接探针」在弹出的列表里选 **akaLinkPro**（授权过一次以后就直连，不再弹框）', 'err');
+          ' —— 点「连接探针」在弹出的列表里选 akaLinkPro（授权过一次以后就直连，不再弹框）', 'err');
         return;
       }
       this.hid = hid;
@@ -355,9 +355,9 @@ export class ScopeView {
       catch {
         // 连上了但问不出型号 —— 十有八九选错了设备（触摸板/键盘也有 0xFF00 的 collection）
         info = hid.label || '未知 HID 设备';
-        $('sc-info').textContent = info + '（HID 已连接，但**问不出型号**）';
+        $('sc-info').textContent = info + '（HID 已连接，但问不出型号）';
         this.setStatusText(`连到的 HID 设备是「${info}」，但它不响应探针协议 —— ` +
-          '选错设备了？请点「连接探针」并在弹框里选 **akaLinkPro**', 'err');
+          '选错设备了？请点「连接探针」并在弹框里选 akaLinkPro', 'err');
         return;
       }
       $('sc-info').textContent = info + '（HID 已连接）';
@@ -593,7 +593,7 @@ export class ScopeView {
       : '';
     const benchTxt = this.benchUs
       ? (riscv
-          ? ` · <s>已标定 ${this.benchUs.toFixed(3)} µs</s>（那是 **SWD** 路径的数字，RISC-V 下不适用）`
+          ? ` · <s>已标定 ${this.benchUs.toFixed(3)} µs</s>（那是 SWD 路径的数字，RISC-V 下不适用）`
           : fresh
             ? ` · <b>已标定：读一次 ${this.benchUs.toFixed(3)} µs</b>（上限 ${Math.round(1e3 / this.benchUs)} kHz，建议周期 ≥ ${this.recPeriodUsFor(estUs)} µs）`
             : ` · <s>已标定 ${this.benchUs.toFixed(3)} µs</s> <b>已失效</b>（那是「${(this._benchKey || {}).vars} @${(this._benchKey || {}).clock} kHz」测的，${this.benchKeyWhy()} —— 重新点「标定真实速率」）`)
@@ -616,7 +616,7 @@ export class ScopeView {
             + `（估算 = 1 次 DMI 扫描/字 + 每 span 收尾查错 ≈${P.RISCV_COST.perSpanUs} µs，锚点是上面两档实测）`) +
         '（零丢建议周期 ≥ 1.5× 这个值）'
       : (useFast
-          ? `单字 span 走固件**流水快路径**：实测 ≈${headlineUs.toFixed(2)} µs/样本 → ≈${Math.round(headlineHz / 1000)} kHz` +
+          ? `单字 span 走固件流水快路径：实测 ≈${headlineUs.toFixed(2)} µs/样本 → ≈${Math.round(headlineHz / 1000)} kHz` +
             `（保守模型算 ${plan.estUs.toFixed(1)} µs —— 每 span 固定 3 次传输 + 每字 1 次 DRW）`
           : `模型估算 ≈${plan.estUs.toFixed(1)} µs/样本 → ≈${khz} kHz` +
             (plan.spans.length === 1 && plan.frameBytes <= 4
@@ -626,7 +626,7 @@ export class ScopeView {
       ? `读计划：${plan.spans.length} 个 span / 帧 ${plan.frameBytes} B · ` + planTxt +
         (!riscv && plan.saved > 0.15 ? `（合并省了 ${(plan.saved * 100).toFixed(0)}%）` : '') +
         benchTxt +
-        '<br>时长 = **目标侧真实时间**，到点自动停（缓冲只是内存上限）' +
+        '<br>时长 = 目标侧真实时间，到点自动停（缓冲只是内存上限）' +
         (slow || (riscv
           ? `（JTAG 下没有"2 µs 下限"那回事：单字实测 ${rv.single} µs，填得比它短就是跳拍丢样本）`
           : '（周期下限 2 µs；周期 < 读一次的耗时就会跳拍丢样本）'))
@@ -1053,7 +1053,7 @@ export class ScopeView {
     this._applyBackendUi();
     if (!first){
       this.setStatusText(`⚠ 后端变成了 ${P.backendName(b)}（${source || '探针回报'}）—— `
-        + `目标类型是**粘的**，探针拉不起来时会自己换另一条路重试`, 'warn');
+        + `目标类型是粘的，探针拉不起来时会自己换另一条路重试`, 'warn');
     }
   }
 
@@ -1234,7 +1234,7 @@ export class ScopeView {
         : `（blob ${blobName}${err ? `，err=${err}` : ''}）`;
       this.setStatusText(`标定：读一次 ${usPerSample.toFixed(3)} µs → 上限 ≈${Math.round(1e3 / usPerSample)} kHz${vsModel}` +
         `${extra}，对「${this._benchKey.vars} @${P.backendName(this._benchKey.backend)}」有效；` +
-        `**建议周期 ≥ ${this.recPeriodUs} µs**（≈${Math.round(1e3 / this.recPeriodUs)} kHz，零丢档）`, 'ok');
+        `建议周期 ≥ ${this.recPeriodUs} µs（≈${Math.round(1e3 / this.recPeriodUs)} kHz，零丢档）`, 'ok');
       this.updatePlan();
     } catch (e){
       this.setStatusText('标定失败：' + (e?.message || e), 'err');

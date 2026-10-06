@@ -150,7 +150,7 @@ export function parseIntelHex(text){
     let sum = 0;
     for (const b of bin) sum = (sum + b) & 0xff;
     if (sum !== 0){
-      throw new Error(`HEX 第 ${li + 1} 行**校验和不对**（所有字节之和应为 0，实得 0x${sum.toString(16).padStart(2, '0')}）` +
+      throw new Error(`HEX 第 ${li + 1} 行校验和不对（所有字节之和应为 0，实得 0x${sum.toString(16).padStart(2, '0')}）` +
         ` —— 文件损坏了，别烧（烧坏的数据回读校验也会"通过"，因为它比的就是这份坏数据）`);
     }
     const addr = ((bin[1] << 8) | bin[2]) >>> 0;

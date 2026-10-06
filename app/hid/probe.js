@@ -434,7 +434,7 @@ export class AkaLinkHid {
     } catch (e){
       this._pending = null;
       throw new Error('HID 发送失败：' + (e?.message || e) +
-        '（探针很可能刚被**复位/拔插**过 —— 点「重连」；还不行就拔插一次探针）');
+        '（探针很可能刚被复位/拔插过 —— 点「重连」；还不行就拔插一次探针）');
     }
   }
 

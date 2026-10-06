@@ -5,7 +5,7 @@
  */
 import { prepareProbeHandoff } from '../core/probe-users.js';
 import { runProbeOperation } from '../core/probe-manager.js';
-import { $, seg, setFlag, setStatus, mhzLabel, ensureSelectOption } from '../ui/dom.js';
+import { $, seg, setStatus, mhzLabel, ensureSelectOption } from '../ui/dom.js';
 import { toast } from '../ui/toast.js';
 import { store } from '../core/store.js';
 import { RxBuffer } from '../core/rxview.js';
@@ -215,7 +215,7 @@ export class RttView {
       const clkLbl = $('r-usb-clock')?.closest('label')?.querySelector('span');
       if (clkLbl) clkLbl.textContent = rv ? 'JTAG TCK' : 'SWD 时钟';
       $('r-usb-clock').title = rv
-        ? 'RISC-V/JTAG 下它是 **JTAG TCK 频率**（DAP_SWJ_Clock），留「自动」即可；'
+        ? 'RISC-V/JTAG 下它是 JTAG TCK 频率（DAP_SWJ_Clock），留「自动」即可；'
           + '注意它与 HID 0x31 action 7 那个 clockHz 字段不是一回事（后者是 DMI idle，必须 0）'
         : 'SWD 时钟：自动 = 从高到低试到通为止';
       $('r-reset').disabled = rv;
@@ -546,7 +546,6 @@ export class RttView {
     this.suppManual = false;
     if (this.suppressed) this._setSuppressed(false);
     this._uiConnected(false);
-    setFlag($('conn-flag'), '未连接');
     setStatus($('r-err'), '已断开');
   }
 
@@ -588,7 +587,6 @@ export class RttView {
     $('r-chlabel').textContent = `下行 ch0${nm ? ' · ' + nm : ''}`;
     const sz = inff.up[0]?.size || 0;
     setStatus($('r-err'), `控制块 0x${found.toString(16)}，上行缓冲 ${sz} B${inff.maxUp > 1 ? `（固件声明 ${inff.maxUp} 个上行通道，本页读 ch0）` : ''}`, 'ok');
-    setFlag($('conn-flag'), `RTT 0x${found.toString(16)}`, 'on');
     this._startPoll(g);
     this._armIdleWatchdog();
   }
@@ -718,7 +716,6 @@ export class RttView {
     this.running = false;
     clearTimeout(this.timer);
     setStatus($('r-err'), '读取失败：' + (e?.message || e), 'err');
-    setFlag($('conn-flag'), 'RTT 中断', 'warn');
   }
 
   _err(e){

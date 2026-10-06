@@ -4,9 +4,19 @@ import { WAVES, dacTable, signalLevels, waveCsv } from './model.js';
 import { AdcScopeStore, envelope } from './scope-store.js';
 import { PinMap } from '../ui/pin-map.js';
 export class AnalogView {
-  constructor(){ this.session = new AnalogSession(); this.store = new AdcScopeStore(); this.wave = []; this._raf = null; this.total = 0; this.page='adc'; }
+  constructor(){ this.session = new AnalogSession(); this.store = new AdcScopeStore(); this.wave = []; this._raf = null; this.total = 0; this.page='adc'; this.canvasSizes = new Map(); }
   init(){
     this.initTabs();
+    this.canvasFont = `13px ${getComputedStyle(document.documentElement).getPropertyValue('--mono').trim()}`;
+    this.resizeObserver = new ResizeObserver(entries => {
+      for (const { target, contentRect } of entries){
+        if (contentRect.width < 1 || contentRect.height < 1) continue;
+        this.canvasSizes.set(target.id, { w:contentRect.width, h:contentRect.height });
+      }
+      this.renderAdc();
+      if (this.page === 'dac') try { this.preview(); } catch (e){ $('an-wave-state').textContent = e.message; }
+    });
+    for (const id of ['an-adc-canvas','an-dac-canvas']) this.resizeObserver.observe($(id));
     this.pinMap=new PinMap({buttonId:'an-pinmap-btn',feature:'adc',state:()=>({connected:this.session.connected,connectionKey:this.session.hid?.device||this.session.hid,supported:!!this.session.caps})});
     this.pinMap.init();
     const bind = (id, fn) => $(id).addEventListener('click', () => { Promise.resolve().then(fn).catch(e => this.status(e.message, true)); });
@@ -92,17 +102,18 @@ export class AnalogView {
     const frame=this.store.frame({timeDiv,reference,trigger:$('an-trigger').value,level,edge:$('an-edge').value});
     if(frame)this.lastFrame=frame;
     const last=this.store.length?this.store.code(this.store.total-1):null;
-    if(last!==null)$('an-value').textContent=`${(last/(2**this.store.bits-1)*reference).toFixed(5)} V · code ${last}`;
+    $('an-value').textContent=last===null?'— V':`${(last/(2**this.store.bits-1)*reference).toFixed(5)} V`;
+    $('an-code').textContent=last===null?'CH1 · 等待采集':`CH1 · code ${last}`;
     $('an-stats').textContent=`${this.total} 点 · 硬件时基 ${(this.store.rate/1000).toFixed(3)} kSa/s · 最近 ${this.store.length} 点可导出 · ${frame?.triggered?'已触发':$('an-trigger').value==='normal'?'等待触发':'自动扫描'}${frame?.limited?' · 当前时窗超过记录长度':''}`;
     if(!frame&&this.lastFrame)return; // Normal trigger holds last complete frame.
     const canvas=$('an-adc-canvas'),ctx=canvas.getContext('2d');if(!ctx)return;
-    const w=canvas.width,h=canvas.height;ctx.fillStyle='#090f17';ctx.fillRect(0,0,w,h);
+    const {w,h}=this.canvasMetrics(canvas,ctx);ctx.fillStyle='#090f17';ctx.fillRect(0,0,w,h);
     ctx.strokeStyle='#26384a';ctx.lineWidth=1;
     for(let i=0;i<=10;i++){ctx.beginPath();ctx.moveTo(i*w/10,0);ctx.lineTo(i*w/10,h);ctx.stroke();}
     for(let i=0;i<=8;i++){ctx.beginPath();ctx.moveTo(0,i*h/8);ctx.lineTo(w,i*h/8);ctx.stroke();}
     const y=v=>h/2-(v-offset)/voltsDiv*h/8;
     ctx.setLineDash([5,5]);ctx.strokeStyle='#df9c42';ctx.beginPath();ctx.moveTo(0,y(level));ctx.lineTo(w,y(level));ctx.stroke();ctx.setLineDash([]);
-    ctx.fillStyle='#d4e2f1';ctx.font='14px monospace';
+    ctx.fillStyle='#d4e2f1';ctx.font=this.canvasFont;
     ctx.fillText(`CH1 PB14   ${voltsDiv} V/div   ${timeDiv<0.001?(timeDiv*1e6)+' us/div':(timeDiv*1000)+' ms/div'}`,12,20);
     if(!frame)return;
     const span=timeDiv*10*frame.rate;
@@ -131,7 +142,7 @@ export class AnalogView {
     $('an-generator-summary').textContent=`${WAVES[options.shape]} · ${freq} · ${2*amp} Vpp · 共模 ${options.offset} V · ${low.toPrecision(6)}–${high.toPrecision(6)} V`;
     $('an-wave-state').textContent=`${this.wave.length} 点${dc?'直流表':noise?'循环伪随机表':'完整一周期表'} · 更新率 ${options.rate} Sa/s · 表时长 ${(1000*this.wave.length/options.rate).toPrecision(6)} ms${table.actualFrequency===null?'':` · 请求 ${options.frequency} Hz，按整数点数量化`}。预览/导出不启动输出；硬件实际更新率以 START 应答为准。`;
     const ctx=$('an-dac-canvas').getContext('2d');
-    if(ctx){ctx.fillStyle='#d4e2f1';ctx.font='14px monospace';ctx.fillText(`${caps.fullScale} V full scale`,12,20);ctx.fillText(`0 → ${(1000*this.wave.length/options.rate).toPrecision(6)} ms`,12,250);}
+    if(ctx){const {h}=this.canvasMetrics($('an-dac-canvas'),ctx);ctx.fillStyle='#d4e2f1';ctx.font=this.canvasFont;ctx.fillText(`${caps.fullScale} V full scale`,12,20);ctx.fillText(`0 → ${(1000*this.wave.length/options.rate).toPrecision(6)} ms`,12,h-12);}
   }
   syncLevels(source='amplitude'){
     const levels=signalLevels({amplitude:Number($('an-amplitude').value),offset:Number($('an-dac-offset').value),
@@ -157,12 +168,19 @@ export class AnalogView {
   }
   plot(id, values, max = 3.3){
     const canvas = $(id), ctx = canvas.getContext('2d'); if (!ctx) return;
-    const w = canvas.width, h = canvas.height; ctx.clearRect(0, 0, w, h);
+    const {w,h} = this.canvasMetrics(canvas,ctx); ctx.clearRect(0, 0, w, h);
     ctx.strokeStyle = '#666'; ctx.lineWidth = 0.5;
     for (let i = 1; i < 4; i++){ ctx.beginPath(); ctx.moveTo(0, i * h / 4); ctx.lineTo(w, i * h / 4); ctx.stroke(); }
     if (!values.length) return;
     ctx.strokeStyle = '#58a6ff'; ctx.lineWidth = 1.5; ctx.beginPath();
     values.forEach((v, i) => { const x = i * w / Math.max(1, values.length - 1), y = h - 8 - v / max * (h - 16); if (!i) ctx.moveTo(x, y); else ctx.lineTo(x, y); }); ctx.stroke();
+  }
+  canvasMetrics(canvas,ctx){
+    const {w,h}=this.canvasSizes.get(canvas.id)||{w:1000,h:260},dpr=window.devicePixelRatio||1;
+    const width=Math.round(w*dpr),height=Math.round(h*dpr);
+    if(canvas.width!==width||canvas.height!==height){canvas.width=width;canvas.height=height;}
+    ctx.setTransform(dpr,0,0,dpr,0,0);
+    return {w,h};
   }
   download(name, content){
     const url = URL.createObjectURL(new Blob([content], { type: 'text/csv;charset=utf-8' }));

@@ -382,5 +382,63 @@ export async function runUiSelfTest(tools){
     return '点击/方向键切换通过；两页共用同一 AnalogSession';
   });
 
+  await step('快捷发送按需展开且保留固定编号', async () => {
+    document.querySelector('#tabs .tab[data-tab="serial"]').click();
+    const quick=tools.assistant.quick,add=$('s-quick-add');
+    const before=quick.map(q=>({row:q.row,body:q.body.value,label:q.lab.value}));
+    let visible=quick.filter(q=>!q.row.hidden).length;
+    while(visible<5){
+      add.click();
+      const after=quick.filter(q=>!q.row.hidden);
+      if(after.length!==visible+1||after.some(q=>getComputedStyle(q.row).display==='none'))
+        throw Error('新增快捷行没有逐行显示');
+      visible=after.length;
+    }
+    if(!add.disabled||quick.some((q,i)=>q.row!==before[i].row||q.body.value!==before[i].body||q.lab.value!==before[i].label||q.row.querySelector('.qidx').textContent!==String(i+1)))
+      throw Error('快捷行内容、编号或数量限制错误');
+    return '最多 5 行；展开保留内容和 Alt+1～5 对应编号';
+  });
+
+  await step('紧凑命令表按需增加且保留内容', async () => {
+    document.querySelector('#tabs .tab[data-tab="spi"]').click();
+    const body=$('sp-cmd-body'),first=body.querySelector('[data-f="tx"]');
+    if(body.children.length!==3)throw Error('初始命令表应为 3 行');
+    first.value='AA BB';$('sp-cmd-add').click();
+    if(body.children.length!==4||body.querySelector('[data-f="tx"]')!==first||first.value!=='AA BB')
+      throw Error('增加行丢失原有内容或节点');
+    if(body.querySelectorAll('input[placeholder="如 AA BB"]').length!==1)throw Error('示例占位字应只出现在第一行');
+    first.value='';
+    return '新增第 4 行成功；原有内容、节点和行序保留';
+  });
+
+  await step('I2C 地址图的 ACK 选用与保留地址', async () => {
+    document.querySelector('#tabs .tab[data-tab="i2c"]').click();
+    const view=tools.i2c,previous=view.scanAddrs,selected=$('i2-dev').value;
+    try {
+      view.scanAddrs=[0x50,0x68];view._renderScan(15);
+      const map=$('i2-address-map');
+      if(map.children.length!==128||map.querySelectorAll('.ack').length!==2||map.querySelectorAll('.reserved').length!==16)
+        throw Error('7 位地址图、ACK 或保留地址数量错误');
+      map.querySelector('[data-address="0x68"]').click();
+      if($('i2-dev').value!=='0x68'||!map.querySelector('[data-address="0x68"]').classList.contains('selected'))
+        throw Error('选用 ACK 地址未同步器件选择');
+      if(!map.querySelector('[data-address="0x00"]').disabled)throw Error('保留地址不可选用');
+    } finally {
+      view.scanAddrs=previous;$('i2-dev').value=selected;view._renderScan();view.reg.setDevice(selected);
+    }
+    return '128 个地址；ACK 可选用；16 个保留地址不扫描';
+  });
+
+  await step('公共日志工具与明确的连接状态', async () => {
+    for(const prefix of ['sp','pn','i2']){
+      const log=$(prefix+'-log'),head=log.previousElementSibling,clear=$(prefix+'-log-clear');
+      if(!head.classList.contains('loghead')||!head.contains(clear)||head.querySelectorAll('button').length!==3)
+        throw Error(prefix+' 日志没有统一的复制/保存/清空工具');
+    }
+    if(!$('conn-flag').textContent.startsWith('串口：')||!$('probe-flag').textContent.startsWith('探针：'))
+      throw Error('串口与探针状态仍有歧义');
+    return '三页日志工具统一；串口与实体探针状态分开';
+  });
+
   return out;
 }

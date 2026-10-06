@@ -187,7 +187,7 @@ export class RegView {
      *    照着新地址写下去 = 把一段数据糊到别的器件/别的寄存器区上（对 EEPROM 尤其致命）。
      *    要换地址就重新读一次 —— 这也是唯一能保证"黄框 = 与器件现状的差异"成立的用法。 */
     if (this.readKey && RegView.keyOf(p) !== this.readKey){
-      this.session.log('e', '寄存器面板：器件/起始地址/地址宽度在「读取」之后被改过 —— 现在写回会把**旧地址读回来的数据**写到新地址上。请先重新「读取」');
+      this.session.log('e', '寄存器面板：器件/起始地址/地址宽度在「读取」之后被改过 —— 现在写回会把旧地址读回来的数据写到新地址上。请先重新「读取」');
       return;
     }
     const offs = only ? this.grid.changedOffsets() : null;
@@ -212,9 +212,9 @@ export class RegView {
         if (vr.err !== P.E.OK){
           this.session.log('w', `写后回读失败：${P.errText(vr.err)} —— 无法确认写进去了没有，先别当成功`);
         } else if (vr.data.length !== want.length || !R.bytesEq(vr.data, want)){
-          this.session.log('e', `写后回读**与写入不一致** —— 器件里存的不是这份数据：` +
+          this.session.log('e', `写后回读与写入不一致 —— 器件里存的不是这份数据：` +
             `写 ${hexHead(want)} / 读 ${hexHead(vr.data)}。常见原因：① 器件有页写回卷而「页大小」没给对` +
-            `（EEPROM 必填）；② 片间 tWR 等太短；③ 器件把非法字段夹掉。**黄框保留，别当写成功**`);
+            `（EEPROM 必填）；② 片间 tWR 等太短；③ 器件把非法字段夹掉。黄框保留，别当写成功`);
           return;
         }
       }

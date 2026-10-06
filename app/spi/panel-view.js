@@ -76,7 +76,7 @@ export const PANEL_PRESETS = {
     cfg: { sclkHz: 40000000, mode: 0, csPolicy: 0, padDc: 0, padRst: 5 /*PA02 J3[7]*/, padBl: 13 /*PA31 J3[11]*/, padActiveLow: 0x06 },
     geom: 'st77916',
     note: {
-      proto: '档 2：QSPI 四线。开窗 = 0x02 + 24bit 地址（00 XX 00，**命令字在中间字节**）；像素 = 0x32 + 四线连续流',
+      proto: '档 2：QSPI 四线。开窗 = 0x02 + 24bit 地址（00 XX 00，命令字在中间字节）；像素 = 0x32 + 四线连续流',
       wire: 'SPI2：CS=J3[26] SCLK=J3[13] D0=J3[28] D1=J3[27] D2=J3[10] D3=J3[8]　RST=PA02(J3[7]) BL=PA31(J3[11])',
       tips: 'RST/BL 都经 LA 实测；PA10(J3[33]) 被固件 LED 任务占用（50 ms 写一次，驱动不出持续电平）；mode 必须 0',
     },
@@ -146,7 +146,7 @@ export class SpiPanelView {
     $('pn-prof-set').addEventListener('click', () => this.applyProfile());
     $('pn-preset').addEventListener('change', () => this.fillPresetNote());
     /* 屏型号落 store：刷新/重开标签页后还停在上次选的那块屏。
-       （引脚图的默认脚位**不再**依赖它 —— 那边用的是固定表 `protocol.AUX_DEFAULT`，
+       （引脚图的默认脚位不再依赖它 —— 那边用的是固定表 `protocol.AUX_DEFAULT`，
         只按配置值覆盖；曾因为跟着屏型号走而出现"DC 消失 / BL 指到不能用的 PA10"。）*/
     store.bind($('pn-preset'), 'panel.preset');
     this.fillPresetNote();
@@ -789,13 +789,25 @@ export class SpiPanelView {
   buildPatternChips(){
     const box = $('pn-patterns');
     box.innerHTML = '';
+    box.classList.add('pattern-groups');
+    const colors = {R:'#f85149',G:'#3fb950',B:'#58a6ff',MRG:'#e3b341',MRB:'#db61a2',MGB:'#39c5cf',W:'#fff',K:'#000',GY:'#808080'};
+    const groups = {};
+    for (const name of ['纯色','对比','测试图']){
+      const row = document.createElement('div'); row.className = 'pattern-group';
+      const title = document.createElement('span'); title.className = 'pattern-label'; title.textContent = name;
+      row.append(title); groups[name] = row; box.append(row);
+    }
     for (const [label, kind] of I.PATTERNS){
       const b = document.createElement('button');
       b.className = 'mini';
       b.textContent = label;
+      if (colors[kind]){
+        const swatch = document.createElement('i'); swatch.className = 'pattern-swatch'; swatch.style.background = colors[kind];
+        swatch.setAttribute('aria-hidden','true'); b.prepend(swatch);
+      }
       b.dataset.kind = kind;
       b.addEventListener('click', () => this.setPattern(kind));
-      box.appendChild(b);
+      groups[colors[kind] ? '纯色' : ['RG','GB','RB'].includes(kind) ? '对比' : '测试图'].appendChild(b);
     }
   }
 
@@ -1038,7 +1050,7 @@ export class SpiPanelView {
     const plan = this.imgPartial.plan(cw.px, cw.win, { align: g.align, scrW: g.w, scrH: g.h });
     this.imgPlan = plan;
     if (plan.action === 'skip'){
-      s.log('i', `整帧跳过：这一张与上一次发出的**逐像素相同**（局部刷新，容差 ${po.tolerance} 位）——` +
+      s.log('i', `整帧跳过：这一张与上一次发出的逐像素相同（局部刷新，容差 ${po.tolerance} 位）——` +
         `一个字节都没发。要强制重发就取消勾选「局部刷新」。`, this.tag);
       $('pn-img-sum').textContent = `整帧跳过（与上次相同，容差 ${po.tolerance} 位）· 省下 ${(cw.px.length / 1024).toFixed(0)} KB`;
       return;
@@ -1107,7 +1119,7 @@ export class SpiPanelView {
       $('pn-anim-info').textContent = `${src.name} · ${src.w}×${src.h}` +
         (src.kind === 'gif' ? ` · ${src.frames} 帧（${ext}）` : ` · ${(src.duration || 0).toFixed(1)} s（视频）`) +
         `　→ 开窗后整帧 ${this.geometry().w * this.geometry().h * 2} 字节，` +
-        (po.enabled ? `**局部刷新**（只发变化区，容差 ${po.tolerance} 位）` : '整帧刷');
+        (po.enabled ? `局部刷新（只发变化区，容差 ${po.tolerance} 位）` : '整帧刷');
       this.session.log('g', `动画已就绪：${src.name}（${src.w}×${src.h}）—— 点「播放到屏」开播`, this.tag);
     } catch (e){
       this.session.log('e', '动画源加载失败：' + (e?.message || e), this.tag);

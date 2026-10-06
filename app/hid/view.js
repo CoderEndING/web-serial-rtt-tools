@@ -120,7 +120,7 @@ export class RttCdcView {
         this.last = r.status;
         this.render();
         if (r.status?.running){
-          toast('探针侧的 RTT 桥**仍在运行**（上一次没停）：它会一直读目标内存占着 RTT 环。' +
+          toast('探针侧的 RTT 桥仍在运行（上一次没停）：它会一直读目标内存占着 RTT 环。' +
             '不用了就去点「停止」；要测 RTT Viewer 也建议先停 —— 两边读的是同一个 RTT 环。', 'warn', 10000);
         }
       } catch { /* 查不到状态不影响"连上了"这件事本身 */ }
@@ -503,7 +503,7 @@ export class RttCdcView {
       const stall = (this._stall || 0) >= 2
         ? (portOpen
             ? ' ⚠ 桥在跑但「已搬运」不涨 —— 多半是另一路在抢同一个 RTT 缓冲（RTT Viewer 的 WebUSB / 桥的 RTT 会话），或者目标根本没在写'
-            : ' ⚠ 桥在跑但「已搬运」不涨 —— **CDC 端口还没打开**：转发出来的数据要从探针的 CDC 串口读（右侧「端口」那一栏选 COM 口并打开），'
+            : ' ⚠ 桥在跑但「已搬运」不涨 —— CDC 端口还没打开：转发出来的数据要从探针的 CDC 串口读（右侧「端口」那一栏选 COM 口并打开），'
               + '没人收它就会把探针的环形缓冲写满然后停下')
         : '';
       setStatus(el, `运行中 · 控制块 ${hex(st.cbAddr)} · 上行缓冲 ${hex(st.upAddr)} · 通道 ${st.channel}`

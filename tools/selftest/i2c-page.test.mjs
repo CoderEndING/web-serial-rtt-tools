@@ -153,10 +153,10 @@ console.log('== 1b. 右列分 tab（照 #dbg 那套：一次只显示一个）==
   // tab 栏那一行（胶囊 + 停止）不在任何 dockpage 里 —— 切到哪个 tab 都看得见
   const pillOutside = await ev(`
     return { inPage: !!document.querySelector('#i2-box-dock .dockpage #i2-run-pill'),
-             inLegend: !!document.querySelector('#i2-box-dock > legend #i2-run-pill'),
-             stopInLegend: !!document.querySelector('#i2-box-dock > legend #i2-run-stop') };`);
-  ok(pillOutside.inLegend && !pillOutside.inPage, '运行胶囊挂在 legend 上（不属于任何 tab，切 tab 都在）');
-  ok(pillOutside.stopInLegend === true, '「停止」按钮同理');
+             inHeader: !!document.querySelector('#i2-box-dock > .dockhead #i2-run-pill'),
+             stopInHeader: !!document.querySelector('#i2-box-dock > .dockhead #i2-run-stop') };`);
+  ok(pillOutside.inHeader && !pillOutside.inPage, '运行状态在卡片内的公共工具栏，切 tab 仍可见');
+  ok(pillOutside.stopInHeader === true, '「停止」按钮在卡片内的公共工具栏');
 }
 
 // ==================================================================== 2

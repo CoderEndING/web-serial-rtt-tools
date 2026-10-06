@@ -281,6 +281,10 @@ test-ui:
 	pwsh -NoProfile -Command "if (-not (Get-NetTCPConnection -State Listen -LocalPort $(PORT) -ErrorAction SilentlyContinue)) { Start-Process -FilePath '$(PY)' -ArgumentList '-m','http.server','$(PORT)','--bind','127.0.0.1' -WindowStyle Hidden; Start-Sleep -Seconds 1 }"
 	$(NODE) tools/selftest/ui.page.test.mjs
 
+.PHONY: test-ui-layout
+test-ui-layout: page-prep
+	$(NODE) tools/selftest/ui-layout-page.test.mjs
+
 # 「工程生成」页的真页面验收（需要 8899 服务 + 9333 CDP 浏览器，见 make open）
 test-gen-page:
 	pwsh -NoProfile -Command "if (-not (Get-NetTCPConnection -State Listen -LocalPort $(PORT) -ErrorAction SilentlyContinue)) { Start-Process -FilePath '$(PY)' -ArgumentList '-m','http.server','$(PORT)','--bind','127.0.0.1' -WindowStyle Hidden; Start-Sleep -Seconds 1 }"
@@ -621,6 +625,7 @@ clean-firmware:
 
 .PHONY: test-stability test-probe
 test-probe:
+	$(NODE) tools/selftest/probe-status.test.mjs
 	$(NODE) tools/selftest/probe-manager.test.mjs
 	$(NODE) tools/selftest/probe-feature-registry.test.mjs
 	$(NODE) tools/selftest/hid-channel.test.mjs

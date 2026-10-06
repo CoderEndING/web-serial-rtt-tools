@@ -98,7 +98,7 @@ export class WebUsbSpiTransport {
     }
     if (!found){
       throw new Error('这个设备没有 SPI 桥接口（vendor 接口 + EP11 双向 bulk）。\n' +
-        '最常见的原因：**板子上烧的是 akaLinkPro 产品固件** —— SPI 桥只在 HPM5301EVKLite 构建里编译\n' +
+        '最常见的原因：板子上烧的是 akaLinkPro 产品固件 —— SPI 桥只在 HPM5301EVKLite 构建里编译\n' +
         '（firmware/application_5301/boards/*/board.h 的 BOARD_HAS_SPI_BRIDGE）。\n' +
         `设备实际暴露的端点：${seen.join(' ') || '(无)'}`);
     }

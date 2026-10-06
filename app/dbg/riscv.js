@@ -358,7 +358,7 @@ export class RiscvDebugSession extends DebugSession {
       if (b){
         if (!this._xipFallbackLogged){
           this._xipFallbackLogged = true;
-          this._log('flash 窗口（0x8000_0000 起）的内存读改用**载入的 ELF** 里的只读段：'
+          this._log('flash 窗口（0x8000_0000 起）的内存读改用载入的 ELF 里的只读段：'
             + '这颗探针/芯片上 SBA 读该窗口会超时并把 DM 打乱（真机实测）；'
             + '读的是 ELF 里那份（flash 运行期不会变），不是从目标实时读回来的。', 'dim');
         }

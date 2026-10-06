@@ -153,7 +153,13 @@ export class ScopeRenderer {
     const st = this.store;
     const { l, t, b } = this.padding;
     const pw = this.plotW, ph = this.plotH;
-    if (!st || !st.count){ this._text(ctx, '还没有数据 —— 连上探针并「开始采样」', l + 8, t + 20, '#7b8794'); return false; }
+    if (!st || !st.count){
+      ctx.fillStyle = '#8b949e'; ctx.font = '14px "Segoe UI", "Microsoft YaHei", sans-serif';
+      ctx.textAlign = 'center'; ctx.fillText('还没有波形数据', W / 2, H / 2 - 10);
+      ctx.font = '12px "Segoe UI", "Microsoft YaHei", sans-serif';
+      ctx.fillText('连接探针，选择变量后点击「开始采样」', W / 2, H / 2 + 16);
+      return false;
+    }
 
     const cols = Math.max(2, Math.floor(pw));
     if (!this._cols || this._cols < cols){

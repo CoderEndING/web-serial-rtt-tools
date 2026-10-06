@@ -9,6 +9,7 @@
 | 2026-10-05 | [`2026-10-05-rtt-viewer-comparison.md`](2026-10-05-rtt-viewer-comparison.md) | F103ZE 609–616 KB/s 基线与 F103CB 杜邦线差异 |
 | 2026-10-05 | [`../真机基准测试.md`](../真机基准测试.md) | 活动板卡场景基准的长期判据和历史数据 |
 | 2026-10-05–06 | [`2026-10-05-hardware-test-results.md`](2026-10-05-hardware-test-results.md) | F103CB、H743、HPM6800EVK 真机结果；含 H743 栈帧矩阵、ADC 矩阵、6800EVK 最新 full flow 与 RISC-V 调试器覆盖边界 |
+| 2026-10-06 | [`2026-10-06-ui-review.md`](2026-10-06-ui-review.md) | UI 逐项审核、修正前后截图，903 项页面/渲染/布局检查，1600/1280 下全部 12 页 |
 
 ## 当前推荐顺序
 

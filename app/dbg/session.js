@@ -40,7 +40,7 @@ const VC_CORERESET = 1;
  * 链路本身由探针层自愈（dap-webusb 的 `_healIfFaulted`），这里只负责把话说清楚。
  */
 function busFaultText(verb, addr, len){
-  return `${verb} 0x${(addr >>> 0).toString(16)}（${len} 字节）失败：目标回了**总线 FAULT** —— `
+  return `${verb} 0x${(addr >>> 0).toString(16)}（${len} 字节）失败：目标回了总线 FAULT —— `
        + '这个地址在当前状态读/写不了（没映射的窗口 / 外设时钟没开 / 只写寄存器 / 跨出了 RAM 末尾）。'
        + '调试链路会自己重新初始化，不用重连，换一个地址继续即可。';
 }
@@ -421,7 +421,7 @@ export class DebugSession {
       }
       this.lastStepMode = 'breakpoint';
       this.lastStepOk = await this._stepByBreakpoint(pc);
-      if (!this.lastStepOk) this._log('这一步**没执行**（断点单步：落点算不出来 / 比较器不够 / 2 s 没停到落点）', 'err');
+      if (!this.lastStepOk) this._log('这一步没执行（断点单步：落点算不出来 / 比较器不够 / 2 s 没停到落点）', 'err');
     });
     await this.refresh();
     await this.refreshRegs();

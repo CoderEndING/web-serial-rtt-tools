@@ -53,7 +53,7 @@ $args = @(
 )
 Write-Output "启动: $Exe"
 Write-Output ("参数: " + ($args -join ' '))
-Start-Process -FilePath $Exe -ArgumentList $args | Out-Null
+Start-Process -FilePath $Exe -ArgumentList $args -WindowStyle Hidden | Out-Null
 
 for ($i = 0; $i -lt 60; $i++){
   try {

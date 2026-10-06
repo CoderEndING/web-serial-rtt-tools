@@ -3,7 +3,7 @@
  * 功能：端口/参数、ASCII-HEX 收发、时间戳、定时发送、快捷发送(Alt+1~5)、
  *      收发统计、保存接收数据、DTR/RTS、显示发送回显。
  */
-import { $, seg, setFlag, setStatus } from '../ui/dom.js';
+import { $, seg, setStatus } from '../ui/dom.js';
 import { toast } from '../ui/toast.js';
 import { store } from '../core/store.js';
 import { RxBuffer } from '../core/rxview.js';
@@ -104,7 +104,6 @@ export class Assistant {
 
     // ---------- 会话事件 ----------
     this.s.on('open', ({ opts, info }) => {
-      setFlag($('conn-flag'), `已连接 ${info} @${opts.baudRate}`, 'on');
       $('s-open').disabled = true; $('s-close').disabled = false;
       $('s-scan').disabled = true; $('s-pick').disabled = true; $('s-port').disabled = true;
       setStatus($('s-err'), '', null);
@@ -119,7 +118,6 @@ export class Assistant {
       this._stats();
     });
     this.s.on('close', ({ unexpected }) => {
-      setFlag($('conn-flag'), '未连接');
       $('s-open').disabled = false; $('s-close').disabled = true;
       $('s-scan').disabled = false; $('s-pick').disabled = false; $('s-port').disabled = false;
       this._armTimer();
@@ -327,8 +325,17 @@ export class Assistant {
         this.send(body.value);
       });
       box.appendChild(row);
-      this.quick.push({ lab, body });
+      row.hidden = !lab.value.trim() && !body.value.trim();
+      this.quick.push({ lab, body, row });
     }
+    const add = $('s-quick-add');
+    const sync = () => { add.disabled = this.quick.every(q => !q.row.hidden); };
+    add.addEventListener('click', () => {
+      const next = this.quick.find(q => q.row.hidden);
+      if (next){ next.row.hidden = false; next.body.focus(); }
+      sync();
+    });
+    sync();
   }
 
   _stats(){

@@ -42,8 +42,8 @@ const OP_CELLS = {
   delay: { dev: 0, addr: 0, data: 1, rd: 0, as: 0, period: 1 },
 };
 const CELL_HINT = {
-  rd:    { addr: '子地址（留空 = 不带子地址的纯读；`-` 同）', data: '', rd: `读几个字节（≤${RD_TOTAL_MAX}；**超过 ${RD_MAX} 自动分片**，想连续读加 ptr）`, as: 'as 解码', period: '周期，如 100ms / 100ms×50' },
-  wr:    { addr: '子地址（留空 = 不带子地址）', data: '要写的十六进制字节，如 11 22 33（≤51 B，**写不自动分片**；留空 = 只把地址指针推过去）', rd: '', as: '', period: '周期，如 500ms×20' },
+  rd:    { addr: '子地址（留空 = 不带子地址的纯读；`-` 同）', data: '', rd: `读几个字节（≤${RD_TOTAL_MAX}；超过 ${RD_MAX} 自动分片，想连续读加 ptr）`, as: 'as 解码', period: '周期，如 100ms / 100ms×50' },
+  wr:    { addr: '子地址（留空 = 不带子地址）', data: '要写的十六进制字节，如 11 22 33（≤51 B，写不自动分片；留空 = 只把地址指针推过去）', rd: '', as: '', period: '周期，如 500ms×20' },
   ping:  { addr: '', data: '', rd: '', as: '', period: '' },
   delay: { addr: '', data: '时长，如 10ms / 500us', rd: '', as: '', period: '' },
 };
@@ -306,7 +306,7 @@ export class I2cView {
   }
 
   _setState(text, kind){
-    setStatus($('i2-state'), text, kind === 'err' ? 'err' : kind === 'warn' ? 'warn' : 'ok');
+    setStatus($('i2-state'), text, kind === 'err' ? 'err' : kind === 'warn' ? 'warn' : this.session.connected ? 'ok' : '');
     this.pinMap?.refresh();
   }
   _syncButtons(st){
@@ -432,6 +432,20 @@ export class I2cView {
     const body = $('i2-scan-body');
     body.innerHTML = '';
     const addrs = this.scanAddrs || [];
+    const map = $('i2-address-map');
+    map.replaceChildren();
+    for (let a = 0; a < 128; a++){
+      const button = document.createElement('button'), ack = addrs.includes(a), reserved = a < 8 || a > 0x77;
+      button.type = 'button'; button.textContent = a.toString(16).toUpperCase().padStart(2, '0');
+      button.dataset.address = addr7(a); button.className = ack ? 'ack' : reserved ? 'reserved' : '';
+      button.disabled = !ack;
+      button.title = `${addr7(a)} · ${reserved ? '保留地址，未扫描' : this.scanAddrs ? ack ? 'ACK，点击选用' : '无应答' : '未扫描'}`;
+      button.setAttribute('aria-label', button.title);
+      button.addEventListener('click', () => {
+        $('i2-dev').value = addr7(a); this._syncScanPick(); this.reg.setDevice(addr7(a));
+      });
+      map.append(button);
+    }
     $('i2-scan-sum').textContent = addrs.length
       ? `找到 ${addrs.length} 个器件${ms != null ? `（${ms.toFixed(0)} ms）` : ''}：` + addrs.map(a => addr7(a)).join(' ')
       : (ms != null ? '总线上一片安静 —— 没有任何地址应答。先跑「接线自检(PINTEST)」，再查供电 / 上拉 / 地址' : '还没扫过');
@@ -459,6 +473,9 @@ export class I2cView {
   }
   _syncScanPick(){
     const v = $('i2-dev').value;
+    for (const button of $('i2-address-map').children){
+      button.classList.toggle('selected', !button.disabled && button.dataset.address.toLowerCase() === v.toLowerCase());
+    }
     for (const tr of $('i2-scan-body').children){
       const hit = tr.firstChild.textContent === v;
       tr.classList.toggle('on', hit);

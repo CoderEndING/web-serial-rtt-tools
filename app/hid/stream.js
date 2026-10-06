@@ -10,7 +10,7 @@
  * 三个标签是同一路数据的三种看法）—— 数据事件里自己也收一份进本页的接收区。
  * 探针那边的启停/地址在 app/hid/view.js（HID 0x31），本文件不碰 HID。
  */
-import { $, seg, setFlag, setStatus } from '../ui/dom.js';
+import { $, seg, setStatus } from '../ui/dom.js';
 import { toast } from '../ui/toast.js';
 import { store } from '../core/store.js';
 import { RxBuffer } from '../core/rxview.js';
@@ -94,7 +94,6 @@ export class RttCdcStreamView {
     this.s.on('open', ({ opts, info }) => {
       $('c-open').disabled = true; $('c-close').disabled = false;
       $('c-scan').disabled = true; $('c-pick').disabled = true; $('c-port').disabled = true;
-      setFlag($('conn-flag'), `已连接 ${info} @${opts.baudRate}`, 'on');
       setStatus($('c-err'), '', null);
       /* 三个页面共用这一个串口会话 → **只对"自己发起的那次"弹提示 / 起自动记录**：
        * 本页专门连探针的 CDC 口，所以在串口助手里开一个普通 UART 时不该冒出
@@ -107,7 +106,6 @@ export class RttCdcStreamView {
     this.s.on('close', ({ unexpected }) => {
       $('c-open').disabled = false; $('c-close').disabled = true;
       $('c-scan').disabled = false; $('c-pick').disabled = false; $('c-port').disabled = false;
-      setFlag($('conn-flag'), '未连接');
       if (unexpected) toast('串口已断开（设备被拔掉或占用）', 'warn');
       this.suppManual = false;
       if (this.suppressed) this._setSuppressed(false);

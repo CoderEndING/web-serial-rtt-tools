@@ -193,7 +193,7 @@ console.log('== 1b. 布局（用户 2026-10 定稿）：右列 tab 化（刷屏 
       const flexEl = pg.querySelector('#pn-code-wrap, .canvasrow, .readrow');
       const minH = parseFloat(getComputedStyle(flexEl).minHeight) || 0;
       return { tab: pg.dataset.dock, h: Math.round(pg.getBoundingClientRect().height),
-               dockH: Math.round(dock.height), legendH: Math.round(document.querySelector('#pn-box-dock>legend').getBoundingClientRect().height),
+               dockH: Math.round(dock.height), legendH: Math.round(document.querySelector('#pn-box-dock>.dockhead').getBoundingClientRect().height),
                over: pg.scrollHeight - pg.clientHeight, clipped,
                flexH: Math.round(flexEl.getBoundingClientRect().height), minH, flexName: flexEl.id || flexEl.className };`);
     // 断言用**相对量**：窗口多大都不该假红（自测跑在用户那个窗口上，尺寸不由我们定）

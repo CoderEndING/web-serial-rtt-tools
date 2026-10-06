@@ -111,8 +111,8 @@ console.log('== 1. 标签页与初始状态 ==');
   const s = await ev('return window.__tools.summary();');
   ok(Array.isArray(s.tabs) && s.tabs.includes('spi'), '标签栏里有 spi（桥页）');
   ok(s.tabs.includes('panel'), '标签栏里有 panel（屏页）');
-  ok(s.tabs[s.tabs.length - 3] === 'panel' && s.tabs[s.tabs.length - 2] === 'i2c' && s.tabs[s.tabs.length - 1] === 'gen',
-     `末尾三个标签是 屏 → USB→I2C → 工程生成（${s.tabs.slice(-3).join(' → ')}）`, s.tabs.join(','));
+  ok(s.tabs.slice(-4).join(',') === 'panel,i2c,analog,gen',
+     `末尾四个标签是 屏 → I2C → ADC/DAC → 工程生成（${s.tabs.slice(-4).join(' → ')}）`, s.tabs.join(','));
   ok(s.ok === true, '页面无 JS 错误', JSON.stringify(s.errors));
   ok(s.spi && s.spi.connected === false && s.spi.dataReady === false, '初始：未连接（HID 与数据面都空）');
   ok(s.panel && s.panel.connected === false, '屏页看到的是**同一个**会话（初始也未连接）');
@@ -152,18 +152,18 @@ console.log('== 1b. 右列分 tab（照 #dbg 那套：一次只显示一个）==
     ok(r.btnOn.length === 1 && r.btnOn[0] === r.d, `……tab 按钮也只有一个高亮`, JSON.stringify(r.btnOn));
     ok(r.saved === r.d, '……选择落进 localStorage（刷新/切页回来还在）', String(r.saved));
   }
-  ok(sw.every(r => r.rows === 10), '切 tab 不重建命令表（10 行始终在）', JSON.stringify(sw.map(r => r.rows)));
+  ok(sw.every(r => r.rows === 3), '切 tab 不重建命令表（初始 3 行始终在）', JSON.stringify(sw.map(r => r.rows)));
   ok(sw.every(r => r.lbRows === 0), '切 tab 不污染回环结果表（还没跑过）');
 
   // tab 栏那一行（胶囊 + 中止）不在任何 dockpage 里 —— 切到哪个 tab 都看得见
   const pill = await ev(`
     return { inPage: !!document.querySelector('#sp-box-dock .dockpage #sp-run-pill'),
-             inLegend: !!document.querySelector('#sp-box-dock > legend #sp-run-pill'),
-             abortInLegend: !!document.querySelector('#sp-box-dock > legend #sp-run-abort'),
+             inHeader: !!document.querySelector('#sp-box-dock > .dockhead #sp-run-pill'),
+             abortInHeader: !!document.querySelector('#sp-box-dock > .dockhead #sp-run-abort'),
              text: document.getElementById('sp-run-pill').textContent,
              abortDisabled: document.getElementById('sp-run-abort').disabled };`);
-  ok(pill.inLegend && !pill.inPage, '运行胶囊挂在 legend 上（不属于任何 tab，切 tab 都在）');
-  ok(pill.abortInLegend === true, '「中止」按钮同理');
+  ok(pill.inHeader && !pill.inPage, '运行状态在卡片内的公共工具栏，切 tab 仍可见');
+  ok(pill.abortInHeader === true, '「中止」按钮在卡片内的公共工具栏');
   ok(/空闲|忙/.test(pill.text), `空闲时胶囊写着状态：「${pill.text}」`);
   ok(pill.abortDisabled === true, '没在跑回环时「中止」是灰的');
 }
@@ -302,10 +302,19 @@ console.log('== 6. 通用命令表（一行一条，最多 10 条）+ 文本面�
   ok(shape.cards.length === 4, `右区就是那四块（现在是四个 tab 的内容）：${shape.cards.join(' / ')}`);
   ok(shape.dock === true && shape.stack === false && shape.spcols === false,
      '右列是 tab 面板（不再是单列堆叠 .busstack，也不是两列 .spcols）', JSON.stringify(shape));
-  ok(shape.rows === 10, `命令表 10 行（实际 ${shape.rows}）`);
+  ok(shape.rows === 3, `命令表初始 3 行（实际 ${shape.rows}）`);
   ok(shape.cols.join(',').includes('cmd') && shape.cols.join(',').includes('tx 数据'), `表头是参数项：${shape.cols.join(' | ')}`);
   ok(shape.cells.join(',') === 'cmd,lines,addrLen,addr,dummy,rx,tx,res', `每行的字段：${shape.cells.join(',')}`);
   ok(!shape.old.some(Boolean), '旧 XFER 表单里的 DC / token / 辅助 CS / 强制轮询等勾选项都撤了');
+
+  const added = await ev(`
+    const cell=document.querySelector('#sp-cmd-body tr:first-child [data-f="tx"]');
+    cell.value='AA BB';
+    document.getElementById('sp-cmd-add').click();
+    const value=cell.value;
+    cell.value='';
+    return { rows:document.querySelectorAll('#sp-cmd-body tr').length, preserved:value==='AA BB' && cell===document.querySelector('#sp-cmd-body tr:first-child [data-f="tx"]') };`);
+  ok(added.rows === 4 && added.preserved, '添加命令行保留已填内容、原节点与发送顺序');
 
   // 填 1/2/4 行，第 3 行故意留空
   const sent = await ev(`

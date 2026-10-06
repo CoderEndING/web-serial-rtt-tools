@@ -115,6 +115,7 @@ console.log('== 1. 标签页与初始状态 ==');
 }
 
 console.log('== 2. 切到 scope 页 + 开假探针 ==');
+await ev(`document.querySelector('#sc-plan').closest('details').open = true; return true;`);
 {
   await ev(`document.querySelector('#tabs .tab[data-tab="scope"]').click(); return true;`);
   await sleep(300);
@@ -122,6 +123,8 @@ console.log('== 2. 切到 scope 页 + 开假探针 ==');
   ok(active === true, '点击标签后 #tab-scope 变成 active');
   const mock = await ev(`
     const c = document.getElementById('sc-mock'); c.checked = true; c.dispatchEvent(new Event('change'));
+    const sc = window.__tools.scope;
+    for (let i=0;i<100 && (!sc.usingMock || !sc.transport || sc._releasing);i++) await new Promise(resolve=>setTimeout(resolve,20));
     return window.__tools.scope.summary().mode;`);
   ok(mock === 'mock', '勾上「用假探针」→ 模式切到 mock');
   const items = await ev(`return [...document.querySelectorAll('#sc-vars .vrow')].length;`);
@@ -443,7 +446,7 @@ console.log('== 9. 勾选顺序 ≠ 地址顺序（帧内顺序 = 地址排序�
   const r = await ev(`
     const sc = window.__tools.scope;
     document.getElementById('sc-mock').checked = true;
-    document.getElementById('sc-mock').dispatchEvent(new Event('change'));
+    await window.__tools.scope.setMock(document.getElementById('sc-mock').checked);
     // 故意**逆着地址**勾：先 0x…20 的 u_ramp，再 0x…14 的 f_sin，最后 0x…22 的 i_sq1k
     const order = ['mock3.u16', 'mock0.f32', 'mock5.u8'];
     sc.selected = [];
@@ -480,37 +483,27 @@ console.log('== 9. 勾选顺序 ≠ 地址顺序（帧内顺序 = 地址排序�
   await ev(`document.querySelector('[data-group=sclayout] button[data-v=overlay]').click(); return true;`);
 }
 
-console.log('== 10. HID 句柄作废（探针被复位过）能自愈 ==');
+console.log('== 10. HID 句柄作废：显式报错，不自动重发/重新认领 ==');
 {
-  // 用户实际遇到的现象：探针自己重启 → USB 重新枚举 → 浏览器手里的 HIDDevice 作废 →
-  // sendReport 抛 "Failed to write the report"（点「开始采样」才炸，看不出原因）。
-  // 这里用一个假设备复现：第一次 sendReport 抛这个错，第二次（重新取到的设备）正常回包。
+  // Existing resource contract: a failed request must not reacquire after release.
+  // See docs/probe-resource-architecture.md; recovery is an explicit later action.
   const r = await ev(`
     const { AkaLinkHid } = await import('/app/hid/probe.js');
-    const mk = (name, fail) => ({
-      name, opened: true, collections: [{ usagePage: 0xFF00 }],
-      addEventListener(){}, removeEventListener(){}, close: async () => {},
-      open: async () => {},
-      sendReport: async () => { if (fail) throw new Error('Failed to write the report.'); 
-                                queueMicrotask(() => hid._handleInput({ data: new DataView(new Uint8Array(63).map((_, i) => i === 1 ? 0x13 : 0).buffer) })); },
-    });
-    const bad = mk('旧句柄（已作废）', true);
-    const good = mk('新句柄', false);
-    const hid = new AkaLinkHid();
-    hid.device = bad;
-    // 重新枚举后 getDevices() 会给到"新的"对象
-    const orig = navigator.hid.getDevices;
-    navigator.hid.getDevices = async () => [good];
-    let out;
-    try {
-      const res = await hid.xfer(0x13, undefined, 1500);      // 固件版本查询
-      out = { ok: true, cmd回显: res[1], reconnects: hid.reconnects, 换成新句柄: hid.device === good };
-    } catch (e){ out = { ok: false, err: String(e.message || e) }; }
-    finally { navigator.hid.getDevices = orig; }
-    return out;`);
-  ok(r.ok === true, '第一次写失败后自动重取设备并重试成功', JSON.stringify(r));
-  ok(r.reconnects === 1 && r['换成新句柄'] === true,
-     `重连计数 = ${r.reconnects}，且换成了重新枚举后的设备对象`);
+    let writes=0, goodWrites=0, enumerations=0;
+    const bad = { opened:true,collections:[{usagePage:0xFF00}],addEventListener(){},removeEventListener(){},
+      close:async()=>{},sendReport:async()=>{writes++;throw Error('Failed to write the report.');} };
+    const good = { ...bad, sendReport:async()=>{goodWrites++;} };
+    const hid=new AkaLinkHid();hid.device=bad;
+    const original=navigator.hid.getDevices;
+    navigator.hid.getDevices=async()=>{enumerations++;return [good];};
+    let error='';
+    try { await hid.xfer(0x13,undefined,1500); }
+    catch(e){error=e.message;}
+    finally{navigator.hid.getDevices=original;await hid.close();}
+    return {error,writes,goodWrites,enumerations};`);
+  ok(/HID.*失败|重连/.test(r.error),'失效句柄请求明确失败并提示重连',JSON.stringify(r));
+  ok(r.writes===1 && r.goodWrites===0 && r.enumerations===0,
+    '失败请求不重发，也不在资源释放后偷偷重新认领',JSON.stringify(r));
   const r2 = await ev(`
     const { AkaLinkHid } = await import('/app/hid/probe.js');
     const hid = new AkaLinkHid();
@@ -534,7 +527,7 @@ console.log('== 11. 探针跟不上时，「时长」也不能被拖长（用户
   const r = await ev(`
     const sc = window.__tools.scope;
     document.getElementById('sc-mock').checked = true;
-    document.getElementById('sc-mock').dispatchEvent(new Event('change'));
+    await window.__tools.scope.setMock(document.getElementById('sc-mock').checked);
     // 假探针"实际做不到"请求的周期：周期 5 µs 想要 200 kHz，每样本实际要 11 µs ⇒ 实得 90.9 kHz，
     // 和用户现场（要 200 kHz / 实得 112.9 kHz）同一类。老代码据此把 3 s 采成了 6.6 s。
     sc.mockProbe.slowdown = 2.2;
@@ -566,7 +559,7 @@ console.log('== 12. 标定值必须跟着变量/时钟失效（否则一个过�
   const r = await ev(`
     const sc = window.__tools.scope;
     document.getElementById('sc-mock').checked = true;
-    document.getElementById('sc-mock').dispatchEvent(new Event('change'));
+    await window.__tools.scope.setMock(document.getElementById('sc-mock').checked);
     await sc.connectHid(false);                      // 假探针也有"标定"（会假装一个结果）
     const pick = names => { sc.selected = [];
       for (const n of names){ const v = sc.mockVars().find(x => x.name === n); if (v) sc.toggleVar(v, true); } };
@@ -593,7 +586,7 @@ console.log('== 12. 标定值必须跟着变量/时钟失效（否则一个过�
      `改了变量 → 标定值标为失效并说明原因（${r.stale.why}）`);
   ok(r.refixed.fresh === true, '重新标定后又新鲜了');
   await ev(`document.getElementById('sc-mock').checked = false;
-            document.getElementById('sc-mock').dispatchEvent(new Event('change')); return true;`);
+            await window.__tools.scope.setMock(document.getElementById('sc-mock').checked); return true;`);
 }
 
 console.log('== 13. 起跑阶段的新数据要收下；收工之后一律不收 ==');
@@ -606,7 +599,7 @@ console.log('== 13. 起跑阶段的新数据要收下；收工之后一律不收
     const S = await import('/app/scope/store.js');
     const sc = window.__tools.scope;
     document.getElementById('sc-mock').checked = true;
-    document.getElementById('sc-mock').dispatchEvent(new Event('change'));
+    await window.__tools.scope.setMock(document.getElementById('sc-mock').checked);
     const vars = sc.mockVars();
     sc.store = new S.SampleStore(vars, 2000);
     sc.renderer.setStore(sc.store);
@@ -637,7 +630,7 @@ console.log('== 14. RISC-V/JTAG 目标：显示生效后端、置灰 SWD 控件�
     const sc = window.__tools.scope;
     const P = await import('/app/scope/protocol.js');
     document.getElementById('sc-mock').checked = true;
-    document.getElementById('sc-mock').dispatchEvent(new Event('change'));
+    await window.__tools.scope.setMock(document.getElementById('sc-mock').checked);
     sc.mockProbe.riscv = false;
     const before = { backend: sc.backend, mhz: document.getElementById('sc-mhz').textContent,
                      plan: document.getElementById('sc-plan').innerText.replace(/\\s+/g, ' ').slice(0, 90) };
@@ -697,7 +690,7 @@ console.log('== 15. 用户现场口径：**没连探针**时切目标类型，�
     const sc = window.__tools.scope;
     // 断开一切（这一段就是要验"探针不在线"的情形）
     document.getElementById('sc-mock').checked = false;
-    document.getElementById('sc-mock').dispatchEvent(new Event('change'));
+    await window.__tools.scope.setMock(document.getElementById('sc-mock').checked);
     await new Promise(r2 => setTimeout(r2, 500));
     sc.setBackend(null, '测试');                   // 后端未知 = 刚打开页面的样子
     sc.backend = null; sc._reportedAt = 0; sc._askedAt = 0;

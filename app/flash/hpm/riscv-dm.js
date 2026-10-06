@@ -72,9 +72,9 @@ export class RiscvTransport {
     if (!this.idcode || this.idcode === 0xffffffff) {
       throw new Error('JTAG 链上没读到 IDCODE（0/全 1）——' +
         '① 先查接线/供电（20 针排线两头是否插紧、板子上电）；' +
-        '② 若反复如此、而且板上应用也不启动：目标很可能被**卡住的 ndmreset 按在复位态**' +
+        '② 若反复如此、而且板上应用也不启动：目标很可能被卡住的 ndmreset 按在复位态' +
         '（TAP 靠探针 TCK 还能读 IDCODE，但 DMI 全部读回同一常量、haltreq 无效）——' +
-        '**把探针 USB 和板子电源一起拔掉，等 10 秒再插**（只拔板子电源没用：探针的 5V 还在供电）。' +
+        '把探针 USB 和板子电源一起拔掉，等 10 秒再插（只拔板子电源没用：探针的 5V 还在供电）。' +
         '详见 app/flash/hpm/riscv-dm.js 里 resetHalt() 的注释');
     }
     await this.sequences(tapLoadIR(IR_DTMCS));
@@ -110,7 +110,7 @@ export class RiscvTransport {
       this.lastDmstatus = await this._dmWakeRecover();
       if (!versionOk(this.lastDmstatus)){
         throw new Error('调试模块不应答：dmstatus 一直读回 0 或垃圾（DM 停在未激活态 / DMI 被打乱）——' +
-          '把**探针 USB 和板子电源一起拔掉 10 秒**再插（只拔板子电源不够：探针 5V 还在供电）');
+          '把探针 USB 和板子电源一起拔掉 10 秒再插（只拔板子电源不够：探针 5V 还在供电）');
       }
     }
     /**
@@ -135,8 +135,8 @@ export class RiscvTransport {
         } catch { stillFrozen = true; }
         if (stillFrozen){
           throw new Error('调试模块的 DMI 冻住了（两个 DM 寄存器读回同一个值、写不落地，haltreq 无效）——' +
-            '硬复位 DTM 也救不回来。请**把探针 USB 和板子电源一起拔掉 10 秒**再插，' +
-            '或用板子的 **BOOT0 + 复位** 把它拉回来（实测两者都有效）');
+            '硬复位 DTM 也救不回来。请把探针 USB 和板子电源一起拔掉 10 秒再插，' +
+            '或用板子的 BOOT0 + 复位 把它拉回来（实测两者都有效）');
         }
         this.log(' ✅ 硬复位 DTM 后 DM 恢复应答');
       }
@@ -409,7 +409,7 @@ export class RiscvTransport {
       } catch { /* 放开失败：调用方会在后续读里报错；提示见 init() 的 IDCODE 文案 */ }
     }
     if (!released) throw new Error('ndmreset 没能放开（探针↔目标链路断了？）——' +
-      '这时目标可能停在复位态，要**把探针 USB 和板子电源一起拔掉 10 秒**再插才能解');
+      '这时目标可能停在复位态，要把探针 USB 和板子电源一起拔掉 10 秒再插才能解');
     try {
       await this.waitHalted(timeoutMs);
     } catch {

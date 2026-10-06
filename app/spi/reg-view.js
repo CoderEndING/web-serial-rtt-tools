@@ -208,7 +208,7 @@ export class SpiRegView {
     if (!this.grid.length){ this.log('w', '寄存器面板：还没读过，先「读取」再写（不然不知道器件现状）'); return; }
     const p = this._readFields();
     if (this.readKey && SpiRegView.keyOf(p, this.start, this.count) !== this.readKey){
-      this.log('e', '寄存器面板：档位 / 起始 / 个数在「读取」之后被改过 —— 现在写回会把**旧配置读回来的数据**按新配置写下去。请先重新「读取」');
+      this.log('e', '寄存器面板：档位 / 起始 / 个数在「读取」之后被改过 —— 现在写回会把旧配置读回来的数据按新配置写下去。请先重新「读取」');
       return;
     }
     const offs = only ? this.grid.changedOffsets() : null;

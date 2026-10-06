@@ -164,6 +164,9 @@ make full_flow_f103cb       # 当前 F103CB：认板 → 基准 → 调试压力
 
 ## 界面
 
+2026-10-06 已统一字号、标签对齐、连接状态和总线日志，调整 ADC 工作区、SPI 命令表、屏图案和 I2C 地址图。
+最新的全部 12 页截图、前后对比及采纳理由见 [UI 评审记录](docs/validation/2026-10-06-ui-review.md)。下方保留历史功能截图。
+
 | 串口助手 | 终端 |
 |---|---|
 | ![串口助手](docs/shots/1-serial.png) | ![终端](docs/shots/2-terminal.png) |
@@ -192,7 +195,7 @@ make full_flow_f103cb       # 当前 F103CB：认板 → 基准 → 调试压力
 |---|
 | ![USB→I2C](docs/shots/15-i2c.png) |
 
-| SPI/QSPI 桥（假探针 · 右列六个 tab：**命令表** / **寄存器** / 脚本 / **实时值** / Flash 测试 / 回环自检 · 命令表 10 行全展开、结果列逐行显示读回的字节） |
+| SPI/QSPI 桥（历史截图 · 假探针 · 右列六个 tab：**命令表** / **寄存器** / 脚本 / **实时值** / Flash 测试 / 回环自检；当前命令表默认 3 行，可按需添加，结果列逐行显示读回的字节） |
 |---|
 | ![SPI/QSPI 桥](docs/shots/16-spi.png) |
 
@@ -204,7 +207,13 @@ make full_flow_f103cb       # 当前 F103CB：认板 → 基准 → 调试压力
 
 ## 实测状态
 
-### 现在（2026-10-03）
+### UI 回归（2026-10-06）
+
+**903 项通过 / 0 失败**：通用 UI 24、SPI 桥 168、屏 179、I2C 145、调试器 143、工程生成 81、Scope 页面 95、Scope 渲染 14、布局 54。
+布局覆盖 1600 和 1280 两种宽度的 12 个页面；`make test-probe test-analog` 也全部通过。详情和完成时间见 [记录](docs/validation/2026-10-06-ui-review.md)。
+新增入口 `make test-ui-layout`，会在 `tmp/ui-review/after/` 保存布局判据及 24 张截图。
+
+### 历史快照（2026-10-03）
 
 **页面自测**（大部分不需要硬件；CDP 类先 `make page-prep` 起 8899 服务 + 9333 浏览器）：
 
@@ -1017,6 +1026,7 @@ node tools\selftest\i2c-dsl.test.mjs            # I2C 命令表/脚本 DSL（mak
 node tools\selftest\spi-bus-page.test.mjs       # SPI/QSPI 桥页（make test-spi-page 的第一半）
 node tools\selftest\spi-panel-page.test.mjs     # SPI/QSPI 屏页（含「局部刷新」一节）
 node tools\selftest\i2c-page.test.mjs           # USB→I2C 页（make test-i2c-page）
+node tools\selftest\ui-layout-page.test.mjs     # 全部 12 页，1600/1280 布局与截图（make test-ui-layout）
 
 # 1i) 真机专项（探针 + 板子）
 make spi-partial-hw ARGS="--panel=axs15352"     # 屏的局部刷新：线上字节逐字节对账（换 --panel=st77916 就是档 2）
