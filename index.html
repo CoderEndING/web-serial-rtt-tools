@@ -2062,6 +2062,45 @@
 
 <script src="app/vendor/xterm/xterm.js"></script>
 <script src="app/vendor/xterm/addon-fit.js"></script>
+<!--
+  🚨 「卡在正在加载…」自救提示（2026-10 用户现场）。
+
+  遮罩只有等 `app/main.js` 及其整个模块图跑完才摘。如果某个模块**加载失败**（最常见的原因：
+  浏览器里还留着上一次的旧 JS —— 老服务器不发缓存头时会留下"启发式缓存"，于是新旧模块混在
+  一起。典型签名：新的 `view.js` 从缓存的旧 `source.js` 里 import 一个新加的具名导出 →
+  浏览器直接抛 "does not provide an export named …"，**整个页面起不来、遮罩永远不消失**，
+  看着就像"网页坏了"）。
+
+  所以这里放一段**不依赖任何模块**的内联脚本：8 秒还没引导完，就把遮罩换成能照做的提示
+  （第一条红色报错 + 强制刷新 / 换端口），别让用户对着转圈猜。日常加载正常时它什么都不做。
+-->
+<script>
+(function(){
+  window.__bootGuardArmed = true;      // 自测断言用：证明这段兜底脚本真的装上了
+  var said = false;
+  function firstError(){
+    try { return window.__bootError || ''; } catch (e){ return ''; }
+  }
+  window.addEventListener('error', function(e){
+    if (window.__bootError) return;
+    var t = e && e.target;
+    if (t && (t.tagName === 'SCRIPT' || t.tagName === 'LINK')) window.__bootError = '（' + t.tagName.toLowerCase() + ' 加载失败：' + (t.src || t.href) + '）';
+    else if (e && e.message) window.__bootError = '（' + e.message + '）';
+  }, true);
+  setTimeout(function(){
+    var m = document.getElementById('boot-mask');
+    if (!m || said) return;                       // 已经摘掉 = 引导成功，什么都不用说
+    said = true;
+    m.innerHTML = '<div class="boot-box">'
+      + '<b>还在加载（已经 8 秒）</b>'
+      + '<span>网络慢的话再等等；如果一直不动，多半是浏览器里留着上一次的旧 JS 模块：'
+      + '按 <b>Ctrl+Shift+R</b> 强制刷新，或换个端口重开（<b>start-web.bat 8900</b> —— 换端口 = 换 origin，旧缓存用不上）。</span>'
+      + '<span style="opacity:.75">看细节：F12 → Console，把第一条红字发我。</span>'
+      + (firstError() ? '<span style="color:#f85149">第一条报错：' + firstError() + '</span>' : '')
+      + '</div>';
+  }, 8000);
+})();
+</script>
 <script type="module" src="app/main.js"></script>
 </body>
 </html>

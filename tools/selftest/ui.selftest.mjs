@@ -30,6 +30,17 @@ export async function runUiSelfTest(tools){
   };
   const { assistant, terminal, session } = tools;
 
+  /**
+   * 引导兜底（index.html 里的内联脚本）：8 秒没引导完就把遮罩换成"怎么办 + 第一条报错"。
+   * 2026-10 用户现场：新的 view.js + 浏览器里旧缓存的 source.js → 具名导出对不上 →
+   * 整个页面起不来、遮罩永远转，看着就是"网页坏了"。这段护栏保证那块兜底还在。
+   */
+  await step('引导兜底脚本在位（模块加载失败时能提示怎么救）', async () => {
+    if (!window.__bootGuardArmed) throw new Error('index.html 里那段引导兜底脚本没了 —— 卡住时用户只会看到转圈');
+    if ($('boot-mask')) throw new Error('引导结束时遮罩本该已经摘掉');
+    return '已装好，且遮罩已正常摘除';
+  });
+
   await step('演示串口出现在端口列表', async () => {
     if (!assistant.demo) throw new Error('没开演示模式（URL 要带 ?demo=serial）');
     if (!assistant.ports.length) throw new Error('端口列表是空的');
