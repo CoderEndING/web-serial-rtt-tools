@@ -2,6 +2,10 @@ import { UsbLease } from '../core/usb-device.js';
 import { withTimeout } from '../rtt/dap-webusb.js';
 export const ADC_EP=0x8b, ADC_BLOCK_BYTES=4096;
 export const ADC_MAX_INFLIGHT=32;
+/** 共享缓冲 IN 侧退场的上限与单笔等待时间（端点空闲时只花一次超时）。
+ *  上限要盖得住一次被遗弃的会话排下的全部块：END 是"每笔原生读一个"，
+ *  最大 32 笔，外加尾块。 */
+const RETIRE_IN_LIMIT=40, RETIRE_IN_TIMEOUT_MS=30;
 const LITTLE_ENDIAN=new Uint8Array(Uint16Array.of(1).buffer)[0]===1;
 export function decodeAdcPacket(bytes,token){
   const v=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength);
@@ -84,6 +88,13 @@ class AdcWorkerTransport {
       .finally(()=>{this.flush=null;});
     return await this.flush;
   }
+  /** SPI/QSPI 桥与 ADC 复用同一个 bulk IN 端点：开流之前必须把它的残留应答读干净，
+   *  否则第一个包会是垃圾（「数据包格式或任务代数错误」）。与 retireSpiOut 成对。 */
+  async retireSpiIn(){
+    if(this.flushIn)throw Error('上一笔共享缓冲 IN 退场请求尚未结束');
+    this.flushIn=this._rpc('in').finally(()=>{this.flushIn=null;});
+    return await this.flushIn;
+  }
   start(token,{bits,inFlight=1,onBlock,onFault}={}){
     if(this.pending&&!this.done)throw Error('上一轮 ADC USB 读取尚未结束');
     if(!Number.isInteger(inFlight)||inFlight<1||inFlight>ADC_MAX_INFLIGHT)throw Error('ADC USB 接收深度必须为 1–32');
@@ -158,6 +169,25 @@ export class AdcTransport {
     const r=await withTimeout(this.flush,2000,'退场 SPI OUT');
     if(r.status!=='ok')throw Error('SPI OUT 退场失败');
   }
+  /** 同 AdcWorkerTransport.retireSpiIn：把共享 IN 端点上残留的应答读掉。
+   *  超时的那一笔读**不能丢**：它已经占着端点，ADC 的第一个包会被它吃掉，
+   *  所以留着当 pump 的第一笔读（`_takeRead`）。 */
+  async retireSpiIn(){
+    if(this.flushIn)throw Error('上一笔共享缓冲 IN 退场请求尚未结束');
+    const task=(async()=>{
+      const settleIdle=()=>new Promise(resolve=>setTimeout(()=>resolve(null),RETIRE_IN_TIMEOUT_MS));
+      for(let retired=0;retired<RETIRE_IN_LIMIT;retired++){
+        // 先接手上一次退场留下的那笔读：丢掉它等于让一笔没人管的读占着端点，
+        // ADC 的第一个包会被它吃掉，流就从 seq=1 开始 → 判成「数据块不连续」。
+        const pending=this._takeRead();
+        const outcome=await Promise.race([pending,settleIdle()]);
+        if(outcome===null){this._leftover=pending;return;}
+        if(outcome.error||outcome.result?.status!=='ok'||!outcome.result.data?.byteLength)return;
+      }
+    })().finally(()=>{this.flushIn=null;});
+    this.flushIn=task;await task;
+  }
+  _takeRead(){const pending=this._leftover;this._leftover=null;return pending||this._read();}
   start(token,{bits,inFlight=1,onBlock,onFault}={}){
     if(this.pending||(this.token!=null&&!this.done))throw Error('上一轮 ADC USB 读取尚未结束');
     if(!Number.isInteger(inFlight)||inFlight<1||inFlight>ADC_MAX_INFLIGHT)throw Error('ADC USB 接收深度必须为 1–32');
@@ -175,7 +205,7 @@ export class AdcTransport {
     catch(error){return Promise.resolve({error});}
   }
   async _pump(){
-    const queue=Array.from({length:this.inFlight},()=>this._read());
+    const queue=Array.from({length:this.inFlight},()=>this._takeRead());
     let ends=0;
     while(queue.length){
       const {result:r,error}=await queue.shift();
@@ -198,7 +228,7 @@ export class AdcTransport {
       }
       // Refill before history/UI callbacks. Stop refilling at the first matched
       // END; firmware sends one sequenced END per negotiated native reader.
-      if(!ends&&!this.usbFailed)queue.push(this._read());
+      if(!ends&&!this.usbFailed)queue.push(this._takeRead());
       if(valid&&p.codes.length&&!this.discard){
         try{this.onBlock?.(p);}catch(e){this.discard=true;this._fault(e);}
       }
@@ -215,5 +245,5 @@ export class AdcTransport {
     if(this.pending)await withTimeout(this.pending,3000,'等待 ADC END');
     if(!this.done)throw Error('ADC 数据流停止未确认');
   }
-  async close(){if(this.pending||this.flush)throw Error('ADC USB 请求尚未退出，请先停止或拔插探针');await this.lease.close();}
+  async close(){if(this.pending||this.flush||this.flushIn)throw Error('ADC USB 请求尚未退出，请先停止或拔插探针');this._leftover=null;await this.lease.close();}
 }
