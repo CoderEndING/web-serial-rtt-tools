@@ -147,9 +147,22 @@ console.log('== 2. SWD 时钟默认值（老设置迁移）+ 载入 ELF 符号 =
     if (!res.ok) throw new Error('取 ELF 失败 ' + res.status);
     const buf = await res.arrayBuffer();
     const st = window.__tools.dbg.loadElfBuffer(buf, 'stm32f103_rtt_speed.elf');
-    return { n: st ? st.size : 0, vars: st ? st.varCount : 0, info: document.getElementById('d-elf-info').textContent };`);
+    return { n: st ? st.size : 0, vars: st ? st.varCount : 0, info: document.getElementById('d-elf-info').textContent,
+             hint: document.getElementById('d-src-file')?.textContent || '',
+             tip: document.getElementById('d-src-pick')?.title || '' };`);
   ok(r.n > 50 && r.vars > 0, `符号载入：${r.n} 个符号、${r.vars} 个带类型变量`, JSON.stringify(r));
   ok(/符号/.test(r.info), '侧栏显示符号摘要', r.info);
+  /**
+   * 载入 ELF 就该给出「选哪个源码目录」的建议（DWARF 里存的是编译时绝对路径）：
+   * 推荐目录 + 覆盖数 + （有的话）跨机器的簇。
+   */
+  /**
+   * 载入 ELF 就该说清"该选哪个源码目录"（DWARF 里存的是编译时绝对路径）：
+   * 标题栏那行给紧凑版，按钮 tooltip 给完整版（含别的簇 / 跨机器提示）。
+   * 不往源码行那块加元素 —— 那儿每多一行，一屏就少看一行源码。
+   */
+  ok(/^推荐：.*（\d+\/\d+）/.test(r.hint), '载入 ELF 后提示推荐源码目录（带覆盖数）', r.hint);
+  ok(/DWARF 路径/.test(r.tip), '「选择源码目录…」的 tooltip 带完整建议', r.tip.slice(0, 80));
 }
 
 // ==================================================================== 3

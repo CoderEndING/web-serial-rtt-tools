@@ -30,7 +30,7 @@ import { runCmd } from './cmd.js';
 import { SymTab } from './symbols.js';
 import { WatchList, resolveWatch, formatWatchValue, treeRows, summarizeTree, TREE_LIMITS } from './watch.js';
 import { completeLine } from './complete.js';
-import { SourceStore } from './source.js';
+import { SourceStore, sourceRootSuggestions } from './source.js';
 import { hex32, parseBytes } from './fmt.js';
 import { Rtt } from '../rtt/protocol.js';
 import { parseSvdXml, decodeSvdRegister, svdSummary } from './svd.js';
@@ -1093,6 +1093,7 @@ export class DbgView {
       this._renderRttSym();
       this._updatePcStrip();
       this.renderSource();
+      this._renderSrcSuggest();          // 载入就能说"该选哪个源码目录"（DWARF 里存的是编译路径）
       return st;
     } catch (e){
       this._out('✗ 解析 ELF 失败：' + (e?.message || e), 'err');
@@ -1491,10 +1492,50 @@ export class DbgView {
       const sum = this.src.indexFileList(files);
       this._out('源码：' + sum, 'ok');
       this.srcShown = null;
+      this._renderSrcSuggest();
       await this.renderSource();
     } catch (e){
       this._out('✗ 索引源码文件失败：' + (e?.message || e), 'err');
     }
+  }
+
+  /**
+   * 按 ELF 的 DWARF 路径推荐"该选哪个源码目录"（`sourceRootSuggestions` 的界面那一半）。
+   *
+   * 用户提的：载入 ELF 的时候不就能知道该选哪个目录了吗？——能。DWARF 的 .debug_line 里存的是
+   * **编译时的路径**（这份 HPM 的 ELF 188 条**全是绝对路径**：146 条在 `E:/sdk_env_v1.11.0/hpm_sdk`、
+   * 18 条在工具链、24 条在 `/home/builder` —— 编译机路径，本机根本不存在）。
+   * 已经选过目录时顺带报"这份 ELF 里能解析出多少"，选小了当场看得出来。
+   */
+  _renderSrcSuggest(){
+    const paths = this.sym?.lines?.paths || [];
+    const s = sourceRootSuggestions(paths);
+    if (!s.total){
+      this._out('源码目录建议：（这份 ELF 里没有可用的编译路径 —— 没有 .debug_line，或路径不是绝对路径）', 'dim');
+      return;
+    }
+    const parts = [];
+    if (this.src?.ready){
+      // 选过目录就报"真的能解析出多少"——比"索引了多少文件"更贴近用户关心的事
+      const uniq = [...new Set(paths.filter(Boolean))];
+      const hit = uniq.filter(p => { try { return !!this.src.resolve(p); } catch { return false; } }).length;
+      parts.push(`已选「${this.src.rootName}」能解析 ${hit}/${uniq.length}`);
+    }
+    parts.push(`推荐选 ${s.best.dir}（覆盖 ${s.best.files}/${s.total} 个源文件）`);
+    if (s.root && s.root.dir !== s.best.dir) parts.push(`要全覆盖就选 ${s.root.dir}（${s.root.files}，目录更大）`);
+    for (const o of s.others){
+      parts.push(`${o.foreign ? '⚠ ' : ''}${o.dir}（${o.files}${o.foreign ? '，编译机/别的盘，本机覆盖不到' : ''}）`);
+    }
+    const text = parts.join(' · ');
+    /**
+     * 🚨 只写**控制台日志 + 标题栏那行的提示 + 按钮 tooltip**，不往"源码行"那块加元素：
+     *    那里每多一行，源码就少看一行（dbg-page 的布局护栏就卡这个：一屏必须 ≥12 行源码）。
+     */
+    this._out('源码目录建议：' + text, 'dim');
+    const pick = $('d-src-pick');
+    if (pick) pick.title = `按这份 ELF 的 DWARF 路径（共 ${s.total} 条，绝对路径）推荐：\n` + parts.join('\n');
+    const leg = $('d-src-file');
+    if (leg && !this.src?.ready) leg.textContent = '推荐：' + s.best.dir + `（${s.best.files}/${s.total}）`;
   }
 
   /** 停下来时画"当前源码行"（Ozone 那种） */
