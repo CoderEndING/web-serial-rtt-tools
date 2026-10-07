@@ -52,3 +52,51 @@ await assert.rejects(flushing.retireSpiOut(),/上一笔/);assert.equal(outs,1);
 await assert.rejects(flushing.close(),/USB 请求/);finishOut({status:'ok'});await flush;
 assert.equal(flushing.flush,null);
 console.log('ADC SPI handoff: one native OUT only, close guarded until native completion PASS');
+// Native IN retirement errors are not equivalent to an empty endpoint.
+for(const result of [new Error('IN unplugged'),{status:'stall'}]){
+ const bad=new AdcTransport({vendorId:20,productId:21,transferIn(){return result instanceof Error?Promise.reject(result):Promise.resolve(result);}});
+ await assert.rejects(bad.retireSpiIn(),/IN unplugged|SPI IN 退场失败/);
+}
+// Exercise the actual Worker script, including the pending read handed to pump.
+const {readFile}=await import('node:fs/promises');
+const vm=await import('node:vm');
+const messages=[];let workerReads=0,finishRead;
+const context=vm.createContext({performance,setTimeout,clearTimeout,Uint8Array,DataView,Error,
+ self:{postMessage:m=>messages.push(m)},testDevice:{transferIn(){workerReads++;return new Promise(resolve=>finishRead=resolve);}}});
+vm.runInContext(await readFile(new URL('../../app/analog/adc-usb-worker.js',import.meta.url),'utf8'),context);
+vm.runInContext('device=testDevice',context);
+await vm.runInContext('retireIn()',context);assert.equal(workerReads,1);
+const task=vm.runInContext('pump({token:30,inFlight:1})',context);
+assert.equal(workerReads,1,'idle native read is reused, never orphaned');
+finishRead({status:'ok',data:new DataView(packet(30,0,0).buffer)});await task;
+assert.ok(messages.some(m=>m.event==='drained'&&m.complete));
+vm.runInContext("device={transferIn:()=>Promise.reject(Error('Worker IN failed'))}",context);
+await assert.rejects(vm.runInContext('retireIn()',context),/Worker IN failed/);
+console.log('ADC retirement: main/Worker native errors propagate; Worker idle IN passes to pump without a duplicate read PASS');
+// Worker OUT caller timeout retains the native RPC and prevents another OUT/close.
+const savedWorker=globalThis.Worker,savedNavigator=Object.getOwnPropertyDescriptor(globalThis,'navigator');
+const nativeDevice={vendorId:40,productId:41,configurations:[{configurationValue:1,interfaces:[{interfaceNumber:5,alternates:[{endpoints:[{endpointNumber:11,direction:'in',type:'bulk'},{endpointNumber:11,direction:'out',type:'bulk'}]}]}]}]};
+let workerStub;
+globalThis.Worker=class {
+ constructor(){workerStub=this;this.requests=[];}
+ postMessage(m){this.requests.push(m);if(m.action==='open'||m.action==='close')queueMicrotask(()=>this.onmessage({data:{id:m.id,ok:true}}));}
+ terminate(){}
+};
+Object.defineProperty(globalThis,'navigator',{configurable:true,value:{usb:{getDevices:async()=>[nativeDevice]}}});
+try{
+ const worker=await AdcTransport.request(nativeDevice);
+ const savedTimeout=globalThis.setTimeout;
+ let timed;
+ try{globalThis.setTimeout=(fn,ms,...args)=>savedTimeout(fn,ms===2000?5:ms,...args);timed=worker.retireSpiOut();}
+ finally{globalThis.setTimeout=savedTimeout;}
+ await assert.rejects(timed,/退场 SPI OUT/);
+ assert.ok(worker.flush,'timeout does not release native ownership');
+ await assert.rejects(worker.retireSpiOut(),/上一笔/);await assert.rejects(worker.close(),/USB 请求/);
+ const out=workerStub.requests.find(m=>m.action==='out');
+ workerStub.onmessage({data:{id:out.id,ok:true,status:'ok'}});
+ await worker.flush;assert.equal(worker.flush,null);await worker.close();
+}finally{
+ globalThis.Worker=savedWorker;
+ if(savedNavigator)Object.defineProperty(globalThis,'navigator',savedNavigator);else delete globalThis.navigator;
+}
+console.log('ADC Worker OUT: caller timeout keeps native request fenced until late completion PASS');

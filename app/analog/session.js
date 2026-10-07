@@ -8,7 +8,7 @@ import { AdcTransport, ADC_MAX_INFLIGHT } from './transport.js';
 import { ADC_ACT, decodeReply, streamCaps } from './adc-protocol.js';
 import * as SPI from '../spi/protocol.js';
 export { decodeReply, streamCaps } from './adc-protocol.js';
-/** 共享缓冲退场 + 复读 CAPS 的最大轮数（每轮 20 ms，约 240 ms 上限）。 */
+/** CAPS 复读次数有界；每轮间隔 20 ms，USB 退场另有独立超时。 */
 const SHARED_RETIRE_ATTEMPTS = 12;
 export class AnalogSession {
   constructor(){ this.hid = null; this.caps = null; this.dac = null; this.busy = false; this.usingMock = false; }
@@ -65,8 +65,7 @@ export class AnalogSession {
     const abort=()=>{this._sendStop().catch(e=>{this._adcStopError=e;});};
     try{
       if(!this.transport)this.transport=await AdcTransport.request(this.hid.device);
-      const caps=await this._acquireSharedCaps({signal});
-      if(caps.flags&1)await this.transport.retireSpiOut();
+      await this._acquireSharedCaps({signal});
       await this.transport.retireSpiIn();
       if(signal.aborted)return;
       const requestedDepth=this.adcInFlight??32;
@@ -105,48 +104,46 @@ export class AnalogSession {
   async streamCommand(action,args=new Uint8Array()){
     return decodeReply(await this.hid.xfer(0x38,Uint8Array.of(action,...args)),action);
   }
-  /**
-   * 取共享缓冲的所有权标志。
-   *
-   * SPI/QSPI 桥与 ADC DMA 抢的是**同一对 bulk 缓冲**，所以固件用 `CAPS.flags` 的
-   * bit1 报"桥此刻真的占着它"。bit1 可能是**真的**（另一个页面还在跑 SPI/QSPI），
-   * 也可能是关桥之后残留的账目 —— 后者由固件在 claim 时自行作废（见
-   * firmware 的 `sb_live_owner`/`sb_reclaim_shared`）。
-   *
-   * 但**绝不能一次采样就硬拒**：2026-10-06 的现场故障就是 enabled=0、ADC 空闲、
-   * frames_ok=0、sclk 没跑，CAPS 却一直报 flags=2，于是 ADC 再也起不来，只能拔插
-   * 探针。所以这里改成"先明确让共享缓冲退场，再复读 CAPS"，退不掉才报错。
-   */
+  // CAPS is a retirement fence, not permission to erase native USB ownership.
   async _acquireSharedCaps({signal}={}){
-    let caps=null;
+    let retired=false;
     for(let attempt=0;attempt<SHARED_RETIRE_ATTEMPTS;attempt++){
-      caps=streamCaps(await this.streamCommand(ADC_ACT.CAPS));
-      if(!(caps.flags&2))return caps;
-      if(attempt===0)await this._retireSharedBuffers();
-      else await waitMs(20);
-      if(signal?.aborted)return caps;
+      if(signal?.aborted)throw Error('ADC 启动已取消');
+      const caps=streamCaps(await this.streamCommand(ADC_ACT.CAPS));
+      if(!caps.flags)return caps;
+      if((caps.flags&2)&&!retired){
+        await this._retireSharedBuffers();retired=true;
+      }
+      if(caps.flags&1)await this.transport.retireSpiOut();
+      await waitMs(20);
     }
-    throw Error('SPI/QSPI 仍占着共享缓冲（ADC 与 SPI/QSPI 互斥）：请到「SPI/QSPI」页停止，或拔插一次探针');
+    throw Error('SPI/QSPI 仍占着共享缓冲（USB 退场未确认）：请停止 SPI/QSPI 后重试');
   }
-  /**
-   * 把共享缓冲要回来。失败不致命 —— 本来没使能/没占用时固件同样接受或直接忽略。
-   *
-   * 两种占用者都要处理：
-   *   ① SPI/QSPI 桥：失能 + 丢弃未处理帧；
-   *   ② **上一次 ADC 会话没退干净**（采集出错、页面被直接关掉）时，固件里
-   *      `owned` 还挂着 —— 共享缓冲就永远显示被占用。这时用协议内的手段把它退掉：
-   *      STOP 让固件停下来并排好 END 块 → 把 EP11 上排队的块读掉（`queued` 归零）
-   *      → CLOSE 才会被接受（固件的 CLOSE 要求 ended && !busy && !queued）。
-   *      没有这条路径，用户只能拔插探针 —— 2026-10-06 就是这么翻车的。
-   */
   async _retireSharedBuffers(){
-    for(const data of [SPI.hidData.enable(false),SPI.hidData.abort()]){
-      try{await this.hid.xfer(SPI.HID_CMD,data);}
-      catch{ /* 桥没连上/没使能：无需退场，继续读 CAPS */ }
+    // Close an abandoned ADC owner before sending SPI control commands: SPI
+    // correctly rejects them while ADC owns the endpoint. Only BUSY is retryable.
+    const status=await this.streamCommand(ADC_ACT.STATUS);
+    if(status.length!==24)throw Error('ADC 状态应答长度错误');
+    if(status[20]){
+      await this.streamCommand(ADC_ACT.END);
+      await this.transport.retireSpiIn();
+      let closed=false;
+      for(let attempt=0;attempt<SHARED_RETIRE_ATTEMPTS;attempt++){
+        try{await this.streamCommand(ADC_ACT.CLOSE);closed=true;break;}
+        catch(e){if(e.code!==2)throw e;await waitMs(20);}
+      }
+      if(!closed)throw Error('上一轮 ADC 会话退场未确认');
     }
-    try{await this.streamCommand(ADC_ACT.END);}catch{ /* 没有在跑的会话 */ }
-    try{await this.transport?.retireSpiIn?.();}catch{ /* 端点本来就干净 */ }
-    try{await this.streamCommand(ADC_ACT.CLOSE);}catch{ /* 还没到可关闭状态，下一轮 CAPS 再看 */ }
+    for(const data of [SPI.hidData.enable(false),SPI.hidData.abort()]){
+      const reply=await this.hid.xfer(SPI.HID_CMD,data);
+      if(!(reply instanceof Uint8Array)||reply.length<7||reply[0]<8||
+         reply[1]!==SPI.HID_CMD||reply[2]!==data[0])throw Error('SPI 退场应答无效');
+      const state=SPI.statusWord(SPI.parseWordPayload(reply));
+      // err is the last frame error, not a per-command return code. Fresh CAPS
+      // below confirms retirement; do not reject a successful disable for it.
+      if(state.enabled)throw Error('SPI 失能未确认');
+    }
+    await this.transport.retireSpiIn();
   }
   async _sendStop(){
     if(this._streamToken==null)return;

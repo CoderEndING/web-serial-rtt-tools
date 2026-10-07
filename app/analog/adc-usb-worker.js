@@ -104,7 +104,9 @@ async function retireIn(){
     const pending = acquireRead();
     const outcome = await Promise.race([pending, idle()]);
     if (outcome === null){ pendingRead = pending; break; }   /* 端点空了：这一笔留给 pump */
-    if (outcome.error || outcome.result?.status !== 'ok' || !outcome.result.data?.byteLength) break;
+    if (outcome.error) throw outcome.error;
+    if (outcome.result?.status !== 'ok') throw Error('SPI IN 退场失败');
+    if (!outcome.result.data?.byteLength) break;
     retired++;
   }
   return { retired };

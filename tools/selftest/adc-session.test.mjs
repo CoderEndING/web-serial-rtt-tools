@@ -57,10 +57,43 @@ console.log('ADC ownership: DAC cannot be unlocked by ADC STOP; native SPI OUT d
 const SPI_ENABLE=1,SPI_ABORT=6;
 r=rig({sharedBusy:1});await r.s.acquire({bits:16,rate:1000,count:3});
 assert.deepEqual(r.spi,[SPI_ENABLE,SPI_ABORT]);assert.equal(r.s.busy,false);assert.equal(r.owned,false);
-// Recovery must also retire a *stale ADC owner* (END + drain EP11 + CLOSE), not just the SPI bridge.
-assert.ok(r.actions.includes(11)&&r.actions.includes(12),'stale ADC session retired with END + CLOSE');
+
 console.log('ADC shared buffer: one busy sample retires SPI/QSPI (ENABLE 0 + ABORT) and re-reads CAPS, no hard reject PASS');
 r=rig({sharedBusy:99});
 await assert.rejects(r.s.acquire({bits:16,rate:1000,count:3}),/SPI\/QSPI 仍占着共享缓冲/);
 assert.equal(r.s.busy,false);assert.equal(r.actions.filter(a=>a===9).length,12);
 console.log('ADC shared buffer: a buffer that never retires fails loudly and bounded, session stays reusable PASS');
+
+// Retirement is a hardware completion fence; CAPS follows actual state changes.
+function handover({out=false,inside=false,owned=false,spiError=false,inError=false}={}){
+ const s=new AnalogSession(),events=[];let finishOut,finishIn,closeTries=0;
+ const outDone=new Promise(resolve=>finishOut=()=>{out=false;resolve();});
+ const inDone=new Promise(resolve=>finishIn=()=>{inside=false;resolve();});
+ s.streamCommand=async a=>{
+  events.push(a);
+  if(a===9){const c=caps();c[16]=(out?1:0)|((inside||owned)?2:0);return c;}
+  if(a===14){const b=new Uint8Array(24);b[20]=+owned;return b;}
+  if(a===11)return new Uint8Array();
+  if(a===12){if(++closeTries<3){const e=Error('busy');e.code=2;throw e;}owned=false;return new Uint8Array();}
+  throw Error(`Unexpected command ${a}`);
+ };
+ s.hid={async xfer(cmd,b){events.push(`spi:${b[0]}`);return Uint8Array.of(8,cmd,b[0],spiError?1:0,0,0,0,0);}};
+ s.transport={async retireSpiOut(){events.push('out');await outDone;},async retireSpiIn(){events.push('in');if(inError)throw Error('native IN failed');await inDone;}};
+ return {s,events,finishOut,finishIn};
+}
+let h=handover();await h.s._acquireSharedCaps();assert.deepEqual(h.events,[9],'cold start needs no recovery');
+h=handover({out:true});let ready=false;
+let fence=h.s._acquireSharedCaps().then(()=>ready=true);
+await new Promise(resolve=>setTimeout(resolve,5));assert.equal(ready,false);h.finishOut();await fence;
+assert.deepEqual(h.events,[9,'out',9],'OUT completion must be followed by fresh CAPS');
+h=handover({inside:true});ready=false;fence=h.s._acquireSharedCaps().then(()=>ready=true);
+await new Promise(resolve=>setTimeout(resolve,5));assert.equal(ready,false);h.finishIn();await fence;
+assert.deepEqual(h.events,[9,14,'spi:1','spi:6','in',9]);
+h=handover({inside:true,owned:true});h.finishIn();await h.s._acquireSharedCaps();
+assert.equal(h.events.filter(a=>a===12).length,3);
+assert.ok(h.events.indexOf('spi:1')>h.events.lastIndexOf(12),'ADC owner closes before SPI commands');
+h=handover({inside:true,spiError:true});await assert.rejects(h.s._acquireSharedCaps(),/SPI 失能未确认/);
+assert.equal(h.events.includes('in'),false,'failed SPI command cannot authorize takeover');
+h=handover({inside:true,inError:true});await assert.rejects(h.s._acquireSharedCaps(),/native IN failed/);
+assert.equal(h.events.filter(a=>a===9).length,1,'failed USB retirement is not swallowed');
+console.log('ADC handover: cold start, delayed native OUT/IN, fresh CAPS fence, abandoned ADC CLOSE retries, control/USB failures PASS');

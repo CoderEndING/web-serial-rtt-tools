@@ -35,10 +35,11 @@ class AdcWorkerTransport {
     this.worker.onmessage=event=>this._message(event.data);
     this.worker.onerror=event=>this._workerError(event.message||'ADC Worker 异常');
   }
-  _rpc(action,args={}){
+  _rpc(action,args={}, {native=false}={}){
     const id=++this._rpcId;
     return new Promise((resolve,reject)=>{
-      const timer=setTimeout(()=>{this._rpcPending.delete(id);reject(Error(`ADC Worker ${action} 超时`));},10000);
+      // A native OUT timeout must not discard its eventual completion.
+      const timer=native?null:setTimeout(()=>{this._rpcPending.delete(id);reject(Error(`ADC Worker ${action} 超时`));},10000);
       this._rpcPending.set(id,{resolve,reject,timer});this.worker.postMessage({id,action,...args});
     });
   }
@@ -84,9 +85,9 @@ class AdcWorkerTransport {
   }
   async retireSpiOut(){
     if(this.flush)throw Error('上一笔 SPI OUT 退场请求尚未结束');
-    this.flush=this._rpc('out').then(r=>{if(r.status!=='ok')throw Error('SPI OUT 退场失败');})
+    this.flush=this._rpc('out',{}, {native:true}).then(r=>{if(r.status!=='ok')throw Error('SPI OUT 退场失败');})
       .finally(()=>{this.flush=null;});
-    return await this.flush;
+    return await withTimeout(this.flush,2000,'退场 SPI OUT');
   }
   /** SPI/QSPI 桥与 ADC 复用同一个 bulk IN 端点：开流之前必须把它的残留应答读干净，
    *  否则第一个包会是垃圾（「数据包格式或任务代数错误」）。与 retireSpiOut 成对。 */
@@ -182,7 +183,9 @@ export class AdcTransport {
         const pending=this._takeRead();
         const outcome=await Promise.race([pending,settleIdle()]);
         if(outcome===null){this._leftover=pending;return;}
-        if(outcome.error||outcome.result?.status!=='ok'||!outcome.result.data?.byteLength)return;
+        if(outcome.error)throw outcome.error;
+        if(outcome.result?.status!=='ok')throw Error('SPI IN 退场失败');
+        if(!outcome.result.data?.byteLength)return;
       }
     })().finally(()=>{this.flushIn=null;});
     this.flushIn=task;await task;
