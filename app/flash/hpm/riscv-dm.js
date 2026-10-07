@@ -295,7 +295,11 @@ export class RiscvTransport {
    * `DAP_JTAG_Sequence`，**每拍都收状态**（DMI 只一级深，丢一拍会静默写错地方）。
    * 任何一拍不是 SUCCESS 就返回 `badAt`，调用方从那一个字起退回逐字慢路径并重对齐地址。
    *
-   * @returns {{ok:boolean, badAt:number, op?:number}} badAt=-1 表示全成功
+   * 🚨 2026-10 真机补充（同 `sbaReadBurst`）：批内每拍背靠背，DM 有一拍没写完就收到下一次
+   *    `sbdata0` 写时会置 `sbbusyerror` —— 而**每拍状态仍报 SUCCESS**，于是写入静默丢失
+   *    （flash 烧出来就是坏的）。所以批尾补一拍 `READ sbcs`（同一扫描，不额外花 USB 命令）。
+   *
+   * @returns {{ok:boolean, badAt:number, op?:number, sbcs:number|null}} badAt=-1 表示全成功
    */
   async dmiWriteBurst(words){
     const reqs = [];
@@ -303,12 +307,17 @@ export class RiscvTransport {
       reqs.push(dmiRequest(DMI_OP.WRITE, DM.SBDATA0, w >>> 0));
       reqs.push(dmiRequest(DMI_OP.NOP, 0, 0));
     }
+    reqs.push(dmiRequest(DMI_OP.READ, DM.SBCS, 0));      // 批尾自检
+    reqs.push(dmiRequest(DMI_OP.NOP, 0, 0));
     const resps = await this._scanDRMany(reqs);
+    const sbcs = dmiResponse(resps[words.length * 2 + 1]).data >>> 0;
     for (let i = 0; i < words.length; i++){
       const r = dmiResponse(resps[i * 2 + 1]);            // 第 i 个写的结果在第 i 个 NOP 那拍
-      if (r.op !== DMI_STATUS.SUCCESS) return { ok: false, badAt: i, op: r.op };
+      if (r.op !== DMI_STATUS.SUCCESS) return { ok: false, badAt: i, op: r.op, sbcs };
     }
-    return { ok: true, badAt: -1 };
+    // 攒下 sbcs 错误位 ⇒ 这一批不能算数（哪一拍超速未知，整批重写）
+    if (sbcs & (SBCS.SBBUSYERROR | SBCS.SBERROR)) return { ok: false, badAt: 0, sbcs };
+    return { ok: true, badAt: -1, sbcs };
   }
 
   // ---------------------------------------------------------------- 目标控制
@@ -569,12 +578,31 @@ export class RiscvTransport {
     this.lastSbcs = extra >>> 0;
   }
 
-  /** sberror/sbbusyerror 是**写 1 清零**（固件里踩过"写 0 等于没做"）*/
+  /**
+   * sberror/sbbusyerror 是**写 1 清零**（固件里踩过"写 0 等于没做"）。
+   *
+   * 🚨 2026-10 真机补充：**在飞的事务没落定时写进去的清位会被丢掉** —— 坏事务随后完成，
+   *    又会把 `sberror` 立起来，于是"读一次没映射的地址 → 之后每一次内存读都失败"。
+   *    所以这里先等 `sbbusy` 落（有界），清完**再读回来复验**，还挂着就再清一次。
+   */
   async sbaClearErrors(){
+    for (let i = 0; i < 25; i++){
+      const s = await this.dmiRead(DM.SBCS).catch(() => null);
+      if (s === null) return;
+      this.lastSbcs = s;
+      if (!(s & SBCS.SBBUSY)) break;
+      await new Promise(r => setTimeout(r, 2));
+    }
     const sbcs = await this.dmiRead(DM.SBCS);
     this.lastSbcs = sbcs;
     if (sbcs & (SBCS.SBBUSYERROR | SBCS.SBERROR)){
       await this.dmiWrite(DM.SBCS, (sbcs | SBCS.SBBUSYERROR | SBCS.SBERROR) >>> 0);
+      const back = await this.dmiRead(DM.SBCS).catch(() => null);      // 复验：粘滞位没清掉的话后面每次读都会失败
+      if (back !== null){
+        this.lastSbcs = back;
+        if (back & (SBCS.SBBUSYERROR | SBCS.SBERROR))
+          await this.dmiWrite(DM.SBCS, (back | SBCS.SBBUSYERROR | SBCS.SBERROR) >>> 0);
+      }
     }
     this._sbcsCfg = null;                 // 清错之后配置要重写
   }
@@ -705,20 +733,41 @@ export class RiscvTransport {
    *
    * @returns {{words:Uint32Array, ok:boolean, badAt:number}} badAt=-1 表示全成功
    */
+  /**
+   * 一批读：把 count 个字的 `sbdata0` 读压进**一条** `DAP_JTAG_Sequence`。
+   *
+   * 🚨 2026-10 真机定因（用户现场：往监视里加一个**结构体**变量 → 复位并停就报
+   *    `读 0x4000b600（60 B）失败：SBA 读 0x4000b638 出错（sbcs=0x20758407）`，
+   *    而且从此**所有内存读全废**）：
+   *      60 B = 15 字 = 一批 13 字 + 一批 2 字；批内每拍是**背靠背**发出的，DM 只要有一拍
+   *      还没来得及读完就收到下一次 `sbdata0` 访问，就会置 **`sbbusyerror`** —— 而
+   *      **每一拍的 DMI 状态仍然报 SUCCESS**，所以只看拍状态根本发现不了，那一批的数据
+   *      也就不可信（可能读到上一笔的残值）。目标在跑、总线被抢时更容易踩中。
+   *
+   *    所以批尾在**同一条扫描**里补一拍 `READ sbcs`：校验成本 0 条额外 USB 命令（只多 2 拍
+   *    JTAG），但每一批都能当场判定"这批到底算不算数"，`ok=false` 时调用方清错误位并按字重读。
+   *
+   * @returns {{words:Uint32Array, ok:boolean, badAt:number, sbcs:number|null}}
+   *          ok=false 且 badAt=0 ⇒ 这批攒下了 sbcs 错误位，整批不可信
+   */
   async sbaReadBurst(count, perWordMs = 2000){
     const reqs = [];
     for (let i = 0; i < count; i++){
       reqs.push(dmiRequest(DMI_OP.READ, DM.SBDATA0, 0));
       reqs.push(dmiRequest(DMI_OP.NOP, 0, 0));
     }
+    reqs.push(dmiRequest(DMI_OP.READ, DM.SBCS, 0));      // 批尾自检
+    reqs.push(dmiRequest(DMI_OP.NOP, 0, 0));
     const resps = await this._scanDRMany(reqs);
+    const sbcs = dmiResponse(resps[count * 2 + 1]).data >>> 0;
     const words = new Uint32Array(count);
     for (let i = 0; i < count; i++){
       const r = dmiResponse(resps[i * 2 + 1]);          // 第 i 个字的结果在第 i 个 NOP 那拍
-      if (r.op !== DMI_STATUS.SUCCESS) return { words, ok: false, badAt: i };
+      if (r.op !== DMI_STATUS.SUCCESS) return { words, ok: false, badAt: i, sbcs };
       words[i] = r.data >>> 0;
     }
-    return { words, ok: true, badAt: -1 };
+    if (sbcs & (SBCS.SBBUSYERROR | SBCS.SBERROR)) return { words, ok: false, badAt: 0, sbcs };
+    return { words, ok: true, badAt: -1, sbcs };
   }
 
   /**
@@ -743,11 +792,23 @@ export class RiscvTransport {
     this.lastSbcs = await this.dmiRead(DM.SBCS, perWordMs);
     if (this.lastSbcs & (SBCS.SBBUSYERROR | SBCS.SBERROR)){
       this.sbaFailed = true;
-      throw new Error(`SBA 读 0x${(here >>> 0).toString(16)} 出错（sbcs=0x${this.lastSbcs.toString(16)}）`);
+      throw new Error(`SBA 读 0x${(here >>> 0).toString(16)} 出错（sbcs=0x${this.lastSbcs.toString(16)}）——`
+        + ' 这一笔总线访问没有干净完成；若之后每次读内存都失败，请「断开」重连（或给板子断电重上电）恢复。');
     }
     if (this.lastSbcs & SBCS.SBBUSY){
+      /**
+       * 这颗 DM 的 `sbbusy` 会在"刚发过访问"的窗口里短暂置起（实测：读内存明明成功，紧接着
+       * 单读一次 sbcs 也是这个位亮着），所以先给它几毫秒自己落，别急着宣判"卡死"。
+       * 真的不落才算故障 —— 那种情况会把后面**所有**内存读带走，必须给用户一条能走的恢复路径。
+       */
+      for (let i = 0; i < 8; i++){
+        await new Promise(r => setTimeout(r, 2));
+        this.lastSbcs = await this.dmiRead(DM.SBCS, perWordMs);
+        if (!(this.lastSbcs & SBCS.SBBUSY)) return;
+      }
       this.sbaFailed = true;
-      throw new Error(`SBA 读 0x${(here >>> 0).toString(16)} 时 sbbusy 一直不落 —— 总线事务没完成（地址没映射 / 外设没时钟）`);
+      throw new Error(`SBA 读 0x${(here >>> 0).toString(16)} 时 sbbusy 一直不落 —— 总线事务没完成`
+        + '（地址没映射 / 外设没时钟）。它会让之后所有内存读都失败：请「断开」重连或给板子断电重上电恢复。');
     }
   }
 
@@ -760,6 +821,26 @@ export class RiscvTransport {
    *    （SBA 只适合 RAM/已配好的 flash 窗口；片内外设一律走算法/内核去读。）
    */
   async readMem(addr, length, perWordMs = 2000){
+    /**
+     * 🚨 2026-10 真机定因（HPM6800EVK，稳定复现）：`复位并停`（ndmreset）之后的**第一笔**
+     *    SBA 访问会被 DM 判成 `sbbusyerror`（`sbcs` 从干净的 `0x20158407` 变成 `0x20758407`），
+     *    于是"复位并停 → 读内存"这一步必错；而 `复位并跑` + 等一会儿再读就正常 —— 说明只是
+     *    复位后总线还没落定，既不是地址错也不是数据错。
+     *
+     *    这类位是**写 1 清零的记账位**：清掉再读一次通常就干净了。直接抛给用户，他看到的就是
+     *    "复位并停之后就报读失败"。所以这里只对这类错误清位重试一次；重试仍带同样的错才认输
+     *    （真·地址不通时两次都会失败，由上层记冷却并如实报错）。
+     */
+    try {
+      return await this._readMemOnce(addr, length, perWordMs);
+    } catch (e){
+      if (!/sbcs|总线访问没有干净完成|sbbusy/.test(String(e?.message || ''))) throw e;
+      await this.sbaClearErrors().catch(() => {});
+      return await this._readMemOnce(addr, length, perWordMs);
+    }
+  }
+
+  async _readMemOnce(addr, length, perWordMs = 2000){
     if (!Number.isInteger(addr) || addr < 0 || addr > 0xffffffff ||
         !Number.isInteger(length) || length < 0 || addr + length > 0x100000000)
       throw new Error('SBA 地址或长度超出 32 位地址空间');
@@ -802,7 +883,18 @@ export class RiscvTransport {
       const want = Math.min(BURST, words - i);
       if (!this._burstOff && slowLeft <= 0 && want >= 2){
         const b = await this.sbaReadBurst(want, perWordMs);
-        const good = b.ok ? want : Math.max(0, b.badAt);
+        /**
+         * 批尾自检判定"这批不算数"（`sbbusyerror`/`sberror`）时：**先清掉那个写 1 清零的
+         * 粘滞位**，再把地址写回去对齐，这一段整批改按字重读（每个字一次 USB 往返，天然
+         * 给总线留了时间）。
+         *
+         * 🚨 以前这里是直接抛错 —— 抛出去时那一笔事务还挂在总线上，之后**每一次** SBA
+         *    访问都失败。用户现场就是"往监视里加了个结构体变量 → 复位并停报错 → 从此全废"。
+         *    读内存失败不该把整颗 DM 的内存通路一起带走：能降级就降级，只有物理不通才报错。
+         */
+        const sbcsBad = typeof b.sbcs === 'number' && (b.sbcs & (SBCS.SBBUSYERROR | SBCS.SBERROR));
+        if (sbcsBad && !b.ok) await this.sbaClearErrors().catch(() => {});
+        const good = b.ok ? want : (sbcsBad ? 0 : Math.max(0, b.badAt));
         for (let k = 0; k < good; k++) put(i + k, b.words[k]);
         i += good;
         if (b.ok){
@@ -864,6 +956,9 @@ export class RiscvTransport {
         for (let k = 0; k < nWords; k++) words.push(dv.getUint32(off + k * 4, true));
         const b = await this.dmiWriteBurst(words);
         if (b.ok){ off += nWords * 4; continue; }
+        // 批尾自检发现"这批不算数"：清掉粘滞错误位，整批从 off 起按字重写（badAt=0 已对齐）
+        if (typeof b.sbcs === 'number' && (b.sbcs & (SBCS.SBBUSYERROR | SBCS.SBERROR)))
+          await this.sbaClearErrors().catch(() => {});
         this._writeBurstMiss = (this._writeBurstMiss || 0) + 1;
         if (this._writeBurstMiss >= 3){
           this._writeBurstOff = true;

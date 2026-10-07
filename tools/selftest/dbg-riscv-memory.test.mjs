@@ -3,6 +3,7 @@ import {Elf} from '../../app/elf/elf.js';
 import {SymTab} from '../../app/dbg/symbols.js';
 import {RiscvDebugSession} from '../../app/dbg/riscv.js';
 import {RiscvTransport} from '../../app/flash/hpm/riscv-dm.js';
+import {SBCS,DM,DMI_OP,DMI_STATUS,dmiRequest} from '../../app/flash/hpm/jtag.js';
 
 const elf=Object.create(Elf.prototype);
 elf.b=Uint8Array.of(11,12,21,22,31,32);
@@ -92,3 +93,96 @@ for(const action of ['resetHalt','resetRun']){
  await assert.rejects(session[action](),/停机未确认/);assert.equal(rearmed,false);
 }
 console.log('RISC-V reset: helper return is not proof of halt; running hart blocks re-arm/resume PASS');
+
+/**
+ * 批量 SBA 读的**批内自检**：一批字的 DMI 状态可以全是 SUCCESS，而 DM 因为"上一笔还没完就
+ * 收到下一次 sbdata0 访问"置了 `sbbusyerror` —— 那一批数据不可信，而且旧实现会把这个错误
+ * 直接抛出去、把那一笔事务留在总线上（用户现场：往监视里加个结构体，从此内存读全废）。
+ * 新实现把 `READ sbcs` 拼在**同一条扫描的批尾**（0 条额外 USB 命令），发现错误就清粘滞位、
+ * 地址写回对齐、这一段按字重读。这个用例把全过程钉死。
+ */
+function burstRig({overrunBursts = new Set()} = {}){
+  const mem = new Map(), st = {burst:0, cur:0, sbcsErr:false, cleared:0, scans:0, sbcsReads:0};
+  const t = Object.create(RiscvTransport.prototype);
+  Object.assign(t, {
+    _burstOff: false, _burstMiss: 0, _holdAddr: null, lastSbcs: 0, sbaFailed: false,
+    _burstWords: () => 4,                       // 小批次：16 字节就是"跨批"了
+    async sbaConfig(){},
+    async sbaClearErrors(){ st.cleared++; st.sbcsErr = false; },
+    async dmiWrite(a, v){
+      if (a === DM.SBADDRESS0) st.cur = v >>> 0;                       // 写地址即（重新）对齐自增指针
+      if (a === DM.SBCS && (v & (SBCS.SBBUSYERROR | SBCS.SBERROR))) st.sbcsErr = false;
+    },
+    async dmiRead(a){
+      if (a === DM.SBCS){ st.sbcsReads++; return st.sbcsErr ? SBCS.SBBUSYERROR : 0; }
+      if (a === DM.SBDATA0){ const w = mem.get(st.cur) ?? 0; st.cur = (st.cur + 4) >>> 0; return w; }
+      throw Error('unexpected dmiRead 0x' + (a >>> 0).toString(16));
+    },
+    async _scanDRMany(reqs){
+      st.scans++;
+      st.burst++;
+      const willOverrun = overrunBursts.has(st.burst);
+      const resps = [];
+      for (let k = 0; k < reqs.length; k += 2){
+        const op = Number(BigInt(reqs[k]) & 0x3n), addr = Number((BigInt(reqs[k]) >> 34n) & 0x7fn);
+        let data = 0;
+        if (op === DMI_OP.READ && addr === DM.SBDATA0){ data = mem.get(st.cur) ?? 0; st.cur = (st.cur + 4) >>> 0; }
+        else if (op === DMI_OP.READ && addr === DM.SBCS) data = willOverrun ? SBCS.SBBUSYERROR : (st.sbcsErr ? SBCS.SBBUSYERROR : 0);
+        resps.push(dmiRequest(DMI_OP.NOP, 0, 0), BigInt(DMI_STATUS.SUCCESS) | (BigInt(data) << 2n));
+      }
+      if (willOverrun) st.sbcsErr = true;        // 批后 DM 留下粘滞错误位，直到有人写 1 清掉
+      return resps;
+    },
+  });
+  for (let i = 0; i < 16; i++) mem.set(0x4000b600 + i * 4, 0x1000 + i);
+  return {t, st, mem};
+}
+
+// ① 正常：一批 16 字节 = 1 次扫描，不碰逐字路径
+{
+  const {t, st} = burstRig();
+  const b = await t.readMem(0x4000b600, 16);
+  assert.deepEqual([...b], [0x00,0x10,0,0, 0x01,0x10,0,0, 0x02,0x10,0,0, 0x03,0x10,0,0]);
+  assert.equal(st.scans, 1);assert.equal(st.cleared, 0);
+}
+
+// ② 第 1 批超速：数据必须靠逐字重读补齐（不能信那批 / 不能抛错 / 粘滞位要清掉）
+{
+  const {t, st} = burstRig({overrunBursts: new Set([1])});
+  const b = await t.readMem(0x4000b600, 16);
+  assert.deepEqual([...b], [0x00,0x10,0,0, 0x01,0x10,0,0, 0x02,0x10,0,0, 0x03,0x10,0,0],
+    '超速那一批要作废并按字重读，不能让残值混进结果');
+  assert.equal(st.cleared, 1, 'sbbusyerror 是写 1 清零的粘滞位，必须清掉');
+  assert.equal(st.sbcsErr, false);
+  assert.equal(t._burstMiss, 1);
+  assert.equal(t._burstOff, false);
+}
+
+// ③ 连续 3 批都超速 ⇒ 关掉批量（BURST=4 ⇒ 48 字节正好 3 批）
+{
+  const {t, st} = burstRig({overrunBursts: new Set([1, 2, 3])});
+  const b = await t.readMem(0x4000b600, 48);      // 12 个字 ⇒ 3 批，全部超速
+  assert.equal(b.length, 48);
+  assert.deepEqual([...b.subarray(0, 4)], [0x00,0x10,0,0]);
+  assert.deepEqual([...b.subarray(44, 48)], [0x0b,0x10,0,0], '被作废的每一批都要按字重读补齐');
+  assert.ok(st.cleared >= 2, '每一批超速都要各自清一次');
+  assert.equal(t._burstMiss, 3);
+  assert.equal(t._burstOff, true, '连撞 3 次就整段别再批（正确优先）');
+}
+
+// ④ 单独读一次 sbcs 时短暂 sbbusy：先等它落，不许直接判定"卡死"
+{
+  const t = Object.create(RiscvTransport.prototype);
+  let polls = 0;
+  Object.assign(t, {lastSbcs:0, sbaFailed:false, dmiRead: async () => (++polls <= 2 ? SBCS.SBBUSY : 0)});
+  await t._checkSbcsAt(0x4000b600, 100);          // 不抛
+  assert.equal(polls, 3);assert.equal(t.sbaFailed, false);
+}
+// ⑤ sbbusy 真的不落：明确报错并告诉用户怎么恢复
+{
+  const t = Object.create(RiscvTransport.prototype);
+  Object.assign(t, {lastSbcs:0, sbaFailed:false, dmiRead: async () => SBCS.SBBUSY});
+  await assert.rejects(t._checkSbcsAt(0x4000b600, 100), /断开.*重连|断电重上电/);
+  assert.equal(t.sbaFailed, true);
+}
+console.log('RISC-V SBA burst: in-scan sbcs fence, overrun burst discarded and re-read word-wise, sticky error cleared, burst disabled after 3 misses, transient sbbusy tolerated PASS');
