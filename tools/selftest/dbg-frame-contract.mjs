@@ -103,7 +103,7 @@ export function compareFrames(actual,expected,{allowConservativeUnavailable=[]}=
    const x=av.get(key),y=ev.get(key);if(!x||!y){failures.push(`${prefix} ${key} 作用域/变量缺失`);continue;}
    if(x.argument!==y.argument||x.status!==y.status){
     const conservative=allowConservativeUnavailable.some(rule=>rule.frame===i&&rule.name===x.name&&
-     (rule.occurrence??0)===x.occurrence&&x.status==='unavailable'&&y.status==='ok'&&
+     (rule.occurrence??0)===x.occurrence&&x.argument===y.argument&&x.status==='unavailable'&&y.status==='ok'&&
      rule.reasonPattern?.test(x.reason||''));
     if(conservative)continue;
     failures.push(`${prefix} ${key} 参数/可用状态不一致 (${x.reason||''})`);continue;

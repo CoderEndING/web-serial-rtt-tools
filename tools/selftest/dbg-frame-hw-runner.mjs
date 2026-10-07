@@ -1,6 +1,7 @@
 /** Hardware runner used by the existing stress entry point. No retries hide mismatches. */
+import {confirmedM7BreakpointRace} from './dbg-breakpoint-proof.mjs';
 import {FRAME_CASES,webVariables,compareFrames} from './dbg-frame-contract.mjs';
-async function captureCheckpoint(address,ramStart,ramEnd,board){
+async function captureCheckpoint(address,ramStart,ramEnd,board,confirm){
  const d=window.__tools.dbg,s=d.session;
  const cmd=async line=>{const r=await d.runLine(line);if(r.error||r.cancelled)throw new Error(line+': '+(r.error||'cancelled'));return r;};
  await cmd('bd all');await cmd('b 0x'+address.toString(16));
@@ -11,35 +12,11 @@ async function captureCheckpoint(address,ramStart,ramEnd,board){
   do{await new Promise(r=>setTimeout(r,20));await s.refresh();if(s.halted)break;}while(Date.now()<end);
   if(!s.halted)throw new Error('检查点暂停超时');
  };
- const confirmedM7BreakpointRace=async()=>{
-  if(board!=='h743'||d.sym.funcAt(s.pc)?.name!=='SysTick_Handler')return null;
-  const cpuid=(await s.probe._readWord(0xe000ed00).catch(()=>0))>>>0;
-  if(((cpuid>>>4)&0xfff)!==0xc27)return null;
-  const dfsr=(await s.probe._readWord(0xe000ed30).catch(()=>0))>>>0;
-  if(!(dfsr&2)||(dfsr&4)||await s.dwt.haltReason().catch(()=>true))return null;
-  if(!s.bps?.some(bp=>((bp&0xfffffffe)>>>0)===address))return null;
-  const ctrl=(await s.probe._readWord(0xe0002000).catch(()=>0))>>>0;
-  const count=Math.min(s.caps?.numCode||0,16),rev=1+((ctrl>>>28)&15);
-  let fpbMatch=false;
-  for(let i=0;i<count;i++){
-   const comp=(await s.probe._readWord(0xe0002008+4*i).catch(()=>0))>>>0;
-   if(!(comp&1))continue;
-   const match=rev===2?(comp&0xfffffffe)>>>0:(((comp&0x1ffffffc)|((((comp>>>30)&3)===2)?2:0))>>>0);
-   if(match===address){fpbMatch=true;break;}
-  }
-  if(!fpbMatch)return null;
-  const xpsr=(await s.readReg('XPSR'))>>>0;
-  if((xpsr&0x1ff)!==15)return null; // current exception must be SysTick
-  const sp=(await s.readReg('SP'))>>>0,stack=await s.memRead(sp,32);
-  if(stack.length!==32)return null;
-  const dv=new DataView(stack.buffer,stack.byteOffset,stack.byteLength),stackedPc=dv.getUint32(24,true),stackedXpsr=dv.getUint32(28,true);
-  if((stackedPc&0xfffffffe)!==address||!(stackedXpsr&0x01000000)||(stackedXpsr&0x1ff)!==0)return null;
-  return {pc:s.pc>>>0,dfsr,stackedPc:stackedPc>>>0,fpbAddress:address};
- };
+
  await s.exclusive(async()=>{
   await s.cont();await waitForStop(8000);
   while(pcNow()!==address){
-   const race=await confirmedM7BreakpointRace();
+   const race=await confirm(d,address,board);
    if(!race)break;
    erratumRecoveries.push(race);
    if(erratumRecoveries.length>4)throw new Error('Cortex-M7 3092511 连续误停超过 4 次，拒绝继续掩盖异常');
@@ -113,6 +90,12 @@ export async function runFrameStress({cdp,oracle,board,rounds=200,code,ok,log,di
  const results=[];
  try{
   if(!code?.some(s=>s.name==='.text'))throw new Error('缺少目标代码验证');
+  const imageOnly = profile.entry==='riscv' && code.some(s =>
+    s.addr < 0x90000000 && s.addr+s.bytes.length > 0x80000000);
+  if(imageOnly){
+   if(oracle.codeVerified!==true)throw new Error('RISC-V XIP 没有独立 GDB 代码校验记录；不能用 ELF 镜像自证板上代码');
+   log('RISC-V XIP：GDB oracle 记录了独立代码校验；Web 读取的是 ELF 镜像，未独立验证当前板上 Flash。请使用本轮实板生成的 oracle。');
+  }else{
   for(const section of code){
    for(let offset=0;offset<section.bytes.length;offset+=1024){
     const expected=section.bytes.slice(offset,offset+1024),address=section.addr+offset;
@@ -121,6 +104,7 @@ export async function runFrameStress({cdp,oracle,board,rounds=200,code,ok,log,di
    }
   }
   ok(true,'Web 独立核对板上 Flash 与当前 ELF 一致');
+  }
   // Establish the same first visit to each checkpoint as the GDB collector.
    if(profile.entry==='riscv'){
     const reset=await cdp.json(`window.__tools.dbg.runLine('reset halt')`);
@@ -131,7 +115,7 @@ export async function runFrameStress({cdp,oracle,board,rounds=200,code,ok,log,di
    }
   for(const c of FRAME_CASES){
    const expected=oracle.cases[c.id],start=Date.now();
-    const captured=await cdp.json(`(${captureCheckpoint.toString()})(${expected.pc},${profile.ramStart},${profile.ramEnd},${JSON.stringify(board)})`);
+    const captured=await cdp.json(`(${captureCheckpoint.toString()})(${expected.pc},${profile.ramStart},${profile.ramEnd},${JSON.stringify(board)},${confirmedM7BreakpointRace.toString()})`);
    const actual=captured.frames.map(f=>({...f,variables:webVariables(f.rows)}));
    // GDB may report a caller-saved parameter from a live volatile register
    // even when the leaf frame's CFI does not preserve it. Keep the web
@@ -145,7 +129,7 @@ export async function runFrameStress({cdp,oracle,board,rounds=200,code,ok,log,di
   const c=oracle.cases.recursive;
   let m7ErratumRecoveries=0;
   for(let i=0;i<rounds;i++){
-    const captured=await cdp.json(`(${captureCheckpoint.toString()})(${c.pc},${profile.ramStart},${profile.ramEnd},${JSON.stringify(board)})`);
+    const captured=await cdp.json(`(${captureCheckpoint.toString()})(${c.pc},${profile.ramStart},${profile.ramEnd},${JSON.stringify(board)},${confirmedM7BreakpointRace.toString()})`);
    m7ErratumRecoveries+=captured.m7ErratumRecoveries.length;
    const actual=captured.frames.map(f=>({...f,variables:webVariables(f.rows)})),diff=compareFrames(actual,c.frames);
    if(diff.length)throw new Error(`压力轮${i+1}: `+diff.join('；'));

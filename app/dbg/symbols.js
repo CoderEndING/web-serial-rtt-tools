@@ -210,15 +210,18 @@ export class SymTab {
    * 注意它**只约束自动刷新**：手动输入的地址照样读 —— 外设寄存器、栈、堆都可能不在 ELF 里，
    * 用"不在 ELF 就拒绝"去挡手动请求会挡住正常用法。
    */
-  covers(addr){
-    const a = addr >>> 0;
-    let sections = [];
-    try { sections = this.elf?.sections?.() || []; } catch { return true; }   // 拿不到映射就放行（别误伤）
-    if (!sections.length) return true;
-    for (const s of sections){
-      if (!(s.flags & 2) || !s.size) continue;          // SHF_ALLOC 之外不占目标内存
-      const start = s.addr >>> 0;
-      if (a >= start && a < ((start + s.size) >>> 0)) return true;
+  covers(addr, len = 1){
+    if (!Number.isInteger(addr) || addr < 0 || addr > 0xffffffff ||
+        !Number.isInteger(len) || len < 1 || addr + len > 0x100000000) return false;
+    let sections;
+    try { sections = this.elf?.sections?.() || []; } catch { return false; }
+    const ranges = sections.filter(s => (s.flags & 2) && s.size > 0)
+      .map(s => [s.addr, s.addr + s.size]).sort((a,b) => a[0] - b[0]);
+    let cursor = addr;
+    for (const [start,end] of ranges){
+      if (start > cursor) break;
+      if (end > cursor) cursor = end;
+      if (cursor >= addr + len) return true;
     }
     return false;
   }

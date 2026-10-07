@@ -91,20 +91,30 @@ export class Elf {
    * @param {object} [opts] `ro:true` = **只认只读段**（不含 SHF_WRITE）。
    *   `.text`/`.rodata` 在 flash 里运行期不会变，文件里那份是权威的；
    *   而 `.data`/`.bss` 在 RAM 里会被程序改写，**绝不能**拿文件内容冒充"目标当前内存"。
-   * @returns {Uint8Array|null} 跨段/越界/段是 NOBITS 时返回 null（不拼凑、不猜）
+   * @returns {Uint8Array|null} 相邻已分配段可拼接；空洞、越界、NOBITS 返回 null
    */
   bytesAt(addr, len, { ro = false } = {}){
-    const a = addr >>> 0;
-    for (const s of this.sections()){
-      if (s.type !== SHT_PROGBITS || !s.size || !s.addr) continue;
-      if (ro && (s.flags & 1)) continue;                       // SHF_WRITE → 会变，不能兜底
-      const start = s.addr >>> 0, end = (start + s.size) >>> 0;
-      if (a < start || a + len > end) continue;
-      const off = (s.off + (a - start)) >>> 0;
-      if (off + len > this.b.length) return null;
-      return this.b.subarray(off, off + len);
+    if (!Number.isInteger(addr) || addr < 0 || addr > 0xffffffff ||
+        !Number.isInteger(len) || len < 0 || addr + len > 0x100000000) return null;
+    if (!len) return new Uint8Array(0);
+    const end = addr + len, parts = [];
+    let cursor = addr;
+    const sections = this.sections().filter(s => s.type === SHT_PROGBITS && s.size &&
+      (s.flags & 2) && (!ro || !(s.flags & 1))); // allocated bytes; no RAM initializers for RO reads
+    while (cursor < end){
+      const s = sections.find(s => cursor >= s.addr && cursor < s.addr + s.size);
+      if (!s) return null; // A hole is unavailable, never synthetic zero data.
+      const take = Math.min(end - cursor, s.addr + s.size - cursor);
+      const off = s.off + cursor - s.addr;
+      if (off < 0 || off + take > this.b.length) return null;
+      parts.push(this.b.subarray(off, off + take));
+      cursor += take;
     }
-    return null;
+    if (parts.length === 1) return parts[0];
+    const out = new Uint8Array(len);
+    let offset = 0;
+    for (const part of parts){ out.set(part, offset); offset += part.length; }
+    return out;
   }
 
   /** 段名 → 原始字节（不存在的段返回空）*/

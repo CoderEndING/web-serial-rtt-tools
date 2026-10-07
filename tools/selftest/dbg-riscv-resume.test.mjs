@@ -57,12 +57,13 @@ function rig(dmstatus){
   assert.equal(calls.logs.some(t => /其实在跑/.test(t)), false, '正常路径不该报"其实在跑"');
 }
 
-// ③ dmstatus 读不到（链路抖）：按老行为继续，别把调试卡死
+// ③ dmstatus 读不到：不允许根据缓存下发抽象命令。
 {
   const { s, calls } = rig(DMSTATUS_HALTED);
   s.dm.dmiRead = async () => { throw new Error('DMI 超时'); };
-  await s.run();
-  assert.equal(calls.readReg.length, 1, 'dmstatus 读不到时按缓存继续（不能因为读不到就什么都不做）');
+  await assert.rejects(s.run(), /DMI 超时/);
+  assert.equal(calls.readReg.length, 0, '状态未知时不下发抽象命令');
+  assert.equal(calls.dmiWrite.some(x=>x.startsWith('dmiWrite:0x10=')), false);
 }
 
-console.log('RISC-V 继续：dmstatus 现场核一遍（在跑 ⇒ 不下发抽象命令、只纠正状态、resumereq 幂等），停着照常，读不到按缓存继续 PASS');
+console.log('RISC-V 继续：dmstatus 现场核一遍（在跑 ⇒ 不下发抽象命令、只纠正状态、resumereq 幂等），停着照常，读不到保持失败且不发抽象命令 PASS');

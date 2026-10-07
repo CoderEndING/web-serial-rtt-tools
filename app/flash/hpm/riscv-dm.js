@@ -760,27 +760,19 @@ export class RiscvTransport {
    *    （SBA 只适合 RAM/已配好的 flash 窗口；片内外设一律走算法/内核去读。）
    */
   async readMem(addr, length, perWordMs = 2000){
-    if (length <= 0) return new Uint8Array(0);
-    /**
-     * 🚨 **XIP/flash 窗口（0x8000_0000–0x9000_0000）一律不读，直接报错**（2026-10 真机定因）。
-     *
-     * 这颗芯片上 SBA 读该窗口会把**事务永久挂住**：`sbcs` 从此常驻 `sbbusy|sbbusyerror`，
-     * 之后**每一次** SBA 访问都失败 —— 用户现场看到的是"连上就一片读失败/变量全红"，
-     * 而且只 `dm.init()` 解不开，要系统复位才恢复。
-     *
-     * 以前只在调试页的 `RiscvDebugSession.memRead()` 里挡（用 ELF 只读段兜底），可是
-     * **任何一条别的调用路径**（页面混了旧 JS、以后新加的读者）都能把整颗 DM 搞坏 ——
-     * 代价太大，所以把闸门放到**传输层**：这里就是最后一关，谁调用都别想碰。
-     * 需要这段内容的上层（调试页的 memRead）在到自己这一层时就已经用 ELF 兜底了，
-     * 根本走不到这儿；走到这儿说明那个调用方没有兜底 —— 那就宁可报错，也不能让链路变砖。
-     */
-    if ((addr >>> 0) >= 0x80000000 && (addr >>> 0) < 0x90000000){
-      throw new Error(`0x${(addr >>> 0).toString(16)} 落在 XIP/flash 窗口：这颗芯片上 SBA 读它会`
-        + '把总线事务挂死（之后所有内存读都失败），所以直接拒绝。'
-        + '要这段内容请走 ELF 的只读段（调试页的 memRead 已经这么做了）。');
+    if (!Number.isInteger(addr) || addr < 0 || addr > 0xffffffff ||
+        !Number.isInteger(length) || length < 0 || addr + length > 0x100000000)
+      throw new Error('SBA 地址或长度超出 32 位地址空间');
+    if (!length) return new Uint8Array(0);
+    // SBA reads full words, including the bytes before/after an unaligned request.
+    // Fence the entire native span before issuing any DMI command.
+    const nativeStart = Math.floor(addr / 4) * 4;
+    const nativeEnd = Math.ceil((addr + length) / 4) * 4;
+    if (nativeStart < 0x90000000 && nativeEnd > 0x80000000){
+      throw new Error('读取范围覆盖 XIP/flash 窗口：拒绝 SBA 访问；请使用已载入 ELF 的只读镜像');
     }
     const out = new Uint8Array(length);
-    const start = (addr >>> 0) & ~3;
+    const start = nativeStart;
     const first = (addr >>> 0) - start;                 // 头部补齐
     const words = Math.ceil((first + length) / 4);
     await this.sbaConfig();

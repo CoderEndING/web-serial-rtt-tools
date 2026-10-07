@@ -57,6 +57,9 @@ const callerExpected=[frame('engine_frame_recursive',[scalar('seed',1028,{argume
 const callerConservative=structuredClone(callerExpected);callerConservative[0].variables[0]={...callerConservative[0].variables[0],status:'unavailable',fields:[],reason:'该帧寄存器 R1 不可恢复'};
 assert.ok(compareFrames(callerConservative,callerExpected).length);
 assert.deepEqual(compareFrames(callerConservative,callerExpected,{allowConservativeUnavailable:[{frame:0,name:'seed',reasonPattern:/^该帧寄存器 R[0-3] 不可恢复$/}]}),[]);
+callerConservative[0].variables[0].argument=false;
+assert.ok(compareFrames(callerConservative,callerExpected,{allowConservativeUnavailable:[{frame:0,name:'seed',reasonPattern:/^该帧寄存器 R[0-3] 不可恢复$/}]}).length, '保守不可恢复例外不能掩盖参数分类错误');
+callerConservative[0].variables[0].argument=true;
 callerConservative[0].variables[0].reason='该帧寄存器 R8 不可恢复';
 assert.ok(compareFrames(callerConservative,callerExpected,{allowConservativeUnavailable:[{frame:0,name:'seed',reasonPattern:/^该帧寄存器 R[0-3] 不可恢复$/}]}).length);
 // Compile and run the shared C target with native GCC in both optimization modes.

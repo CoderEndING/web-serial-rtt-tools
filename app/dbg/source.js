@@ -145,6 +145,8 @@ export class SourceStore {
     this.text = new Map();           // 路径（小写）→ 文本
     this.note = '';
     this.root = null;                // showDirectoryPicker 给的目录句柄（认得它就不用整棵遍历）
+    this._generation = 0;
+    this._files = null;
     this.expected = null;            // ELF 里的完整路径列表 —— "按需索引"的唯一依据
   }
 
@@ -162,13 +164,15 @@ export class SourceStore {
   }
 
   clear(){
-    this.byRel.clear(); this.byBase.clear(); this.entries = []; this.text.clear();
+    this._resetEntries();
+    this._files = null;
     this.rootName = ''; this.note = '';
     this.root = null;                                   // ELF 路径列表跟着 ELF 走，不在这里清
   }
 
   /** 只清"索引"，保留目录句柄与 ELF 路径列表（重新索引时用） */
   _resetEntries(){
+    this._generation++;
     this.byRel.clear(); this.byBase.clear(); this.entries = []; this.text.clear();
     this.note = '';
   }
@@ -208,6 +212,7 @@ export class SourceStore {
       await this.indexFromExpected();
       return this.summary();
     }
+    if (this._files) return this.indexFileList(this._files);
     return this.note || '还没选源码目录';
   }
 
@@ -217,16 +222,21 @@ export class SourceStore {
    */
   async indexFromExpected(){
     this._resetEntries();
-    const list = this.expected || [];
+    const generation = this._generation, root = this.root, rootName = this.rootName;
+    const list = [...(this.expected || [])];
+    if (!list.length){ this.note = '当前 ELF 没有源码路径，未扫描目录'; return this.summary(); }
     let hit = 0, miss = 0;
     for (const p of list){
-      const rel = relUnderRoot(p, this.rootName);
+      if (generation !== this._generation) return this.summary();
+      const rel = relUnderRoot(p, rootName);
       if (!rel) continue;
-      const fh = await this._openRel(rel).catch(() => null);
+      const fh = await this._openRel(rel, root).catch(() => null);
+      if (generation !== this._generation) return this.summary();
       if (!fh){ miss++; continue; }
       this._put({ rel, base: baseNameOf(rel), kind: 'handle', h: fh });
       hit++;
     }
+    if (generation !== this._generation) return this.summary();
     this.note = `按 ELF 的路径按需索引：${hit}/${list.length} 个文件在这个目录里`
       + (miss ? `（另外 ${miss} 条不在 —— 工具链/编译机路径居多）` : '');
     /**
@@ -235,27 +245,28 @@ export class SourceStore {
      */
     if (!hit && this.root){
       this.note = '按 ELF 的路径一条都没命中（可能选错了目录）→ 退回整棵遍历再试一次';
-      await this._walk(this.root, '', 0);
+      await this._walk(root, '', 0, generation);
     }
     return this.summary();
   }
 
   /** 打开"相对所选目录"的文件句柄（逐级 getDirectoryHandle，最后 getFileHandle） */
-  async _openRel(rel){
+  async _openRel(rel, root = this.root){
     const parts = normSlashes(rel).split('/').filter(Boolean);
-    if (!this.root || !parts.length) return null;
-    let dir = this.root;
+    if (!root || !parts.length) return null;
+    let dir = root;
     for (const seg of parts.slice(0, -1)) dir = await dir.getDirectoryHandle(seg);
     return await dir.getFileHandle(parts[parts.length - 1]);
   }
 
-  async _walk(dir, prefix, depth){
-    if (depth > MAX_DEPTH) return;
+  async _walk(dir, prefix, depth, generation = this._generation){
+    if (depth > MAX_DEPTH || generation !== this._generation) return;
     for await (const [name, h] of dir.entries()){
+      if (generation !== this._generation) return;
       if (this.entries.length >= MAX_FILES){ this.note = `文件数超过 ${MAX_FILES}，只索引了前面这些`; return; }
       if (h.kind === 'directory'){
         if (SKIP_DIRS.has(name) || name.startsWith('.')) continue;
-        await this._walk(h, prefix ? `${prefix}/${name}` : name, depth + 1);
+        await this._walk(h, prefix ? `${prefix}/${name}` : name, depth + 1, generation);
       } else {
         this._put({ rel: prefix ? `${prefix}/${name}` : name, base: name, kind: 'handle', h });
       }
@@ -266,6 +277,8 @@ export class SourceStore {
   indexFileList(list){
     this._resetEntries();
     const arr = Array.from(list || []);
+    this.root = null;
+    this._files = arr;
     this.rootName = (arr[0]?.webkitRelativePath || '').split('/')[0] || '（已选文件夹）';
     /**
      * 浏览器已经把整棵树列给我们的（这一步没法省），但**索引可以只留 ELF 用得上的那些**：
@@ -307,6 +320,7 @@ export class SourceStore {
 
   /** 读源码（带缓存）；找不到/读不了**抛人话错误**，界面照实显示 */
   async read(p){
+    const generation = this._generation;
     const key = normSlashes(p).toLowerCase();
     if (this.text.has(key)) return this.text.get(key);
     const entry = this.resolve(p);
@@ -319,6 +333,7 @@ export class SourceStore {
     }
     if (file.size > MAX_FILE_BYTES) throw new Error(`${entry.rel} 有 ${(file.size / 1048576).toFixed(1)} MB，太大不读`);
     const txt = await file.text();
+    if (generation !== this._generation) throw new Error('源码目录或 ELF 已切换，请重新读取');
     if (this.text.size >= MAX_CACHE) this.text.delete(this.text.keys().next().value);
     this.text.set(key, txt);
     return txt;

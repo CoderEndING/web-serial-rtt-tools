@@ -124,3 +124,48 @@ import { SymTab } from '../../app/dbg/symbols.js';
 console.log('dbg-src-suggest: 首选目录（沿最大分支钻）/ 跨机器簇标记 / 大小写去重 / 真 ELF /'
   + ' 陈旧地址判据 covers() /'
   + ' 按需索引（不遍历目录）/ FileList 筛选 PASS');
+
+// Latest ELF/directory wins even if an old native filesystem request finishes later.
+{
+ const s=new SourceStore();s.root={};s.rootName='proj';let release;
+ const oldHandle=new Promise(resolve=>release=resolve);
+ s._openRel=rel=>rel==='old.c'?oldHandle:Promise.resolve({getFile:async()=>({size:1,text:async()=>rel})});
+ const old=s.setExpectedPaths(['/proj/old.c']);
+ await s.setExpectedPaths(['/proj/new.c']);
+ release({getFile:async()=>({size:1,text:async()=> 'old'})});await old;
+ assert.deepEqual(s.entries.map(e=>e.rel),['new.c']);
+ assert.equal(s.resolve('/proj/old.c'),null);
+}
+// Switching to FileList retires the old directory handle and preserves files for another ELF.
+{
+ const s=new SourceStore();s.root={};s.rootName='old';
+ s.indexFileList([{name:'a.c',webkitRelativePath:'proj/a.c',size:1,text:async()=> 'a'},
+                  {name:'b.c',webkitRelativePath:'proj/b.c',size:1,text:async()=> 'b'}]);
+ assert.equal(s.root,null);
+ await s.setExpectedPaths(['/proj/a.c']);assert.deepEqual(s.entries.map(e=>e.rel),['a.c']);
+ await s.setExpectedPaths(['/proj/b.c']);assert.deepEqual(s.entries.map(e=>e.rel),['b.c']);
+}
+// A cancelled fallback directory walk cannot inject files into the new index.
+{
+ const s=new SourceStore();let release;
+ s.root={async *entries(){await new Promise(resolve=>release=resolve);yield ['old.c',{kind:'file'}];}};
+ s.rootName='proj';s._openRel=async()=>null;
+ const old=s.setExpectedPaths(['/proj/missing.c']);
+ await new Promise(resolve=>setImmediate(resolve));
+ s.clear();await s.setExpectedPaths(['/proj/new.c']);
+ s.indexFileList([{name:'new.c',webkitRelativePath:'proj/new.c'}]);
+ release();await old;assert.deepEqual(s.entries.map(e=>e.rel),['new.c']);
+}
+// File text which completes after a directory/ELF change cannot poison the new cache.
+{
+ const s=new SourceStore();let release;
+ s.indexFileList([{name:'a.c',webkitRelativePath:'proj/a.c',size:1,text:()=>new Promise(resolve=>release=resolve)}]);
+ const old=s.read('/proj/a.c');await new Promise(resolve=>setImmediate(resolve));
+ s.indexFileList([{name:'a.c',webkitRelativePath:'proj/a.c',size:1,text:async()=> 'new'}]);
+ release('old');await assert.rejects(old,/已切换/);assert.equal(await s.read('/proj/a.c'),'new');
+}
+console.log('SourceStore: stale ELF open/walk/text cancelled, FileList retires directory and reindexes across ELF changes PASS');
+{
+ const s=new SourceStore();s.root={};s.rootName='proj';s._walk=async()=>{throw Error('must not scan without source paths');};
+ await s.setExpectedPaths([]);assert.equal(s.count,0);assert.match(s.note,/未扫描/);
+}

@@ -19,7 +19,7 @@ const dm = {
   /** 真流程里这一步会「按住 ndmreset+haltreq → 放开 ndmreset 保持 haltreq → 复验 → waitHalted」*/
   async _haltByReset(hart){ seq.push(`haltByReset:${hart}`); },
   async dmiWrite(a, v){ seq.push(`dmiWrite:0x${(a >>> 0).toString(16)}=0x${(v >>> 0).toString(16)}`); },
-  async dmiRead(a){ seq.push(`dmiRead:0x${(a >>> 0).toString(16)}`); return 0; },
+  async dmiRead(a){ seq.push(`dmiRead:0x${(a >>> 0).toString(16)}`); return a===0x11?0x4c03a2:0; },
   async writeReg(r, v){ seq.push(`writeReg:0x${(r >>> 0).toString(16)}=0x${(v >>> 0).toString(16)}`); },
   async readReg(r){ seq.push(`readReg:0x${(r >>> 0).toString(16)}`); return 0x21800000; },
 };

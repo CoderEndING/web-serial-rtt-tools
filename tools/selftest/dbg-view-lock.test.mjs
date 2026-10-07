@@ -13,3 +13,13 @@ held.resolve();await Promise.all([op,read,watch]);assert.equal(reads,1);assert.e
 // Internal refresh already inside an action must not reacquire the non-reentrant lock.
 await s.exclusive(()=>v._readMemLocked());assert.equal(reads,2);
 console.log('dbg-view-lock: memory/watch entry points queue behind actions, internal refresh avoids nested lock PASS');
+// A slower old source read cannot paint its text on a newer PC/file location.
+nodes.set('d-src',{});
+const source=Object.create(DbgView.prototype),oldText=gate(),paint=[];
+Object.assign(source,{session:{connected:true,pc:1},sym:{lines:{},at:pc=>({file:pc===1?'old.c':'new.c',line:pc})},
+ src:{ready:true,read:file=>file==='old.c'?oldText.promise:Promise.resolve('new text')},
+ _srcPaint:(box,at,lines)=>paint.push({file:at.file,lines})});
+const older=source.renderSource();source.session.pc=2;await source.renderSource();
+oldText.resolve('old text');await older;
+assert.deepEqual(paint,[{file:'new.c',lines:['new text']}]);
+console.log('dbg source UI: latest request/location wins, stale file text never repaints current source PASS');

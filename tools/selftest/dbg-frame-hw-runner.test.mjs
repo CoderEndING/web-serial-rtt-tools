@@ -56,3 +56,9 @@ for(const unconfirmedErratum of ['stack','dfsr','dwt']){
  assert.ok(r.results.some(v=>!v.passed),'缺少 erratum 证据时必须保持失败');assert.equal(r.session.connected,false);
 }
 console.log('dbg-frame-hw-runner: checkpoints, read-only snapshots, stale-cache flow, strict M7 erratum recovery, rejection without stacked-PC/DFSR proof, target mismatch and cleanup PASS');
+// RISC-V XIP reads are ELF image bytes, not an independent board-code verifier.
+const xip=rig();xip.board='6800evk';xip.code=[{name:'.text',addr:0x80000000,bytes:[0,0]}];
+await runFrameStress(xip);
+assert.ok(xip.results.some(r=>!r.passed&&/独立 GDB/.test(r.details||r.name)),JSON.stringify(xip.results));
+assert.equal(xip.session.connected,false);
+console.log('dbg-frame-hw-runner: XIP image cannot self-certify live target code; independent GDB proof required PASS');

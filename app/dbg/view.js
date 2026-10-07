@@ -1109,7 +1109,7 @@ export class DbgView {
        *  33000+ 文件的目录也不用等）。索引完再刷一次建议行，报"能解析几个"。
        */
       Promise.resolve(this.src?.setExpectedPaths?.(st.lines?.paths || []))
-        .then(s => { if (this.src?.ready) this._out('源码：' + s, 'ok'); })
+        .then(s => { if (this.sym === st && this.src?.ready) this._out('源码：' + s, 'ok'); })
         .catch(() => {})
         .finally(() => this._renderSrcSuggest());
       const info = st.summary();
@@ -1145,7 +1145,8 @@ export class DbgView {
     const ma = $('d-mem-addr');
     if (!ma || typeof st?.covers !== 'function') return;
     const a = parseNumSafe(ma.value);
-    if (a === null || st.covers(a)){ this._memAddrStale = false; return; }
+    const len = Math.max(1, Math.min(1024, parseNumSafe($('d-mem-len')?.value) ?? 128));
+    if (a === null || st.covers(a, len)){ this._memAddrStale = false; return; }
     this._memAddrStale = true;
     this._out(`内存窗口里的 ${hex32(a)} 不属于当前 ELF —— 已停用它的自动读取（要看就改地址，或手动点「读」）`, 'warn');
   }
@@ -1589,6 +1590,8 @@ export class DbgView {
 
   /** 停下来时画"当前源码行"（Ozone 那种） */
   async renderSource(){
+    const request = this._srcRequest = (this._srcRequest || 0) + 1;
+    const sym = this.sym;
     const box = $('d-src');
     if (!box) return;
     const ph = (t) => { box.textContent = ''; const d = document.createElement('div'); d.className = 'hint'; d.textContent = t; box.appendChild(d); };
@@ -1603,13 +1606,14 @@ export class DbgView {
       this.srcCur = null;
       return;
     }
-    this.srcCur = { ...at };
+    const current = this.srcCur = { ...at };
     let text = null, err = '';
     if (this.src.ready){
       try { text = await this.src.read(at.file); }
       catch (e){ err = e?.message || String(e); }
     }
-    this._srcPaint(box, this.srcCur, text != null ? text.split(/\r?\n/) : null, err);
+    if (request !== this._srcRequest || this.sym !== sym || this.srcCur !== current) return;
+    this._srcPaint(box, current, text != null ? text.split(/\r?\n/) : null, err);
   }
 
   _srcPaint(box, at, lines, err){
@@ -1732,6 +1736,8 @@ export class DbgView {
 
   /** 命令行 `src <文件:行>` 用：把源码视图跳到指定位置 */
   async showSource(file, line = 1){
+    const request = this._srcRequest = (this._srcRequest || 0) + 1;
+    const sym = this.sym;
     if (!this.sym?.lines) return false;
     const want = String(file).toLowerCase();
     const paths = this.sym.lines.paths;
@@ -1739,13 +1745,14 @@ export class DbgView {
       || paths.find(p => p.toLowerCase().endsWith('/' + want))
       || paths.find(p => baseName(p).toLowerCase() === baseName(want));
     if (!hit) return false;
-    this.srcCur = { file: hit, line, addr: this.sym.lines.addrOfLine(hit, line) ?? 0 };
+    const current = this.srcCur = { file: hit, line, addr: this.sym.lines.addrOfLine(hit, line) ?? 0 };
     const box = $('d-src');
     if (!box) return true;
     let text = null, err = '';
     if (this.src.ready){ try { text = await this.src.read(hit); } catch (e){ err = e?.message || String(e); } }
+    if (request !== this._srcRequest || this.sym !== sym || this.srcCur !== current) return false;
     this.srcShown = null;
-    this._srcPaint(box, this.srcCur, text != null ? text.split(/\r?\n/) : null, err);
+    this._srcPaint(box, current, text != null ? text.split(/\r?\n/) : null, err);
     const leg = $('d-src-file');
     if (leg) leg.textContent = `${baseName(hit)}:${line}（手动定位）`;
     return true;

@@ -27,7 +27,7 @@
  */
 import { DebugSession } from './session.js';
 import { RV_ARCH } from './rv.js';
-import { DMCONTROL, REGNO, DCSR_EBREAK } from '../flash/hpm/jtag.js';
+import { DMCONTROL, DMSTATUS_LAYOUT, REGNO, DCSR_EBREAK } from '../flash/hpm/jtag.js';
 import { RiscvTransport } from '../flash/hpm/riscv-dm.js';
 import { DapJtagTransport, setOutputModeData, PROBE_OUTPUT_MODE } from '../flash/hpm/dap-transport.js';
 import { AkaLinkHid } from '../hid/probe.js';
@@ -173,22 +173,27 @@ export class RiscvDebugSession extends DebugSession {
     this.dm = null; this.jtag = null; this.probe = null;
     this.halted = false; this.regs = []; this._prev = null; this.bps = [];
     this._xipFallbackLogged = false;
+    this._badAddrs?.clear();
     if (p) this._log('已断开探针', 'dim');
   }
 
   // ---------------------------------------------------------------- 状态
 
-  /** dmstatus 的 halted 位（这颗 DM 是 legacy 排法 [9:8]，`detectLayout()` 已标定）*/
   async _pollHalted(){
     const st = (await this.dm.dmiRead(0x11)) >>> 0;
-    return ((st >>> 8) & 3) === 3;                 // allhalted | anyhalted
+    const layout = DMSTATUS_LAYOUT[this.dm.dmLayout || this.dmLayout] || DMSTATUS_LAYOUT.legacy;
+    const halted = layout.allhalted | layout.anyhalted;
+    const running = layout.allrunning | layout.anyrunning;
+    this.dm.lastDmstatus = st;
+    if ((st & 0xf) !== 2) throw new Error(`无法确认目标停机/运行状态：dmstatus=0x${st.toString(16)}`);
+    const unavailable = layout.allunavail | layout.anyunavail;
+    if (st & unavailable) throw new Error(`目标不可用：dmstatus=0x${st.toString(16)}`);
+    if ((st & halted) === halted && !(st & running)) return true;
+    if ((st & running) === running && !(st & halted)) return false;
+    throw new Error(`无法确认目标停机/运行状态：dmstatus=0x${st.toString(16)}`);
   }
 
-  /** dmstatus 的 running 位（legacy 排法 [11:10]，见 jtag.js 的 DMSTATUS_LAYOUT）*/
-  async _pollRunning(){
-    const st = (await this.dm.dmiRead(0x11)) >>> 0;
-    return ((st >>> 10) & 3) !== 0;
-  }
+  async _pollRunning(){ return !(await this._pollHalted()); }
 
   /**
    * 等"目标**真的**跑起来了"，再开始等它停 —— 不加这一步会踩**陈旧读数**的坑。
@@ -227,10 +232,10 @@ export class RiscvDebugSession extends DebugSession {
 
   async refresh(){
     if (!this.dm) return { halted: false, pc: 0 };
-    const st = (await this.dm.dmiRead(0x11)) >>> 0;
-    this.dm.lastDmstatus = st;
-    this.halted = ((st >>> 8) & 3) === 3;
-    if (this.halted){ try { this.pc = (await this.dm.readReg(REGNO.PC)) >>> 0; } catch {} }
+    const wasHalted = this.halted, oldPc = this.pc;
+    this.halted = await this._pollHalted();
+    if (this.halted) this.pc = (await this.dm.readReg(REGNO.PC)) >>> 0;
+    if (!this.halted || !wasHalted || this.pc !== oldPc) this.clearFrames();
     return this.statusInfo();
   }
 
@@ -242,19 +247,19 @@ export class RiscvDebugSession extends DebugSession {
      * 🚨 抽象命令**要求 hart 停住**。运行中读会 cmderr=4 —— 这时候**保留上一次的行**，
      *    别把 0 写进寄存器表（那会让人以为寄存器真的变 0 了，ARM 那边读到的只是陈旧值）。
      */
+    if (this.halted) this.halted = await this._pollHalted();
     if (!this.halted){
+      this.clearFrames();
       if (!this._regsStaleLogged){ this._log('目标在运行时读不到寄存器（RISC-V 的抽象命令要求先停住）—— 先「暂停」再看', 'dim'); this._regsStaleLogged = true; }
       return this.regs;
     }
     this._regsStaleLogged = false;
     const list = [];
     for (let i = 0; i < 32; i++){
-      let v = 0;
-      try { v = (await this.dm.readReg(0x1000 + i)) >>> 0; } catch (e){ v = 0; }
+      const v = (await this.dm.readReg(0x1000 + i)) >>> 0;
       list.push({ name: XREGS[i], value: v, index: i, kind: 'gpr', note: `x${i}` });
     }
-    let pcv = 0;
-    try { pcv = (await this.dm.readReg(REGNO.PC)) >>> 0; } catch {}
+    const pcv = (await this.dm.readReg(REGNO.PC)) >>> 0;
     list.push({ name: 'pc', value: pcv, kind: 'pc' });
     for (const [nm, num] of SHOW_CSRS){
       let v = 0;
@@ -280,8 +285,8 @@ export class RiscvDebugSession extends DebugSession {
   async readReg(name){
     const r = rvRegno(name);
     if (!r) throw new Error(`不认识的寄存器「${name}」（RV32：x0..x31 / ABI 名 / pc / 常用 CSR）`);
-    if (!this.halted && r.kind !== 'gpr') throw new Error('抽象命令要先停住目标（先「暂停」）');
-    if (this.halted && r.kind !== 'gpr') await this._ensureHalted('readReg ' + name);
+    if (!this.halted) throw new Error('抽象命令要先停住目标（先「暂停」）');
+    await this._ensureHalted('readReg ' + name);
     return (await this.dm.readReg(r.regno)) >>> 0;
   }
 
@@ -290,7 +295,8 @@ export class RiscvDebugSession extends DebugSession {
     const r = rvRegno(name);
     if (!r) throw new Error(`不认识的寄存器「${name}」`);
     if (r.regno === 0x1000) throw new Error('x0 是硬连 0，写不进去');
-    if (this.halted) await this._ensureHalted('writeReg ' + name);
+    if (!this.halted) throw new Error('抽象命令要先停住目标（先「暂停」）');
+    await this._ensureHalted('writeReg ' + name);
     await this.dm.writeReg(r.regno, value >>> 0);
     return (await this.dm.readReg(r.regno)) >>> 0;
   }
@@ -305,8 +311,7 @@ export class RiscvDebugSession extends DebugSession {
    *    发现跑着就先 halt 再继续 —— 只在这条"缓存说停着"的路径上多读一次 dmstatus。
    */
   async _ensureHalted(what){
-    let live = true;
-    try { live = await this._pollHalted(); } catch { return; }   // 读不到就按缓存继续（别把调试卡死）
+    const live = await this._pollHalted();   // 读不到就按缓存继续（别把调试卡死）
     if (live) return;
     this._log(`${what}：目标其实在跑（dmstatus 说没停）→ 先「暂停」再继续`, 'warn');
     await this.halt();
@@ -314,172 +319,43 @@ export class RiscvDebugSession extends DebugSession {
 
   // ---------------------------------------------------------------- 内存（SBA）
 
-  /**
-   * 读内存（带"复位 DM 重试一次"）—— SBA 撞上挂起窗口时会整条链路不应答，见 riscv-mem.js。
-   *
-   * 🚨 再加一层**只读段兜底**（2026-10 真机定因）：这颗芯片上 **SBA 读 XIP/flash 窗口
-   *    （0x8000_0000 以上，代码和 const 都在那儿）会失败**（现场 `SBA 读 0x80005898 出错
-   *    sbcs=0x4595c398`）。`.text`/`.rodata` 在运行期不会变，**文件里那份就是权威的**，
-   *    所以读不到时用它顶上，并且**明确写日志**说明"这份值来自 ELF，不是从目标读回来的"
-   *    （绝不假装）。可写段（.data/.bss）不兜底 —— RAM 里的值随时会被程序改写。
+  /** Read target RAM via SBA; XIP uses only fully covered ELF image bytes.
+   * A read failure must never reset DM/hart or restart the debugged program.
    */
   async memRead(addr, len){
+    if (!Number.isInteger(addr) || addr < 0 || addr > 0xffffffff ||
+        !Number.isInteger(len) || len < 0 || addr + len > 0x100000000)
+      throw new Error('内存地址或长度超出 32 位地址空间');
     if (!len) return new Uint8Array(0);
-    const a = addr >>> 0, n = len >>> 0;
-    /**
-     * 🚨 **同一个坏地址短期"记仇"**（2026-10 用户现场）：监视面板（以及"运行中也刷新"）会**每 2 s
-     *    重读同一批地址**，而这块板子上"读一个没映射的地址"会把 SBA 的 sticky 错误位挂上 ——
-     *    于是每一轮刷新都要"两次 SBA + dm.init() + 自愈"，日志一直在滚、链路一直在被搞脏。
-     *    这里把刚失败过的地址记 15 秒：这段时间内直接抛同样的错（不碰链路），
-     *    读成功一次、或过了 15 秒，就自动解除 —— 既不反复自伤，也不会永久屏蔽。
-     */
-    if (!this._badAddrs) this._badAddrs = new Map();
-    const bad = this._badAddrs.get(a);
-    if (bad && Date.now() - bad.at < 15000){
-      throw new Error(bad.msg + '（这个地址刚失败过：15 秒内不再重试，免得反复把 SBA 搞脏；'
-        + '读成功一次或等一会儿会自动解除）');
-    }
-    const inXip = a >= 0x80000000 && a < 0x90000000;         // HPM 的 XIP/Flash 窗口（代码与 const 都在这儿）
-    const fromElf = () => {
-      const b = this.sym?.codeBytes?.(a, n);
-      return (b && b.length >= n) ? b : null;
-    };
-    const useElf = (why) => {
-      const b = fromElf();
-      if (!b) return null;
+    const a = addr, n = len;
+    if (a < 0x90000000 && a + n > 0x80000000){
+      // A request crossing into/out of XIP must not touch SBA, even partially.
+      const b = a >= 0x80000000 && a + n <= 0x90000000 ? this.sym?.codeBytes?.(a, n) : null;
+      if (!b || b.length !== n)
+        throw new Error('XIP/flash 数据不可用：载入的 ELF 只读段未完整覆盖请求；未访问 SBA，未补零');
       if (!this._xipFallbackLogged){
         this._xipFallbackLogged = true;
-        this._log(`读目标内存 0x${a.toString(16)}（${n} B）失败（${why}）—— 这份值改用 ELF 里的只读段`
-          + '（flash 窗口读不到时的兜底；不是从目标实时读回来的。后面同类地址不再逐个重试）', 'warn');
+        this._log('XIP/flash 读取使用已载入 ELF 的只读镜像，未读取目标实时内存；请确保 ELF 与目标固件一致。', 'warn');
       }
       return b;
-    };
-    /**
-     * 🚨 **已知读不到就别再试**：`p g_model_const` 这种"展开一个 flash 里的结构体"会发几十次读，
-     *    每次都"两次 SBA + 一次 DM 重新初始化"的话，一次展开要几十秒（真机把自测的 CDP 调用都拖超时了）。
-     *    失败过一次就记住这个窗口，直接用 ELF 里那份只读内容。
-     */
-    /**
-     * 🚨 **flash（XIP）窗口根本不走 SBA**（2026-10 真机定因，别改回去）：
-     *    这颗芯片上 SBA 读 0x8000_0000 段会**超时（实测 5.3 s）并把这颗 DM 打成一团乱**
-     *    （现场：超时之后 `dmstatus` 读回 `0x67adb267`（version=7，垃圾），USB 还得复位端口才恢复）。
-     *    而这一段在运行期是**只读的 flash**（代码 + const），ELF 里那份就是权威内容 ——
-     *    所以这里直接给 ELF 的只读段，一次都不去试。可写段（.data/.bss 在 RAM）不走这条路。
-     */
-    if (inXip){
-      const b = fromElf();
-      if (b){
-        if (!this._xipFallbackLogged){
-          this._xipFallbackLogged = true;
-          this._log('flash 窗口（0x8000_0000 起）的内存读改用载入的 ELF 里的只读段：'
-            + '这颗探针/芯片上 SBA 读该窗口会超时并把 DM 打乱（真机实测）；'
-            + '读的是 ELF 里那份（flash 运行期不会变），不是从目标实时读回来的。', 'dim');
-        }
-        return b;
-      }
-      /**
-       * 🚨 **没兜底到也绝不退回 SBA**（2026-10 用户现场定因）。
-       *
-       * 现场：监视一个地址落在 flash 窗口的变量，`memRead(0x80000500, 512)` —— 这 512 B
-       * **跨出了 ELF 的只读段**（`codeBytes()` 要求整段都在一个可读段里，于是返回 null），
-       * 老代码就退回 SBA；而 SBA 读 XIP 会把事务**永久挂住**：`sbcs` 从此常驻
-       * `sbbusy|sbbusyerror`（实测 0x20758407），接着**每一次内存读都失败** ——
-       * 用户看到的就是「选了几个变量、点复位并停之后，全变读失败」。
-       * 这里改成：**一块一块地用 ELF 覆盖**，覆盖不到的地方补 0，并如实说清楚；
-       * 无论如何都不去碰 SBA（这条链路的代价是整颗 DM 变砖，不是一个变量读不到）。
-       */
-      const out = new Uint8Array(n);
-      let filled = 0;
-      for (let i = 0; i < n;){
-        const part = this.sym?.codeBytes?.((a + i) >>> 0, n - i);
-        if (part && part.length){
-          const take = Math.min(part.length, n - i);
-          out.set(part.subarray(0, take), i);
-          filled += take; i += take;
-        } else {
-          i += 1;                                  // 这一字节不在 ELF 只读段里 → 保持 0
-        }
-      }
-      if (!this._xipPartialLogged){
-        this._xipPartialLogged = true;
-        this._log(`读 0x${a.toString(16)}（${n} B）：这段**不在** ELF 的只读段里，`
-          + `已用 ELF 覆盖 ${filled}/${n} B、其余补 0；不去读 SBA —— 这颗芯片上 SBA 读 flash 窗口`
-          + '会把调试模块卡死（之后所有内存读都会失败）。要看真实值请把变量放到 RAM，'
-          + '或用右侧「内存」页手填 RAM 地址。', 'warn');
-      }
-      return out;
     }
+    if (!this._badAddrs) this._badAddrs = new Map();
+    const key = `${a}:${n}`, bad = this._badAddrs.get(key);
+    if (bad && Date.now() - bad.at < 15000)
+      throw new Error(bad.msg + '（同一读取范围失败后暂停重试 15 秒）');
     try {
-      const got = await withTimeout(this.dm.readMem(a, n, 1500), Math.max(4000, Math.ceil(n / 4) * 60), `SBA 读 ${n} 字节`);
-      /**
-       * 读成功 = 链路是好的：记下"这个地址能读"（自愈时拿它当探针，别拿一个目标上根本没有的
-       * 地址去探），并**重新武装自愈**（下一次真卡死还能救）。
-       */
-      this._lastGoodAddr = a;
-      this._sbaHealTried = false;
-      this._badAddrs.delete(a);                                // 这个地址现在读得动了，解除记仇
+      const got = await this.dm.readMem(a, n, 1500);
+      this._badAddrs.delete(key);
       return got;
     } catch (e){
-      if (this._sbaRetry) throw useElf(e?.message || e) || e;
-      this._sbaRetry = true;
-      const wasHalted = this.halted;
-      try {
-        this._log(`读 0x${a.toString(16)}（${n} B）失败：${e.message} —— 复位 DM 后重试一次`, 'warn');
-        /**
-         * 先清 SBA 的 sticky 错误位（写 1 清零：sberror / sbbusyerror）再复位 DM。
-         * 只 `init()` 有时解不开——上面那种"总线事务挂死"会让 sbbusy 常驻，之后每次读都失败；
-         * 清错误位 + 重初始化两道一起上，能救回来的比例高得多（真机现场：只 init 时下一次读照样报
-         * `sbcs=0x20758407`）。
-         */
-        try { await this.dm.sbaClearErrors(); } catch { /* 清不掉就继续走 init */ }
-        await this.dm.init();
-        /**
-         * 🚨 `dm.init()` 头一件事是写 `dmcontrol = 0`（复位 DM）—— 这一笔会让**核重新跑起来**：
-         *    真机实测（HPM6800EVK）紧接着的抽象命令全变成 `cmderr=4`，
-         *    而页面上的 `halted` 还是 true → 后面每个断点/寄存器操作都失败。
-         *    所以："原来停着"的话，重新初始化之后必须再停一次。
-         */
-        if (wasHalted && !(await this._pollHalted().catch(() => false))){
-          this._log('复位 DM 之后核跑起来了 —— 重新停住它（原来就是停着的）', 'dim');
-          await this._haltQuiet(0, 2000).catch(() => {});
-        }
-        return await this.dm.readMem(a, n, 1500);
-      } catch (e2){
-        /**
-         * 二次还是失败 ⇒ 多半是"SBA 上挂着一个永远不完成的事务"（`sbcs` 常驻 `sbbusy|sbbusyerror`，
-         * 实测 0x20758407）。仓库里早有成熟的分级自愈（`app/flash/hpm/riscv-dm.js` 的
-         * `sbaHealthCheck`：清错误位 → DM 复位 → **系统复位 ndmreset**），烧录页与 RTT Viewer
-         * 都在用它，**调试页以前一直没接** —— 于是 2026-10 用户现场看到的是"选了变量、点复位并停，
-         * 之后每次内存读都失败"（变量面板整片"读失败"，只 `dm.init()` 解不开）。
-         * 这里补上这一级（每会话最多自动救一次，救成功就重读；会如实告知目标可能被复位过）。
-         */
-        if (!this._sbaHealTried && this.dm?.sbaHealthCheck){
-          this._sbaHealTried = true;
-          const h = await this.dm.sbaHealthCheck({ allowSystemReset: true,
-                                                   peekAddr: this._lastGoodAddr || 0x01200000 })
-                             .catch(() => null);
-          if (h?.ok){
-            /**
-             * 🚨 自愈会把目标复位/重启，**它现在在跑还是在停，得问 `dmstatus`，不能猜**。
-             *    2026-10 用户现场：猜"在跑"（halted=false）之后，紧接着的 `reset` 又把它设回 true，
-             *    于是界面上"已停止"、硬件其实在跑 —— 用户接着敲 `c`，`cont()` 第一件事就是读 PC
-             *    （抽象命令要求先停住）→ `cmderr=4` 报错。refresh() 一次就把真实状态摆正。
-             */
-            await this.refresh().catch(() => {});
-            this._log(`SBA 卡死 → 自愈成功（${h.level}：${h.note}）。`
-              + `注意：自愈会复位/重启目标（现在${this.halted ? '已停住' : '在运行'}）——`
-              + '要接着调试请按需「暂停」/「继续」；'
-              + '重新读一次那个地址。', 'warn');
-            const again = await this.dm.readMem(a, n, 1500);
-            this._sbaHealTried = false;                // 已经修好，下次再卡还能救
-            return again;
-          }
-          this._log('SBA 自愈失败：' + (h?.note || '未知')
-            + ' —— 建议断开重连探针（顺手检查目标供电与接线）', 'err');
-        }
-        this._badAddrs.set(a, { msg: String(e2?.message || e2), at: Date.now() });
-        throw useElf(e2?.message || e2) || e2;
-      } finally { this._sbaRetry = false; }
+      // Clearing SBA error bits is link bookkeeping. dm.init()/ndmreset can
+      // release a halted hart or erase hardware triggers and are never implicit.
+      try { await this.dm.sbaClearErrors?.(); } catch { /* Preserve original read failure. */ }
+      const msg = String(e?.message || e);
+      if (this._badAddrs.size >= 256) this._badAddrs.delete(this._badAddrs.keys().next().value);
+      this._badAddrs.set(key, { msg, at: Date.now() });
+      this._log(`读 0x${a.toString(16)}（${n} B）失败：${msg}。未自动复位调试模块或目标；若链路持续异常，请显式复位或重新连接。`, 'warn');
+      throw e;
     }
   }
 
@@ -513,7 +389,7 @@ export class RiscvDebugSession extends DebugSession {
    *    真机压测里连续几十次单步后 DMI 偶发不应答（`dmstatus` 读回 0），
    *    这时一记 reset-halt 会把板子按在复位态、状态全丢，而且**问题不在目标**。
    *    所以这里自己走"安静停机"：先纯 haltreq，不行先治 DM（`dm.init()` 里有 dmactive 0→1、
-   *    TAP 复位 + dmihardreset、DMI 冻住判别），治好再停一次；只有都不行才让 `dm.halt()` 兜底。
+   *    TAP 复位 + dmihardreset、DMI 冻住判别），治好再停一次；仍然失败则报错，不自动系统复位。
    */
   async _haltQuiet(hart = 0, timeoutMs = 2500){
     await this.dm.dmiWrite(0x10, this.dm._ctl(hart, DMCONTROL.haltreq));
@@ -527,8 +403,7 @@ export class RiscvDebugSession extends DebugSession {
       if (!await this._healDm(why)) throw e;
       try { return await this._haltQuiet(hart, timeoutMs); }
       catch (e2){
-        this._log('重新初始化后仍然停不住 → 退回 reset-halt（会把目标整颗复位）', 'warn');
-        return await this.dm.halt(hart, timeoutMs);
+        throw new Error('暂停失败，未自动复位目标；请显式选择「复位并停」：' + (e2?.message || e2));
       }
     }
   }
@@ -539,6 +414,7 @@ export class RiscvDebugSession extends DebugSession {
    * @returns {Promise<boolean>} 救回来没有
    */
   async _healDm(why = 'DM 不应答'){
+    this.clearFrames();
     try {
       const r = await this.dm.init();
       this.dmLayout = this.dm.dmLayout;
@@ -555,9 +431,14 @@ export class RiscvDebugSession extends DebugSession {
    * 而用户在目标跑着的时候也可能按下断点。ARM 那边写 FPB 不需要停核，RISC-V 需要。
    */
   async _withHalted(fn, why = '操作'){
-    if (this.halted) return await fn();
+    const live = await this._pollHalted();
+    this.halted = live;
+    if (live) return await fn();
+    this.clearFrames();
     this._log(`目标在跑：先停住目标来${why}，完事再放它继续`, 'dim');
     await this._haltWithHeal(why);
+    this.halted = await this._pollHalted();
+    if (!this.halted) throw new Error('停机未确认，未执行寄存器操作');
     const wasPc = this.pc;
     try { return await fn(); }
     finally {
@@ -673,7 +554,8 @@ export class RiscvDebugSession extends DebugSession {
      *    核已经在跑 ⇒ 根本不该去读 dcsr（读也读不到，"清 step"此时也没意义），
      *    纠正缓存 + 补一次 resumereq（幂等）就收工，绝不把一条假的错误推给用户。
      */
-    const live = await this._pollHalted().catch(() => null);
+    this.clearFrames();
+    const live = await this._pollHalted();
     if (live === false){
       if (this.halted) this._log('继续：目标其实在跑（dmstatus 说没停）—— 只纠正状态，不下发抽象命令', 'warn');
       await this.dm.dmiWrite(0x10, this.dm._ctl(0, DMCONTROL.resumereq));
@@ -687,8 +569,10 @@ export class RiscvDebugSession extends DebugSession {
   }
 
   async halt(){
+    this.clearFrames();
     await this._haltWithHeal('暂停', 0, 3000);
-    this.halted = true;
+    this.halted = await this._pollHalted();
+    if (!this.halted) throw new Error('暂停未确认，目标仍在运行');
     try { this.pc = (await this.dm.readReg(REGNO.PC)) >>> 0; } catch {}
     return true;
   }
@@ -743,13 +627,19 @@ export class RiscvDebugSession extends DebugSession {
       const n = this.bps.length;
       await this._programBps();
       this._log(`${what}后重新下发 ${n} 个硬件断点（hart 复位会把触发器清掉）`, 'dim');
-    } catch (e){ this._log(`${what}后重新下发断点失败：` + (e?.message || e), 'warn'); }
+    } catch (e){
+      this._log(`${what}后重新下发断点失败，目标不继续运行：` + (e?.message || e), 'err');
+      throw e;
+    }
   }
 
   /** 复位并停：ndmreset 脉冲 + 保持 haltreq（照烧录算法的要求，见 riscv-dm.js 的 resetHalt）*/
   async resetHalt(){
+    this.clearFrames();
+    this._badAddrs?.clear();
     await this.dm.resetHalt(0);
-    this.halted = true;
+    this.halted = await this._pollHalted();
+    if (!this.halted) throw new Error('复位后停机未确认，未重装断点');
     await this._rearmBpsAfterReset();
     await this.refresh();
     await this.refreshRegs();
@@ -769,10 +659,13 @@ export class RiscvDebugSession extends DebugSession {
    *      → ④ 写触发器（此时抽象命令合法）→ ⑤ 放 haltreq 开跑。
    */
   async resetRun(){
+    this.clearFrames();
+    this._badAddrs?.clear();
     const DMC = 0x10;
     // ①②③：复位 + 停在复位向量（ndmreset 放开与否由 dm 侧复验，见那里的"血案"注释）
     await this.dm._haltByReset(0);
-    this.halted = true;
+    this.halted = await this._pollHalted();
+    if (!this.halted) throw new Error('复位后停机未确认，未继续运行');
     // ④：现在核确实停着、且 ndmreset 已放开 —— 抽象命令写触发器才写得进去
     await this._rearmBpsAfterReset();
     /**
